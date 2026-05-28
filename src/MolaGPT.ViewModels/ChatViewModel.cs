@@ -1,0 +1,1497 @@
+using System.Collections.ObjectModel;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using CommunityToolkit.Mvvm.ComponentModel;
+using MolaGPT.Core.Chat;
+using MolaGPT.Core.Models;
+using MolaGPT.Storage;
+using MolaGPT.Storage.Repositories;
+using MolaGPT.ViewModels.Services;
+
+namespace MolaGPT.ViewModels;
+
+/// <summary>
+/// View model for the active chat. Holds the message list, the active
+/// (provider, model) pair, streaming state, hint chips for the welcome screen
+/// and, when available, the SQLite-backed message repository.
+/// </summary>
+public sealed partial class ChatViewModel : ObservableObject
+{
+    public ObservableCollection<MessageViewModel> Messages { get; } = new();
+
+    /// <summary>Default prompt suggestions shown on the welcome screen.</summary>
+    public ObservableCollection<string> HintChips { get; } = new()
+    {
+        "用 Markdown 输出快速排序",
+        "把这段话翻译成英文",
+        "今天有什么新闻?",
+        "推荐三本科幻小说"
+    };
+
+    [ObservableProperty] private string? _conversationId;
+    [ObservableProperty] private string _conversationTitle = "新对话";
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsBYOKActive))]
+    private IChatProvider? _activeProvider;
+    [ObservableProperty] private ProviderModel? _activeModel;
+    [ObservableProperty] private bool _isStreaming;
+    [ObservableProperty] private string? _conversationSystemPrompt;
+
+    /// <summary>
+    /// Persona bound to the current conversation, or null if none.
+    /// Persisted in <c>conversations.persona_id</c>.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ActivePersona))]
+    [NotifyPropertyChangedFor(nameof(ActivePersonaAvatar))]
+    [NotifyPropertyChangedFor(nameof(ActivePersonaName))]
+    [NotifyPropertyChangedFor(nameof(ActivePersonaSystemPrompt))]
+    private string? _activePersonaId;
+
+    /// <summary>
+    /// How <see cref="ConversationSystemPrompt"/> combines with the active
+    /// persona's prompt: <c>"override"</c> (default) replaces the persona
+    /// prompt; <c>"append"</c> concatenates persona + "\n\n" + override.
+    /// Persisted in <c>conversations.system_prompt_mode</c>.
+    /// </summary>
+    [ObservableProperty] private string _systemPromptMode = "override";
+
+    /// <summary>
+    /// System prompt configured at the model level (from ProviderModelEntry.SystemPrompt).
+    /// Set externally by MainViewModel when the active model changes.
+    /// Retained for backward compatibility; used only when no persona is bound.
+    /// </summary>
+    public string? ActiveModelSystemPrompt { get; set; }
+
+    /// <summary>The persona view-model bound to the current conversation, or null.</summary>
+    public PersonaItemViewModel? ActivePersona => _personas?.Find(ActivePersonaId);
+
+    /// <summary>Avatar glyph shown by Composer / Welcome / dialog whether or
+    /// not a persona is bound. Returns the default robot glyph when no
+    /// persona is active so XAML doesn't need FallbackValue gymnastics.</summary>
+    public string ActivePersonaAvatar => ActivePersona is { } p
+        ? p.DisplayAvatar
+        : PersonaIconCatalog.DefaultGlyph;
+
+    /// <summary>Display name for the active persona, or "角色" when none.</summary>
+    public string ActivePersonaName => ActivePersona?.Name ?? "角色";
+
+    /// <summary>Shortcut for the active persona's prompt text. Null when no persona is bound
+    /// or the persona has an empty prompt.</summary>
+    public string? ActivePersonaSystemPrompt
+    {
+        get
+        {
+            var p = ActivePersona;
+            return string.IsNullOrWhiteSpace(p?.SystemPrompt) ? null : p!.SystemPrompt;
+        }
+    }
+
+    /// <summary>Persona registry, exposed so XAML (WelcomeView quick-pick row,
+    /// Composer picker) can bind to <c>Personas.Personas</c> without going
+    /// through MainViewModel.</summary>
+    public PersonaListViewModel? Personas => _personas;
+
+    /// <summary>True when persona-related surfaces should be shown. We treat
+    /// "no provider yet" as BYOK because the welcome screen needs to surface
+    /// roles before the user has signed in to MolaGPT.</summary>
+    public bool IsBYOKActive =>
+        _personas is not null && (ActiveProvider is null || ActiveProvider.Kind != ProviderKind.MolaGptProxy);
+
+    /// <summary>True iff <see cref="Messages"/> is empty; drives welcome screen visibility.</summary>
+    public bool IsEmpty => Messages.Count == 0;
+
+    public string ActiveModelLabel => ActiveModel?.DisplayName ?? "未选择";
+    public string ActiveProviderLabel => ActiveProvider?.DisplayName ?? "未选择";
+
+    private readonly ProviderRegistry _providers;
+    private readonly MessageRepository? _messageRepo;
+    private readonly ConversationRepository? _conversationRepo;
+    private readonly PersonaListViewModel? _personas;
+    private int _messageLoadVersion;
+
+    /// <summary>
+    /// Raised whenever a conversation row was created or its title / updated_at
+    /// moved. <see cref="ConversationListViewModel"/> subscribes so the sidebar
+    /// reflects the change without a full SQLite reload.
+    /// </summary>
+    public event EventHandler<ConversationTouchedEventArgs>? ConversationTouched;
+
+    public ChatViewModel(ProviderRegistry providers)
+        : this(providers, null, null, null) { }
+
+    public ChatViewModel(
+        ProviderRegistry providers,
+        MessageRepository? messageRepo,
+        ConversationRepository? conversationRepo)
+        : this(providers, messageRepo, conversationRepo, null) { }
+
+    public ChatViewModel(
+        ProviderRegistry providers,
+        MessageRepository? messageRepo,
+        ConversationRepository? conversationRepo,
+        PersonaListViewModel? personas)
+    {
+        _providers = providers;
+        _messageRepo = messageRepo;
+        _conversationRepo = conversationRepo;
+        _personas = personas;
+
+        Messages.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(IsEmpty));
+            UpdateLatestAssistantFlags();
+        };
+        _providers.Changed += (_, _) => RefreshActiveModelAfterProviderChange();
+
+        // When the user edits the active persona's prompt, the resolved
+        // ActivePersonaSystemPrompt changes value-wise even if the id didn't.
+        if (_personas is not null)
+            _personas.PersonasChanged += (_, _) =>
+            {
+                OnPropertyChanged(nameof(ActivePersona));
+                OnPropertyChanged(nameof(ActivePersonaAvatar));
+                OnPropertyChanged(nameof(ActivePersonaName));
+                OnPropertyChanged(nameof(ActivePersonaSystemPrompt));
+            };
+
+        ActivePersonaId = ResolveDefaultPersonaId();
+        TryAutoPickActive();
+    }
+
+    /// <summary>If no provider is currently active, pick the first registered one.</summary>
+    public void TryAutoPickActive()
+    {
+        if (ActiveProvider is not null && ActiveModel is not null) return;
+        var first = _providers.Providers.FirstOrDefault();
+        if (first is null || first.Models.Count == 0) return;
+        ActiveProvider = first;
+        ActiveModel = first.Models[0];
+    }
+
+    public void SetActive(IChatProvider provider, ProviderModel model)
+    {
+        ActiveProvider = provider;
+        ActiveModel = model;
+    }
+
+    public bool SetActiveByIds(string? providerId, string? modelId, bool ignoreConversationBoundary = false)
+    {
+        if (string.IsNullOrWhiteSpace(providerId) || string.IsNullOrWhiteSpace(modelId))
+            return false;
+
+        var resolved = _providers.FindModel(providerId, modelId);
+        if (resolved is null) return false;
+        if (!ignoreConversationBoundary && !CanSwitchToProvider(resolved.Value.Provider))
+            return false;
+
+        SetActive(resolved.Value.Provider, resolved.Value.Model);
+        return true;
+    }
+
+    public bool CanSwitchToProvider(IChatProvider provider)
+    {
+        var family = GetCurrentConversationProviderFamily();
+        return family switch
+        {
+            ConversationProviderFamily.MolaGpt => provider.Kind == ProviderKind.MolaGptProxy,
+            ConversationProviderFamily.Byok => provider.Kind != ProviderKind.MolaGptProxy,
+            _ => true
+        };
+    }
+
+    public void SaveConversationSystemPrompt(string? prompt)
+    {
+        ConversationSystemPrompt = string.IsNullOrWhiteSpace(prompt) ? null : prompt.Trim();
+        if (_conversationRepo is null || string.IsNullOrEmpty(ConversationId)) return;
+        var existing = _conversationRepo.Get(ConversationId!);
+        if (existing is null) return;
+        _conversationRepo.Upsert(existing with { SystemPrompt = ConversationSystemPrompt });
+    }
+
+    /// <summary>
+    /// Bind the current conversation to a persona (or unbind by passing null).
+    /// Persists immediately when a conversation row exists; otherwise the
+    /// selection is captured on the first send via <see cref="InitializeConversationIfNeeded"/>.
+    /// </summary>
+    public void SaveActivePersona(string? personaId)
+    {
+        ActivePersonaId = string.IsNullOrEmpty(personaId) ? null : personaId;
+        if (_conversationRepo is null || string.IsNullOrEmpty(ConversationId)) return;
+        var existing = _conversationRepo.Get(ConversationId!);
+        if (existing is null) return;
+        _conversationRepo.Upsert(existing with { PersonaId = ActivePersonaId });
+
+        // Push the new persona label into the sidebar so the BYOK badge
+        // refreshes without requiring a user message to be sent first.
+        // Pass "" (not null) when un-binding so the sidebar treats it as
+        // an explicit clear rather than "no info, keep existing".
+        ConversationTouched?.Invoke(this, new ConversationTouchedEventArgs(
+            ConversationId!,
+            ConversationTitle,
+            DateTimeOffset.FromUnixTimeMilliseconds(existing.UpdatedAt),
+            existing.ProviderId,
+            ActivePersonaId is null ? "" : ActivePersona?.Name));
+    }
+
+    /// <summary>
+    /// Set whether the conversation-level prompt overrides or appends to the
+    /// persona prompt. Accepts "override" / "append" — anything else falls
+    /// back to "override".
+    /// </summary>
+    public void SaveSystemPromptMode(string? mode)
+    {
+        SystemPromptMode = string.Equals(mode, "append", StringComparison.OrdinalIgnoreCase) ? "append" : "override";
+        if (_conversationRepo is null || string.IsNullOrEmpty(ConversationId)) return;
+        var existing = _conversationRepo.Get(ConversationId!);
+        if (existing is null) return;
+        _conversationRepo.Upsert(existing with { SystemPromptMode = SystemPromptMode });
+    }
+
+    public void StartDraftConversation()
+    {
+        _messageLoadVersion++;
+        foreach (var existing in Messages) existing.Dispose();
+        Messages.Clear();
+        ConversationId = null;
+        ConversationTitle = "新对话";
+        ConversationSystemPrompt = null;
+        ActivePersonaId = ResolveDefaultPersonaId();
+        SystemPromptMode = "override";
+    }
+
+    private string? ResolveDefaultPersonaId() =>
+        _personas?.Find(PersonaListViewModel.BuiltinDefaultId) is not null
+            ? PersonaListViewModel.BuiltinDefaultId
+            : null;
+
+    public async Task LoadConversationAsync(string conversationId, bool loadAllMessagesImmediately = false)
+    {
+        ConversationId = conversationId;
+        var loadVersion = ++_messageLoadVersion;
+
+        // Dispose any existing message VMs (their elapsed timers etc.)
+        // before clearing the collection.
+        foreach (var existing in Messages) existing.Dispose();
+        Messages.Clear();
+
+        ConversationRow? conversationRow = null;
+        if (_messageRepo is not null)
+        {
+            var snapshot = await Task.Run(() =>
+            {
+                var messages = PrepareMessageSnapshot(_messageRepo.List(conversationId));
+                var conversation = _conversationRepo?.Get(conversationId);
+                return (messages, conversation);
+            }).ConfigureAwait(true);
+
+            if (loadVersion != _messageLoadVersion || ConversationId != conversationId)
+                return;
+
+            conversationRow = snapshot.conversation;
+            var prepared = snapshot.messages;
+
+            // First batch: enough to fill the visible scroll area (~10 items);
+            // remaining batches are queued back to the dispatcher so input
+            // and animation get chances to breathe while they trickle in.
+            const int firstBatch = 10;
+            const int batchSize = 8;
+            int taken = loadAllMessagesImmediately ? prepared.Count : Math.Min(firstBatch, prepared.Count);
+            for (int i = 0; i < taken; i++) Messages.Add(CreateMessageViewModel(prepared[i]));
+
+            if (taken < prepared.Count)
+                EnqueueRemainingMessages(prepared, taken, batchSize, loadVersion);
+            UpdateLatestAssistantFlags();
+        }
+
+        conversationRow ??= _conversationRepo?.Get(conversationId);
+        if (conversationRow is { } row2)
+        {
+            ConversationTitle = string.IsNullOrWhiteSpace(row2.Title) ? "新对话" : row2.Title;
+            ConversationSystemPrompt = row2.SystemPrompt;
+            ActivePersonaId = row2.PersonaId;
+            SystemPromptMode = string.Equals(row2.SystemPromptMode, "append", StringComparison.OrdinalIgnoreCase)
+                ? "append" : "override";
+            RestoreActiveModel(row2);
+        }
+        else
+        {
+            ConversationTitle = "新对话";
+            ConversationSystemPrompt = null;
+            ActivePersonaId = null;
+            SystemPromptMode = "override";
+        }
+    }
+
+    private static List<PreparedMessage> PrepareMessageSnapshot(IReadOnlyList<MessageRow> rows)
+    {
+        var prepared = new List<PreparedMessage>(rows.Count);
+        IReadOnlyList<SourceReference>? lastKnownSources = null;
+        foreach (var row in rows)
+        {
+            var split = SplitInlineThinking(row.Content);
+            string? modelLabel = null;
+            string? providerLabel = null;
+            string? thinkingText = split.Thinking;
+            Usage? usage = null;
+            IReadOnlyList<SourceReference>? sources = null;
+            IReadOnlyList<AttachmentChip>? attachments = null;
+            string? contentPartsJson = null;
+            IReadOnlyList<MessageAttempt>? retryAttempts = null;
+            IReadOnlyList<ToolCallDelta>? toolCalls = null;
+            IReadOnlyList<ThinkingSegmentDelta>? thinkingSegments = null;
+            var retryCurrent = 0;
+            if (!string.IsNullOrEmpty(row.Meta))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(row.Meta);
+                    if (doc.RootElement.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String)
+                        modelLabel = m.GetString();
+                    if (doc.RootElement.TryGetProperty("provider", out var p) && p.ValueKind == JsonValueKind.String)
+                        providerLabel = p.GetString();
+                    if (doc.RootElement.TryGetProperty("thinking", out var th) && th.ValueKind == JsonValueKind.String)
+                    {
+                        var thinking = th.GetString();
+                        if (!string.IsNullOrWhiteSpace(thinking))
+                            thinkingText = MergeThinking(thinking, thinkingText);
+                    }
+                    usage = ParseUsage(doc.RootElement, "response_stats");
+                    sources = ParseSources(doc.RootElement);
+                    attachments = ParseAttachments(doc.RootElement);
+                    contentPartsJson = ParseContentPartsJson(doc.RootElement);
+                    (retryAttempts, retryCurrent) = ParseRetry(doc.RootElement);
+                    toolCalls = ParseToolCalls(doc.RootElement);
+                    thinkingSegments = ParseThinkingSegments(doc.RootElement);
+                    (toolCalls, thinkingSegments) = InferMissingTimelineIndexes(toolCalls, thinkingSegments);
+                }
+                catch (JsonException) { }
+            }
+
+            if (row.Role == ChatMessage.RoleAssistant && sources is { Count: > 0 })
+                lastKnownSources = sources;
+            else if (row.Role == ChatMessage.RoleAssistant
+                     && sources is null
+                     && lastKnownSources is { Count: > 0 }
+                     && row.Content.Contains("<ref", StringComparison.OrdinalIgnoreCase))
+                sources = lastKnownSources;
+
+            if (!string.IsNullOrWhiteSpace(thinkingText))
+            {
+                split = FoldLeadingThinkingToolMarkup(split.Visible, thinkingText);
+                thinkingText = split.Thinking;
+            }
+
+            prepared.Add(new PreparedMessage(
+                row.Id,
+                row.Role,
+                split.Visible,
+                thinkingText,
+                row.CreatedAt,
+                modelLabel,
+                providerLabel,
+                usage,
+                sources,
+                attachments,
+                contentPartsJson,
+                retryAttempts,
+                retryCurrent,
+                toolCalls,
+                thinkingSegments));
+        }
+
+        return prepared;
+    }
+
+    private static MessageViewModel CreateMessageViewModel(PreparedMessage prepared)
+    {
+        var vm = new MessageViewModel(prepared.Role, prepared.Content, DateTimeOffset.FromUnixTimeMilliseconds(prepared.CreatedAt))
+        {
+            MessageId = prepared.Id,
+            ModelLabel = prepared.ModelLabel,
+            ProviderLabel = prepared.ProviderLabel,
+            Usage = prepared.Usage,
+            Sources = prepared.Sources,
+            Attachments = prepared.Attachments,
+            ContentPartsJson = prepared.ContentPartsJson,
+            RetryAttempts = prepared.RetryAttempts,
+            RetryCurrentIndex = prepared.RetryCurrentIndex
+        };
+        if (prepared.ToolCalls is { Count: > 0 })
+        {
+            foreach (var toolCall in prepared.ToolCalls)
+                vm.ApplyToolDelta(toolCall);
+        }
+        if (!string.IsNullOrWhiteSpace(prepared.Thinking))
+        {
+            vm.Thinking = prepared.Thinking;
+            vm.ThinkingElapsedSeconds = 0;
+            vm.IsThinkingActive = false;
+            vm.RestoreThinkingSegments(prepared.ThinkingSegments is { Count: > 0 }
+                ? prepared.ThinkingSegments
+                : [new ThinkingSegmentDelta(prepared.Thinking, 0)]);
+        }
+        return vm;
+    }
+
+    private sealed record PreparedMessage(
+        string Id,
+        string Role,
+        string Content,
+        string? Thinking,
+        long CreatedAt,
+        string? ModelLabel,
+        string? ProviderLabel,
+        Usage? Usage,
+        IReadOnlyList<SourceReference>? Sources,
+        IReadOnlyList<AttachmentChip>? Attachments,
+        string? ContentPartsJson,
+        IReadOnlyList<MessageAttempt>? RetryAttempts,
+        int RetryCurrentIndex,
+        IReadOnlyList<ToolCallDelta>? ToolCalls,
+        IReadOnlyList<ThinkingSegmentDelta>? ThinkingSegments);
+
+    /// <summary>
+    /// Trickle remaining message VMs into the ObservableCollection. We use
+    /// SynchronizationContext (UI-agnostic) so this VM stays in the
+    /// net8.0 ViewModels project; on WPF the captured context is the
+    /// dispatcher and Post() runs at Normal priority — fast enough to feel
+    /// instant but not so fast it monopolizes the UI thread.
+    /// </summary>
+    private void EnqueueRemainingMessages(IReadOnlyList<PreparedMessage> prepared, int startIndex, int batchSize, int loadVersion)
+    {
+        var ctx = SynchronizationContext.Current;
+        if (ctx is null)
+        {
+            // Fallback: no UI context (testing / headless). Add inline.
+            for (int i = startIndex; i < prepared.Count; i++) Messages.Add(CreateMessageViewModel(prepared[i]));
+            return;
+        }
+        int idx = startIndex;
+        void PostBatch()
+        {
+            if (loadVersion != _messageLoadVersion) return;
+            int end = Math.Min(idx + batchSize, prepared.Count);
+            for (; idx < end; idx++) Messages.Add(CreateMessageViewModel(prepared[idx]));
+            if (idx < prepared.Count)
+            {
+                _ = Task.Delay(1).ContinueWith(
+                    _ => ctx.Post(_ => PostBatch(), null),
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+        }
+        ctx.Post(_ => PostBatch(), null);
+    }
+
+    public void AppendUserMessage(
+        string text,
+        IReadOnlyList<AttachmentChip>? attachments = null,
+        string? contentPartsJson = null)
+    {
+        EnsureConversationExists(text);
+        var vm = new MessageViewModel(ChatMessage.RoleUser, text, DateTimeOffset.UtcNow)
+        {
+            Attachments = attachments,
+            ContentPartsJson = contentPartsJson
+        };
+        Messages.Add(vm);
+        PersistMessage(vm);
+        TouchConversation();
+    }
+
+    public MessageViewModel BeginAssistantMessage()
+    {
+        EnsureConversationExists();
+        var vm = new MessageViewModel(ChatMessage.RoleAssistant, string.Empty, DateTimeOffset.UtcNow)
+        {
+            IsStreaming = true,
+            ModelLabel = ActiveModel?.DisplayName,
+            ProviderLabel = ActiveProvider?.DisplayName
+        };
+        vm.StartPending(IsRoutesModel(ActiveModel));
+        Messages.Add(vm);
+        return vm;
+    }
+
+    public void FinalizeAssistantMessage(MessageViewModel vm)
+    {
+        vm.StopPending();
+        vm.FlushPendingDelta();
+        vm.IsStreaming = false;
+        vm.StopThinking();
+        PersistMessage(vm);
+        TouchConversation();
+    }
+
+    public void FinalizeAssistantMessage(string conversationId, MessageViewModel vm)
+    {
+        if (string.IsNullOrWhiteSpace(conversationId))
+        {
+            FinalizeAssistantMessage(vm);
+            return;
+        }
+
+        vm.StopPending();
+        vm.FlushPendingDelta();
+        vm.IsStreaming = false;
+        vm.StopThinking();
+        PersistMessage(vm, conversationId);
+        TouchConversation(conversationId);
+
+        if (ConversationId == conversationId && !Messages.Contains(vm))
+        {
+            Messages.Add(vm);
+            UpdateLatestAssistantFlags();
+        }
+    }
+
+    public void DetachTransientMessage(MessageViewModel vm)
+    {
+        if (Messages.Remove(vm))
+            UpdateLatestAssistantFlags();
+    }
+
+    public void AttachTransientMessage(MessageViewModel vm)
+    {
+        if (Messages.Contains(vm)) return;
+        Messages.Add(vm);
+        UpdateLatestAssistantFlags();
+    }
+
+    public void ApplyExternalConversationTitle(string conversationId, string title)
+    {
+        if (string.IsNullOrWhiteSpace(conversationId) || string.IsNullOrWhiteSpace(title))
+            return;
+
+        var updatedAt = DateTimeOffset.UtcNow;
+        if (_conversationRepo?.Get(conversationId) is { } row)
+            updatedAt = DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt);
+
+        if (ConversationId == conversationId)
+            ConversationTitle = title;
+
+        var existingRow = _conversationRepo?.Get(conversationId);
+        var providerId = existingRow?.ProviderId;
+        ConversationTouched?.Invoke(this, new ConversationTouchedEventArgs(
+            conversationId, title, updatedAt, providerId,
+            _personas?.Find(existingRow?.PersonaId)?.Name));
+    }
+
+    private void PersistMessage(MessageViewModel vm)
+    {
+        if (string.IsNullOrEmpty(ConversationId)) return;
+        PersistMessage(vm, ConversationId!);
+    }
+
+    private void PersistMessage(MessageViewModel vm, string conversationId)
+    {
+        if (_messageRepo is null || string.IsNullOrEmpty(conversationId)) return;
+        var meta = BuildMessageMeta(vm);
+        var id = Guid.NewGuid().ToString("N");
+        _messageRepo.Insert(new MessageRow(
+            Id: id,
+            ConversationId: conversationId,
+            Role: vm.Role,
+            Content: vm.Content,
+            Meta: meta,
+            CreatedAt: vm.Timestamp.ToUnixTimeMilliseconds()));
+        vm.MessageId = id;
+    }
+
+    public void UpdatePersistedMessage(MessageViewModel vm)
+    {
+        if (_messageRepo is null || string.IsNullOrWhiteSpace(vm.MessageId)) return;
+        _messageRepo.Update(vm.MessageId, vm.Content, BuildMessageMeta(vm));
+    }
+
+    private static string BuildMessageMeta(MessageViewModel vm)
+    {
+        var meta = new JsonObject();
+        if (!string.IsNullOrWhiteSpace(vm.ModelLabel)) meta["model"] = vm.ModelLabel;
+        if (!string.IsNullOrWhiteSpace(vm.ProviderLabel)) meta["provider"] = vm.ProviderLabel;
+        if (!string.IsNullOrWhiteSpace(vm.Thinking)) meta["thinking"] = vm.Thinking;
+        if (vm.Usage is not null)
+        {
+            meta["response_stats"] = BuildUsageJson(vm.Usage);
+        }
+        if (vm.Sources is { Count: > 0 })
+        {
+            meta["sources"] = new JsonArray(vm.Sources
+                .Select(s => new JsonObject
+                {
+                    ["id"] = s.Id,
+                    ["title"] = s.Title,
+                    ["url"] = s.Url
+                })
+                .Cast<JsonNode?>()
+                .ToArray());
+        }
+        if (vm.Attachments is { Count: > 0 })
+        {
+            meta["attachments"] = new JsonArray(vm.Attachments
+                .Select(a =>
+                {
+                    var obj = new JsonObject
+                    {
+                        ["filename"] = a.FileName,
+                        ["label"] = a.Label
+                    };
+                    if (!string.IsNullOrWhiteSpace(a.ThumbnailUrl))
+                        obj["thumbnailUrl"] = a.ThumbnailUrl;
+                    return obj;
+                })
+                .Cast<JsonNode?>()
+                .ToArray());
+        }
+        if (!string.IsNullOrWhiteSpace(vm.ContentPartsJson))
+        {
+            try
+            {
+                if (JsonNode.Parse(vm.ContentPartsJson!) is JsonNode parts)
+                    meta["content_parts"] = parts;
+            }
+            catch (JsonException) { }
+        }
+        if (vm.RetryAttempts is { Count: > 1 })
+        {
+            meta["retry"] = new JsonObject
+            {
+                ["current"] = vm.RetryCurrentIndex,
+                ["attempts"] = new JsonArray(vm.RetryAttempts
+                    .Select(a => new JsonObject
+                    {
+                        ["content"] = a.Content,
+                        ["model_label"] = a.ModelLabel,
+                        ["response_stats"] = a.Usage is null ? (JsonNode?)null : BuildUsageJson(a.Usage),
+                        ["sources"] = a.Sources is null ? (JsonNode?)null : BuildSourcesJson(a.Sources)
+                    })
+                    .Cast<JsonNode?>()
+                    .ToArray())
+            };
+        }
+        if (vm.ToolCalls.Count > 0)
+        {
+            meta["tool_calls"] = new JsonArray(vm.ToolCalls
+                .Select(t => new JsonObject
+                {
+                    ["id"] = t.Id,
+                    ["name"] = t.Name,
+                    ["status"] = t.Status,
+                    ["label"] = t.Label,
+                    ["summary"] = t.Summary,
+                    ["detail"] = t.Detail,
+                    ["arguments_json"] = t.ArgumentsJson,
+                    ["result_preview_json"] = t.ResultPreviewJson,
+                    ["provider"] = t.Provider,
+                    ["content_offset"] = t.ContentOffset,
+                    ["timeline_index"] = t.TimelineIndex
+                })
+                .Cast<JsonNode?>()
+                .ToArray());
+        }
+        if (vm.ThinkingSegments.Count > 0)
+        {
+            meta["thinking_segments"] = new JsonArray(vm.ThinkingSegments
+                .Where(t => !string.IsNullOrWhiteSpace(t.Source))
+                .Select(t => new JsonObject
+                {
+                    ["source"] = t.Source,
+                    ["content_offset"] = t.ContentOffset,
+                    ["timeline_index"] = t.TimelineIndex,
+                    ["elapsed_seconds"] = t.ElapsedSeconds
+                })
+                .Cast<JsonNode?>()
+                .ToArray());
+        }
+        return meta.ToJsonString();
+    }
+
+    private static JsonObject BuildUsageJson(Usage usage)
+    {
+        var obj = new JsonObject();
+        if (usage.PromptTokens is { } prompt) obj["promptTokens"] = prompt;
+        if (usage.CompletionTokens is { } completion)
+        {
+            obj["completionTokens"] = completion;
+            obj["answerTokens"] = completion;
+        }
+        if (usage.TotalTokens is { } total) obj["totalTokens"] = total;
+        return obj;
+    }
+
+    private static JsonArray BuildSourcesJson(IReadOnlyList<SourceReference> sources) =>
+        new(sources
+            .Select(s => new JsonObject
+            {
+                ["id"] = s.Id,
+                ["title"] = s.Title,
+                ["url"] = s.Url
+            })
+            .Cast<JsonNode?>()
+            .ToArray());
+
+    private void EnsureConversationExists(string? firstUserText = null)
+    {
+        if (_conversationRepo is null || string.IsNullOrEmpty(ConversationId)) return;
+        if (_conversationRepo.Get(ConversationId!) is not null) return;
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var title = string.IsNullOrWhiteSpace(firstUserText) ? "无标题对话" : GenerateTitle(firstUserText);
+        _conversationRepo.Upsert(new ConversationRow(
+            Id: ConversationId!,
+            Title: title,
+            ModelId: ActiveModel?.Id,
+            ProviderId: ActiveProvider?.Id,
+            CreatedAt: now,
+            UpdatedAt: now,
+            Pinned: false,
+            DeletedAt: null,
+            SystemPrompt: ConversationSystemPrompt,
+            PersonaId: ActivePersonaId,
+            SystemPromptMode: SystemPromptMode == "append" ? "append" : null));
+        ConversationTitle = title;
+        ConversationTouched?.Invoke(this, new ConversationTouchedEventArgs(
+            ConversationId!, title, DateTimeOffset.FromUnixTimeMilliseconds(now), ActiveProvider?.Id, ActivePersona?.Name));
+    }
+
+    private void TouchConversation()
+    {
+        if (_conversationRepo is null || string.IsNullOrEmpty(ConversationId)) return;
+        var existing = _conversationRepo.Get(ConversationId!);
+        if (existing is null) return;
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var firstUser = Messages.FirstOrDefault(m => m.Role == ChatMessage.RoleUser);
+        var title = !string.IsNullOrWhiteSpace(existing.Title) && existing.Title != "新对话"
+            ? existing.Title
+            : (firstUser is null ? "无标题对话" : GenerateTitle(firstUser.Content));
+        _conversationRepo.Upsert(existing with
+        {
+            Title = title,
+            UpdatedAt = now,
+            ModelId = ActiveModel?.Id,
+            ProviderId = ActiveProvider?.Id
+        });
+        ConversationTitle = title;
+        ConversationTouched?.Invoke(this, new ConversationTouchedEventArgs(
+            ConversationId!, title, DateTimeOffset.FromUnixTimeMilliseconds(now), ActiveProvider?.Id, ActivePersona?.Name));
+    }
+
+    private void TouchConversation(string conversationId)
+    {
+        if (_conversationRepo is null || string.IsNullOrEmpty(conversationId)) return;
+        var existing = _conversationRepo.Get(conversationId);
+        if (existing is null) return;
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var title = string.IsNullOrWhiteSpace(existing.Title) ? "无标题对话" : existing.Title;
+        _conversationRepo.Upsert(existing with
+        {
+            Title = title,
+            UpdatedAt = now
+        });
+
+        if (ConversationId == conversationId)
+            ConversationTitle = title;
+
+        ConversationTouched?.Invoke(this, new ConversationTouchedEventArgs(
+            conversationId, title, DateTimeOffset.FromUnixTimeMilliseconds(now), existing.ProviderId,
+            _personas?.Find(existing.PersonaId)?.Name));
+    }
+
+    private void RestoreActiveModel(ConversationRow row)
+    {
+        if (HasSavedModel(row))
+        {
+            if (!SetActiveByIds(row.ProviderId, row.ModelId, ignoreConversationBoundary: true))
+            {
+                ActiveProvider = null;
+                ActiveModel = null;
+            }
+            return;
+        }
+
+        TryAutoPickActive();
+    }
+
+    private void RefreshActiveModelAfterProviderChange()
+    {
+        if (!IsActiveModelAvailable())
+        {
+            ActiveProvider = null;
+            ActiveModel = null;
+        }
+
+        if (!TryRestoreActiveModelForCurrentConversation())
+            TryAutoPickActive();
+    }
+
+    private bool TryRestoreActiveModelForCurrentConversation()
+    {
+        if (_conversationRepo is null || string.IsNullOrWhiteSpace(ConversationId))
+            return false;
+
+        var row = _conversationRepo.Get(ConversationId);
+        if (row is null) return false;
+        if (!HasSavedModel(row)) return false;
+        if (SetActiveByIds(row.ProviderId, row.ModelId, ignoreConversationBoundary: true)) return true;
+
+        ActiveProvider = null;
+        ActiveModel = null;
+        return true;
+    }
+
+    private bool IsActiveModelAvailable()
+    {
+        if (ActiveProvider is null || ActiveModel is null) return false;
+        if (!CanSwitchToProvider(ActiveProvider)) return false;
+        var resolved = _providers.FindModel(ActiveProvider.Id, ActiveModel.Id);
+        return resolved is not null;
+    }
+
+    private static bool HasSavedModel(ConversationRow row) =>
+        !string.IsNullOrWhiteSpace(row.ProviderId)
+        && !string.IsNullOrWhiteSpace(row.ModelId);
+
+    private ConversationProviderFamily? GetCurrentConversationProviderFamily()
+    {
+        if (_conversationRepo is null || string.IsNullOrWhiteSpace(ConversationId))
+            return null;
+
+        var row = _conversationRepo.Get(ConversationId);
+        return GetProviderFamily(row?.ProviderId);
+    }
+
+    private static ConversationProviderFamily? GetProviderFamily(string? providerId)
+    {
+        if (string.IsNullOrWhiteSpace(providerId)) return null;
+        return string.Equals(providerId, "molagpt-proxy", StringComparison.OrdinalIgnoreCase)
+            ? ConversationProviderFamily.MolaGpt
+            : ConversationProviderFamily.Byok;
+    }
+
+    private enum ConversationProviderFamily
+    {
+        MolaGpt,
+        Byok
+    }
+
+    private void UpdateLatestAssistantFlags()
+    {
+        MessageViewModel? latest = null;
+        foreach (var message in Messages)
+        {
+            if (message.Role == ChatMessage.RoleAssistant)
+                latest = message;
+        }
+
+        foreach (var message in Messages)
+            message.IsLatestAssistant = ReferenceEquals(message, latest);
+    }
+
+    private static IReadOnlyList<SourceReference>? ParseSources(JsonElement root)
+    {
+        if (!root.TryGetProperty("sources", out var node) || node.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var list = new List<SourceReference>();
+        var fallbackId = 1;
+        foreach (var item in node.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            var id = item.TryGetProperty("id", out var idNode)
+                     && idNode.ValueKind == JsonValueKind.Number
+                     && idNode.TryGetInt32(out var parsedId)
+                ? parsedId
+                : fallbackId;
+            var title = item.TryGetProperty("title", out var titleNode) && titleNode.ValueKind == JsonValueKind.String
+                ? titleNode.GetString() ?? string.Empty
+                : string.Empty;
+            var url = item.TryGetProperty("url", out var urlNode) && urlNode.ValueKind == JsonValueKind.String
+                ? urlNode.GetString() ?? string.Empty
+                : string.Empty;
+            list.Add(new SourceReference(id, title, url));
+            fallbackId++;
+        }
+
+        return list.Count == 0 ? null : list;
+    }
+
+    private static IReadOnlyList<AttachmentChip>? ParseAttachments(JsonElement root)
+    {
+        if (!root.TryGetProperty("attachments", out var node) || node.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var list = new List<AttachmentChip>();
+        foreach (var item in node.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            var filename = item.TryGetProperty("filename", out var filenameNode)
+                           && filenameNode.ValueKind == JsonValueKind.String
+                ? filenameNode.GetString()
+                : null;
+            if (string.IsNullOrWhiteSpace(filename)) continue;
+            var label = item.TryGetProperty("label", out var labelNode)
+                        && labelNode.ValueKind == JsonValueKind.String
+                ? labelNode.GetString()
+                : null;
+            var thumbnailUrl = item.TryGetProperty("thumbnailUrl", out var thumbNode)
+                               && thumbNode.ValueKind == JsonValueKind.String
+                ? thumbNode.GetString()
+                : null;
+            list.Add(new AttachmentChip(filename!, string.IsNullOrWhiteSpace(label) ? "附件" : label!, thumbnailUrl));
+        }
+
+        return list.Count == 0 ? null : list;
+    }
+
+    private static string? ParseContentPartsJson(JsonElement root)
+    {
+        if (!root.TryGetProperty("content_parts", out var node) || node.ValueKind != JsonValueKind.Array)
+            return null;
+        return node.GetRawText();
+    }
+
+    private static Usage? ParseUsage(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var node) || node.ValueKind != JsonValueKind.Object)
+            return null;
+
+        var prompt = ReadInt(node, "promptTokens") ?? ReadInt(node, "prompt_tokens");
+        var completion = ReadInt(node, "completionTokens") ?? ReadInt(node, "completion_tokens") ?? ReadInt(node, "answerTokens");
+        var total = ReadInt(node, "totalTokens") ?? ReadInt(node, "total_tokens");
+        return prompt is null && completion is null && total is null
+            ? null
+            : new Usage(prompt, completion, total);
+    }
+
+    private static (IReadOnlyList<MessageAttempt>? Attempts, int Current) ParseRetry(JsonElement root)
+    {
+        if (!root.TryGetProperty("retry", out var retry) || retry.ValueKind != JsonValueKind.Object)
+            return (null, 0);
+        if (!retry.TryGetProperty("attempts", out var attemptsNode) || attemptsNode.ValueKind != JsonValueKind.Array)
+            return (null, 0);
+
+        var attempts = new List<MessageAttempt>();
+        foreach (var item in attemptsNode.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String)
+            {
+                attempts.Add(new MessageAttempt(item.GetString() ?? string.Empty, null, null, null));
+                continue;
+            }
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            var content = item.TryGetProperty("content", out var contentNode) && contentNode.ValueKind == JsonValueKind.String
+                ? contentNode.GetString() ?? string.Empty
+                : string.Empty;
+            var modelLabel = item.TryGetProperty("model_label", out var modelNode) && modelNode.ValueKind == JsonValueKind.String
+                ? modelNode.GetString()
+                : null;
+            attempts.Add(new MessageAttempt(content, modelLabel, ParseUsage(item, "response_stats"), ParseSources(item)));
+        }
+
+        var current = ReadInt(retry, "current") ?? Math.Max(0, attempts.Count - 1);
+        current = Math.Max(0, Math.Min(current, Math.Max(0, attempts.Count - 1)));
+        return attempts.Count == 0 ? (null, 0) : (attempts, current);
+    }
+
+    private static IReadOnlyList<ToolCallDelta>? ParseToolCalls(JsonElement root)
+    {
+        if (!root.TryGetProperty("tool_calls", out var node) || node.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var list = new List<ToolCallDelta>();
+        var fallbackIndex = 1;
+        foreach (var item in node.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            var name = ReadString(item, "name");
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            var id = ReadString(item, "id");
+            if (string.IsNullOrWhiteSpace(id))
+                id = $"restored-tool-{fallbackIndex}";
+
+            list.Add(new ToolCallDelta(
+                id!,
+                name!,
+                ReadString(item, "status") ?? "completed",
+                ReadString(item, "label"),
+                ReadString(item, "summary"),
+                ReadString(item, "detail"),
+                ReadString(item, "arguments_json") ?? ReadString(item, "argumentsJson"),
+                ReadString(item, "result_preview_json") ?? ReadString(item, "resultPreviewJson"),
+                ReadString(item, "provider"),
+                ReadInt(item, "content_offset") ?? ReadInt(item, "contentOffset"),
+                ReadInt(item, "timeline_index") ?? ReadInt(item, "timelineIndex")));
+            fallbackIndex++;
+        }
+
+        return list.Count == 0 ? null : list;
+    }
+
+    private static IReadOnlyList<ThinkingSegmentDelta>? ParseThinkingSegments(JsonElement root)
+    {
+        if (!root.TryGetProperty("thinking_segments", out var node) || node.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var list = new List<ThinkingSegmentDelta>();
+        foreach (var item in node.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            var source = ReadString(item, "source");
+            if (string.IsNullOrWhiteSpace(source)) continue;
+            list.Add(new ThinkingSegmentDelta(
+                source!,
+                ReadInt(item, "content_offset") ?? ReadInt(item, "contentOffset") ?? 0,
+                ReadDouble(item, "elapsed_seconds") ?? ReadDouble(item, "elapsedSeconds") ?? 0,
+                ReadInt(item, "timeline_index") ?? ReadInt(item, "timelineIndex")));
+        }
+
+        return list.Count == 0 ? null : list;
+    }
+
+    private static (IReadOnlyList<ToolCallDelta>? ToolCalls, IReadOnlyList<ThinkingSegmentDelta>? ThinkingSegments)
+        InferMissingTimelineIndexes(IReadOnlyList<ToolCallDelta>? toolCalls, IReadOnlyList<ThinkingSegmentDelta>? thinkingSegments)
+    {
+        if ((toolCalls is null || toolCalls.Count == 0) && (thinkingSegments is null || thinkingSegments.Count == 0))
+            return (toolCalls, thinkingSegments);
+
+        var hasPersistedTimeline =
+            toolCalls?.Any(t => t.TimelineIndex is not null) == true
+            || thinkingSegments?.Any(t => t.TimelineIndex is not null) == true;
+        if (hasPersistedTimeline)
+            return (toolCalls, thinkingSegments);
+
+        var toolIndexes = new Dictionary<int, int>();
+        var thinkingIndexes = new Dictionary<int, int>();
+        var toolGroups = (toolCalls ?? [])
+            .Select((item, index) => new IndexedTool(item, index))
+            .GroupBy(t => t.Item.ContentOffset ?? 0)
+            .ToDictionary(g => g.Key, g => g.ToList());
+        var thinkingGroups = (thinkingSegments ?? [])
+            .Select((item, index) => new IndexedThinking(item, index))
+            .GroupBy(t => t.Item.ContentOffset)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var sequence = 0;
+        foreach (var offset in toolGroups.Keys.Concat(thinkingGroups.Keys).Distinct().OrderBy(x => x))
+        {
+            toolGroups.TryGetValue(offset, out var toolsAtOffset);
+            thinkingGroups.TryGetValue(offset, out var thinkingAtOffset);
+            var count = Math.Max(toolsAtOffset?.Count ?? 0, thinkingAtOffset?.Count ?? 0);
+            for (var i = 0; i < count; i++)
+            {
+                if (thinkingAtOffset is not null && i < thinkingAtOffset.Count)
+                    thinkingIndexes[thinkingAtOffset[i].Index] = sequence++;
+                if (toolsAtOffset is not null && i < toolsAtOffset.Count)
+                    toolIndexes[toolsAtOffset[i].Index] = sequence++;
+            }
+        }
+
+        var restoredTools = toolCalls?.Select((t, i) => t with { TimelineIndex = toolIndexes[i] }).ToList();
+        var restoredThinking = thinkingSegments?.Select((t, i) => t with { TimelineIndex = thinkingIndexes[i] }).ToList();
+        return (restoredTools, restoredThinking);
+    }
+
+    private sealed record IndexedTool(ToolCallDelta Item, int Index);
+    private sealed record IndexedThinking(ThinkingSegmentDelta Item, int Index);
+
+    private static int? ReadInt(JsonElement obj, string name)
+    {
+        if (!obj.TryGetProperty(name, out var value)) return null;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number)) return number;
+        if (value.ValueKind == JsonValueKind.String && int.TryParse(value.GetString(), out var parsed)) return parsed;
+        return null;
+    }
+
+    private static double? ReadDouble(JsonElement obj, string name)
+    {
+        if (!obj.TryGetProperty(name, out var value)) return null;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number)) return number;
+        if (value.ValueKind == JsonValueKind.String && double.TryParse(value.GetString(), out var parsed)) return parsed;
+        return null;
+    }
+
+    private static string? ReadString(JsonElement obj, string name)
+    {
+        if (!obj.TryGetProperty(name, out var value)) return null;
+        return value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+    }
+
+    public static string GenerateTitle(string? content)
+    {
+        content = (content ?? string.Empty)
+            .Replace("\r", " ")
+            .Replace("\n", " ")
+            .Trim();
+        content = MessageViewModel.StripSystemHints(content);
+
+        var title = content.Length <= 25 ? content : content[..25].Trim() + "...";
+        return string.IsNullOrWhiteSpace(title) ? "无标题对话" : title;
+    }
+
+    public static InlineThinkingParts SplitInlineThinking(string? content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return new InlineThinkingParts(string.Empty, null);
+
+        if (IndexOfIgnoreCase(content, "<think") >= 0)
+            return SplitInlineThinkingPreservingToolOrder(content);
+
+        var splitter = new InlineThinkSplitter();
+        var fed = splitter.Feed(content);
+        var flushed = splitter.Flush();
+        var visible = fed.Visible + flushed.Visible;
+        var thinking = fed.Thinking + flushed.Thinking;
+        if (!string.IsNullOrWhiteSpace(thinking))
+        {
+            return FoldLeadingThinkingToolMarkup(visible, thinking);
+        }
+
+        return new InlineThinkingParts(visible, string.IsNullOrWhiteSpace(thinking) ? null : thinking.Trim());
+    }
+
+    private static InlineThinkingParts SplitInlineThinkingPreservingToolOrder(string content)
+    {
+        var visible = new StringBuilder();
+        var thinking = new StringBuilder();
+        var pos = 0;
+        var sawThink = false;
+        var finalAnswerStarted = false;
+
+        while (pos < content.Length)
+        {
+            var nextThink = IndexOfIgnoreCase(content, "<think", pos);
+            var nextTool = sawThink && !finalAnswerStarted
+                ? IndexOfNextThinkingToolMarker(content, pos)
+                : -1;
+            var next = MinPositive(nextThink, nextTool);
+            if (next < 0)
+            {
+                visible.Append(content, pos, content.Length - pos);
+                break;
+            }
+
+            if (next > pos)
+            {
+                var outside = content[pos..next];
+                if (sawThink && !finalAnswerStarted && string.IsNullOrWhiteSpace(outside))
+                {
+                    // Spacing between think/tool/think segments belongs to
+                    // the thinking timeline, not the final answer body.
+                }
+                else
+                {
+                    visible.Append(outside);
+                    if (!string.IsNullOrWhiteSpace(outside))
+                        finalAnswerStarted = true;
+                }
+            }
+
+            if (next == nextThink)
+            {
+                var openEnd = content.IndexOf('>', next);
+                if (openEnd < 0)
+                {
+                    AppendThinkingSegment(thinking, content[next..]);
+                    sawThink = true;
+                    break;
+                }
+
+                var bodyStart = openEnd + 1;
+                var close = IndexOfIgnoreCase(content, "</think>", bodyStart);
+                if (close < 0)
+                {
+                    AppendThinkingSegment(thinking, content[bodyStart..]);
+                    sawThink = true;
+                    break;
+                }
+
+                AppendThinkingSegment(thinking, content[bodyStart..close]);
+                sawThink = true;
+                pos = close + "</think>".Length;
+                continue;
+            }
+
+            var toolEnd = FindLeadingThinkingToolEnd(content, next);
+            if (toolEnd < 0)
+            {
+                visible.Append(content[next]);
+                pos = next + 1;
+                continue;
+            }
+
+            AppendThinkingSegment(thinking, content[next..toolEnd]);
+            pos = toolEnd;
+        }
+
+        var thinkingText = thinking.ToString().Trim();
+        return new InlineThinkingParts(
+            visible.ToString().TrimStart(),
+            string.IsNullOrWhiteSpace(thinkingText) ? null : thinkingText);
+    }
+
+    public static InlineThinkingParts FoldLeadingThinkingToolMarkup(string visible, string? thinking)
+    {
+        if (string.IsNullOrWhiteSpace(thinking))
+            return new InlineThinkingParts(visible, null);
+
+        var leadingTools = PeelLeadingThinkingToolMarkup(visible);
+        var mergedThinking = string.IsNullOrWhiteSpace(leadingTools.ThinkingPrefix)
+            ? thinking
+            : MergeThinkingWithToolTimeline(thinking, leadingTools.ThinkingPrefix);
+
+        return new InlineThinkingParts(
+            leadingTools.Visible,
+            string.IsNullOrWhiteSpace(mergedThinking) ? null : mergedThinking.Trim());
+    }
+
+    private static string MergeThinkingWithToolTimeline(string thinking, string toolMarkup)
+    {
+        var toolUnits = ExtractThinkingToolUnits(toolMarkup).ToList();
+        if (toolUnits.Count == 0)
+            return MergeThinking(thinking, toolMarkup);
+
+        var builder = new StringBuilder();
+        var pos = 0;
+        var toolIndex = 0;
+        while (toolIndex < toolUnits.Count)
+        {
+            var dsStart = IndexOfIgnoreCase(thinking, "<DSanalysis", pos);
+            if (dsStart < 0) break;
+
+            builder.Append(thinking, pos, dsStart - pos);
+            AppendThinkingSegment(builder, toolUnits[toolIndex++]);
+
+            var dsEnd = FindTagEnd(thinking, dsStart, "</DSanalysis>");
+            builder.Append(thinking, dsStart, dsEnd - dsStart);
+            pos = dsEnd;
+        }
+
+        builder.Append(thinking, pos, thinking.Length - pos);
+        while (toolIndex < toolUnits.Count)
+            AppendThinkingSegment(builder, toolUnits[toolIndex++]);
+
+        return builder.ToString();
+    }
+
+    private static IEnumerable<string> ExtractThinkingToolUnits(string source)
+    {
+        var pos = 0;
+        while (pos < source.Length)
+        {
+            var next = IndexOfNextThinkingToolMarker(source, pos);
+            if (next < 0)
+            {
+                var tail = source[pos..].Trim();
+                if (!string.IsNullOrWhiteSpace(tail))
+                    yield return tail;
+                yield break;
+            }
+
+            var interstitial = source[pos..next].Trim();
+            if (!string.IsNullOrWhiteSpace(interstitial))
+                yield return interstitial;
+
+            var end = FindLeadingThinkingToolEnd(source, next);
+            if (end < 0) yield break;
+
+            var unit = source[next..end].Trim();
+            if (!string.IsNullOrWhiteSpace(unit))
+                yield return unit;
+            pos = end;
+        }
+    }
+
+    private static void AppendThinkingSegment(StringBuilder builder, string? segment)
+    {
+        if (string.IsNullOrWhiteSpace(segment)) return;
+        var text = segment.Trim();
+        if (builder.Length > 0 && !EndsWithBlankLine(builder))
+            builder.Append("\n\n");
+        builder.Append(text);
+    }
+
+    private static bool EndsWithBlankLine(StringBuilder builder)
+    {
+        if (builder.Length < 2) return false;
+        var last = builder[builder.Length - 1];
+        var prev = builder[builder.Length - 2];
+        return (last == '\n' && prev == '\n') || (last == '\n' && prev == '\r');
+    }
+
+    private static InlineThinkingToolPeel PeelLeadingThinkingToolMarkup(string visible)
+    {
+        if (string.IsNullOrWhiteSpace(visible))
+            return new InlineThinkingToolPeel(visible, string.Empty);
+
+        var pos = 0;
+        var movedAny = false;
+        while (pos < visible.Length)
+        {
+            pos = SkipWhitespace(visible, pos);
+            var end = FindLeadingThinkingToolEnd(visible, pos);
+            if (end < 0)
+                break;
+
+            pos = end;
+            movedAny = true;
+
+            var afterTool = SkipWhitespace(visible, pos);
+            var nextTool = IndexOfNextThinkingToolMarker(visible, afterTool);
+            if (nextTool == afterTool)
+            {
+                pos = afterTool;
+                continue;
+            }
+            if (nextTool < 0) break;
+
+            var interstitial = visible[afterTool..nextTool];
+            if (CountNonWhitespace(interstitial) > 800) break;
+            pos = nextTool;
+        }
+
+        if (!movedAny) return new InlineThinkingToolPeel(visible, string.Empty);
+
+        var thinkingPrefix = visible[..pos].Trim();
+        var remainder = visible[pos..].TrimStart();
+        return new InlineThinkingToolPeel(remainder, string.IsNullOrWhiteSpace(thinkingPrefix) ? string.Empty : "\n\n" + thinkingPrefix);
+    }
+
+    private static int FindLeadingThinkingToolEnd(string source, int start)
+    {
+        if (StartsWithIgnoreCase(source, start, "<steel-step"))
+            return FindTagEnd(source, start, "</steel-step>");
+        if (StartsWithIgnoreCase(source, start, "<DSanalysis"))
+            return FindTagEnd(source, start, "</DSanalysis>");
+        if (StartsWithToolStatusBlockquote(source, start))
+            return FindTagEnd(source, start, "</blockquote>");
+        return -1;
+    }
+
+    private static int FindTagEnd(string source, int start, string closeTag)
+    {
+        var close = IndexOfIgnoreCase(source, closeTag, start);
+        return close < 0 ? source.Length : close + closeTag.Length;
+    }
+
+    private static int IndexOfNextThinkingToolMarker(string source, int start)
+    {
+        var next = MinPositive(
+            IndexOfIgnoreCase(source, "<steel-step", start),
+            IndexOfIgnoreCase(source, "<DSanalysis", start),
+            IndexOfNextToolStatusBlockquote(source, start));
+        return next;
+    }
+
+    private static int IndexOfNextToolStatusBlockquote(string source, int start)
+    {
+        var pos = IndexOfIgnoreCase(source, "<blockquote", start);
+        while (pos >= 0)
+        {
+            if (StartsWithToolStatusBlockquote(source, pos)) return pos;
+            pos = IndexOfIgnoreCase(source, "<blockquote", pos + "<blockquote".Length);
+        }
+        return -1;
+    }
+
+    private static bool StartsWithToolStatusBlockquote(string source, int start)
+    {
+        if (!StartsWithIgnoreCase(source, start, "<blockquote")) return false;
+        var openEnd = source.IndexOf('>', start);
+        if (openEnd < 0) return false;
+        return source.Substring(start, openEnd - start + 1).Contains("tool-status", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int MinPositive(params int[] values)
+    {
+        var min = -1;
+        foreach (var value in values)
+        {
+            if (value < 0) continue;
+            if (min < 0 || value < min) min = value;
+        }
+        return min;
+    }
+
+    private static int SkipWhitespace(string source, int start)
+    {
+        while (start < source.Length && char.IsWhiteSpace(source[start])) start++;
+        return start;
+    }
+
+    private static int CountNonWhitespace(string value)
+    {
+        var count = 0;
+        foreach (var ch in value)
+        {
+            if (!char.IsWhiteSpace(ch)) count++;
+        }
+        return count;
+    }
+
+    private static bool StartsWithIgnoreCase(string source, int start, string value)
+    {
+        return start >= 0
+            && start + value.Length <= source.Length
+            && source.AsSpan(start, value.Length).Equals(value.AsSpan(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int IndexOfIgnoreCase(string source, string value, int start = 0)
+    {
+        return source.IndexOf(value, start, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string MergeThinking(string first, string? second)
+    {
+        if (string.IsNullOrWhiteSpace(second)) return first;
+        if (first.Contains(second, StringComparison.Ordinal)) return first;
+        if (second.Contains(first, StringComparison.Ordinal)) return second;
+        return first.TrimEnd() + "\n\n" + second.TrimStart();
+    }
+
+    private static bool IsRoutesModel(ProviderModel? model)
+    {
+        if (model is null) return false;
+        return string.Equals(model.Id, "autoLLM", StringComparison.OrdinalIgnoreCase)
+            || model.DisplayName.Contains("MolaGPT Routes", StringComparison.OrdinalIgnoreCase);
+    }
+
+    partial void OnActiveProviderChanged(IChatProvider? value)
+    {
+        OnPropertyChanged(nameof(ActiveProviderLabel));
+    }
+
+    partial void OnActiveModelChanged(ProviderModel? value)
+    {
+        OnPropertyChanged(nameof(ActiveModelLabel));
+    }
+
+    private sealed record InlineThinkingToolPeel(string Visible, string ThinkingPrefix);
+}
+
+public sealed record InlineThinkingParts(string Visible, string? Thinking);
+
+public sealed class ConversationTouchedEventArgs : EventArgs
+{
+    public ConversationTouchedEventArgs(string id, string title, DateTimeOffset updatedAt, string? providerId)
+        : this(id, title, updatedAt, providerId, null) { }
+
+    public ConversationTouchedEventArgs(string id, string title, DateTimeOffset updatedAt, string? providerId, string? personaLabel)
+    {
+        Id = id;
+        Title = title;
+        UpdatedAt = updatedAt;
+        ProviderId = providerId;
+        PersonaLabel = personaLabel;
+    }
+    public string Id { get; }
+    public string Title { get; }
+    public DateTimeOffset UpdatedAt { get; }
+    public string? ProviderId { get; }
+    /// <summary>Persona display name bound to this conversation, or null when
+    /// no persona is attached. Surfaced in the sidebar as the badge label.</summary>
+    public string? PersonaLabel { get; }
+}

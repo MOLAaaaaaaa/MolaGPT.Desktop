@@ -1,0 +1,40 @@
+<Window x:Class="MolaGPT.Desktop.Views.ImagePreviewWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="#E6000000"
+        WindowStartupLocation="CenterOwner"
+        WindowState="Maximized"
+        ShowInTaskbar="False"
+        Cursor="Hand"
+        MouseDown="OnRootMouseDown"
+        KeyDown="OnRootKeyDown"
+        Focusable="True">
+    <!-- Fullscreen semi-transparent overlay with centered image preview,
+         filename caption, and click-anywhere close behavior. -->
+    <Grid Margin="48,48,48,80">
+        <Image x:Name="PreviewImage"
+               HorizontalAlignment="Center"
+               VerticalAlignment="Center"
+               Stretch="Uniform"
+               StretchDirection="DownOnly"
+               RenderOptions.BitmapScalingMode="HighQuality">
+            <Image.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="20" ShadowDepth="6" Opacity="0.5" />
+            </Image.Effect>
+        </Image>
+        <Border Background="#B3000000"
+                CornerRadius="4"
+                Padding="12,6"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Bottom"
+                Margin="0,0,0,-48"
+                MaxWidth="640">
+            <TextBlock x:Name="CaptionText"
+                       Foreground="White"
+                       FontSize="14"
+                       TextTrimming="CharacterEllipsis" />
+        </Border>
+    </Grid>
+</Window>
