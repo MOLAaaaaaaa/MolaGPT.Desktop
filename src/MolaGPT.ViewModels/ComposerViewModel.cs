@@ -1,0 +1,1154 @@
+using System.Collections.ObjectModel;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using MolaGPT.Core.Auth;
+using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Providers;
+using MolaGPT.Core.Models;
+using MolaGPT.ViewModels.Services;
+
+namespace MolaGPT.ViewModels;
+
+/// <summary>
+/// Bottom composer view model. Owns the in-flight CancellationTokenSource so
+/// the Stop button can abort a streaming generation. Send is enabled only when
+/// (a) there's text, (b) we're not already sending, (c) a provider+model is
+/// active.
+///
+/// Tracks composer toolbar state for reasoning, network tools, webpage
+/// reading, and attachments. Visibility is derived from the selected model's
+/// advertised capabilities.
+/// </summary>
+public sealed partial class ComposerViewModel : ObservableObject
+{
+    [ObservableProperty] private string _text = string.Empty;
+    [ObservableProperty] private bool _isSending;
+    [ObservableProperty] private bool _enterToSend = true;
+
+    /// <summary>True when the user has tapped the lightbulb button on a
+    /// reasoning-capable model. Becomes <c>use_thinking</c> in the request body.</summary>
+    [ObservableProperty] private bool _enableThinking;
+
+    /// <summary>"low" / "medium" / "high". Becomes <c>reasoning_effort</c>.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ReasoningEffortLabel))]
+    private string _reasoningEffort = "medium";
+
+    /// <summary>Budget tokens for Anthropic/Gemini/Qwen thinking modes.</summary>
+    [ObservableProperty] private int _thinkingBudgetTokens = 10000;
+
+    /// <summary>The thinking parameter kind of the currently active model.</summary>
+    [ObservableProperty] private MolaGPT.Core.Models.ThinkingParamKind _activeThinkingKind = MolaGPT.Core.Models.ThinkingParamKind.None;
+
+    /// <summary>True when the user has tapped the globe button. Becomes
+    /// <c>enabled_tools.network</c>.</summary>
+    [ObservableProperty] private bool _enableNetwork;
+
+    /// <summary>True when web_fetch / webpage reading is enabled. BYOK 使用
+    /// 工具名 <c>web_fetch</c>；wire 上仍以 <c>enabled_tools.steelBrowser</c>
+    /// 与代理后端通信（向前兼容）。</summary>
+    [ObservableProperty] private bool _enableWebFetch;
+
+    public ObservableCollection<Attachment> Attachments { get; } = new();
+
+    public Func<string, CancellationToken, Task<string?>>? ConversationCompletedAsync { get; set; }
+
+    private readonly ChatViewModel _chat;
+    private readonly BackgroundStreamService? _backgroundStreams;
+    private readonly SettingsViewModel? _settings;
+    private readonly PersonaListViewModel? _personas;
+    private CancellationTokenSource? _cts;
+    private Task? _activeStreamTask;
+    private MessageViewModel? _activeAssistantMsg;
+    private BackgroundStreamTask? _activeTask;
+
+    /// <summary>Exposed to XAML so the composer can bind directly to chat state
+    /// (active persona, conversation prompt, model labels) without going through
+    /// the Main view model. ComposerView.DataContext is this VM.</summary>
+    public ChatViewModel Chat => _chat;
+
+    /// <summary>Exposed to XAML so the PersonaPicker popup can render the full
+    /// list. Null when no persona registry is wired (e.g. design-time data).</summary>
+    public PersonaListViewModel? Personas => _personas;
+
+    /// <summary>True iff persona / system-prompt controls should be visible;
+    /// BYOK provider active. MolaGptProxy mode hides them entirely so the
+    /// client doesn't override server-side prompts (chator.php has its own).</summary>
+    public bool IsPersonaPickerVisible =>
+        _chat.ActiveProvider is not null && _chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
+
+    public ComposerViewModel(ChatViewModel chat, BackgroundStreamService? backgroundStreams = null, SettingsViewModel? settings = null)
+        : this(chat, backgroundStreams, settings, null) { }
+
+    public ComposerViewModel(
+        ChatViewModel chat,
+        BackgroundStreamService? backgroundStreams,
+        SettingsViewModel? settings,
+        PersonaListViewModel? personas)
+    {
+        _chat = chat;
+        _backgroundStreams = backgroundStreams;
+        _settings = settings;
+        _personas = personas;
+        _chat.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(ChatViewModel.ActiveProvider) or nameof(ChatViewModel.ActiveModel))
+            {
+                SendCommand.NotifyCanExecuteChanged();
+                RetryCommand.NotifyCanExecuteChanged();
+                OnPropertyChanged(nameof(IsThinkingVisible));
+                OnPropertyChanged(nameof(IsReasoningEffortVisible));
+                OnPropertyChanged(nameof(IsAttachVisible));
+                OnPropertyChanged(nameof(CanAcceptImageAttachments));
+                OnPropertyChanged(nameof(CanAcceptFileAttachments));
+                OnPropertyChanged(nameof(AreNetworkToolsEnabled));
+                OnPropertyChanged(nameof(IsPersonaPickerVisible));
+
+                if (!IsThinkingVisible && EnableThinking) EnableThinking = false;
+                if (!AreNetworkToolsEnabled)
+                {
+                    EnableNetwork = false;
+                    EnableWebFetch = false;
+                }
+
+                ActiveThinkingKind = _chat.ActiveModel?.ThinkingConfig?.Kind
+                    ?? MolaGPT.Core.Models.ThinkingParamKind.None;
+
+                // Normalize ReasoningEffort BEFORE notifying AvailableEffortLevels so
+                // the ComboBox doesn't reverse-write null when the previous value
+                // (e.g. "medium") isn't in the new model's level set (e.g. DeepSeek
+                // exposes only ["high","max"]). Order: model default → keep current
+                // if still valid → fall back to first available level.
+                var newLevels = AvailableEffortLevels;
+                var modelDefault = _chat.ActiveModel?.ThinkingConfig?.DefaultEffort;
+                if (!string.IsNullOrEmpty(modelDefault) && newLevels.Contains(modelDefault))
+                    ReasoningEffort = modelDefault!;
+                else if (!newLevels.Contains(ReasoningEffort))
+                    ReasoningEffort = newLevels.FirstOrDefault() ?? "medium";
+
+                // Always refresh budget/effort bounds — two models may share the
+                // same ThinkingParamKind but differ in budget range or default effort.
+                OnPropertyChanged(nameof(BudgetMin));
+                OnPropertyChanged(nameof(BudgetMax));
+                OnPropertyChanged(nameof(AvailableEffortLevels));
+
+                if (_chat.ActiveModel?.ThinkingConfig?.DefaultBudget is { } defBudget)
+                    ThinkingBudgetTokens = defBudget;
+            }
+        };
+        Attachments.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasAttachments));
+            SendCommand.NotifyCanExecuteChanged();
+        };
+    }
+
+    /// <summary>Show "推理" toggle iff the active model explicitly reports
+    /// SupportsThinking. MolaGPT account models get this from
+    /// model_config_public.php; BYOK models get it from user settings.</summary>
+    public bool IsThinkingVisible => _chat.ActiveModel?.SupportsThinking == true;
+
+    /// <summary>Show "推理强度" iff the active model supports effort control
+    /// and the user has enabled thinking.</summary>
+    public bool IsReasoningEffortVisible => EnableThinking && _chat.ActiveModel?.SupportsReasoningEffort == true;
+
+    /// <summary>Attach button is always shown; text/document attachments are
+    /// validated at send time, while images also require vision support.</summary>
+    public bool IsAttachVisible => true;
+    public bool CanAcceptImageAttachments =>
+        _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy || _chat.ActiveModel?.SupportsVision == true;
+    /// <summary>非图片附件目前仅 MolaGPT 代理模式支持（走沙箱上传）。BYOK
+    /// 直连官方端点时，PDF/DOCX 等二进制文件无法解析，文本类文件也只是
+    /// inline 截断 —— 在 UI 入口直接拦截，避免用户误以为模型读到了文件内容。</summary>
+    public bool CanAcceptFileAttachments =>
+        _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy;
+    public bool AreNetworkToolsEnabled =>
+        _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy || _chat.ActiveModel?.SupportsToolCalling == true;
+
+    public bool HasAttachments => Attachments.Count > 0;
+
+    /// <summary>Display label for the current effort, "低 / 中 / 高".</summary>
+    public string ReasoningEffortLabel => ReasoningEffort switch
+    {
+        "none" => "无",
+        "minimal" => "极低",
+        "low" => "低",
+        "medium" => "中",
+        "high" => "高",
+        "xhigh" => "极高",
+        "max" => "最大",
+        // Empty/null: blank so the button doesn't lie about an unset value.
+        null or "" => string.Empty,
+        // Unknown value: surface it verbatim instead of pretending it's "中".
+        var other => other
+    };
+
+    public IReadOnlyList<string> AvailableEffortLevels => ActiveThinkingKind switch
+    {
+        MolaGPT.Core.Models.ThinkingParamKind.OpenAiReasoningEffort =>
+            new[] { "none", "minimal", "low", "medium", "high", "xhigh" },
+        MolaGPT.Core.Models.ThinkingParamKind.AnthropicAdaptive =>
+            new[] { "low", "medium", "high", "xhigh", "max" },
+        MolaGPT.Core.Models.ThinkingParamKind.DeepSeekV4 =>
+            new[] { "high", "max" },
+        MolaGPT.Core.Models.ThinkingParamKind.GeminiThinkingLevel =>
+            new[] { "minimal", "low", "medium", "high" },
+        _ => new[] { "low", "medium", "high" }
+    };
+
+    public bool IsEffortComboVisible => ActiveThinkingKind is not (
+        MolaGPT.Core.Models.ThinkingParamKind.AnthropicBudget or
+        MolaGPT.Core.Models.ThinkingParamKind.GeminiBudget or
+        MolaGPT.Core.Models.ThinkingParamKind.QwenThinkingBudget);
+
+    public bool IsBudgetSliderVisible => ActiveThinkingKind is
+        MolaGPT.Core.Models.ThinkingParamKind.AnthropicBudget or
+        MolaGPT.Core.Models.ThinkingParamKind.GeminiBudget or
+        MolaGPT.Core.Models.ThinkingParamKind.QwenThinkingBudget;
+
+    public int BudgetMin => _chat.ActiveModel?.ThinkingConfig?.MinBudget ?? 0;
+    public int BudgetMax => _chat.ActiveModel?.ThinkingConfig?.MaxBudget ?? 32768;
+
+    /// <summary>
+    /// Hint chip click handler — fills the composer with the canned prompt and
+    /// (optionally) auto-sends so the user sees streaming start.
+    /// </summary>
+    [RelayCommand]
+    public void ApplyHint(string? hint)
+    {
+        if (string.IsNullOrWhiteSpace(hint)) return;
+        Text = hint;
+    }
+
+    /// <summary>Cycle the reasoning effort low → medium → high → low.</summary>
+    [RelayCommand]
+    public void CycleReasoningEffort()
+    {
+        ReasoningEffort = ReasoningEffort switch
+        {
+            "low" => "medium",
+            "medium" => "high",
+            _ => "low"
+        };
+    }
+
+    partial void OnActiveThinkingKindChanged(MolaGPT.Core.Models.ThinkingParamKind value)
+    {
+        OnPropertyChanged(nameof(AvailableEffortLevels));
+        OnPropertyChanged(nameof(IsEffortComboVisible));
+        OnPropertyChanged(nameof(IsBudgetSliderVisible));
+        OnPropertyChanged(nameof(BudgetMin));
+        OnPropertyChanged(nameof(BudgetMax));
+    }
+
+    [RelayCommand]
+    public void RemoveAttachment(Attachment? a)
+    {
+        if (a is null) return;
+        Attachments.Remove(a);
+    }
+
+    [RelayCommand]
+    public void ClearAttachments() => Attachments.Clear();
+
+    [RelayCommand(CanExecute = nameof(CanSend))]
+    public async Task SendAsync()
+    {
+        if (string.IsNullOrWhiteSpace(Text) && Attachments.Count == 0) return;
+        if (_chat.ActiveProvider is null || _chat.ActiveModel is null) return;
+        if (HasUnsupportedImages(Attachments, _chat.ActiveProvider, _chat.ActiveModel))
+            return;
+
+        if (string.IsNullOrEmpty(_chat.ConversationId))
+            _chat.ConversationId = CreateWebCompatibleConversationId();
+
+        var userText = Text;
+        var queuedAttachments = Attachments.ToList();
+        Text = string.Empty;
+        _chat.AppendUserMessage(userText, BuildAttachmentChips(queuedAttachments));
+        var userMsg = _chat.Messages.LastOrDefault(m => m.Role == ChatMessage.RoleUser);
+        var assistantMsg = _chat.BeginAssistantMessage();
+        IsSending = true;
+        _chat.IsStreaming = true;
+        Attachments.Clear();
+
+        var cts = new CancellationTokenSource();
+        _cts = cts;
+        _activeAssistantMsg = assistantMsg;
+
+        var provider = _chat.ActiveProvider;
+        var model = _chat.ActiveModel;
+        var conversationId = _chat.ConversationId!;
+        var conversationTitle = _chat.ConversationTitle;
+        var outgoingUserText = userText;
+        var outgoingAttachments = queuedAttachments;
+
+        if (queuedAttachments.Count > 0
+            && provider is MolaGptProxyProvider proxyForUploads)
+        {
+            try
+            {
+                assistantMsg.SetPendingStatus("上传附件", "同步到会话沙箱");
+                var prepared = await proxyForUploads.PrepareAttachmentsAsync(
+                    queuedAttachments,
+                    conversationId,
+                    model.SupportsVision,
+                    cts.Token);
+                outgoingAttachments = prepared.Attachments.ToList();
+                if (!string.IsNullOrWhiteSpace(prepared.SystemHint))
+                    outgoingUserText = AppendHiddenSystemHint(userText, prepared.SystemHint!);
+
+                if (userMsg is not null)
+                {
+                    userMsg.Content = outgoingUserText;
+                    userMsg.Attachments = BuildAttachmentChips(outgoingAttachments);
+                    userMsg.ContentPartsJson = BuildOpenAiContentPartsJson(outgoingUserText, outgoingAttachments);
+                    _chat.UpdatePersistedMessage(userMsg);
+                }
+            }
+            catch (Exception ex)
+            {
+                assistantMsg.AppendDelta($"\n\n> ❌ **附件上传失败**: {ex.Message}");
+                assistantMsg.FlushPendingDelta();
+                assistantMsg.IsStreaming = false;
+                assistantMsg.StopThinking();
+                _chat.FinalizeAssistantMessage(conversationId, assistantMsg);
+                IsSending = false;
+                _chat.IsStreaming = false;
+                _activeStreamTask = null;
+                _activeAssistantMsg = null;
+                _activeTask = null;
+                _cts = null;
+                cts.Dispose();
+                return;
+            }
+        }
+        else if (userMsg is not null && outgoingAttachments.Any(a => a.Kind == AttachmentKind.Image && !string.IsNullOrWhiteSpace(a.RemoteUrl)))
+        {
+            userMsg.ContentPartsJson = BuildOpenAiContentPartsJson(outgoingUserText, outgoingAttachments);
+            _chat.UpdatePersistedMessage(userMsg);
+        }
+        var requestAttachments = BuildRequestAttachments(provider, model, outgoingAttachments);
+
+        var msgs = _chat.Messages
+            .Where(m => !m.IsStreaming || m == assistantMsg)
+            .Where(m => m != assistantMsg)
+            .Select(m => new ChatMessage(
+                m.Role,
+                ReferenceEquals(m, userMsg) ? outgoingUserText : BuildContentForHistory(m),
+                Attachments: ReferenceEquals(m, userMsg) && requestAttachments.Count > 0 ? requestAttachments : null,
+                ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null))
+            .ToList();
+
+        var systemPrompt = ResolveSystemPrompt();
+        if (!string.IsNullOrWhiteSpace(systemPrompt))
+            msgs.Insert(0, new ChatMessage("system", systemPrompt));
+
+        var extras = BuildExtras();
+        var thinkingKind = ResolveActiveThinkingParamKind();
+
+        var req = new ChatRequest(
+            ModelId: model.Id,
+            Messages: msgs,
+            ConversationId: conversationId,
+            SessionId: Guid.NewGuid().ToString("N"),
+            UseThinking: EnableThinking,
+            ReasoningEffort: IsReasoningEffortVisible ? ReasoningEffort : null,
+            ExtraBody: extras,
+            ThinkingBudgetTokens: EnableThinking ? ThinkingBudgetTokens : null,
+            ThinkingParamKind: thinkingKind);
+
+        var streamContext = new BackgroundStreamTask
+        {
+            ConversationId = conversationId,
+            ConversationTitle = conversationTitle,
+            ModelLabel = assistantMsg.ModelLabel,
+            ProviderId = provider.Id,
+            ProviderKind = provider.Kind,
+            AssistantMessage = assistantMsg,
+            Cts = cts,
+            StreamTask = Task.CompletedTask,
+            SessionId = req.SessionId
+        };
+        _activeTask = streamContext;
+
+        var streamTask = RunStreamLoopAsync(provider, req, assistantMsg, cts, streamContext);
+        streamContext.StreamTask = streamTask;
+        _activeStreamTask = streamTask;
+        var wasCancelled = false;
+
+        try
+        {
+            await streamContext.StreamTask;
+        }
+        catch (OperationCanceledException)
+        {
+            wasCancelled = true;
+        }
+        catch (MolaGptAuthExpiredException ex)
+        {
+            assistantMsg.AppendDelta($"\n\n> ⚠️ {ex.Message}");
+            try
+            {
+                if (provider.Id == "molagpt-proxy" && _chat.ActiveProvider?.Id == provider.Id)
+                {
+                    _chat.ActiveProvider = null;
+                    _chat.ActiveModel = null;
+                    _chat.TryAutoPickActive();
+                }
+            }
+            catch { }
+        }
+        catch (Exception ex)
+        {
+            assistantMsg.AppendDelta($"\n\n> ❌ **错误**: {ex.Message}");
+        }
+        finally
+        {
+            if (streamContext.IsDetached && streamContext.ProviderKind == ProviderKind.MolaGptProxy)
+            {
+                // MolaGPT Proxy detach: polling handles completion, don't touch the task
+            }
+            else
+            {
+                CompleteStreamContext(streamContext, publishNotification: !wasCancelled);
+            }
+            if (ReferenceEquals(_activeTask, streamContext))
+            {
+                IsSending = false;
+                _chat.IsStreaming = false;
+                _activeStreamTask = null;
+                _activeAssistantMsg = null;
+                _activeTask = null;
+                _cts = null;
+            }
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Detach the current active stream to background so the user can switch
+    /// conversations without interrupting generation.
+    /// </summary>
+    public bool DetachToBackground()
+    {
+        if (_backgroundStreams is null || _activeTask is null)
+            return false;
+        if (string.IsNullOrEmpty(_activeTask.ConversationId))
+            return false;
+
+        _activeTask.IsDetached = true;
+        _chat.DetachTransientMessage(_activeTask.AssistantMessage);
+
+        if (_activeTask.ProviderKind == ProviderKind.MolaGptProxy
+            && _chat.ActiveProvider is MolaGptProxyProvider proxyProvider)
+        {
+            _activeTask.ApiUrl = proxyProvider.LastResolvedApiUrl;
+            _activeTask.Cts.Cancel();
+            _backgroundStreams.RegisterWithPolling(_activeTask, proxyProvider);
+        }
+        else
+        {
+            _backgroundStreams.Register(_activeTask);
+        }
+
+        _cts = null;
+        _activeStreamTask = null;
+        _activeAssistantMsg = null;
+        _activeTask = null;
+        IsSending = false;
+        _chat.IsStreaming = false;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Re-attach a background stream that was previously detached. Called when
+    /// the user switches back to a conversation with an active background task.
+    /// </summary>
+    public async Task ReattachFromBackgroundAsync(string conversationId)
+    {
+        if (_backgroundStreams is null) return;
+        var task = _backgroundStreams.GetTask(conversationId);
+        if (task is null) return;
+
+        _backgroundStreams.StopPolling(task);
+        _backgroundStreams.Detach(conversationId);
+        task.IsDetached = false;
+
+        if (task.IsCompleted)
+        {
+            _chat.AttachTransientMessage(task.AssistantMessage);
+            task.AssistantMessage.FinishStreaming();
+            CompleteStreamContext(task, publishNotification: false);
+            return;
+        }
+
+        _chat.AttachTransientMessage(task.AssistantMessage);
+
+        if (task.ProviderKind == ProviderKind.MolaGptProxy
+            && _chat.ActiveProvider is MolaGptProxyProvider proxyProvider
+            && !string.IsNullOrEmpty(task.SessionId))
+        {
+            var status = await proxyProvider.CheckStreamStatusAsync(task.SessionId!, CancellationToken.None);
+
+            if (status is null || status.Status == "completed")
+            {
+                var data = await proxyProvider.FetchCompletedStreamAsync(task.SessionId!, CancellationToken.None);
+                if (data is not null)
+                    task.AssistantMessage.ReplaceContent(data.Text);
+                task.AssistantMessage.FinishStreaming();
+                CompleteStreamContext(task, publishNotification: false);
+                return;
+            }
+
+            var cts = new CancellationTokenSource();
+            _cts = cts;
+            _activeAssistantMsg = task.AssistantMessage;
+            _activeTask = task;
+            task.Cts = cts;
+            IsSending = true;
+            _chat.IsStreaming = true;
+
+            var resumeTask = RunResumeStreamLoopAsync(
+                proxyProvider, task.SessionId!, task.ReceivedChunkCount,
+                task.ApiUrl ?? "api/auth/chatAuto.php",
+                task.AssistantMessage, cts);
+            _activeStreamTask = resumeTask;
+            task.StreamTask = resumeTask;
+
+            try
+            {
+                await resumeTask;
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                task.AssistantMessage.AppendDelta($"\n\n> ❌ **恢复错误**: {ex.Message}");
+            }
+            finally
+            {
+                CompleteStreamContext(task, publishNotification: true);
+                if (ReferenceEquals(_activeTask, task))
+                {
+                    IsSending = false;
+                    _chat.IsStreaming = false;
+                    _activeStreamTask = null;
+                    _activeAssistantMsg = null;
+                    _activeTask = null;
+                    _cts = null;
+                }
+                cts.Dispose();
+            }
+            return;
+        }
+
+        _activeAssistantMsg = task.AssistantMessage;
+        _cts = task.Cts;
+        _activeStreamTask = task.StreamTask;
+        _activeTask = task;
+        IsSending = true;
+        _chat.IsStreaming = true;
+    }
+
+    private static async Task RunStreamLoopAsync(
+        IChatProvider provider,
+        ChatRequest req,
+        MessageViewModel assistantMsg,
+        CancellationTokenSource cts,
+        BackgroundStreamTask? trackingTask = null)
+    {
+        var toolProgressRouting = new ToolProgressRoutingState();
+        await foreach (var chunk in provider.StreamChatAsync(req, cts.Token).WithCancellation(cts.Token))
+        {
+            ApplyStreamChunk(assistantMsg, chunk, toolProgressRouting);
+            if (trackingTask is not null && chunk.DeltaText is not null)
+                trackingTask.ReceivedChunkCount++;
+            if (chunk.FinishReason is not null) break;
+        }
+    }
+
+    private static async Task RunResumeStreamLoopAsync(
+        MolaGptProxyProvider provider,
+        string sessionId,
+        int offset,
+        string apiUrl,
+        MessageViewModel assistantMsg,
+        CancellationTokenSource cts)
+    {
+        var toolProgressRouting = new ToolProgressRoutingState();
+        await foreach (var chunk in provider.ResumeStreamAsync(sessionId, offset, apiUrl, cts.Token).WithCancellation(cts.Token))
+        {
+            ApplyStreamChunk(assistantMsg, chunk, toolProgressRouting);
+            if (chunk.FinishReason is not null) break;
+        }
+    }
+
+    private Dictionary<string, object> BuildExtras()
+    {
+        var enabledTools = new Dictionary<string, object?>
+        {
+            ["network"] = EnableNetwork,
+            ["steelBrowser"] = EnableWebFetch,
+            ["code"] = true,
+            ["deepResearch"] = false
+        };
+
+        if (_chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy)
+        {
+            enabledTools["searchProvider"] = _settings?.WebSearchProvider;
+            enabledTools["searchApiKey"] = _settings?.WebSearchApiKey;
+            enabledTools["searchBaseUrl"] = _settings?.WebSearchBaseUrl;
+            enabledTools["searchMaxResults"] = _settings?.WebSearchMaxResults ?? 6;
+            enabledTools["webPageMaxCharacters"] = _settings?.WebPageMaxCharacters ?? 12000;
+        }
+
+        var extras = new Dictionary<string, object>
+        {
+            ["enabled_tools"] = enabledTools
+        };
+
+        if (_settings is not null && !_settings.TracksEnabled)
+            extras["privacy_mode"] = true;
+
+        return extras;
+    }
+
+    private static object BuildContentForHistory(MessageViewModel message)
+    {
+        if (!string.IsNullOrWhiteSpace(message.ContentPartsJson))
+        {
+            try
+            {
+                if (JsonNode.Parse(message.ContentPartsJson!) is JsonNode parts)
+                    return parts;
+            }
+            catch (JsonException) { }
+        }
+
+        return message.Content;
+    }
+
+    private static IReadOnlyList<AttachmentChip>? BuildAttachmentChips(IReadOnlyList<Attachment> attachments)
+    {
+        if (attachments.Count == 0) return null;
+        return attachments
+            .Select(attachment => new AttachmentChip(
+                string.IsNullOrWhiteSpace(attachment.FileName) ? "附件" : attachment.FileName!,
+                attachment.Kind == AttachmentKind.Image ? "图片" : LabelForFile(attachment),
+                string.IsNullOrWhiteSpace(attachment.RemoteUrl) ? null : attachment.RemoteUrl)
+            {
+                // Keep image bytes in memory so the user can re-open the
+                // preview after sending. Not serialized to SQLite — BYOK reload
+                // loses preview (no RemoteUrl), MolaGPT reload falls back to
+                // ThumbnailUrl. Non-image attachments don't need preview.
+                Bytes = attachment.Kind == AttachmentKind.Image && attachment.Bytes is { Length: > 0 }
+                    ? attachment.Bytes
+                    : null
+            })
+            .ToList();
+    }
+
+    private static IReadOnlyList<Attachment> BuildRequestAttachments(
+        IChatProvider provider,
+        ProviderModel model,
+        IReadOnlyList<Attachment> attachments)
+    {
+        if (attachments.Count == 0) return Array.Empty<Attachment>();
+        if (provider.Kind != ProviderKind.MolaGptProxy)
+            return attachments;
+
+        if (!model.SupportsVision)
+            return Array.Empty<Attachment>();
+
+        return attachments
+            .Where(attachment => attachment.Kind == AttachmentKind.Image
+                                 && !string.IsNullOrWhiteSpace(attachment.RemoteUrl))
+            .ToList();
+    }
+
+    private static string? BuildOpenAiContentPartsJson(string text, IReadOnlyList<Attachment> attachments)
+    {
+        var images = attachments
+            .Where(a => a.Kind == AttachmentKind.Image && !string.IsNullOrWhiteSpace(a.RemoteUrl))
+            .ToList();
+        if (images.Count == 0) return null;
+
+        var parts = new JsonArray();
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            parts.Add(new JsonObject
+            {
+                ["type"] = "text",
+                ["text"] = text
+            });
+        }
+
+        foreach (var image in images)
+        {
+            parts.Add(new JsonObject
+            {
+                ["type"] = "image_url",
+                ["image_url"] = new JsonObject
+                {
+                    ["url"] = image.RemoteUrl
+                }
+            });
+        }
+
+        return parts.ToJsonString();
+    }
+
+    private static string LabelForFile(Attachment attachment)
+    {
+        var name = attachment.FileName ?? string.Empty;
+        var ext = Path.GetExtension(name).TrimStart('.').ToUpperInvariant();
+        return string.IsNullOrWhiteSpace(ext) ? "文件" : ext;
+    }
+
+    private static string AppendHiddenSystemHint(string text, string hint)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return hint;
+        return text.TrimEnd() + "\n\n" + hint;
+    }
+
+    private string? ResolveSystemPrompt()
+    {
+        if (_chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy)
+            return null;
+
+        // Four-layer resolution (highest priority first):
+        //   1. Conversation-level override          — _chat.ConversationSystemPrompt
+        //   2. Active persona's system prompt       — _chat.ActivePersonaSystemPrompt
+        //   3. Model-level default (legacy fallback)— _chat.ActiveModelSystemPrompt
+        //   4. None                                  — return null
+        //
+        // When the conversation override is set together with a persona, the
+        // user can choose to "append" the override after the persona prompt
+        // instead of replacing it (default: replace).
+        var conversationPrompt = _chat.ConversationSystemPrompt;
+        var personaPrompt = _chat.ActivePersonaSystemPrompt;
+
+        string? merged;
+        if (!string.IsNullOrWhiteSpace(personaPrompt) || !string.IsNullOrWhiteSpace(conversationPrompt))
+        {
+            merged = SystemPromptInterpolator.Combine(personaPrompt, conversationPrompt, _chat.SystemPromptMode);
+        }
+        else
+        {
+            // Neither persona nor conversation prompt — fall back to the
+            // legacy per-model default for backwards compatibility with the
+            // pre-persona ProviderModelEntry.SystemPrompt field.
+            var modelPrompt = _chat.ActiveModelSystemPrompt;
+            merged = string.IsNullOrWhiteSpace(modelPrompt) ? null : modelPrompt;
+        }
+
+        if (string.IsNullOrWhiteSpace(merged)) return null;
+
+        var vars = new PromptVariables
+        {
+            Now = DateTimeOffset.Now,
+            ModelDisplayName = _chat.ActiveModel?.DisplayName,
+            ModelId = _chat.ActiveModel?.Id,
+            ProviderDisplayName = _chat.ActiveProvider?.DisplayName,
+            Username = _settings?.MolaGptUsername
+        };
+        return SystemPromptInterpolator.Interpolate(merged, vars);
+    }
+
+    [RelayCommand(CanExecute = nameof(CanStop))]
+    public void Stop()
+    {
+        _cts?.Cancel();
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRetry))]
+    public async Task RetryAsync(MessageViewModel? assistantMsg)
+    {
+        var activeProvider = _chat.ActiveProvider;
+        var activeModel = _chat.ActiveModel;
+        if (assistantMsg is null || activeProvider is null || activeModel is null) return;
+        var index = _chat.Messages.IndexOf(assistantMsg);
+        if (index <= 0 || !assistantMsg.IsLatestAssistant) return;
+
+        var previousUser = _chat.Messages
+            .Take(index)
+            .LastOrDefault(m => m.Role == ChatMessage.RoleUser);
+        if (previousUser is null) return;
+
+        assistantMsg.BeginRetryAttempt();
+        // Sync the assistant bubble's model/provider labels to whatever is
+        // active *now*, not whatever produced the previous attempt — the
+        // floating model name above the message must reflect the live model
+        // during the retry stream and freeze on that value when committed.
+        assistantMsg.ModelLabel = activeModel.DisplayName;
+        assistantMsg.ProviderLabel = activeProvider.DisplayName;
+        assistantMsg.IsStreaming = true;
+        assistantMsg.StartPending(IsRoutesModel(activeModel));
+        IsSending = true;
+        _chat.IsStreaming = true;
+        _cts = new CancellationTokenSource();
+
+        try
+        {
+            var msgs = _chat.Messages
+                .Take(index)
+                .Select(m => new ChatMessage(
+                    m.Role,
+                    BuildContentForHistory(m),
+                    ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null))
+                .ToList();
+
+            var systemPrompt = ResolveSystemPrompt();
+            if (!string.IsNullOrWhiteSpace(systemPrompt))
+                msgs.Insert(0, new ChatMessage("system", systemPrompt));
+
+            var extras = BuildExtras();
+            var thinkingKind = ResolveActiveThinkingParamKind();
+
+            var req = new ChatRequest(
+                ModelId: activeModel.Id,
+                Messages: msgs,
+                ConversationId: _chat.ConversationId,
+                SessionId: Guid.NewGuid().ToString("N"),
+                UseThinking: EnableThinking,
+                ReasoningEffort: IsReasoningEffortVisible ? ReasoningEffort : null,
+                ExtraBody: extras,
+                ThinkingBudgetTokens: EnableThinking ? ThinkingBudgetTokens : null,
+                ThinkingParamKind: thinkingKind);
+
+            var toolProgressRouting = new ToolProgressRoutingState();
+            await foreach (var chunk in activeProvider.StreamChatAsync(req, _cts.Token).WithCancellation(_cts.Token))
+            {
+                ApplyStreamChunk(assistantMsg, chunk, toolProgressRouting);
+                if (chunk.FinishReason is not null) break;
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            assistantMsg.AppendDelta($"\n\n> ❌ **错误**: {ex.Message}");
+        }
+        finally
+        {
+            assistantMsg.StopPending();
+            assistantMsg.FlushPendingDelta();
+            assistantMsg.IsStreaming = false;
+            assistantMsg.StopThinking();
+            assistantMsg.CommitRetryAttempt();
+            _chat.UpdatePersistedMessage(assistantMsg);
+            IsSending = false;
+            _chat.IsStreaming = false;
+            _cts?.Dispose();
+            _cts = null;
+        }
+    }
+
+    private bool CanSend() =>
+        !IsSending &&
+        (!string.IsNullOrWhiteSpace(Text) || Attachments.Count > 0) &&
+        _chat.ActiveProvider is not null &&
+        _chat.ActiveModel is not null &&
+        !HasUnsupportedImages(Attachments, _chat.ActiveProvider, _chat.ActiveModel);
+
+    private bool CanStop() => IsSending;
+    private bool CanRetry(MessageViewModel? message) =>
+        !IsSending
+        && message is not null
+        && message.Role == ChatMessage.RoleAssistant
+        && message.IsLatestAssistant
+        && !message.IsStreaming
+        && _chat.ActiveProvider is not null
+        && _chat.ActiveModel is not null;
+
+    private static bool HasUnsupportedImages(
+        IEnumerable<Attachment> attachments,
+        IChatProvider? provider,
+        ProviderModel? model)
+    {
+        if (!attachments.Any(a => a.Kind == AttachmentKind.Image)) return false;
+        if (provider?.Kind == ProviderKind.MolaGptProxy) return false;
+        return model?.SupportsVision != true;
+    }
+
+    private static bool IsRoutesModel(ProviderModel? model)
+    {
+        if (model is null) return false;
+        return string.Equals(model.Id, "autoLLM", StringComparison.OrdinalIgnoreCase)
+            || model.DisplayName.Contains("MolaGPT Routes", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void ApplyStreamChunk(MessageViewModel assistantMsg, ChatChunk chunk, ToolProgressRoutingState toolProgressRouting)
+    {
+        if (chunk.Pending is { } pending)
+            assistantMsg.SetPendingStatus(pending.Label, pending.Detail, pending.IsRoutes);
+        if (chunk.Tool is { } tool)
+        {
+            assistantMsg.FlushPendingDelta();
+            assistantMsg.ApplyToolDelta(tool);
+        }
+        if (chunk.Sources is { Count: > 0 })
+            assistantMsg.Sources = chunk.Sources;
+        if (chunk.Usage is not null)
+            assistantMsg.Usage = chunk.Usage;
+        if (chunk.DeltaText is { Length: > 0 } t)
+        {
+            var routed = RouteToolProgressDelta(t, toolProgressRouting);
+            if (!string.IsNullOrEmpty(routed.Thinking))
+            {
+                var reclaimed = assistantMsg.ReclaimRecentVisibleContentForThinking();
+                if (assistantMsg.IsThinkingActive || reclaimed)
+                    assistantMsg.AppendThinking(routed.Thinking);
+                else
+                    assistantMsg.AppendDelta(routed.Thinking);
+            }
+            if (!string.IsNullOrEmpty(routed.Visible))
+                assistantMsg.AppendDelta(routed.Visible);
+        }
+        if (chunk.DeltaThinking is { Length: > 0 } th)
+            assistantMsg.AppendThinking(th);
+    }
+
+    private void CompleteStreamContext(BackgroundStreamTask streamContext, bool publishNotification)
+    {
+        _chat.FinalizeAssistantMessage(streamContext.ConversationId, streamContext.AssistantMessage);
+
+        if (publishNotification)
+        {
+            if (streamContext.IsDetached)
+                _backgroundStreams?.Complete(streamContext);
+            else
+                _backgroundStreams?.PublishCompletion(
+                    streamContext.ConversationId,
+                    streamContext.ConversationTitle,
+                    streamContext.ModelLabel);
+        }
+        else if (streamContext.IsDetached)
+        {
+            _backgroundStreams?.Detach(streamContext.ConversationId);
+        }
+
+        if (streamContext.ProviderKind == ProviderKind.MolaGptProxy)
+            _ = CompleteConversationTurnAsync(streamContext.ConversationId);
+    }
+
+    private async Task CompleteConversationTurnAsync(string conversationId)
+    {
+        if (ConversationCompletedAsync is null) return;
+
+        try
+        {
+            var title = await ConversationCompletedAsync(conversationId, CancellationToken.None);
+            if (!string.IsNullOrWhiteSpace(title))
+                _chat.ApplyExternalConversationTitle(conversationId, title);
+        }
+        catch
+        {
+            // Background sync/title generation should never break the composer.
+        }
+    }
+
+    partial void OnTextChanged(string value) => SendCommand.NotifyCanExecuteChanged();
+    partial void OnIsSendingChanged(bool value)
+    {
+        SendCommand.NotifyCanExecuteChanged();
+        StopCommand.NotifyCanExecuteChanged();
+        RetryCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnEnableThinkingChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsReasoningEffortVisible));
+    }
+
+    partial void OnReasoningEffortChanged(string value)
+    {
+        OnPropertyChanged(nameof(ReasoningEffortLabel));
+    }
+
+    private MolaGPT.Core.Models.ThinkingParamKind? ResolveActiveThinkingParamKind()
+    {
+        if (!IsThinkingVisible) return null;
+
+        var kind = ActiveThinkingKind;
+        if (kind == MolaGPT.Core.Models.ThinkingParamKind.None)
+            kind = MolaGPT.Core.Models.ThinkingParamKindInference.InferFromModelId(_chat.ActiveModel?.Id);
+
+        return kind == MolaGPT.Core.Models.ThinkingParamKind.None ? null : kind;
+    }
+
+    private static RoutedToolProgressDelta RouteToolProgressDelta(string text, ToolProgressRoutingState state)
+    {
+        if (string.IsNullOrEmpty(text))
+            return new RoutedToolProgressDelta(null, null);
+
+        if (state.IsInsideToolMarkup)
+        {
+            var balancedEnd = state.FindBalancedEnd(text);
+            if (balancedEnd.HasValue && balancedEnd.Value > 0 && balancedEnd.Value < text.Length)
+            {
+                var thinking = text[..balancedEnd.Value];
+                state.Absorb(thinking);
+                var tail = RouteToolProgressDelta(text[balancedEnd.Value..], state);
+                return new RoutedToolProgressDelta(thinking + tail.Thinking, tail.Visible);
+            }
+
+            state.Absorb(text);
+            return new RoutedToolProgressDelta(text, null);
+        }
+
+        if (!IsMolaGptToolProgressMarkup(text))
+            return new RoutedToolProgressDelta(null, text);
+
+        var completeEnd = state.FindBalancedEnd(text);
+        if (completeEnd.HasValue && completeEnd.Value > 0 && completeEnd.Value < text.Length)
+        {
+            var thinking = text[..completeEnd.Value];
+            state.Absorb(thinking);
+            var tail = RouteToolProgressDelta(text[completeEnd.Value..], state);
+            return new RoutedToolProgressDelta(thinking + tail.Thinking, tail.Visible);
+        }
+
+        state.Absorb(text);
+        return new RoutedToolProgressDelta(text, null);
+    }
+
+    private static bool IsMolaGptToolProgressMarkup(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        return text.Contains("tool-status", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("<DSanalysis", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("</DSanalysis>", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("<steel-step", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("</steel-step>", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("ai-image-pending-skeleton", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("ai-image-error-card", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("tool-steel-step", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("tool-steel-step-card", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("tool-steel-step-meta", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("tool-steel-meta-item", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("tool-search-chip", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("</blockquote>", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class ToolProgressRoutingState
+    {
+        private int _steelDepth;
+        private int _dsDepth;
+        private int _toolStatusDepth;
+
+        public bool IsInsideToolMarkup => _steelDepth > 0 || _dsDepth > 0 || _toolStatusDepth > 0;
+
+        public int? FindBalancedEnd(string text)
+        {
+            var steelDepth = _steelDepth;
+            var dsDepth = _dsDepth;
+            var toolStatusDepth = _toolStatusDepth;
+            var pos = 0;
+
+            while (pos < text.Length)
+            {
+                var marker = FindNextMarker(text, pos);
+                if (marker is null) return null;
+
+                var (index, token, delta) = marker.Value;
+                if (token == ToolMarkupToken.Steel) steelDepth = Math.Max(0, steelDepth + delta);
+                else if (token == ToolMarkupToken.DsAnalysis) dsDepth = Math.Max(0, dsDepth + delta);
+                else toolStatusDepth = Math.Max(0, toolStatusDepth + delta);
+
+                var eventEnd = index + MarkerLength(token, delta);
+                if (steelDepth == 0 && dsDepth == 0 && toolStatusDepth == 0)
+                    return eventEnd;
+
+                pos = eventEnd;
+            }
+
+            return null;
+        }
+
+        public void Absorb(string text)
+        {
+            _steelDepth = Math.Max(0, _steelDepth + Count(text, "<steel-step") - Count(text, "</steel-step>"));
+            _dsDepth = Math.Max(0, _dsDepth + Count(text, "<DSanalysis") - Count(text, "</DSanalysis>"));
+            _toolStatusDepth = Math.Max(0, _toolStatusDepth + Count(text, "<blockquote class=\"tool-status") - Count(text, "</blockquote>"));
+        }
+
+        private static int Count(string text, string needle)
+        {
+            var count = 0;
+            var index = 0;
+            while ((index = text.IndexOf(needle, index, StringComparison.OrdinalIgnoreCase)) >= 0)
+            {
+                count++;
+                index += needle.Length;
+            }
+            return count;
+        }
+
+        private static (int Index, ToolMarkupToken Token, int Delta)? FindNextMarker(string text, int start)
+        {
+            var bestIndex = -1;
+            var bestToken = ToolMarkupToken.Steel;
+            var bestDelta = 0;
+
+            Consider(text, "<steel-step", ToolMarkupToken.Steel, +1, start, ref bestIndex, ref bestToken, ref bestDelta);
+            Consider(text, "</steel-step>", ToolMarkupToken.Steel, -1, start, ref bestIndex, ref bestToken, ref bestDelta);
+            Consider(text, "<DSanalysis", ToolMarkupToken.DsAnalysis, +1, start, ref bestIndex, ref bestToken, ref bestDelta);
+            Consider(text, "</DSanalysis>", ToolMarkupToken.DsAnalysis, -1, start, ref bestIndex, ref bestToken, ref bestDelta);
+            Consider(text, "<blockquote class=\"tool-status", ToolMarkupToken.ToolStatus, +1, start, ref bestIndex, ref bestToken, ref bestDelta);
+            Consider(text, "</blockquote>", ToolMarkupToken.ToolStatus, -1, start, ref bestIndex, ref bestToken, ref bestDelta);
+
+            return bestIndex < 0 ? null : (bestIndex, bestToken, bestDelta);
+        }
+
+        private static void Consider(
+            string text,
+            string marker,
+            ToolMarkupToken token,
+            int delta,
+            int start,
+            ref int bestIndex,
+            ref ToolMarkupToken bestToken,
+            ref int bestDelta)
+        {
+            var index = text.IndexOf(marker, start, StringComparison.OrdinalIgnoreCase);
+            if (index < 0 || (bestIndex >= 0 && index >= bestIndex)) return;
+            bestIndex = index;
+            bestToken = token;
+            bestDelta = delta;
+        }
+
+        private static int MarkerLength(ToolMarkupToken token, int delta) => (token, delta) switch
+        {
+            (ToolMarkupToken.Steel, > 0) => "<steel-step".Length,
+            (ToolMarkupToken.Steel, _) => "</steel-step>".Length,
+            (ToolMarkupToken.DsAnalysis, > 0) => "<DSanalysis".Length,
+            (ToolMarkupToken.DsAnalysis, _) => "</DSanalysis>".Length,
+            (ToolMarkupToken.ToolStatus, > 0) => "<blockquote class=\"tool-status".Length,
+            _ => "</blockquote>".Length
+        };
+    }
+
+    private readonly record struct RoutedToolProgressDelta(string? Thinking, string? Visible);
+
+    private enum ToolMarkupToken
+    {
+        Steel,
+        DsAnalysis,
+        ToolStatus
+    }
+
+    private static string CreateWebCompatibleConversationId()
+    {
+        const string alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+        Span<char> suffix = stackalloc char[9];
+        var random = Random.Shared;
+        for (int i = 0; i < suffix.Length; i++)
+            suffix[i] = alphabet[random.Next(alphabet.Length)];
+        return $"chat_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}_{new string(suffix)}";
+    }
+}

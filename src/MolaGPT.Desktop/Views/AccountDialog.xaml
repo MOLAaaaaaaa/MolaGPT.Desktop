@@ -1,0 +1,181 @@
+<Window x:Class="MolaGPT.Desktop.Views.AccountDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:views="clr-namespace:MolaGPT.Desktop.Views"
+        Title="MolaGPT 账号"
+        Icon="/Assets/app-logo.png"
+        Width="460" Height="560"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize"
+        FontFamily="{DynamicResource Font.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        mc:Ignorable="d">
+
+    <!-- Native account summary with aggregate counters, per-model
+         request/token progress bars, and footer actions. -->
+    <Grid Margin="24">
+        <Border Style="{StaticResource ModalWindowGlow}" />
+        <Border Style="{StaticResource ModalWindowSurface}"
+                Padding="0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- Header: avatar + username + close -->
+                <Border Grid.Row="0"
+                        Padding="20,18,16,12"
+                        BorderBrush="{DynamicResource Brush.Divider}"
+                        BorderThickness="0,0,0,1">
+                    <Grid>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Border Width="40" Height="40"
+                                    CornerRadius="{DynamicResource Radius.Pill}"
+                                    VerticalAlignment="Center">
+                                <Border.Background>
+                                    <RadialGradientBrush GradientOrigin="0.35,0.30">
+                                        <GradientStop Color="#FFF2CFD3" Offset="0.0" />
+                                        <GradientStop Color="#FFD89BA4" Offset="0.55" />
+                                        <GradientStop Color="#FFBE727F" Offset="1.0" />
+                                    </RadialGradientBrush>
+                                </Border.Background>
+                                <TextBlock Text="&#xE77B;"
+                                           FontFamily="{DynamicResource Font.Icon}"
+                                           FontSize="18"
+                                           Foreground="White"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Border>
+                            <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                                <TextBlock x:Name="UsernameText"
+                                           Text="用户"
+                                           FontSize="{DynamicResource Font.Size.Heading}"
+                                           FontWeight="SemiBold"
+                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+                                <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                                    <Ellipse Width="6" Height="6"
+                                             Fill="{DynamicResource Brush.Success}"
+                                             VerticalAlignment="Center"
+                                             Margin="0,0,6,0" />
+                                    <TextBlock x:Name="UserBadgeText"
+                                               Text="已注册用户"
+                                               FontSize="{DynamicResource Font.Size.Small}"
+                                               Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                </StackPanel>
+                            </StackPanel>
+                        </StackPanel>
+                        <Button HorizontalAlignment="Right"
+                                VerticalAlignment="Top"
+                                Style="{StaticResource HeaderIconButton}"
+                                Click="CloseClick"
+                                ToolTip="关闭">
+                            <TextBlock Text="&#xE711;" FontFamily="{DynamicResource Font.Icon}" FontSize="14" />
+                        </Button>
+                    </Grid>
+                </Border>
+
+                <!-- Section title "今日使用情况" + total summary card -->
+                <StackPanel Grid.Row="1" Margin="20,14,20,8">
+                    <TextBlock Text="今日使用情况"
+                               FontSize="{DynamicResource Font.Size.Small}"
+                               FontWeight="SemiBold"
+                               Foreground="{DynamicResource Brush.Text.Muted}"
+                               Margin="0,0,0,8" />
+
+                    <!-- Aggregate card — tinted gradient bg matching .user-panel
+                         getDetailedStats() summary header (login.js:3877-3886). -->
+                    <Border CornerRadius="{DynamicResource Radius.Md}"
+                            Padding="16,10">
+                        <Border.Background>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                <GradientStop Color="#FFBE727F" Offset="0" />
+                                <GradientStop Color="#FFD4949E" Offset="1" />
+                            </LinearGradientBrush>
+                        </Border.Background>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" HorizontalAlignment="Center">
+                                <TextBlock x:Name="TotalRequestsText"
+                                           Text="0"
+                                           FontSize="20" FontWeight="SemiBold"
+                                           Foreground="White"
+                                           HorizontalAlignment="Center" />
+                                <TextBlock Text="总请求次数"
+                                           FontSize="{DynamicResource Font.Size.XSmall}"
+                                           Foreground="#E6FFFFFF"
+                                           Margin="0,2,0,0"
+                                           HorizontalAlignment="Center" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" HorizontalAlignment="Center">
+                                <TextBlock x:Name="TotalTokensText"
+                                           Text="0"
+                                           FontSize="20" FontWeight="SemiBold"
+                                           Foreground="White"
+                                           HorizontalAlignment="Center" />
+                                <TextBlock Text="总 Tokens 用量"
+                                           FontSize="{DynamicResource Font.Size.XSmall}"
+                                           Foreground="#E6FFFFFF"
+                                           Margin="0,2,0,0"
+                                           HorizontalAlignment="Center" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </StackPanel>
+
+                <!-- Per-model usage list -->
+                <ScrollViewer Grid.Row="2"
+                              Margin="20,0,12,0"
+                              Padding="0,0,8,0"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel x:Name="ModelList">
+                        <TextBlock x:Name="EmptyState"
+                                   Text="加载用量中…"
+                                   FontSize="{DynamicResource Font.Size.Small}"
+                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                   Margin="0,8,0,8"
+                                   HorizontalAlignment="Center" />
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- Action row: 退出登录 -->
+                <Border Grid.Row="3"
+                        BorderBrush="{DynamicResource Brush.Divider}"
+                        BorderThickness="0,1,0,0"
+                        Padding="20,12,20,18">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0"
+                                   x:Name="StatusText"
+                                   Text=""
+                                   VerticalAlignment="Center"
+                                   FontSize="{DynamicResource Font.Size.Small}"
+                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                   TextWrapping="Wrap" />
+                        <Button Grid.Column="1"
+                                Style="{StaticResource OutlineButton}"
+                                Content="退出登录"
+                                Padding="14,8"
+                                Foreground="{DynamicResource Brush.Error}"
+                                BorderBrush="{DynamicResource Brush.Error}"
+                                Click="LogoutClick" />
+                    </Grid>
+                </Border>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

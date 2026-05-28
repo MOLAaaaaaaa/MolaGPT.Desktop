@@ -1,0 +1,637 @@
+<Window x:Class="MolaGPT.Desktop.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
+        xmlns:views="clr-namespace:MolaGPT.Desktop.Views"
+        Title="{Binding WindowTitle}"
+        Icon="/Assets/app-logo.png"
+        Height="820" Width="1280"
+        MinHeight="540" MinWidth="900"
+        Background="{DynamicResource Brush.Bg.Canvas}"
+        Foreground="{DynamicResource Brush.Text.Primary}"
+        FontFamily="{DynamicResource Font.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        WindowStartupLocation="CenterScreen"
+        d:DataContext="{d:DesignInstance vm:MainViewModel}"
+        mc:Ignorable="d">
+
+    <!-- Main desktop layout: two floating cards (sidebar + main) on a soft
+         canvas with 16px padding/gap.
+         SidebarColumn.Width is animated by MainWindow.xaml.cs in response
+         to MainViewModel.SidebarCollapsed (no XAML binding because Grid
+         columns aren't FrameworkElements and can't carry storyboards). -->
+    <Border Background="{DynamicResource Brush.Bg.Canvas}">
+    <Grid Margin="16">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition x:Name="SidebarColumn" Width="280" />
+            <ColumnDefinition x:Name="GapColumn" Width="16" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!-- ========================================================
+             SIDEBAR — floating card.
+             Visibility flips to Collapsed when fully collapsed so the
+             sidebar's content doesn't paint into a 0px-wide column.
+             ======================================================== -->
+        <Border x:Name="SidebarCard"
+                Grid.Column="0"
+                Style="{StaticResource FloatingCard}"
+                Background="{DynamicResource Brush.Bg.Secondary}"
+                ClipToBounds="True">
+            <DockPanel LastChildFill="True">
+                <!-- Sidebar header -->
+                <DockPanel DockPanel.Dock="Top" Margin="20,20,16,12" LastChildFill="True">
+                    <Button DockPanel.Dock="Right"
+                            Style="{StaticResource HeaderIconButton}"
+                            Width="32" Height="32"
+                            Command="{Binding ToggleSidebarCommand}"
+                            ToolTip="收起侧边栏">
+                        <TextBlock Text="&#xE76B;" FontFamily="{DynamicResource Font.Icon}" FontSize="12" />
+                    </Button>
+                    <TextBlock Text="对话历史"
+                               FontSize="{DynamicResource Font.Size.Title}"
+                               FontWeight="ExtraBold"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource Brush.Text.Primary}" />
+                </DockPanel>
+
+                <!-- New chat (pill) -->
+                <Button DockPanel.Dock="Top"
+                        Margin="20,4,16,8"
+                        Style="{StaticResource PillPrimaryButton}"
+                        Command="{Binding NewConversationCommand}">
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                        <TextBlock Text="&#xE710;" FontFamily="{DynamicResource Font.Icon}" FontSize="13" Margin="0,0,8,0" />
+                        <TextBlock Text="新建对话" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Search box -->
+                <Border DockPanel.Dock="Top"
+                        Margin="20,4,16,8"
+                        Padding="14,8"
+                        Background="{DynamicResource Brush.Bg.Tertiary}"
+                        CornerRadius="{DynamicResource Radius.Sm}">
+                    <DockPanel LastChildFill="True">
+                        <TextBlock DockPanel.Dock="Left"
+                                   Text="&#xE721;"
+                                   FontFamily="{DynamicResource Font.Icon}"
+                                   FontSize="13"
+                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0" />
+                        <TextBox Style="{StaticResource InlineTextBox}"
+                                 Text="{Binding ConversationList.SearchQuery, UpdateSourceTrigger=PropertyChanged}" />
+                    </DockPanel>
+                </Border>
+
+                <!-- Multi-selection toolbar -->
+                <Border DockPanel.Dock="Top"
+                        Margin="20,0,16,6"
+                        Padding="10,7"
+                        Background="{DynamicResource Brush.Primary.Tint}"
+                        BorderBrush="{DynamicResource Brush.Primary.Border}"
+                        BorderThickness="1"
+                        CornerRadius="{DynamicResource Radius.Sm}"
+                        Visibility="{Binding ConversationList.HasSelectedConversations, Converter={x:Static views:BoolToVisibility.Instance}}">
+                    <DockPanel LastChildFill="True">
+                        <Button DockPanel.Dock="Right"
+                                Style="{StaticResource HeaderIconButton}"
+                                Width="28" Height="28"
+                                Command="{Binding ConversationList.DeleteSelectedConversationsCommand}"
+                                ToolTip="删除已选对话">
+                            <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource Font.Icon}" FontSize="13" />
+                        </Button>
+                        <TextBlock Text="{Binding ConversationList.SelectionSummary}"
+                                   VerticalAlignment="Center"
+                                   FontSize="{DynamicResource Font.Size.Small}"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource Brush.Primary.Hover}" />
+                    </DockPanel>
+                </Border>
+
+                <!-- Footer -->
+                <Border DockPanel.Dock="Bottom"
+                        BorderBrush="{DynamicResource Brush.Divider}"
+                        BorderThickness="0,1,0,0"
+                        Padding="20,10,16,16">
+                    <TextBlock TextWrapping="Wrap"
+                               FontSize="{DynamicResource Font.Size.XSmall}"
+                               Foreground="{DynamicResource Brush.Text.Muted}">
+                        <Run Text="对话历史可能会受到限制。" />
+                        <LineBreak />
+                        <Hyperlink Foreground="{DynamicResource Brush.Text.Secondary}" TextDecorations="None">近期更新</Hyperlink>
+                        <Run Text=" · " />
+                        <Hyperlink Foreground="{DynamicResource Brush.Text.Secondary}" TextDecorations="None">更新日志</Hyperlink>
+                    </TextBlock>
+                </Border>
+
+                <!-- ============================================================
+                     Grouped conversation list — BYOK on top, MolaGPT below.
+                     Both groups individually collapsible; expansion state
+                     persists in SettingsRepository. We use two parallel
+                     ListBox instances bound to ByokItems / MolaGptItems
+                     rather than a single ListBox + GroupStyle, so the VM
+                     project can stay PresentationFramework-free.
+                     Keep each ListBox height-bounded so WPF virtualization
+                     stays active for large local histories.
+                     ============================================================ -->
+                <Grid Margin="14,4,12,8">
+                    <Grid.Resources>
+                        <DataTemplate x:Key="ConversationRowTemplate" DataType="{x:Type vm:ConversationListItem}">
+                            <DockPanel LastChildFill="True">
+                                <Button DockPanel.Dock="Right"
+                                        Style="{StaticResource HeaderIconButton}"
+                                        Width="24" Height="24"
+                                        Margin="4,0,0,0"
+                                        Command="{Binding DataContext.ConversationList.DeleteConversationCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                        CommandParameter="{Binding Id}"
+                                        ToolTip="删除对话">
+                                    <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource Font.Icon}" FontSize="11" />
+                                </Button>
+                                <TextBlock DockPanel.Dock="Right"
+                                           Text="{Binding TimeLabel}"
+                                           FontSize="{DynamicResource Font.Size.XSmall}"
+                                           Opacity="0.65"
+                                           VerticalAlignment="Center" />
+                                <StackPanel DockPanel.Dock="Right"
+                                            Orientation="Horizontal"
+                                            Margin="6,0,4,0"
+                                            VerticalAlignment="Center"
+                                            Visibility="{Binding IsGenerating, Converter={x:Static views:BoolToVisibility.Instance}}">
+                                    <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Margin="0,0,3,0" Opacity="0.6" />
+                                    <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Margin="0,0,3,0" Opacity="0.6" />
+                                    <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Opacity="0.6" />
+                                </StackPanel>
+                                <Border DockPanel.Dock="Right"
+                                        Margin="6,0,0,0"
+                                        Padding="6,0"
+                                        Height="20"
+                                        MinWidth="32"
+                                        VerticalAlignment="Center"
+                                        Background="{DynamicResource Brush.Bg.Tertiary}"
+                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                        BorderThickness="1"
+                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                        Visibility="{Binding IsByok, Converter={x:Static views:BoolToVisibility.Instance}}"
+                                        ToolTip="{Binding BadgeLabel}">
+                                    <TextBlock Text="{Binding BadgeLabel}"
+                                               FontSize="{DynamicResource Font.Size.XSmall}"
+                                               FontWeight="SemiBold"
+                                               Foreground="{DynamicResource Brush.Text.Muted}"
+                                               TextAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"
+                                               MaxWidth="80"
+                                               VerticalAlignment="Center"
+                                               LineHeight="12"
+                                               LineStackingStrategy="BlockLineHeight" />
+                                </Border>
+                                <TextBlock DockPanel.Dock="Left"
+                                           Text="&#xE8BD;"
+                                           FontFamily="{DynamicResource Font.Icon}"
+                                           FontSize="13"
+                                           Opacity="0.7"
+                                           VerticalAlignment="Center"
+                                           Margin="0,0,10,0" />
+                                <TextBlock Text="{Binding Title}"
+                                           TextTrimming="CharacterEllipsis"
+                                           VerticalAlignment="Center"
+                                           FontSize="13"
+                                           FontWeight="Medium" />
+                            </DockPanel>
+                        </DataTemplate>
+                    </Grid.Resources>
+
+                    <Grid x:Name="ConversationGroupsHost"
+                          MouseEnter="ConversationGroupsHost_MouseEnter"
+                          MouseLeave="ConversationGroupsHost_MouseLeave">
+                        <Grid.RowDefinitions>
+                            <RowDefinition x:Name="ByokHeaderRow" Height="Auto" />
+                            <RowDefinition x:Name="ByokListRow" Height="Auto" />
+                            <RowDefinition x:Name="MolaGptHeaderRow" Height="Auto" />
+                            <RowDefinition x:Name="MolaGptListRow" Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <!-- ===== BYOK group ===== -->
+                        <Button Grid.Row="0"
+                                Tag="byok"
+                                Style="{StaticResource SidebarGroupHeaderButton}"
+                                Command="{Binding ConversationList.ToggleByokGroupCommand}"
+                                Click="ConversationGroupHeader_Click"
+                                Visibility="{Binding ConversationList.HasByokConversations, Converter={x:Static views:BoolToVisibility.Instance}}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding ConversationList.ByokGroupChevron}"
+                                           FontFamily="{DynamicResource Font.Icon}"
+                                           FontSize="9"
+                                           Opacity="0.7"
+                                           VerticalAlignment="Center"
+                                           Margin="0,0,8,0" />
+                                <TextBlock Grid.Column="1"
+                                           Text="BYOK 模型"
+                                           FontSize="{DynamicResource Font.Size.XSmall}"
+                                           FontWeight="SemiBold"
+                                           Foreground="{DynamicResource Brush.Text.Secondary}"
+                                           VerticalAlignment="Center" />
+                                <Border Grid.Column="2"
+                                        Background="{DynamicResource Brush.Bg.Primary}"
+                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                        BorderThickness="1"
+                                        CornerRadius="8"
+                                        Padding="6,1"
+                                        VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding ConversationList.ByokCount}"
+                                               FontSize="10"
+                                               FontWeight="SemiBold"
+                                               Foreground="{DynamicResource Brush.Text.Muted}" />
+                                </Border>
+                            </Grid>
+                        </Button>
+                        <ListBox Grid.Row="1"
+                                 x:Name="ByokListBox"
+                                 ItemsSource="{Binding ConversationList.ByokItems}"
+                                 SelectedValue="{Binding ConversationList.SelectedId, Mode=OneWayToSource}"
+                                 SelectedValuePath="Id"
+                                 SelectionMode="Extended"
+                                 SelectionChanged="ConversationListBox_SelectionChanged"
+                                 PreviewMouseWheel="ConversationGroupList_PreviewMouseWheel"
+                                 ScrollViewer.ScrollChanged="ConversationGroupList_ScrollChanged"
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 MaxHeight="240"
+                                 ItemContainerStyle="{StaticResource ConversationListItemStyle}"
+                                 ItemTemplate="{StaticResource ConversationRowTemplate}"
+                                 ScrollViewer.CanContentScroll="True"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                 VirtualizingStackPanel.IsVirtualizing="True"
+                                 VirtualizingStackPanel.VirtualizationMode="Recycling"
+                                 VirtualizingStackPanel.ScrollUnit="Pixel">
+                            <ListBox.Style>
+                                <Style TargetType="ListBox">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <MultiDataTrigger>
+                                            <MultiDataTrigger.Conditions>
+                                                <Condition Binding="{Binding ConversationList.HasByokConversations}" Value="True" />
+                                                <Condition Binding="{Binding ConversationList.IsByokGroupExpanded}" Value="True" />
+                                            </MultiDataTrigger.Conditions>
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </MultiDataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ListBox.Style>
+                        </ListBox>
+
+                        <!-- ===== MolaGPT group ===== -->
+                        <Button Grid.Row="2"
+                                Tag="molagpt"
+                                Style="{StaticResource SidebarGroupHeaderButton}"
+                                Command="{Binding ConversationList.ToggleMolaGptGroupCommand}"
+                                Click="ConversationGroupHeader_Click"
+                                Visibility="{Binding ConversationList.HasMolaGptConversations, Converter={x:Static views:BoolToVisibility.Instance}}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding ConversationList.MolaGptGroupChevron}"
+                                           FontFamily="{DynamicResource Font.Icon}"
+                                           FontSize="9"
+                                           Opacity="0.7"
+                                           VerticalAlignment="Center"
+                                           Margin="0,0,8,0" />
+                                <TextBlock Grid.Column="1"
+                                           Text="MolaGPT 对话"
+                                           FontSize="{DynamicResource Font.Size.XSmall}"
+                                           FontWeight="SemiBold"
+                                           Foreground="{DynamicResource Brush.Text.Secondary}"
+                                           VerticalAlignment="Center" />
+                                <Border Grid.Column="2"
+                                        Background="{DynamicResource Brush.Bg.Primary}"
+                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                        BorderThickness="1"
+                                        CornerRadius="8"
+                                        Padding="6,1"
+                                        VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding ConversationList.MolaGptCount}"
+                                               FontSize="10"
+                                               FontWeight="SemiBold"
+                                               Foreground="{DynamicResource Brush.Text.Muted}" />
+                                </Border>
+                            </Grid>
+                        </Button>
+                        <ListBox Grid.Row="3"
+                                 x:Name="MolaGptListBox"
+                                 ItemsSource="{Binding ConversationList.MolaGptItems}"
+                                 SelectedValue="{Binding ConversationList.SelectedId, Mode=OneWayToSource}"
+                                 SelectedValuePath="Id"
+                                 SelectionMode="Extended"
+                                 SelectionChanged="ConversationListBox_SelectionChanged"
+                                 PreviewMouseWheel="ConversationGroupList_PreviewMouseWheel"
+                                 ScrollViewer.ScrollChanged="ConversationGroupList_ScrollChanged"
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 ItemContainerStyle="{StaticResource ConversationListItemStyle}"
+                                 ItemTemplate="{StaticResource ConversationRowTemplate}"
+                                 ScrollViewer.CanContentScroll="True"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                 VirtualizingStackPanel.IsVirtualizing="True"
+                                 VirtualizingStackPanel.VirtualizationMode="Recycling"
+                                 VirtualizingStackPanel.ScrollUnit="Pixel">
+                            <ListBox.Style>
+                                <Style TargetType="ListBox">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <MultiDataTrigger>
+                                            <MultiDataTrigger.Conditions>
+                                                <Condition Binding="{Binding ConversationList.HasMolaGptConversations}" Value="True" />
+                                                <Condition Binding="{Binding ConversationList.IsMolaGptGroupExpanded}" Value="True" />
+                                            </MultiDataTrigger.Conditions>
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </MultiDataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ListBox.Style>
+                        </ListBox>
+                    </Grid>
+                </Grid>
+            </DockPanel>
+        </Border>
+
+        <!-- ========================================================
+             MAIN — floating card with floating header & composer
+             ======================================================== -->
+        <Border x:Name="MainCard"
+                Grid.Column="2"
+                Background="{DynamicResource Brush.Bg.Primary}"
+                CornerRadius="{DynamicResource Radius.Xxl}"
+                BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                BorderThickness="1"
+                ClipToBounds="True">
+            <Grid>
+                <!-- Welcome screen — separate overlay (NOT inside the
+                     virtualizing scroller) so its presence/absence doesn't
+                     interfere with VirtualizingStackPanel's IScrollInfo
+                     contract on the message list. -->
+                <ContentControl Visibility="{Binding Chat.IsEmpty, Converter={x:Static views:BoolToVisibility.Instance}}"
+                                Margin="40,80,40,180">
+                    <views:WelcomeView DataContext="{Binding Chat}" />
+                </ContentControl>
+
+                <!-- Messages scroll area.
+                     ScrollViewer.CanContentScroll=True is mandatory for
+                     VirtualizingStackPanel virtualization to engage; combined
+                     with ScrollUnit=Pixel below the wheel still scrolls in
+                     pixels (not in whole items). The ItemsControl is the
+                     direct child of the ScrollViewer — no wrapper Grid —
+                     because virtualization requires the IScrollInfo delegate
+                     (the inner VirtualizingStackPanel) to be reachable. -->
+                <ScrollViewer x:Name="MessagesScroll"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              CanContentScroll="True"
+                              Padding="40,64,40,6"
+                              Margin="0,0,0,160"
+                              SizeChanged="MessagesScroll_SizeChanged"
+                              ScrollChanged="MessagesScroll_ScrollChanged"
+                              PreviewMouseWheel="MessagesScroll_PreviewMouseWheel"
+                              MouseWheel="MessagesScroll_MouseWheel"
+                              Visibility="{Binding Chat.IsEmpty, Converter={x:Static views:BoolToVisibilityInverse.Instance}}">
+                    <ItemsControl ItemsSource="{Binding Chat.Messages}"
+                                  HorizontalAlignment="Stretch"
+                                  Margin="0,8"
+                                  VirtualizingStackPanel.IsVirtualizing="True"
+                                  VirtualizingStackPanel.VirtualizationMode="Recycling"
+                                  VirtualizingStackPanel.ScrollUnit="Pixel"
+                                  VirtualizingStackPanel.CacheLengthUnit="Pixel"
+                                  VirtualizingStackPanel.CacheLength="800,800"
+                                  ScrollViewer.CanContentScroll="True">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <VirtualizingStackPanel Orientation="Vertical" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:MessageViewModel}">
+                                <Grid HorizontalAlignment="Stretch" Margin="0,4">
+                                    <views:MessageItemView />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+
+                <!-- Floating top header centered above the message stream. -->
+                <Border VerticalAlignment="Top"
+                        Margin="16,16,16,0"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Padding="16,8">
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Left: optional expand-sidebar pill + app logo + heart.
+                             The expand pill only appears when the sidebar is
+                             collapsed; clicking it flips MainViewModel.SidebarCollapsed
+                             which the code-behind animates. -->
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Button Style="{StaticResource HeaderIconButton}"
+                                    Width="32" Height="32"
+                                    Margin="0,0,8,0"
+                                    Command="{Binding ToggleSidebarCommand}"
+                                    ToolTip="展开侧边栏"
+                                    Visibility="{Binding SidebarCollapsed, Converter={x:Static views:BoolToVisibility.Instance}}">
+                                <TextBlock Text="&#xE700;" FontFamily="{DynamicResource Font.Icon}" FontSize="12" />
+                            </Button>
+                            <Border Width="32" Height="32" CornerRadius="8" ClipToBounds="True">
+                                <Image Source="/Assets/app-logo.png"
+                                       Stretch="UniformToFill"
+                                       SnapsToDevicePixels="True"
+                                       RenderOptions.BitmapScalingMode="HighQuality" />
+                            </Border>
+                            <Button Style="{StaticResource HeaderIconButton}" Margin="2,0,0,0" ToolTip="支持我"
+                                    FontFamily="Segoe UI Emoji">
+                                <TextBlock Text="❤" Foreground="{DynamicResource Brush.Primary}" FontSize="14" />
+                            </Button>
+                        </StackPanel>
+
+                        <!-- Center: model selector pill -->
+                        <Button Grid.Column="1"
+                                HorizontalAlignment="Left"
+                                Style="{StaticResource OutlineButton}"
+                                Padding="14,6"
+                                Margin="16,0,0,0"
+                                Click="OpenModelSelector_Click"
+                                ToolTip="选择模型">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE99A;" FontFamily="{DynamicResource Font.Icon}" FontSize="14" Margin="0,0,8,0" />
+                                <TextBlock Text="{Binding Chat.ActiveModelLabel}" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding Chat.ActiveProviderLabel}"
+                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                           FontSize="{DynamicResource Font.Size.XSmall}"
+                                           Margin="8,1,0,0" />
+                                <TextBlock Text="&#xE70D;" FontFamily="{DynamicResource Font.Icon}" FontSize="10" Margin="8,0,0,0" Opacity="0.6" />
+                            </StackPanel>
+                        </Button>
+
+                        <!-- Right: action icons -->
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Button Style="{StaticResource HeaderIconButton}"
+                                    Width="Auto"
+                                    MinWidth="116"
+                                    Padding="8,4"
+                                    Margin="0,0,6,0"
+                                    Command="{Binding SyncCloudCommand}"
+                                    ToolTip="{Binding CloudSyncStatusToolTip}"
+                                    Visibility="{Binding CloudSyncStatusVisible, Converter={x:Static views:BoolToVisibility.Instance}}">
+                                <Border Padding="8,3"
+                                        BorderThickness="1"
+                                        CornerRadius="{DynamicResource Radius.Sm}">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+                                            <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding CloudSyncStatusKind}" Value="Syncing">
+                                                    <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+                                                    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding CloudSyncStatusKind}" Value="Success">
+                                                    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Success}" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding CloudSyncStatusKind}" Value="Error">
+                                                    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Warning}" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding CloudSyncStatusKind}" Value="Disabled">
+                                                    <Setter Property="Opacity" Value="0.62" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <Ellipse Width="7" Height="7" Margin="0,0,7,0">
+                                            <Ellipse.Style>
+                                                <Style TargetType="Ellipse">
+                                                    <Setter Property="Fill" Value="{DynamicResource Brush.Text.Muted}" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding CloudSyncStatusKind}" Value="Syncing">
+                                                            <Setter Property="Fill" Value="{DynamicResource Brush.Primary}" />
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding CloudSyncStatusKind}" Value="Success">
+                                                            <Setter Property="Fill" Value="{DynamicResource Brush.Success}" />
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding CloudSyncStatusKind}" Value="Error">
+                                                            <Setter Property="Fill" Value="{DynamicResource Brush.Warning}" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Ellipse.Style>
+                                        </Ellipse>
+                                        <TextBlock Text="&#xE753;"
+                                                   FontFamily="{DynamicResource Font.Icon}"
+                                                   FontSize="12"
+                                                   Margin="0,0,6,0" />
+                                        <TextBlock Text="{Binding CloudSyncStatusText}"
+                                                   MaxWidth="150"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   FontFamily="{DynamicResource Font.Cjk}"
+                                                   FontSize="{DynamicResource Font.Size.XSmall}"
+                                                   FontWeight="SemiBold" />
+                                    </StackPanel>
+                                </Border>
+                            </Button>
+                            <Button Style="{StaticResource HeaderIconButton}"
+                                    Command="{Binding OpenSystemPromptCommand}"
+                                    Visibility="{Binding ConversationSystemPromptVisible, Converter={x:Static views:BoolToVisibility.Instance}}"
+                                    ToolTip="会话提示词覆盖">
+                                <Grid>
+                                    <TextBlock Text="&#xE8A5;" FontFamily="{DynamicResource Font.Icon}" />
+                                    <!-- Active indicator: small primary-colored dot in
+                                         the top-right corner when this conversation
+                                         has a conversation-level prompt override set.
+                                         Mirrors the macOS "modified document" cue so
+                                         users can see at a glance that the prompt isn't
+                                         the persona default. -->
+                                    <Ellipse Width="7" Height="7"
+                                             Fill="{DynamicResource Brush.Primary}"
+                                             HorizontalAlignment="Right"
+                                             VerticalAlignment="Top"
+                                             Margin="0,-2,-2,0"
+                                             Visibility="{Binding Chat.ConversationSystemPrompt, Converter={x:Static views:NullToInverseVisibility.Instance}}" />
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource HeaderIconButton}"
+                                    Command="{Binding OpenSettingsCommand}"
+                                    ToolTip="设置">
+                                <TextBlock Text="&#xE713;" FontFamily="{DynamicResource Font.Icon}" />
+                            </Button>
+                            <Button Style="{StaticResource HeaderIconButton}"
+                                    Command="{Binding ToggleThemeCommand}"
+                                    ToolTip="主题切换">
+                                <TextBlock Text="&#xE793;" FontFamily="{DynamicResource Font.Icon}" />
+                            </Button>
+                            <Button Style="{StaticResource HeaderIconButton}"
+                                    Command="{Binding OpenLoginCommand}"
+                                    ToolTip="登录 MolaGPT">
+                                <TextBlock Text="&#xE77B;" FontFamily="{DynamicResource Font.Icon}" />
+                            </Button>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- Floating composer -->
+                <Border x:Name="ComposerHost"
+                        VerticalAlignment="Bottom"
+                        HorizontalAlignment="Stretch"
+                        Margin="40,0,40,24"
+                        SizeChanged="ComposerHost_SizeChanged">
+                    <views:ComposerView DataContext="{Binding Composer}" />
+                </Border>
+
+                <!-- Model selector popup (dynamically populated).
+                     Outer Grid Margin=14 keeps spacing around the rounded menu
+                     render outside the rounded Border without being clipped
+                     by the Popup's HWND boundary — this fixes the visible
+                     "square corner" artifact at the popup's bounding box. -->
+                <Popup x:Name="ModelSelectorPopup"
+                       StaysOpen="False"
+                       AllowsTransparency="True"
+                       Placement="Bottom"
+                       PlacementTarget="{Binding ElementName=MessagesScroll}"
+                       HorizontalOffset="20"
+                       VerticalOffset="-8">
+                    <Grid Margin="14">
+                        <Border Background="{DynamicResource Brush.Bg.Elevated}"
+                                BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                BorderThickness="1"
+                                CornerRadius="{DynamicResource Radius.Md}"
+                                Padding="6"
+                                MinWidth="280"
+                                MaxHeight="420">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <ItemsControl x:Name="ModelSelectorItems" />
+                            </ScrollViewer>
+                        </Border>
+                    </Grid>
+                </Popup>
+            </Grid>
+        </Border>
+    </Grid>
+    </Border>
+</Window>
