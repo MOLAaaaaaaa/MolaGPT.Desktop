@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using MolaGPT.Core.Auth;
 
 namespace MolaGPT.Core.Chat.LocalTools;
 
@@ -260,7 +261,7 @@ public static partial class LocalToolRegistry
         }
 
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.TryAddWithoutValidation("User-Agent", "MolaGPT-Desktop/1.0");
+        req.Headers.TryAddWithoutValidation("User-Agent", UserAgentProvider.FixedUa);
         req.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8");
         var html = await SendTextAsync(http, req, ct).ConfigureAwait(false);
         var title = ExtractTitle(html);
@@ -310,7 +311,7 @@ public static partial class LocalToolRegistry
     {
         var url = "https://html.duckduckgo.com/html/?q=" + Uri.EscapeDataString(query);
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.TryAddWithoutValidation("User-Agent", "MolaGPT-Desktop/1.0");
+        req.Headers.TryAddWithoutValidation("User-Agent", UserAgentProvider.FixedUa);
         req.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml");
         var html = await SendTextAsync(http, req, ct).ConfigureAwait(false);
         return ParseDuckDuckGoResults(html).Take(options.SearchMaxResults).ToArray();

@@ -33,9 +33,16 @@ public sealed class CloudSyncService
     private static readonly TimeSpan TitleTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan PeriodicSyncInterval = TimeSpan.FromMinutes(3);
 
+    // .NET 8 marks JsonSerializerOptions read-only on first use through
+    // JsonContent.Create. If TypeInfoResolver hasn't been set explicitly
+    // by then, every subsequent JsonContent.Create call throws
+    // "JsonSerializerOptions instance must specify a TypeInfoResolver
+    // setting before being marked as read-only". The reflection-based
+    // resolver is fine for our use (no AOT requirements here).
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
-        WriteIndented = false
+        WriteIndented = false,
+        TypeInfoResolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver()
     };
 
     private readonly HttpClient _http;

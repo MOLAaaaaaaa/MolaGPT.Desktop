@@ -13,16 +13,19 @@ namespace MolaGPT.Core.Auth;
 /// that matches <c>http.user_agent contains "MolaGPT-Desktop"</c>, and the
 /// desktop client never gets challenged.
 ///
-/// IMPORTANT: do NOT bake real version numbers into the UA. Once a JWT is
-/// issued for a specific UA hash, any change to that UA invalidates the
-/// token and forces re-login. The version segment below is a marketing-style
-/// "1.0" that we hold steady forever; protocol-breaking changes get a new
-/// suffix that bumps the stored UA on purpose.
+/// NO VERSION NUMBER, ON PURPOSE. Once a JWT is signed against a UA hash,
+/// changing that UA invalidates the token and forces re-login. Embedding
+/// the assembly version turns every release into a forced logout, which
+/// is bad UX. The constant below is intentionally version-less so we can
+/// ship as many releases as we want without disturbing existing logins;
+/// CF / WAF rules still match by the literal "MolaGPT-Desktop" prefix.
+/// If we ever truly need a hard re-login (security wipe, protocol break),
+/// bump the suffix manually — that's the only situation that warrants it.
 /// </summary>
 public static class UserAgentProvider
 {
     /// <summary>Recognizable, app-stable User-Agent. Easy to whitelist in Cloudflare.</summary>
-    public const string FixedUa = "MolaGPT-Desktop/1.0 (Windows; .NET 8 WPF)";
+    public const string FixedUa = "MolaGPT-Desktop (Windows; .NET 8 WPF)";
 
     /// <summary>
     /// Custom header value clients send alongside the UA — gives operators a
