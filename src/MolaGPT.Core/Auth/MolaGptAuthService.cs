@@ -32,19 +32,28 @@ public sealed class MolaGptAuthService
     public const string UsernameKey = "molagpt.username";
     public const string UaHashKey = "molagpt.ua_hash";
     public const string DefaultLoginUrl = "https://chatgpt.wljay.cn/v2/api/auth/login.php";
+    public const string DefaultOAuthExchangeUrl = "https://chatgpt.wljay.cn/v2/api/auth/oauth_exchange.php";
     public const string DefaultWarmupUrl = "https://chatgpt.wljay.cn/v2/";
 
     private readonly HttpClient _http;
     private readonly CredentialStore _store;
     private readonly string _loginUrl;
+    private readonly string _oauthExchangeUrl;
     private readonly string _warmupUrl;
     private bool _warmedUp;
 
-    public MolaGptAuthService(HttpClient http, CredentialStore store, string? loginUrl = null, string? warmupUrl = null)
+    public MolaGptAuthService(
+        HttpClient http,
+        CredentialStore store,
+        string? loginUrl = null,
+        string? warmupUrl = null,
+        string? oauthExchangeUrl = null)
     {
         _http = http ?? throw new ArgumentNullException(nameof(http));
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _loginUrl = NetworkSecurity.RequireHttps(new Uri(loginUrl ?? DefaultLoginUrl), "MolaGPT 登录").ToString();
+        _oauthExchangeUrl = NetworkSecurity.RequireHttps(
+            new Uri(oauthExchangeUrl ?? DefaultOAuthExchangeUrl), "MolaGPT OAuth 兑换").ToString();
         _warmupUrl = NetworkSecurity.RequireHttps(new Uri(warmupUrl ?? DefaultWarmupUrl), "MolaGPT 预热").ToString();
     }
 
@@ -132,11 +141,45 @@ public sealed class MolaGptAuthService
     }
 
     /// <summary>
-    /// Persists a JWT obtained out-of-band (typically from the
-    /// molagpt:// OAuth deep link). Decodes the JWT payload to recover
-    /// the username and stores everything in the same shape as
-    /// <see cref="LoginAsync"/>. Returns false when the token is empty
-    /// or unparseable; the caller should surface a user-facing error.
+    /// Redeems a short-lived OAuth handoff code (from
+    /// <c>molagpt://oauth_callback?code=...</c>) for the session JWT and
+    /// persists it. The code is single-use and expires in about five minutes.
+    /// </summary>
+    public async Task<LoginResult> ExchangeOAuthCodeAsync(string? code, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(code))
+            return new LoginResult(false, null, "授权码为空");
+
+        await WarmupAsync(ct).ConfigureAwait(false);
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, _oauthExchangeUrl);
+        req.Content = JsonContent.Create(new { code });
+        req.Headers.TryAddWithoutValidation("Origin", "https://chatgpt.wljay.cn");
+        req.Headers.TryAddWithoutValidation("Referer", "https://chatgpt.wljay.cn/v2/");
+        req.Headers.TryAddWithoutValidation("X-MolaGPT-Client", UserAgentProvider.ClientMarker);
+
+        using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
+        var content = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        if (!resp.IsSuccessStatusCode)
+            return new LoginResult(false, null, $"HTTP {(int)resp.StatusCode}: {SummarizeLoginBody(content)}");
+
+        LoginPayload? payload;
+        try { payload = JsonSerializer.Deserialize<LoginPayload>(content); }
+        catch (JsonException) { return new LoginResult(false, null, SummarizeLoginBody(content)); }
+
+        if (payload is null || !payload.Success || string.IsNullOrEmpty(payload.Token))
+            return new LoginResult(false, null, payload?.Message ?? "授权码兑换失败");
+
+        if (!ApplyExternalToken(payload.Token))
+            return new LoginResult(false, null, "兑换成功但令牌无法解析，请重试");
+
+        return new LoginResult(true, payload.UserInfo, null);
+    }
+
+    /// <summary>
+    /// Persists a JWT obtained out-of-band. Prefer
+    /// <see cref="ExchangeOAuthCodeAsync"/> for OAuth; this remains for
+    /// direct JWT handoff during migration.
     /// </summary>
     public bool ApplyExternalToken(string? token)
     {

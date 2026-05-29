@@ -10,16 +10,15 @@ namespace MolaGPT.Desktop.Views;
 /// <summary>
 /// MolaGPT login dialog. On success it refreshes the proxy model list and
 /// registers the provider so the model selector can use the account route.
-/// Third-party login (Google / Microsoft / Linux Do) opens the system
-/// browser at the v2 OAuth init endpoint with desktop=1; oauth_landing.html
-/// then redirects to molagpt://oauth_callback?token=... which is captured
-/// by the running instance via UrlSchemeRegistrar + SingleInstanceGuard.
+/// Third-party login opens the system browser at the v2 OAuth init endpoint
+/// with desktop=1; oauth_landing.html redirects to
+/// molagpt://oauth_callback?code=... (short-lived, one-time). App.xaml.cs
+/// exchanges the code over HTTPS and persists the session JWT.
 ///
 /// While waiting on the browser the dialog stays open so the user has a
 /// place to land when they alt-tab back, and so we have a parent window
-/// to close once App.xaml.cs finishes applying the external token. The
-/// completion signal comes through <see cref="ExternalLoginCompleted"/>,
-/// which App.xaml.cs raises after ApplyExternalToken returns true.
+/// to close once App.xaml.cs finishes the OAuth exchange. The completion
+/// signal comes through <see cref="ExternalLoginCompleted"/>.
 /// </summary>
 public partial class LoginDialog : Window
 {
@@ -37,7 +36,7 @@ public partial class LoginDialog : Window
     /// </summary>
     public static event Action? ExternalLoginCompleted;
 
-    /// <summary>App.xaml.cs calls this after ApplyExternalToken succeeds.</summary>
+    /// <summary>App.xaml.cs calls this after OAuth code exchange succeeds.</summary>
     public static void NotifyExternalLoginCompleted() => ExternalLoginCompleted?.Invoke();
 
     public LoginDialog(MolaGptAuthService auth, MolaGptProxyProvider proxy, ProviderRegistry registry)

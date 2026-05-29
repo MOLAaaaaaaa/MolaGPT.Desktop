@@ -9,15 +9,18 @@ public sealed class NotificationService : IDisposable
 {
     private readonly BackgroundStreamService _backgroundStreams;
     private readonly SettingsViewModel _settings;
+    private readonly Func<string?>? _getCurrentConversationId;
     private readonly Action<string>? _navigateToConversation;
 
     public NotificationService(
         BackgroundStreamService backgroundStreams,
         SettingsViewModel settings,
+        Func<string?>? getCurrentConversationId = null,
         Action<string>? navigateToConversation = null)
     {
         _backgroundStreams = backgroundStreams;
         _settings = settings;
+        _getCurrentConversationId = getCurrentConversationId;
         _navigateToConversation = navigateToConversation;
 
         _backgroundStreams.TaskCompleted += OnTaskCompleted;
@@ -31,7 +34,8 @@ public sealed class NotificationService : IDisposable
         var mainWindow = Application.Current?.MainWindow;
         if (mainWindow is not null
             && mainWindow.IsActive
-            && mainWindow.WindowState != WindowState.Minimized)
+            && mainWindow.WindowState != WindowState.Minimized
+            && string.Equals(_getCurrentConversationId?.Invoke(), e.ConversationId, StringComparison.Ordinal))
         {
             return;
         }

@@ -409,14 +409,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         finally
         {
-            if (streamContext.IsDetached && streamContext.ProviderKind == ProviderKind.MolaGptProxy)
-            {
-                // MolaGPT Proxy detach: polling handles completion, don't touch the task
-            }
-            else
-            {
-                CompleteStreamContext(streamContext, publishNotification: !wasCancelled);
-            }
+            CompleteStreamContext(streamContext, publishNotification: !wasCancelled);
             if (ReferenceEquals(_activeTask, streamContext))
             {
                 IsSending = false;
@@ -446,15 +439,9 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         if (_activeTask.ProviderKind == ProviderKind.MolaGptProxy
             && _chat.ActiveProvider is MolaGptProxyProvider proxyProvider)
-        {
             _activeTask.ApiUrl = proxyProvider.LastResolvedApiUrl;
-            _activeTask.Cts.Cancel();
-            _backgroundStreams.RegisterWithPolling(_activeTask, proxyProvider);
-        }
-        else
-        {
-            _backgroundStreams.Register(_activeTask);
-        }
+
+        _backgroundStreams.Register(_activeTask);
 
         _cts = null;
         _activeStreamTask = null;
@@ -490,6 +477,17 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         _chat.AttachTransientMessage(task.AssistantMessage);
 
+        if (!task.StreamTask.IsCompleted && !task.Cts.IsCancellationRequested)
+        {
+            _activeAssistantMsg = task.AssistantMessage;
+            _cts = task.Cts;
+            _activeStreamTask = task.StreamTask;
+            _activeTask = task;
+            IsSending = true;
+            _chat.IsStreaming = true;
+            return;
+        }
+
         if (task.ProviderKind == ProviderKind.MolaGptProxy
             && _chat.ActiveProvider is MolaGptProxyProvider proxyProvider
             && !string.IsNullOrEmpty(task.SessionId))
@@ -500,7 +498,11 @@ public sealed partial class ComposerViewModel : ObservableObject
             {
                 var data = await proxyProvider.FetchCompletedStreamAsync(task.SessionId!, CancellationToken.None);
                 if (data is not null)
+                {
                     task.AssistantMessage.ReplaceContent(data.Text);
+                    if (data.Sources is { Count: > 0 })
+                        task.AssistantMessage.Sources = data.Sources;
+                }
                 task.AssistantMessage.FinishStreaming();
                 CompleteStreamContext(task, publishNotification: false);
                 return;
@@ -517,7 +519,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             var resumeTask = RunResumeStreamLoopAsync(
                 proxyProvider, task.SessionId!, task.ReceivedChunkCount,
                 task.ApiUrl ?? "api/auth/chatAuto.php",
-                task.AssistantMessage, cts);
+                task.AssistantMessage, cts, task);
             _activeStreamTask = resumeTask;
             task.StreamTask = resumeTask;
 
@@ -566,7 +568,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         await foreach (var chunk in provider.StreamChatAsync(req, cts.Token).WithCancellation(cts.Token))
         {
             ApplyStreamChunk(assistantMsg, chunk, toolProgressRouting);
-            if (trackingTask is not null && chunk.DeltaText is not null)
+            if (trackingTask is not null && chunk.RawJson is not null)
                 trackingTask.ReceivedChunkCount++;
             if (chunk.FinishReason is not null) break;
         }
@@ -578,12 +580,15 @@ public sealed partial class ComposerViewModel : ObservableObject
         int offset,
         string apiUrl,
         MessageViewModel assistantMsg,
-        CancellationTokenSource cts)
+        CancellationTokenSource cts,
+        BackgroundStreamTask? trackingTask = null)
     {
         var toolProgressRouting = new ToolProgressRoutingState();
         await foreach (var chunk in provider.ResumeStreamAsync(sessionId, offset, apiUrl, cts.Token).WithCancellation(cts.Token))
         {
             ApplyStreamChunk(assistantMsg, chunk, toolProgressRouting);
+            if (trackingTask is not null && chunk.RawJson is not null)
+                trackingTask.ReceivedChunkCount++;
             if (chunk.FinishReason is not null) break;
         }
     }

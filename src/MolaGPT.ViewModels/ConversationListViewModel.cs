@@ -432,11 +432,11 @@ public sealed partial class ConversationListViewModel : ObservableObject
             Items.RemoveAt(i);
             deleted.Add(item.Id);
             _selectedIds.Remove(item.Id);
-            if (_repository is not null)
-                _repository.SoftDelete(item.Id, timestamp);
         }
 
         if (deleted.Count == 0) return;
+
+        _repository?.SoftDeleteMany(deleted, timestamp);
 
         if (SelectedId is not null && idSet.Contains(SelectedId))
             SelectedId = null;

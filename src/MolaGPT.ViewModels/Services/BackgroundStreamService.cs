@@ -20,6 +20,7 @@ public sealed class BackgroundStreamTask
     public string? SessionId { get; init; }
     public string? ApiUrl { get; set; }
     public int ReceivedChunkCount { get; set; }
+    public int MissedStatusPolls { get; set; }
     internal CancellationTokenSource? PollCts { get; set; }
 }
 
@@ -71,20 +72,27 @@ public sealed class BackgroundStreamService
                 var status = await provider.CheckStreamStatusAsync(task.SessionId!, ct);
                 if (status is null)
                 {
+                    task.MissedStatusPolls++;
+                    if (task.MissedStatusPolls < 3)
+                        continue;
+
                     task.IsCompleted = true;
-                    _tasks.TryRemove(task.ConversationId, out _);
                     PublishCompletion(task.ConversationId, task.ConversationTitle, task.ModelLabel);
                     break;
                 }
+                task.MissedStatusPolls = 0;
 
                 if (status.Status == "completed")
                 {
                     var data = await provider.FetchCompletedStreamAsync(task.SessionId!, ct);
                     if (data is not null)
+                    {
                         task.AssistantMessage.ReplaceContent(data.Text);
+                        if (data.Sources is { Count: > 0 })
+                            task.AssistantMessage.Sources = data.Sources;
+                    }
 
                     task.IsCompleted = true;
-                    _tasks.TryRemove(task.ConversationId, out _);
                     PublishCompletion(task.ConversationId, task.ConversationTitle, task.ModelLabel);
                     break;
                 }

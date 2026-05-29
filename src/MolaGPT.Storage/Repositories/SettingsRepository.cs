@@ -27,6 +27,14 @@ public sealed class SettingsRepository
         using var conn = _db.Open();
         conn.Execute("DELETE FROM settings WHERE key = @key", new { key });
     }
+
+    public void RemoveByPrefix(string prefix)
+    {
+        if (string.IsNullOrEmpty(prefix)) return;
+        using var conn = _db.Open();
+        conn.Execute("DELETE FROM settings WHERE key LIKE @pattern ESCAPE '\\'",
+            new { pattern = prefix.Replace("%", "\\%").Replace("_", "\\_") + "%" });
+    }
 }
 
 public sealed class ProviderRepository

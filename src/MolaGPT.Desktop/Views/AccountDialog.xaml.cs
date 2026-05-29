@@ -6,6 +6,8 @@ using System.Windows.Media;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Providers;
+using MolaGPT.Desktop.Services;
+using MolaGPT.ViewModels;
 
 namespace MolaGPT.Desktop.Views;
 
@@ -22,13 +24,22 @@ public partial class AccountDialog : Window
     private readonly MolaGptAuthService _auth;
     private readonly MolaGptProxyProvider _proxy;
     private readonly ProviderRegistry _registry;
+    private readonly CloudSyncService _cloudSync;
+    private readonly ConversationListViewModel _conversationListVm;
 
-    public AccountDialog(MolaGptAuthService auth, MolaGptProxyProvider proxy, ProviderRegistry registry)
+    public AccountDialog(
+        MolaGptAuthService auth,
+        MolaGptProxyProvider proxy,
+        ProviderRegistry registry,
+        CloudSyncService cloudSync,
+        ConversationListViewModel conversationListVm)
     {
         InitializeComponent();
         _auth = auth;
         _proxy = proxy;
         _registry = registry;
+        _cloudSync = cloudSync;
+        _conversationListVm = conversationListVm;
 
         MouseLeftButtonDown += (_, e) =>
         {
@@ -267,19 +278,32 @@ public partial class AccountDialog : Window
     {
         var confirm = MessageBox.Show(
             this,
-            "退出后将无法继续使用 MolaGPT 模型，确认退出登录？",
+            "退出后将无法继续使用 MolaGPT 模型，未下载到本地的云端对话占位会被清除（已下载的本地对话会保留），确认退出登录？",
             "退出登录",
             MessageBoxButton.OKCancel,
             MessageBoxImage.Question);
         if (confirm != MessageBoxResult.OK) return;
 
         _auth.Logout();
-        // Drop the proxy provider so the model selector stops listing
-        // MolaGPT account models. ProviderRegistry.Unregister is the public
-        // counterpart to Register; if it doesn't exist we fall back to a
-        // best-effort no-op (the next 401 will surface the auth-expired
-        // error and clear the active model anyway).
         try { _registry.Unregister(_proxy.Id); } catch { /* tolerate */ }
+
+        // Remove only the metadata-only placeholders (conversations with no
+        // local messages). These are cloud-list entries the user never opened;
+        // the server keeps full copies, so re-login repopulates them. Any
+        // conversation with actual local content is preserved — this is what
+        // protects offline / sync-disabled users from data loss.
+        //
+        // Hard delete (not soft) so the next login's cloud sync does not push
+        // these ids as deletions to the server. messages cascade via
+        // ON DELETE CASCADE (a no-op here since these rows have none).
+        _cloudSync.CleanupLocalPlaceholdersForLogout();
+        // NOTE: cloud_sync.last_sync_timestamp is intentionally preserved.
+        // Clearing it would force the next login into a "first sync" that
+        // re-uploads every retained local conversation. Same-account re-login
+        // then runs an incremental sync; cross-account switches are handled by
+        // CloudSyncService's account-binding check before sync runs.
+
+        _ = _conversationListVm.ReloadAsync();
 
         DialogResult = true;
         Close();

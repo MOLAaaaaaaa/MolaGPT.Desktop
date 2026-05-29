@@ -74,7 +74,7 @@
                                FontSize="{DynamicResource Font.Size.Small}"
                                TextWrapping="Wrap"
                                Margin="0,4,0,0"
-                               Text="密码以 SHA-256 加密传输，登录凭据通过 Windows DPAPI 加密保存在本机。" />
+                               Text="您的登录凭据将通过 TLS 加密传输。" />
 
                     <Grid Margin="0,16,0,0">
                         <Grid.ColumnDefinitions>

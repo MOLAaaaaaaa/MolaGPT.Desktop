@@ -21,6 +21,7 @@ public sealed class CloudSyncService
     private const string TitleEndpoint = "https://chatgpt.wljay.cn/v2/api/auth/generateTitle.php";
     private const string LastSyncKey = "cloud_sync.last_sync_timestamp";
     private const string SyncEnabledKey = "sync_conversations";
+    private const string BoundAccountKey = "cloud_sync.bound_account";
     private const string DetailRefreshPrefix = "cloud_sync.detail_refresh.";
     private const string ConversationSyncPrefix = "cloud_sync.conversation_timestamp.";
     private const string ConversationMetadataPrefix = "cloud_sync.metadata.";
@@ -54,6 +55,7 @@ public sealed class CloudSyncService
     private CancellationTokenSource? _periodicSyncCts;
 
     public event EventHandler<CloudSyncStatusChangedEventArgs>? StatusChanged;
+    public event EventHandler? LocalConversationsChanged;
 
     public CloudSyncService(
         HttpClient http,
@@ -97,6 +99,14 @@ public sealed class CloudSyncService
 
             if (bool.TryParse(_settings.Get(SyncEnabledKey), out var enabled) && !enabled)
                 throw new InvalidOperationException("请先开启对话数据同步。");
+
+            // Account-binding guard (cross-account leak prevention): if the
+            // local MolaGPT data is bound to a different account than the one
+            // now logged in, purge the previous account's local conversations
+            // and reset sync state BEFORE building the dirty set. Otherwise a
+            // first sync would upload the previous account's retained
+            // conversations to the new account.
+            var accountBinding = await Task.Run(() => EnforceAccountBinding(), token).ConfigureAwait(false);
 
             var lastSync = _settings.Get(LastSyncKey) ?? EpochIso;
             var lastSyncMs = ToUnixMilliseconds(lastSync);
@@ -155,7 +165,7 @@ public sealed class CloudSyncService
             return new CloudSyncResult(
                 Uploaded: dirty.Count,
                 Downloaded: merge.Upserted,
-                Deleted: deletedIds.Length + merge.RemoteDeleted,
+                Deleted: accountBinding.PurgedConversationCount + deletedIds.Length + merge.RemoteDeleted,
                 LastSyncTimestamp: syncTimestamp);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
@@ -251,6 +261,9 @@ public sealed class CloudSyncService
         var jwt = _auth.CurrentJwt;
         if (string.IsNullOrWhiteSpace(jwt)) return false;
 
+        var accountBinding = await Task.Run(() => EnforceAccountBinding(), ct).ConfigureAwait(false);
+        if (accountBinding.PurgedConversationCount > 0) return false;
+
         var refreshKey = DetailRefreshKey(conversationId);
         var needsRefresh = !string.IsNullOrWhiteSpace(_settings.Get(refreshKey));
         var existingMessages = await Task.Run(() => _messages.List(conversationId), ct)
@@ -293,6 +306,9 @@ public sealed class CloudSyncService
     public async Task<string?> CompleteConversationTurnAsync(string conversationId, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(conversationId)) return null;
+
+        var accountBinding = await Task.Run(() => EnforceAccountBinding(), ct).ConfigureAwait(false);
+        if (accountBinding.PurgedConversationCount > 0) return null;
 
         var row = await Task.Run(() => _conversations.Get(conversationId), ct)
             .ConfigureAwait(false);
@@ -337,6 +353,9 @@ public sealed class CloudSyncService
             var jwt = _auth.CurrentJwt;
             if (string.IsNullOrWhiteSpace(jwt)) return false;
             if (bool.TryParse(_settings.Get(SyncEnabledKey), out var enabled) && !enabled) return false;
+
+            var accountBinding = await Task.Run(() => EnforceAccountBinding(), ct).ConfigureAwait(false);
+            if (accountBinding.PurgedConversationCount > 0) return false;
 
             var snapshot = await Task.Run(() =>
             {
@@ -389,14 +408,27 @@ public sealed class CloudSyncService
     public async Task PushDeletedConversationsAsync(IReadOnlyList<string> conversationIds, CancellationToken ct = default)
     {
         if (conversationIds.Count == 0) return;
+        if (string.IsNullOrWhiteSpace(_auth.CurrentJwt))
+        {
+            ForgetLoggedOutLocalDeletes(conversationIds);
+            return;
+        }
+
         while (Interlocked.Exchange(ref _isSyncing, 1) == 1)
             await Task.Delay(1000, ct).ConfigureAwait(false);
 
         try
         {
             var jwt = _auth.CurrentJwt;
-            if (string.IsNullOrWhiteSpace(jwt)) return;
+            if (string.IsNullOrWhiteSpace(jwt))
+            {
+                ForgetLoggedOutLocalDeletes(conversationIds);
+                return;
+            }
             if (bool.TryParse(_settings.Get(SyncEnabledKey), out var enabled) && !enabled) return;
+
+            var accountBinding = await Task.Run(() => EnforceAccountBinding(), ct).ConfigureAwait(false);
+            if (accountBinding.PurgedConversationCount > 0) return;
 
             var ids = conversationIds
                 .Where(id => !string.IsNullOrWhiteSpace(id))
@@ -421,6 +453,18 @@ public sealed class CloudSyncService
         finally
         {
             Interlocked.Exchange(ref _isSyncing, 0);
+        }
+    }
+
+    private void ForgetLoggedOutLocalDeletes(IReadOnlyList<string> conversationIds)
+    {
+        var deletedIds = _conversations.HardDeleteDeletedByProvider(conversationIds, MolaGptProviderId);
+        foreach (var id in deletedIds)
+        {
+            _settings.Remove(ConversationSyncKey(id));
+            _settings.Remove(CloudMetadataKey(id));
+            _settings.Remove(DetailRefreshKey(id));
+            _settings.Remove(TitleGeneratedKey(id));
         }
     }
 
@@ -487,6 +531,64 @@ public sealed class CloudSyncService
         });
         _settings.Set(TitleGeneratedKey(conversationId), "true");
         return title;
+    }
+
+    public int CleanupLocalPlaceholdersForLogout()
+    {
+        var deletedIds = _conversations.HardDeleteEmptyByProvider(MolaGptProviderId);
+        foreach (var id in deletedIds)
+        {
+            _settings.Remove(ConversationSyncKey(id));
+            _settings.Remove(CloudMetadataKey(id));
+            _settings.Remove(DetailRefreshKey(id));
+            _settings.Remove(TitleGeneratedKey(id));
+        }
+
+        if (deletedIds.Count > 0)
+            LocalConversationsChanged?.Invoke(this, EventArgs.Empty);
+
+        return deletedIds.Count;
+    }
+
+    /// <summary>
+    /// Ensures local MolaGPT data belongs to the currently logged-in account.
+    /// If the stored binding names a different account, the previous account's
+    /// local conversations and all sync bookkeeping are purged so the upcoming
+    /// sync starts clean for the new account. The binding is written immediately
+    /// after adopting or purging. No-op when the account matches or no username
+    /// is available yet (e.g. token applied but profile not fetched).
+    /// </summary>
+    private AccountBindingResult EnforceAccountBinding()
+    {
+        var current = _auth.CurrentUsername;
+        if (string.IsNullOrWhiteSpace(current)) return new AccountBindingResult(0);
+
+        var bound = _settings.Get(BoundAccountKey);
+        if (string.IsNullOrWhiteSpace(bound))
+        {
+            // First time binding (or upgraded from a pre-binding build): adopt
+            // the current account without purging. Existing local data is
+            // assumed to belong to this account.
+            _settings.Set(BoundAccountKey, current);
+            return new AccountBindingResult(0);
+        }
+
+        if (string.Equals(bound, current, StringComparison.Ordinal)) return new AccountBindingResult(0);
+
+        // Different account: purge previous account's local MolaGPT data.
+        var purged = _conversations.PurgeAllByProvider(MolaGptProviderId);
+        foreach (var id in purged)
+        {
+            _settings.Remove(ConversationSyncKey(id));
+            _settings.Remove(CloudMetadataKey(id));
+            _settings.Remove(DetailRefreshKey(id));
+            _settings.Remove(TitleGeneratedKey(id));
+        }
+        _settings.Remove(LastSyncKey);
+        _settings.Set(BoundAccountKey, current);
+        if (purged.Count > 0)
+            LocalConversationsChanged?.Invoke(this, EventArgs.Empty);
+        return new AccountBindingResult(purged.Count);
     }
 
     private JsonArray BuildDirtyConversations(long lastSyncMs, bool isFirstSync)
@@ -1066,6 +1168,8 @@ public sealed class CloudSyncService
 public sealed record CloudSyncResult(int Uploaded, int Downloaded, int Deleted, string LastSyncTimestamp);
 
 public sealed record CloudMetadataMergeResult(int Upserted, int RemoteDeleted);
+
+internal readonly record struct AccountBindingResult(int PurgedConversationCount);
 
 public enum CloudSyncState
 {

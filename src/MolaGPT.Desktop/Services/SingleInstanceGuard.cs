@@ -32,7 +32,7 @@ public static class SingleInstanceGuard
 
     /// <summary>
     /// Raised on the UI thread when another launch hands us a URL via
-    /// the OAuth deep link (molagpt://oauth_callback?token=...). The host
+    /// the OAuth deep link (molagpt://oauth_callback?code=...). The host
     /// subscribes to feed the token into MolaGptAuthService.
     /// </summary>
     public static event Action<string>? DeepLinkReceived;

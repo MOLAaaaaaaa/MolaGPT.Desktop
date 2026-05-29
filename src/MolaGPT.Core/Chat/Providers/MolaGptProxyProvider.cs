@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MolaGPT.Core.Auth;
@@ -29,7 +30,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
     private const int MaxPublicImageUploadBytes = 10 * 1024 * 1024;
 
     public string Id => "molagpt-proxy";
-    public string DisplayName => "MolaGPT (账号代理)";
+    public string DisplayName => "MolaGPT 账号";
     public ProviderKind Kind => ProviderKind.MolaGptProxy;
     public IReadOnlyList<ProviderModel> Models => _models;
 
@@ -438,6 +439,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
             {
                 chunk = new ChatChunk(RawJson: ev.Data);
             }
+            if (chunk is null && IsRecoverableSseDataLine(ev.Data))
+                chunk = new ChatChunk(RawJson: ev.Data);
             if (chunk is not null) yield return chunk;
         }
     }
@@ -850,6 +853,23 @@ public sealed class MolaGptProxyProvider : IChatProvider
             : null;
     }
 
+    private static bool IsRecoverableSseDataLine(string data)
+    {
+        if (string.IsNullOrWhiteSpace(data)) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(data);
+            var root = doc.RootElement;
+            return !(root.TryGetProperty("type", out var type)
+                     && type.ValueKind == JsonValueKind.String
+                     && string.Equals(type.GetString(), "session_init", StringComparison.Ordinal));
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
+    }
+
     private static bool TryParseSources(JsonElement root, out IReadOnlyList<SourceReference> sources)
     {
         sources = Array.Empty<SourceReference>();
@@ -916,9 +936,15 @@ public sealed class MolaGptProxyProvider : IChatProvider
 
         var root = doc.RootElement;
         if (!root.TryGetProperty("sessions", out var sessions) || sessions.ValueKind != JsonValueKind.Object)
-            return null;
+        {
+            if (!root.TryGetProperty("results", out sessions) || sessions.ValueKind != JsonValueKind.Object)
+                return null;
+        }
 
         if (!sessions.TryGetProperty(sessionId, out var session) || session.ValueKind != JsonValueKind.Object)
+            return null;
+
+        if (session.ValueKind == JsonValueKind.Null)
             return null;
 
         var status = session.TryGetProperty("status", out var s) && s.ValueKind == JsonValueKind.String
@@ -1050,6 +1076,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
             {
                 chunk = new ChatChunk(RawJson: ev.Data);
             }
+            if (chunk is null && IsRecoverableSseDataLine(ev.Data))
+                chunk = new ChatChunk(RawJson: ev.Data);
             if (chunk is not null) yield return chunk;
         }
     }
@@ -1101,7 +1129,106 @@ public sealed class MolaGptProxyProvider : IChatProvider
             }
         }
 
+        if (string.IsNullOrEmpty(text)
+            && root.TryGetProperty("raw_sse", out var rawNode)
+            && rawNode.ValueKind == JsonValueKind.String)
+        {
+            return await ParseCompletedRawSseAsync(rawNode.GetString() ?? string.Empty, sources, ct)
+                .ConfigureAwait(false);
+        }
+
         return new CompletedStreamData(text, sources);
+    }
+
+    private static async Task<CompletedStreamData> ParseCompletedRawSseAsync(
+        string rawSse,
+        IReadOnlyList<SourceReference>? fallbackSources,
+        CancellationToken ct)
+    {
+        var text = new StringBuilder();
+        IReadOnlyList<SourceReference>? sources = fallbackSources;
+        await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(rawSse));
+        var thinkSplitter = new InlineThinkSplitter();
+        var toolSynthesizer = new ToolCallContentSynthesizer();
+        var responseMapper = new ResponseStreamEventMapper();
+
+        await foreach (var ev in SseStreamReader.ReadAsync(stream, ct).ConfigureAwait(false))
+        {
+            if (ev.IsDone)
+            {
+                AppendVisibleText(text, toolSynthesizer.FinalizeOpenBlocks());
+                var tail = thinkSplitter.Flush();
+                AppendVisibleText(text, tail.Visible);
+                break;
+            }
+
+            if (string.IsNullOrEmpty(ev.Data)) continue;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(ev.Data);
+                var root = doc.RootElement;
+                if (TryParseSources(root, out var parsedSources))
+                {
+                    sources = parsedSources;
+                    continue;
+                }
+
+                if (responseMapper.TryMap(root, out var responseText, out _))
+                {
+                    if (!string.IsNullOrEmpty(responseText))
+                    {
+                        var split = thinkSplitter.Feed(responseText);
+                        AppendVisibleText(text, split.Visible);
+                    }
+                    continue;
+                }
+
+                if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
+                    continue;
+
+                var choice = choices[0];
+                if (!choice.TryGetProperty("delta", out var delta))
+                    continue;
+
+                var toolText = toolSynthesizer.HandleToolCalls(delta);
+                if (toolText is not null)
+                {
+                    AppendVisibleText(text, toolText);
+                    continue;
+                }
+
+                var visible = ExtractContentText(delta);
+                var finish = choice.TryGetProperty("finish_reason", out var f) && f.ValueKind == JsonValueKind.String
+                    ? f.GetString()
+                    : null;
+                var finalizeToolUi = finish == "tool_calls" || (toolSynthesizer.HasOpenBlocks && !string.IsNullOrEmpty(visible));
+                if (finalizeToolUi)
+                {
+                    var toolTail = toolSynthesizer.FinalizeOpenBlocks();
+                    if (!string.IsNullOrEmpty(toolTail))
+                        visible = string.IsNullOrEmpty(visible) ? toolTail : toolTail + visible;
+                }
+
+                if (!string.IsNullOrEmpty(visible))
+                {
+                    var split = thinkSplitter.Feed(visible);
+                    AppendVisibleText(text, split.Visible);
+                }
+            }
+            catch (JsonException) { }
+        }
+
+        AppendVisibleText(text, toolSynthesizer.FinalizeOpenBlocks());
+        var finalTail = thinkSplitter.Flush();
+        AppendVisibleText(text, finalTail.Visible);
+        return new CompletedStreamData(text.ToString(), sources);
+    }
+
+    private static void AppendVisibleText(StringBuilder builder, string? value)
+    {
+        if (!string.IsNullOrEmpty(value))
+            builder.Append(value);
     }
 }
 

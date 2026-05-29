@@ -254,7 +254,7 @@ public partial class SettingsWindow : Window
             _vm.IsLoggedIn = true;
             _vm.MolaGptUsername = user;
             StatusLine.Text = user ?? "MolaGPT 用户";
-            StatusDetail.Text = "登录信息已加密保存在本机";
+            StatusDetail.Text = "已登录账号";
             LoginLogoutButton.Content = "退出";
         }
         else
@@ -272,7 +272,9 @@ public partial class SettingsWindow : Window
         if (!string.IsNullOrEmpty(_auth.CurrentJwt))
         {
             _auth.Logout();
-            _registry.Unregister("molagpt-proxy");
+            try { _registry.Unregister("molagpt-proxy"); } catch { /* tolerate */ }
+            _cloudSync.CleanupLocalPlaceholdersForLogout();
+            _ = _conversationList.ReloadAsync();
             UpdateAccountUi();
         }
         else

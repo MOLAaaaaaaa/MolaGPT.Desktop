@@ -35,6 +35,16 @@ public sealed class MolaGptDatabase
     {
         var conn = new SqliteConnection(ConnectionString);
         conn.Open();
+        // synchronous is a per-connection PRAGMA that SQLite resets to FULL on
+        // every new connection, so it must be applied here rather than once in
+        // EnsureSchema (journal_mode=WAL, by contrast, is persisted in the DB
+        // header and survives across connections). NORMAL is durable under WAL:
+        // it only risks losing the last commit on OS/power loss, not corruption.
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "PRAGMA synchronous=NORMAL;";
+            cmd.ExecuteNonQuery();
+        }
         return conn;
     }
 
@@ -42,6 +52,14 @@ public sealed class MolaGptDatabase
     public void EnsureSchema()
     {
         using var conn = Open();
+        // WAL is a persistent, database-level setting (stored in the file
+        // header); setting it once here applies to all future connections and
+        // dramatically reduces write contention vs the default rollback journal.
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "PRAGMA journal_mode=WAL;";
+            cmd.ExecuteNonQuery();
+        }
         var assembly = typeof(MolaGptDatabase).Assembly;
         var resources = assembly.GetManifestResourceNames()
             .Where(n => n.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))

@@ -123,6 +123,12 @@ public partial class App : Application
         SystemEvents.UserPreferenceChanged += OnSystemUserPreferenceChanged;
         mainVm.EnsureConversationDetailAsync = id => cloudSync.FetchConversationToLocalAsync(id);
         composerVm.ConversationCompletedAsync = cloudSync.CompleteConversationTurnAsync;
+        cloudSync.LocalConversationsChanged += (_, _) =>
+        {
+            _ = Dispatcher.InvokeAsync(
+                () => { _ = conversationListVm.ReloadAsync(); },
+                DispatcherPriority.Background);
+        };
         cloudSync.StatusChanged += (_, status) =>
         {
             Dispatcher.InvokeAsync(() => mainVm.UpdateCloudSyncStatus(
@@ -425,9 +431,9 @@ public partial class App : Application
         services.AddSingleton<NotificationService>(sp => new NotificationService(
             sp.GetRequiredService<BackgroundStreamService>(),
             sp.GetRequiredService<SettingsViewModel>(),
+            () => sp.GetRequiredService<ChatViewModel>().ConversationId,
             conversationId =>
             {
-                var chatVm = sp.GetRequiredService<ChatViewModel>();
                 var listVm = sp.GetRequiredService<ConversationListViewModel>();
                 listVm.SelectById(conversationId);
             }));
@@ -449,7 +455,9 @@ public partial class App : Application
         services.AddTransient(sp => new AccountDialog(
             sp.GetRequiredService<MolaGptAuthService>(),
             sp.GetRequiredService<MolaGptProxyProvider>(),
-            sp.GetRequiredService<ProviderRegistry>()));
+            sp.GetRequiredService<ProviderRegistry>(),
+            sp.GetRequiredService<CloudSyncService>(),
+            sp.GetRequiredService<ConversationListViewModel>()));
         services.AddTransient(sp =>
         {
             Func<HttpClient> factory = () =>
@@ -654,11 +662,9 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Handles a molagpt://oauth_callback?token=... deep link delivered
-    /// either via argv (cold start launched by the URL scheme) or via
-    /// WM_COPYDATA (a second instance forwarded the URL to us). Pulls
-    /// the token, persists it through MolaGptAuthService, and refreshes
-    /// the proxy provider so the model selector sees the account route.
+    /// Handles a molagpt://oauth_callback?code=... deep link (or legacy
+    /// ?token=...) delivered via argv or WM_COPYDATA. Exchanges the code
+    /// over HTTPS for the session JWT, persists it, and refreshes the proxy.
     /// </summary>
     private async Task HandleOAuthDeepLinkAsync(string url)
     {
@@ -672,30 +678,50 @@ public partial class App : Application
         }
 
         var query = uri.Query.TrimStart('?');
-        string? token = null;
+        string? code = null;
+        string? legacyToken = null;
         foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
         {
             var eq = pair.IndexOf('=');
             if (eq < 0) continue;
             var key = Uri.UnescapeDataString(pair[..eq]);
             var value = Uri.UnescapeDataString(pair[(eq + 1)..]);
-            if (string.Equals(key, "token", StringComparison.Ordinal))
-            {
-                token = value;
-                break;
-            }
+            if (string.Equals(key, "code", StringComparison.Ordinal))
+                code = value;
+            else if (string.Equals(key, "token", StringComparison.Ordinal))
+                legacyToken = value;
         }
-        DiagnosticLog.Write("OAuthDeepLink", $"token.len={token?.Length ?? 0}");
-        if (string.IsNullOrEmpty(token)) return;
 
         var auth = Services.GetRequiredService<MolaGptAuthService>();
         var registry = Services.GetRequiredService<ProviderRegistry>();
-        var applied = auth.ApplyExternalToken(token);
-        DiagnosticLog.Write("OAuthDeepLink", $"ApplyExternalToken={applied}");
-        if (!applied)
+        var loginOk = false;
+        if (!string.IsNullOrEmpty(code))
         {
-            MessageBox.Show("第三方登录返回的 Token 无法解析，请重试。",
-                "MolaGPT 登录", MessageBoxButton.OK, MessageBoxImage.Warning);
+            DiagnosticLog.Write("OAuthDeepLink", $"code.len={code.Length}");
+            var exchange = await auth.ExchangeOAuthCodeAsync(code).ConfigureAwait(true);
+            loginOk = exchange.Success;
+            DiagnosticLog.Write("OAuthDeepLink", $"ExchangeOAuthCode={loginOk}");
+            if (!loginOk)
+            {
+                MessageBox.Show(exchange.ErrorMessage ?? "授权码兑换失败，请重新发起第三方登录。",
+                    "MolaGPT 登录", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+        }
+        else if (!string.IsNullOrEmpty(legacyToken))
+        {
+            DiagnosticLog.Write("OAuthDeepLink", $"legacy token.len={legacyToken.Length}");
+            loginOk = auth.ApplyExternalToken(legacyToken);
+            DiagnosticLog.Write("OAuthDeepLink", $"ApplyExternalToken={loginOk}");
+            if (!loginOk)
+            {
+                MessageBox.Show("第三方登录返回的 Token 无法解析，请重试。",
+                    "MolaGPT 登录", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+        }
+        else
+        {
             return;
         }
 

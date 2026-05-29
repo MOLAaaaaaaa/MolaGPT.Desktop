@@ -154,7 +154,7 @@
                                                        FontSize="{DynamicResource Font.Size.Small}"
                                                        TextWrapping="Wrap"
                                                        Margin="0,4,0,0"
-                                                       Text="开启后，本机的对话会与网页端双向同步，空白对话不会上传。" />
+                                                       Text="开启后，本机的对话会与 MolaGPT 网页端双向同步，自定义 API 的对话不会被上传。" />
                                         </StackPanel>
                                         <StackPanel Grid.Column="1" HorizontalAlignment="Right">
                                             <ToggleButton Width="48"
