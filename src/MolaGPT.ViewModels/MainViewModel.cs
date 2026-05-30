@@ -28,12 +28,21 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty] private string _updateLatestVersion = string.Empty;
     [ObservableProperty] private string? _updateDownloadUrl;
     [ObservableProperty] private string _updateTooltip = "发现新版本";
+    [ObservableProperty] private string _updateActionText = "立即下载";
+    [ObservableProperty] private string? _updateInstallerSha256;
+    [ObservableProperty] private string _updateState = "Available";
+    [ObservableProperty] private string _updateChipLabel = "发现更新";
+    [ObservableProperty] private string _updateChipDetail = string.Empty;
+    private string? _updateNotes;
 
     /// <summary>Hooked at app startup; opens the LoginDialog. Set by App.xaml.cs to avoid View dependency here.</summary>
     public Action? LoginRequested { get; set; }
 
     /// <summary>Opens the SettingsWindow. Set by App.xaml.cs.</summary>
     public Action? SettingsRequested { get; set; }
+
+    /// <summary>Opens the AboutWindow. Set by App.xaml.cs.</summary>
+    public Action? AboutRequested { get; set; }
 
     private bool _openSettingsToPersonas;
     private bool _openSettingsWithNewPersona;
@@ -132,6 +141,9 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void OpenSettings() => SettingsRequested?.Invoke();
 
+    [RelayCommand]
+    private void OpenAbout() => AboutRequested?.Invoke();
+
     public void RequestPersonaSettings(bool startNewPersona)
     {
         _openSettingsToPersonas = true;
@@ -159,29 +171,92 @@ public sealed partial class MainViewModel : ObservableObject
             await CloudSyncRequested();
     }
 
-    /// <summary>Opens the download URL for an available update. Set by App.xaml.cs.</summary>
-    public Action<string>? OpenUpdateDownloadRequested { get; set; }
+    /// <summary>
+    /// Shows the update details dialog. App.xaml.cs wires this to a
+    /// window that renders the release notes and offers a download
+    /// button; the args are (version, notes, downloadUrl, actionText, installerSha256).
+    /// </summary>
+    public Action<string, string?, string?, string, string?>? UpdateActionRequested { get; set; }
+
+    public Func<Task>? UpdateBackgroundDownloadRequested { get; set; }
+
+    public Action? UpdateInstallReadyRequested { get; set; }
 
     [RelayCommand]
-    private void OpenUpdateDownload()
+    private async Task OpenUpdateDownload()
     {
-        if (string.IsNullOrEmpty(UpdateDownloadUrl)) return;
-        OpenUpdateDownloadRequested?.Invoke(UpdateDownloadUrl);
+        switch (UpdateState)
+        {
+            case "Downloading":
+                return;
+            case "Ready":
+                UpdateInstallReadyRequested?.Invoke();
+                return;
+            case "Error":
+                if (UpdateBackgroundDownloadRequested is not null)
+                    await UpdateBackgroundDownloadRequested();
+                return;
+            default:
+                UpdateActionRequested?.Invoke(
+                    UpdateLatestVersion, _updateNotes, UpdateDownloadUrl, UpdateActionText, UpdateInstallerSha256);
+                return;
+        }
     }
 
     /// <summary>
     /// Surfaces a discovered update on the title bar. Called from
     /// App.xaml.cs once the version-check service finishes.
     /// </summary>
-    public void AnnounceUpdate(string latestVersion, string? downloadUrl, string? notes)
+    public void AnnounceUpdate(
+        string latestVersion,
+        string? downloadUrl,
+        string? notes,
+        string? actionText = null,
+        string? installerSha256 = null)
     {
         if (string.IsNullOrWhiteSpace(latestVersion)) return;
         UpdateLatestVersion = latestVersion;
         UpdateDownloadUrl = downloadUrl;
-        UpdateTooltip = string.IsNullOrWhiteSpace(notes)
-            ? $"新版本 {latestVersion} 已发布，点击下载安装包"
-            : $"新版本 {latestVersion}\n{notes}\n点击下载安装包";
+        _updateNotes = notes;
+        UpdateActionText = string.IsNullOrWhiteSpace(actionText) ? "立即下载" : actionText;
+        UpdateInstallerSha256 = installerSha256;
+        UpdateState = "Available";
+        UpdateChipLabel = "发现更新";
+        UpdateChipDetail = $"v{latestVersion}";
+        UpdateTooltip = $"发现新版本 v{latestVersion}，点击查看更新内容";
         UpdateAvailable = true;
+    }
+
+    public void BeginUpdateDownload()
+    {
+        UpdateState = "Downloading";
+        UpdateChipLabel = "下载更新";
+        UpdateChipDetail = "0%";
+        UpdateTooltip = "正在下载更新";
+        UpdateAvailable = true;
+    }
+
+    public void ReportUpdateDownloadProgress(double progress)
+    {
+        var percent = Math.Clamp((int)(progress * 100), 0, 100);
+        UpdateChipDetail = $"{percent}%";
+        UpdateTooltip = $"正在下载更新 {percent}%";
+    }
+
+    public void MarkUpdateReady()
+    {
+        UpdateState = "Ready";
+        UpdateChipLabel = "安装更新";
+        UpdateChipDetail = "并重启";
+        UpdateTooltip = "更新已下载，点击安装并重启";
+    }
+
+    public void MarkUpdateFailed(string message)
+    {
+        UpdateState = "Error";
+        UpdateChipLabel = "更新失败";
+        UpdateChipDetail = "重试";
+        UpdateTooltip = string.IsNullOrWhiteSpace(message) ? "更新下载失败，点击重试" : message;
     }
 
     public void UpdateCloudSyncStatus(string kind, string message, DateTimeOffset timestamp)

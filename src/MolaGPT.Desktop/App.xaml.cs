@@ -39,6 +39,8 @@ public partial class App : Application
     private static bool s_languageMetadataApplied;
     private static bool s_focusVisualHandlerRegistered;
     private CancellationTokenSource? _cloudStatusHideCts;
+    private string? _pendingUpdateInstallerPath;
+    private bool _installingUpdateWithRestart;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -189,6 +191,12 @@ public partial class App : Application
                 dlg.OpenPersonasTab(settingsRequest.StartNewPersona);
             dlg.ShowDialog();
         };
+        mainVm.AboutRequested = () =>
+        {
+            var dlg = Services.GetRequiredService<AboutWindow>();
+            dlg.Owner = window;
+            dlg.ShowDialog();
+        };
         mainVm.ThemeToggleRequested = () =>
         {
             // The header toggle is a simple Light↔Dark flip; routing it through
@@ -235,23 +243,81 @@ public partial class App : Application
         cloudSync.StartPeriodicSync();
         _ = RunStartupCloudSyncAfterFirstPaintAsync(cloudSync, conversationListVm);
 
-        mainVm.OpenUpdateDownloadRequested = url =>
+        mainVm.UpdateActionRequested = (version, notes, downloadUrl, actionText, installerSha256) =>
         {
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = url,
-                    UseShellExecute = true
-                });
-            }
-            catch
-            {
-                // Browser unavailable / blocked — leave the chip up so the
-                // user can copy the URL out of the tooltip if needed.
-            }
+            var autoUpdate = Services.GetRequiredService<AutoUpdateService>();
+            var dlg = new UpdateDialog(
+                version,
+                notes,
+                downloadUrl,
+                actionText,
+                installerSha256: installerSha256,
+                autoUpdate: autoUpdate,
+                backgroundDownloadRequested: package => BeginBackgroundUpdateDownloadAsync(mainVm, autoUpdate, package))
+            { Owner = window };
+            dlg.ShowDialog();
+        };
+        mainVm.UpdateBackgroundDownloadRequested = () =>
+        {
+            if (!TryCreateUpdatePackage(mainVm, out var package))
+                return Task.CompletedTask;
+            return BeginBackgroundUpdateDownloadAsync(
+                mainVm,
+                Services.GetRequiredService<AutoUpdateService>(),
+                package);
+        };
+        mainVm.UpdateInstallReadyRequested = () =>
+        {
+            if (string.IsNullOrWhiteSpace(_pendingUpdateInstallerPath))
+                return;
+            _installingUpdateWithRestart = true;
+            Services.GetRequiredService<AutoUpdateService>()
+                .InstallAfterExitAndRestart(_pendingUpdateInstallerPath);
         };
         _ = RunUpdateCheckAsync(mainVm);
+    }
+
+    private async Task BeginBackgroundUpdateDownloadAsync(
+        MainViewModel mainVm,
+        AutoUpdateService autoUpdate,
+        AutoUpdateService.UpdatePackage package)
+    {
+        if (mainVm.UpdateState == "Downloading")
+            return;
+
+        mainVm.BeginUpdateDownload();
+        try
+        {
+            var progress = new Progress<double>(mainVm.ReportUpdateDownloadProgress);
+            _pendingUpdateInstallerPath = await autoUpdate.DownloadAndVerifyAsync(package, progress)
+                .ConfigureAwait(false);
+            await Dispatcher.InvokeAsync(mainVm.MarkUpdateReady);
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.InvokeAsync(() => mainVm.MarkUpdateFailed("更新下载失败：" + ex.Message));
+        }
+    }
+
+    private static bool TryCreateUpdatePackage(
+        MainViewModel mainVm,
+        out AutoUpdateService.UpdatePackage package)
+    {
+        package = default!;
+        if (string.IsNullOrWhiteSpace(mainVm.UpdateLatestVersion)
+            || string.IsNullOrWhiteSpace(mainVm.UpdateDownloadUrl)
+            || string.IsNullOrWhiteSpace(mainVm.UpdateInstallerSha256)
+            || !Uri.TryCreate(mainVm.UpdateDownloadUrl, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        package = new AutoUpdateService.UpdatePackage(
+            mainVm.UpdateLatestVersion,
+            mainVm.UpdateDownloadUrl,
+            mainVm.UpdateInstallerSha256,
+            Path.GetFileName(uri.LocalPath));
+        return true;
     }
 
     private async Task RunUpdateCheckAsync(MolaGPT.ViewModels.MainViewModel mainVm)
@@ -265,12 +331,19 @@ public partial class App : Application
             var info = await Services.GetRequiredService<UpdateCheckService>().CheckAsync().ConfigureAwait(false);
             if (info is null) return;
             await Dispatcher.InvokeAsync(() =>
-                mainVm.AnnounceUpdate(info.LatestVersion, info.DownloadUrl, info.Notes));
+                mainVm.AnnounceUpdate(
+                    info.LatestVersion,
+                    info.DownloadUrl,
+                    info.Notes,
+                    info.ActionText,
+                    info.InstallerSha256));
         }
-        catch
+        catch (Exception ex)
         {
-            // Manifest fetch failure is silent — we don't want a transient
-            // network blip to surface as an error toast.
+            // A transient network blip shouldn't surface as an error toast;
+            // the chip just stays hidden. UpdateCheckService already logs
+            // its own failures, so this is a last-resort guard.
+            DiagnosticLog.Write("UpdateCheck", $"runner failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -440,12 +513,18 @@ public partial class App : Application
 
         services.AddSingleton(sp =>
         {
-            // BYOK client is fine for the manifest — it doesn't need the
-            // CookieContainer-bound molagpt client, and using ByokHttpClient
-            // keeps the molagpt cookie jar pristine.
+            // BYOK client is fine for both update sources (GitHub API +
+            // server manifest) — neither needs the CookieContainer-bound
+            // molagpt client, and using ByokHttpClient keeps the molagpt
+            // cookie jar pristine.
             var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient);
-            return new UpdateCheckService(http);
+            return new UpdateCheckService(
+                http,
+                Environment.GetEnvironmentVariable("MOLAGPT_UPDATE_API_URL"),
+                Environment.GetEnvironmentVariable("MOLAGPT_UPDATE_MANIFEST_URL"));
         });
+        services.AddSingleton(sp =>
+            new AutoUpdateService(sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient)));
 
         services.AddSingleton<MainWindow>();
         services.AddTransient(sp => new LoginDialog(
@@ -471,6 +550,10 @@ public partial class App : Application
                 sp.GetRequiredService<PersonaListViewModel>(),
                 factory);
         });
+        services.AddTransient(sp =>
+            new AboutWindow(
+                sp.GetRequiredService<UpdateCheckService>(),
+                sp.GetRequiredService<AutoUpdateService>()));
     }
 
     private void RestoreSavedProviders()
@@ -799,6 +882,20 @@ public partial class App : Application
             Host.Services.GetService<CloudSyncService>()?.StopPeriodicSync();
             await Host.StopAsync(TimeSpan.FromSeconds(2));
             Host.Dispose();
+        }
+        if (!_installingUpdateWithRestart
+            && !string.IsNullOrWhiteSpace(_pendingUpdateInstallerPath)
+            && File.Exists(_pendingUpdateInstallerPath))
+        {
+            try
+            {
+                new AutoUpdateService(new HttpClient())
+                    .InstallAfterExitWithoutRestart(_pendingUpdateInstallerPath);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Write("UpdateInstall", $"install-on-exit failed: {ex.GetType().Name}: {ex.Message}");
+            }
         }
         base.OnExit(e);
     }

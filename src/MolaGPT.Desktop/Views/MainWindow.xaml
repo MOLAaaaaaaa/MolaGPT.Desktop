@@ -499,7 +499,7 @@
                                     Command="{Binding OpenUpdateDownloadCommand}"
                                     ToolTip="{Binding UpdateTooltip}"
                                     Visibility="{Binding UpdateAvailable, Converter={x:Static views:BoolToVisibility.Instance}}">
-                                <Border Padding="8,3"
+                                <Border Padding="9,3"
                                         Background="{DynamicResource Brush.Primary.Tint}"
                                         BorderBrush="{DynamicResource Brush.Primary.Border}"
                                         BorderThickness="1"
@@ -509,11 +509,20 @@
                                                    FontFamily="{DynamicResource Font.Icon}"
                                                    FontSize="12"
                                                    Margin="0,0,6,0"
+                                                   VerticalAlignment="Center"
                                                    Foreground="{DynamicResource Brush.Primary}" />
-                                        <TextBlock Text="{Binding UpdateLatestVersion, StringFormat=v{0}}"
+                                        <TextBlock Text="{Binding UpdateChipLabel}"
                                                    FontFamily="{DynamicResource Font.Cjk}"
                                                    FontSize="{DynamicResource Font.Size.XSmall}"
                                                    FontWeight="SemiBold"
+                                                   VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource Brush.Primary}" />
+                                        <TextBlock Text="{Binding UpdateChipDetail}"
+                                                   FontFamily="{DynamicResource Font.Cjk}"
+                                                   FontSize="{DynamicResource Font.Size.XSmall}"
+                                                   Margin="5,0,0,0"
+                                                   VerticalAlignment="Center"
+                                                   Opacity="0.75"
                                                    Foreground="{DynamicResource Brush.Primary}" />
                                     </StackPanel>
                                 </Border>
@@ -606,6 +615,11 @@
                                     Command="{Binding OpenSettingsCommand}"
                                     ToolTip="设置">
                                 <TextBlock Text="&#xE713;" FontFamily="{DynamicResource Font.Icon}" />
+                            </Button>
+                            <Button Style="{StaticResource HeaderIconButton}"
+                                    Command="{Binding OpenAboutCommand}"
+                                    ToolTip="关于 MolaGPT">
+                                <TextBlock Text="&#xE946;" FontFamily="{DynamicResource Font.Icon}" />
                             </Button>
                             <Button Style="{StaticResource HeaderIconButton}"
                                     Command="{Binding ToggleThemeCommand}"
