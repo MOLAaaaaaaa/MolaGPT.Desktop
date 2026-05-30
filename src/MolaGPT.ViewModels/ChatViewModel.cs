@@ -641,6 +641,10 @@ public sealed partial class ChatViewModel : ObservableObject
                     };
                     if (!string.IsNullOrWhiteSpace(a.ThumbnailUrl))
                         obj["thumbnailUrl"] = a.ThumbnailUrl;
+                    if (!string.IsNullOrWhiteSpace(a.LocalName))
+                        obj["localName"] = a.LocalName;
+                    if (!string.IsNullOrWhiteSpace(a.MimeType))
+                        obj["mime"] = a.MimeType;
                     return obj;
                 })
                 .Cast<JsonNode?>()
@@ -941,7 +945,19 @@ public sealed partial class ChatViewModel : ObservableObject
                                && thumbNode.ValueKind == JsonValueKind.String
                 ? thumbNode.GetString()
                 : null;
-            list.Add(new AttachmentChip(filename!, string.IsNullOrWhiteSpace(label) ? "附件" : label!, thumbnailUrl));
+            var localName = item.TryGetProperty("localName", out var localNode)
+                            && localNode.ValueKind == JsonValueKind.String
+                ? localNode.GetString()
+                : null;
+            var mime = item.TryGetProperty("mime", out var mimeNode)
+                       && mimeNode.ValueKind == JsonValueKind.String
+                ? mimeNode.GetString()
+                : null;
+            list.Add(new AttachmentChip(filename!, string.IsNullOrWhiteSpace(label) ? "附件" : label!, thumbnailUrl)
+            {
+                LocalName = localName,
+                MimeType = mime
+            });
         }
 
         return list.Count == 0 ? null : list;

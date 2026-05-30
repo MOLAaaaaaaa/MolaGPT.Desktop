@@ -61,6 +61,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     private readonly BackgroundStreamService? _backgroundStreams;
     private readonly SettingsViewModel? _settings;
     private readonly PersonaListViewModel? _personas;
+    private readonly MolaGPT.Storage.AttachmentStore? _attachmentStore;
     private CancellationTokenSource? _cts;
     private Task? _activeStreamTask;
     private MessageViewModel? _activeAssistantMsg;
@@ -82,18 +83,27 @@ public sealed partial class ComposerViewModel : ObservableObject
         _chat.ActiveProvider is not null && _chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
 
     public ComposerViewModel(ChatViewModel chat, BackgroundStreamService? backgroundStreams = null, SettingsViewModel? settings = null)
-        : this(chat, backgroundStreams, settings, null) { }
+        : this(chat, backgroundStreams, settings, null, null) { }
 
     public ComposerViewModel(
         ChatViewModel chat,
         BackgroundStreamService? backgroundStreams,
         SettingsViewModel? settings,
         PersonaListViewModel? personas)
+        : this(chat, backgroundStreams, settings, personas, null) { }
+
+    public ComposerViewModel(
+        ChatViewModel chat,
+        BackgroundStreamService? backgroundStreams,
+        SettingsViewModel? settings,
+        PersonaListViewModel? personas,
+        MolaGPT.Storage.AttachmentStore? attachmentStore)
     {
         _chat = chat;
         _backgroundStreams = backgroundStreams;
         _settings = settings;
         _personas = personas;
+        _attachmentStore = attachmentStore;
         _chat.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(ChatViewModel.ActiveProvider) or nameof(ChatViewModel.ActiveModel))
@@ -160,7 +170,9 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// validated at send time, while images also require vision support.</summary>
     public bool IsAttachVisible => true;
     public bool CanAcceptImageAttachments =>
-        _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy || _chat.ActiveModel?.SupportsVision == true;
+        _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy
+        || _chat.ActiveModel?.SupportsVision == true
+        || _settings?.IsVisionProxyAvailableFor(_chat.ActiveProvider?.Kind, _chat.ActiveModel) == true;
     /// <summary>非图片附件目前仅 MolaGPT 代理模式支持（走沙箱上传）。BYOK
     /// 直连官方端点时，PDF/DOCX 等二进制文件无法解析，文本类文件也只是
     /// inline 截断 —— 在 UI 入口直接拦截，避免用户误以为模型读到了文件内容。</summary>
@@ -334,13 +346,21 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         var requestAttachments = BuildRequestAttachments(provider, model, outgoingAttachments);
 
+        // BYOK history images are re-fed from the local store so multi-turn
+        // follow-ups can still see earlier pictures. MolaGPT-account mode keeps
+        // images in ContentPartsJson (durable RemoteUrl), so we don't backfill
+        // raw bytes there.
+        var backfillHistory = provider.Kind != ProviderKind.MolaGptProxy;
+
         var msgs = _chat.Messages
             .Where(m => !m.IsStreaming || m == assistantMsg)
             .Where(m => m != assistantMsg)
             .Select(m => new ChatMessage(
                 m.Role,
                 ReferenceEquals(m, userMsg) ? outgoingUserText : BuildContentForHistory(m),
-                Attachments: ReferenceEquals(m, userMsg) && requestAttachments.Count > 0 ? requestAttachments : null,
+                Attachments: ReferenceEquals(m, userMsg)
+                    ? (requestAttachments.Count > 0 ? requestAttachments : null)
+                    : (backfillHistory && m.Role == ChatMessage.RoleUser ? BuildHistoryAttachments(m) : null),
                 ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null))
             .ToList();
 
@@ -610,6 +630,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             enabledTools["searchBaseUrl"] = _settings?.WebSearchBaseUrl;
             enabledTools["searchMaxResults"] = _settings?.WebSearchMaxResults ?? 6;
             enabledTools["webPageMaxCharacters"] = _settings?.WebPageMaxCharacters ?? 12000;
+            enabledTools["mcpServers"] = _settings?.BuildMcpServerOptions() ?? Array.Empty<MolaGPT.Core.Chat.LocalTools.McpServerOptions>();
+            enabledTools["vision"] = _settings?.BuildVisionProxyOptions();
         }
 
         var extras = new Dictionary<string, object>
@@ -638,22 +660,63 @@ public sealed partial class ComposerViewModel : ObservableObject
         return message.Content;
     }
 
-    private static IReadOnlyList<AttachmentChip>? BuildAttachmentChips(IReadOnlyList<Attachment> attachments)
+    /// <summary>
+    /// Rebuild the wire <see cref="Attachment"/> list for a history user message
+    /// so multi-turn follow-ups still carry earlier images. BYOK image bytes are
+    /// re-read from the local <see cref="MolaGPT.Storage.AttachmentStore"/> by
+    /// <see cref="AttachmentChip.LocalName"/>; in-memory <see cref="AttachmentChip.Bytes"/>
+    /// (the just-sent turn) is preferred to skip a disk round-trip. Returns null
+    /// when the message has no rehydratable image (e.g. MolaGPT-account images,
+    /// which travel via ContentPartsJson instead).
+    /// </summary>
+    private IReadOnlyList<Attachment>? BuildHistoryAttachments(MessageViewModel message)
+    {
+        if (message.Attachments is null || message.Attachments.Count == 0) return null;
+        var rebuilt = new List<Attachment>();
+        foreach (var chip in message.Attachments)
+        {
+            if (!chip.IsImage) continue;
+            var bytes = chip.Bytes;
+            if (bytes is not { Length: > 0 } && _attachmentStore is not null)
+                bytes = _attachmentStore.Load(chip.LocalName);
+            if (bytes is not { Length: > 0 }) continue;
+            rebuilt.Add(new Attachment(
+                AttachmentKind.Image,
+                string.IsNullOrWhiteSpace(chip.MimeType) ? "image/png" : chip.MimeType!,
+                bytes,
+                FileName: chip.FileName));
+        }
+        return rebuilt.Count == 0 ? null : rebuilt;
+    }
+
+    private IReadOnlyList<AttachmentChip>? BuildAttachmentChips(IReadOnlyList<Attachment> attachments)
     {
         if (attachments.Count == 0) return null;
         return attachments
-            .Select(attachment => new AttachmentChip(
-                string.IsNullOrWhiteSpace(attachment.FileName) ? "附件" : attachment.FileName!,
-                attachment.Kind == AttachmentKind.Image ? "图片" : LabelForFile(attachment),
-                string.IsNullOrWhiteSpace(attachment.RemoteUrl) ? null : attachment.RemoteUrl)
+            .Select(attachment =>
             {
-                // Keep image bytes in memory so the user can re-open the
-                // preview after sending. Not serialized to SQLite — BYOK reload
-                // loses preview (no RemoteUrl), MolaGPT reload falls back to
-                // ThumbnailUrl. Non-image attachments don't need preview.
-                Bytes = attachment.Kind == AttachmentKind.Image && attachment.Bytes is { Length: > 0 }
-                    ? attachment.Bytes
-                    : null
+                var isImage = attachment.Kind == AttachmentKind.Image && attachment.Bytes is { Length: > 0 };
+                // BYOK images (no server RemoteUrl) are content-addressed into
+                // the local AttachmentStore so they survive app restart and can
+                // be re-fed to the vision proxy on later turns. MolaGPT-account
+                // images already have a durable RemoteUrl/ThumbnailUrl.
+                string? localName = null;
+                if (isImage && string.IsNullOrWhiteSpace(attachment.RemoteUrl) && _attachmentStore is not null)
+                    localName = _attachmentStore.Save(attachment.Bytes, attachment.MimeType, attachment.FileName);
+
+                return new AttachmentChip(
+                    string.IsNullOrWhiteSpace(attachment.FileName) ? "附件" : attachment.FileName!,
+                    attachment.Kind == AttachmentKind.Image ? "图片" : LabelForFile(attachment),
+                    string.IsNullOrWhiteSpace(attachment.RemoteUrl) ? null : attachment.RemoteUrl)
+                {
+                    // Keep image bytes in memory so the user can re-open the
+                    // preview right after sending (no disk round-trip). On reload
+                    // the preview falls back to LocalName → AttachmentStore, or
+                    // ThumbnailUrl for MolaGPT-account images.
+                    Bytes = isImage ? attachment.Bytes : null,
+                    LocalName = localName,
+                    MimeType = isImage ? attachment.MimeType : null
+                };
             })
             .ToList();
     }
@@ -800,11 +863,15 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         try
         {
+            var backfillHistory = activeProvider.Kind != ProviderKind.MolaGptProxy;
             var msgs = _chat.Messages
                 .Take(index)
                 .Select(m => new ChatMessage(
                     m.Role,
                     BuildContentForHistory(m),
+                    Attachments: backfillHistory && m.Role == ChatMessage.RoleUser
+                        ? BuildHistoryAttachments(m)
+                        : null,
                     ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null))
                 .ToList();
 
@@ -870,14 +937,15 @@ public sealed partial class ComposerViewModel : ObservableObject
         && _chat.ActiveProvider is not null
         && _chat.ActiveModel is not null;
 
-    private static bool HasUnsupportedImages(
+    private bool HasUnsupportedImages(
         IEnumerable<Attachment> attachments,
         IChatProvider? provider,
         ProviderModel? model)
     {
         if (!attachments.Any(a => a.Kind == AttachmentKind.Image)) return false;
         if (provider?.Kind == ProviderKind.MolaGptProxy) return false;
-        return model?.SupportsVision != true;
+        return model?.SupportsVision != true
+               && _settings?.IsVisionProxyAvailableFor(provider?.Kind, model) != true;
     }
 
     private static bool IsRoutesModel(ProviderModel? model)

@@ -2,6 +2,9 @@ using System.Collections.ObjectModel;
 using System.Text.Json;
 using CommunityToolkit.Mvvm.ComponentModel;
 using MolaGPT.Core.Auth;
+using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Models;
 using MolaGPT.Storage.Repositories;
 
 namespace MolaGPT.ViewModels;
@@ -22,6 +25,11 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string WebSearchMaxResultsKey = "web_search_max_results";
     private const string WebPageMaxCharactersKey = "web_page_max_characters";
     private const string WebSearchSecretPrefix = "web_search_api_key:";
+    private const string ByokMcpServersKey = "byok_mcp_servers";
+    private const string McpServerSecretPrefix = "mcp_server_token:";
+    private const string VisionProxyEnabledKey = "vision_proxy_enabled";
+    private const string VisionProxyProviderIdKey = "vision_proxy_provider_id";
+    private const string VisionProxyModelIdKey = "vision_proxy_model_id";
 
     /// <summary>
     /// Raised whenever the user changes the theme mode in settings (or when
@@ -43,8 +51,13 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string? _webSearchApiKey;
     [ObservableProperty] private int _webSearchMaxResults = 6;
     [ObservableProperty] private int _webPageMaxCharacters = 12000;
+    [ObservableProperty] private bool _visionProxyEnabled;
+    [ObservableProperty] private string? _visionProxyProviderId;
+    [ObservableProperty] private string? _visionProxyModelId;
 
     public ObservableCollection<ProviderEntry> Providers { get; } = new();
+    public ObservableCollection<McpServerEntry> McpServers { get; } = new();
+    public ObservableCollection<VisionProviderModelOption> VisionProviderModels { get; } = new();
 
     private readonly ProviderRepository? _repo;
     private readonly CredentialStore? _credentialStore;
@@ -74,6 +87,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             var models = TryDeserializeModels(row.Models);
             Providers.Add(new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder));
         }
+        RefreshVisionProviderModels();
     }
 
     private void LoadSettings()
@@ -98,11 +112,34 @@ public sealed partial class SettingsViewModel : ObservableObject
             if (int.TryParse(_settingsRepo.Get(WebPageMaxCharactersKey), out var maxChars))
                 WebPageMaxCharacters = Math.Clamp(maxChars, 1000, 30000);
             WebSearchApiKey = _credentialStore?.LoadSecret(WebSearchSecretPrefix + WebSearchProvider);
+            LoadMcpServers();
+            VisionProxyEnabled = bool.TryParse(_settingsRepo.Get(VisionProxyEnabledKey), out var visionEnabled) && visionEnabled;
+            VisionProxyProviderId = _settingsRepo.Get(VisionProxyProviderIdKey);
+            VisionProxyModelId = _settingsRepo.Get(VisionProxyModelIdKey);
         }
         finally
         {
             _loadingSettings = false;
         }
+    }
+
+    private void LoadMcpServers()
+    {
+        McpServers.Clear();
+        var json = _settingsRepo?.Get(ByokMcpServersKey);
+        if (string.IsNullOrWhiteSpace(json)) return;
+        try
+        {
+            var entries = JsonSerializer.Deserialize<List<McpServerEntry>>(json) ?? new();
+            foreach (var entry in entries)
+            {
+                McpServers.Add(entry with
+                {
+                    Token = _credentialStore?.LoadSecret(McpServerSecretPrefix + entry.Id)
+                });
+            }
+        }
+        catch (JsonException) { }
     }
 
     partial void OnSyncConversationsChanged(bool value)
@@ -176,6 +213,24 @@ public sealed partial class SettingsViewModel : ObservableObject
         _settingsRepo.Set(WebPageMaxCharactersKey, WebPageMaxCharacters.ToString());
     }
 
+    partial void OnVisionProxyEnabledChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(VisionProxyEnabledKey, value.ToString());
+    }
+
+    partial void OnVisionProxyProviderIdChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(VisionProxyProviderIdKey, value);
+    }
+
+    partial void OnVisionProxyModelIdChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(VisionProxyModelIdKey, value);
+    }
+
     public static string NormalizeWebSearchProvider(string? provider) =>
         string.IsNullOrWhiteSpace(provider)
             ? "duckduckgo"
@@ -210,6 +265,78 @@ public sealed partial class SettingsViewModel : ObservableObject
             Models: JsonSerializer.Serialize(entry.Models),
             Enabled: entry.Enabled,
             SortOrder: entry.SortOrder));
+        RefreshVisionProviderModels();
+    }
+
+    public void UpsertMcpServer(McpServerEntry entry)
+    {
+        var existing = McpServers.FirstOrDefault(s => s.Id == entry.Id);
+        if (existing is not null) McpServers.Remove(existing);
+        McpServers.Add(entry);
+        SaveMcpServers();
+    }
+
+    public void DeleteMcpServer(McpServerEntry entry)
+    {
+        McpServers.Remove(entry);
+        _credentialStore?.RemoveSecret(McpServerSecretPrefix + entry.Id);
+        SaveMcpServers();
+    }
+
+    public IReadOnlyList<McpServerOptions> BuildMcpServerOptions() =>
+        McpServers
+            .Select(s => new McpServerOptions(s.Id, s.Name, s.Url, s.Transport, s.HeaderName, s.Token, s.Enabled))
+            .ToArray();
+
+    public VisionProxyOptions BuildVisionProxyOptions() => new(
+        VisionProxyEnabled,
+        VisionProxyProviderId,
+        VisionProxyModelId);
+
+    public bool IsVisionProxyAvailableFor(ProviderKind? providerKind, ProviderModel? model) =>
+        providerKind == ProviderKind.OpenAICompatible
+        && model?.SupportsToolCalling == true
+        && model.SupportsVision != true
+        && VisionProxyEnabled;
+
+    private void SaveMcpServers()
+    {
+        if (_settingsRepo is null) return;
+        var publicEntries = McpServers.Select(s => s with { Token = null }).ToList();
+        _settingsRepo.Set(ByokMcpServersKey, JsonSerializer.Serialize(publicEntries));
+        if (_credentialStore is null) return;
+        foreach (var server in McpServers)
+        {
+            var key = McpServerSecretPrefix + server.Id;
+            if (string.IsNullOrWhiteSpace(server.Token))
+                _credentialStore.RemoveSecret(key);
+            else
+                _credentialStore.SaveSecret(key, server.Token.Trim());
+        }
+    }
+
+    private void SetOrRemove(string key, string? value)
+    {
+        if (_settingsRepo is null) return;
+        if (string.IsNullOrWhiteSpace(value))
+            _settingsRepo.Remove(key);
+        else
+            _settingsRepo.Set(key, value.Trim());
+    }
+
+    public void RefreshVisionProviderModels()
+    {
+        VisionProviderModels.Clear();
+        foreach (var provider in Providers.Where(p => p.Enabled))
+        {
+            foreach (var model in provider.Models.Where(m => m.Vision))
+            {
+                VisionProviderModels.Add(new VisionProviderModelOption(
+                    provider.Id,
+                    model.Id,
+                    $"{provider.Name} / {model.DisplayName}"));
+            }
+        }
     }
 
     public void Delete(string id)
@@ -263,3 +390,17 @@ public sealed record ProviderModelEntry(
     int? ThinkingBudgetDefault = null,
     string? DefaultEffort = null,
     string? SystemPrompt = null);
+
+public sealed record McpServerEntry(
+    string Id,
+    string Name,
+    string Url,
+    string Transport = "http",
+    string HeaderName = "Authorization",
+    string? Token = null,
+    bool Enabled = true);
+
+public sealed record VisionProviderModelOption(
+    string ProviderId,
+    string ModelId,
+    string Label);

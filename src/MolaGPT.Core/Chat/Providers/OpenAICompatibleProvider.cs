@@ -4,6 +4,9 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.Mcp;
+using MolaGPT.Core.Chat.Tools.Vision;
 using MolaGPT.Core.Models;
 using MolaGPT.Core.Net;
 using MolaGPT.Core.Sse;
@@ -33,6 +36,7 @@ public sealed class OpenAICompatibleProvider : IChatProvider
     public string ChatPath { get; init; } = "v1/chat/completions";
 
     private readonly HttpClient _http;
+    private readonly IChatToolHost? _toolHost;
 
     public OpenAICompatibleProvider(
         string id,
@@ -40,7 +44,8 @@ public sealed class OpenAICompatibleProvider : IChatProvider
         string baseUrl,
         string apiKey,
         IReadOnlyList<ProviderModel> models,
-        HttpClient http)
+        HttpClient http,
+        IChatToolHost? toolHost = null)
     {
         Id = id;
         DisplayName = displayName;
@@ -48,6 +53,7 @@ public sealed class OpenAICompatibleProvider : IChatProvider
         ApiKey = apiKey;
         Models = models;
         _http = http;
+        _toolHost = toolHost;
     }
 
     public void UpdateModels(IReadOnlyList<ProviderModel> models) => Models = models;
@@ -57,11 +63,24 @@ public sealed class OpenAICompatibleProvider : IChatProvider
         [EnumeratorCancellation] CancellationToken ct)
     {
         var localToolOptions = LocalToolOptions.FromExtraBody(request.ExtraBody);
-        var localToolDefinitions = SupportsLocalTools(request.ModelId)
+        var modelSupportsTools = SupportsLocalTools(request.ModelId);
+        var modelSupportsVision = SupportsVision(request.ModelId);
+        var toolContext = new ChatToolContext(request, Id, request.ModelId, modelSupportsVision, Models);
+        var localToolDefinitions = modelSupportsTools
             ? LocalToolRegistry.BuildOpenAiToolDefinitions(localToolOptions)
             : Array.Empty<object>();
-        var useLocalTools = localToolDefinitions.Count > 0;
-        var wireMessages = request.Messages.Select(m => ToOpenAiWireMessage(m, request)).ToList();
+        var extendedToolDefinitions = modelSupportsTools && _toolHost is not null
+            ? await _toolHost.BuildToolDefinitionsAsync(toolContext, localToolOptions, ct).ConfigureAwait(false)
+            : Array.Empty<object>();
+        var toolDefinitions = localToolDefinitions.Concat(extendedToolDefinitions).ToArray();
+        var useLocalTools = toolDefinitions.Length > 0;
+        var replaceImagesWithText = !modelSupportsVision && localToolOptions.Vision?.Enabled == true;
+        // Image ordinal runs globally across all messages so the [图片#N]
+        // placeholders line up with VisionProxyTool's flat enumeration order.
+        var imageOrdinal = 0;
+        var wireMessages = new List<object>(request.Messages.Count);
+        foreach (var m in request.Messages)
+            wireMessages.Add(ToOpenAiWireMessage(m, request, replaceImagesWithText, ref imageOrdinal));
         const int MaxLocalToolTurns = 64;
         var maxToolTurns = useLocalTools ? MaxLocalToolTurns : 1;
 
@@ -71,7 +90,7 @@ public sealed class OpenAICompatibleProvider : IChatProvider
             var body = BuildRequestBody(request, wireMessages);
             if (useLocalTools)
             {
-                body["tools"] = localToolDefinitions;
+                body["tools"] = toolDefinitions;
                 body["tool_choice"] = "auto";
             }
 
@@ -226,11 +245,11 @@ public sealed class OpenAICompatibleProvider : IChatProvider
             {
                 var name = string.IsNullOrWhiteSpace(toolCall.Name) ? "unknown" : toolCall.Name;
                 yield return new ChatChunk(Tool: BuildToolDelta(toolCall, localToolOptions, "running"));
-                var result = await LocalToolRegistry.ExecuteAsync(
+                var result = await ExecuteToolAsync(
                     name,
                     toolCall.Arguments.ToString(),
+                    toolContext,
                     localToolOptions,
-                    _http,
                     ct).ConfigureAwait(false);
                 yield return new ChatChunk(Tool: BuildToolDelta(
                     toolCall,
@@ -306,18 +325,40 @@ public sealed class OpenAICompatibleProvider : IChatProvider
     private bool SupportsLocalTools(string modelId) =>
         Models.FirstOrDefault(m => m.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase))?.SupportsToolCalling == true;
 
+    private bool SupportsVision(string modelId) =>
+        Models.FirstOrDefault(m => m.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase))?.SupportsVision == true;
+
+    private Task<string> ExecuteToolAsync(
+        string name,
+        string argumentsJson,
+        ChatToolContext context,
+        LocalToolOptions options,
+        CancellationToken ct)
+    {
+        if (name is "search_web" or "web_fetch")
+            return LocalToolRegistry.ExecuteAsync(name, argumentsJson, options, _http, ct);
+
+        return _toolHost is null
+            ? Task.FromResult(JsonSerializer.Serialize(new
+            {
+                success = false,
+                error = $"Unknown local tool: {name}"
+            }))
+            : _toolHost.ExecuteAsync(name, argumentsJson, context, options, ct);
+    }
+
     private static bool ShouldPassReasoningContent(ChatRequest request, string role, string? reasoningContent) =>
         request.UseThinking == true
         && request.ThinkingParamKind == ThinkingParamKind.DeepSeekV4
         && role == ChatMessage.RoleAssistant
         && !string.IsNullOrWhiteSpace(reasoningContent);
 
-    private static object ToOpenAiWireMessage(ChatMessage message, ChatRequest request)
+    private static object ToOpenAiWireMessage(ChatMessage message, ChatRequest request, bool replaceImagesWithText, ref int imageOrdinal)
     {
         var wire = new Dictionary<string, object?>
         {
             ["role"] = message.Role,
-            ["content"] = OpenAiMessageContentBuilder.Build(message)
+            ["content"] = OpenAiMessageContentBuilder.Build(message, replaceImagesWithText, ref imageOrdinal)
         };
         if (ShouldPassReasoningContent(request, message.Role, message.ReasoningContent))
             wire["reasoning_content"] = message.ReasoningContent;
@@ -448,6 +489,10 @@ public sealed class OpenAICompatibleProvider : IChatProvider
 
             if (name == "web_fetch")
                 return ReadString(root, "url") ?? "等待网页地址";
+            if (name == VisionProxyTool.ToolName)
+                return ReadString(root, "query") ?? "查看图片";
+            if (McpToolName.TryDecode(name, out var server, out var tool))
+                return $"{server} / {tool}";
         }
         catch (JsonException) { }
 
@@ -473,6 +518,10 @@ public sealed class OpenAICompatibleProvider : IChatProvider
         }
         if (name == "web_fetch")
             return "读取页面标题、正文和链接";
+        if (name == VisionProxyTool.ToolName)
+            return "通过视觉模型读取图片";
+        if (McpToolName.TryDecode(name, out var server, out _))
+            return $"MCP: {server}";
         return null;
     }
 

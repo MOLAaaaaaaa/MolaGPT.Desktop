@@ -1,0 +1,129 @@
+<Window x:Class="MolaGPT.Desktop.Views.McpServerDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="MCP 服务器"
+        Width="520" Height="500"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        ResizeMode="NoResize"
+        Background="Transparent"
+        FontFamily="{DynamicResource Font.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+    <Grid Margin="24">
+        <Border Style="{StaticResource ModalWindowGlow}" />
+        <Border Style="{StaticResource ModalWindowSurface}" Padding="0">
+            <DockPanel LastChildFill="True">
+                <!-- Header -->
+                <Border DockPanel.Dock="Top"
+                        Padding="20,14"
+                        BorderBrush="{DynamicResource Brush.Divider}"
+                        BorderThickness="0,0,0,1"
+                        MouseLeftButtonDown="Header_MouseLeftButtonDown">
+                    <Grid>
+                        <TextBlock x:Name="DialogTitle"
+                                   Text="添加 MCP 服务器"
+                                   FontSize="{DynamicResource Font.Size.Heading}"
+                                   FontWeight="SemiBold" />
+                        <Button HorizontalAlignment="Right"
+                                Style="{StaticResource HeaderIconButton}"
+                                Click="CancelClick">
+                            <TextBlock Text="&#xE711;" FontFamily="{DynamicResource Font.Icon}" FontSize="14" />
+                        </Button>
+                    </Grid>
+                </Border>
+
+                <!-- Footer buttons -->
+                <Border DockPanel.Dock="Bottom"
+                        Padding="20,12"
+                        BorderBrush="{DynamicResource Brush.Divider}"
+                        BorderThickness="0,1,0,0">
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button Style="{StaticResource OutlineButton}"
+                                Content="取消"
+                                Width="80"
+                                Margin="0,0,8,0"
+                                Click="CancelClick" />
+                        <Button Style="{StaticResource PillPrimaryButton}"
+                                Content="保存"
+                                Width="100"
+                                Click="SaveClick" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Content -->
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20,16">
+                    <StackPanel>
+                        <TextBlock Text="名称" Margin="0,0,0,4"
+                                   Foreground="{DynamicResource Brush.Text.Secondary}" />
+                        <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                                CornerRadius="{DynamicResource Radius.Sm}"
+                                Padding="12,8" Margin="0,0,0,12">
+                            <TextBox x:Name="NameBox" Style="{StaticResource InlineTextBox}" />
+                        </Border>
+
+                        <TextBlock Text="服务器地址 (URL)" Margin="0,0,0,4"
+                                   Foreground="{DynamicResource Brush.Text.Secondary}" />
+                        <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                                CornerRadius="{DynamicResource Radius.Sm}"
+                                Padding="12,8" Margin="0,0,0,4">
+                            <TextBox x:Name="UrlBox" Style="{StaticResource InlineTextBox}" />
+                        </Border>
+                        <TextBlock Text="远程地址需使用 https://；本地服务器可用 http://localhost"
+                                   FontSize="{DynamicResource Font.Size.XSmall}"
+                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                   Margin="0,0,0,12" />
+
+                        <TextBlock Text="鉴权（可选）" Margin="0,0,0,6"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource Brush.Text.Secondary}" />
+                        <Grid Margin="0,0,0,12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="160" />
+                                <ColumnDefinition Width="12" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="请求头名称" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                    <TextBox x:Name="HeaderBox" Style="{StaticResource InlineTextBox}" Text="Authorization" />
+                                </Border>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="Token" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                    <PasswordBox x:Name="TokenBox"
+                                                 Background="Transparent"
+                                                 BorderThickness="0"
+                                                 Foreground="{DynamicResource Brush.Text.Primary}"
+                                                 FontFamily="{DynamicResource Font.UI}"
+                                                 FontSize="{DynamicResource Font.Size.Body}" />
+                                </Border>
+                            </StackPanel>
+                        </Grid>
+
+                        <CheckBox x:Name="EnabledBox" Content="启用此服务器" IsChecked="True"
+                                  Foreground="{DynamicResource Brush.Text.Primary}"
+                                  Margin="0,4,0,12" />
+
+                        <DockPanel LastChildFill="True">
+                            <Button DockPanel.Dock="Right"
+                                    x:Name="TestButton"
+                                    Style="{StaticResource OutlineButton}"
+                                    Content="测试连接"
+                                    Width="110"
+                                    Click="TestClick" />
+                            <TextBlock x:Name="TestStatusText"
+                                       VerticalAlignment="Center"
+                                       TextWrapping="Wrap"
+                                       FontSize="{DynamicResource Font.Size.Small}"
+                                       Foreground="{DynamicResource Brush.Text.Muted}" />
+                        </DockPanel>
+                    </StackPanel>
+                </ScrollViewer>
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>

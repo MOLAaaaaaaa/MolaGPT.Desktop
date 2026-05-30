@@ -5,6 +5,8 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using Microsoft.Extensions.DependencyInjection;
+using MolaGPT.Storage;
 using MolaGPT.ViewModels;
 
 namespace MolaGPT.Desktop.Views;
@@ -185,20 +187,33 @@ public partial class MessageItemView : UserControl
 
     /// <summary>
     /// Click on a sent attachment card: opens the fullscreen image preview for
-    /// image attachments. In-memory bytes preferred (BYOK + just-sent), falls
-    /// back to <see cref="AttachmentChip.ThumbnailUrl"/> for MolaGPT-mode
-    /// messages reloaded from SQLite. Non-image / non-previewable cards are
-    /// no-ops.
+    /// image attachments. In-memory bytes preferred (just-sent, no disk hit);
+    /// on reload, BYOK images re-read from the local <c>AttachmentStore</c> via
+    /// <see cref="AttachmentChip.LocalName"/>, MolaGPT-mode images fall back to
+    /// <see cref="AttachmentChip.ThumbnailUrl"/>. Non-previewable cards no-op.
     /// </summary>
     private void OnAttachmentCardClick(object sender, MouseButtonEventArgs e)
     {
         if (sender is not FrameworkElement fe || fe.DataContext is not AttachmentChip chip) return;
         if (!chip.HasInlinePreview) return;
 
+        var owner = Window.GetWindow(this);
         if (chip.Bytes is { Length: > 0 })
-            ImagePreviewWindow.Show(Window.GetWindow(this), chip.Bytes, chip.FileName);
+        {
+            ImagePreviewWindow.Show(owner, chip.Bytes, chip.FileName);
+        }
+        else if (!string.IsNullOrWhiteSpace(chip.LocalName))
+        {
+            var bytes = App.Services.GetRequiredService<AttachmentStore>().Load(chip.LocalName);
+            if (bytes is { Length: > 0 })
+                ImagePreviewWindow.Show(owner, bytes, chip.FileName);
+            else if (!string.IsNullOrWhiteSpace(chip.ThumbnailUrl))
+                ImagePreviewWindow.Show(owner, chip.ThumbnailUrl!, chip.FileName);
+        }
         else if (!string.IsNullOrWhiteSpace(chip.ThumbnailUrl))
-            ImagePreviewWindow.Show(Window.GetWindow(this), chip.ThumbnailUrl!, chip.FileName);
+        {
+            ImagePreviewWindow.Show(owner, chip.ThumbnailUrl!, chip.FileName);
+        }
 
         e.Handled = true;
     }

@@ -15,6 +15,9 @@ using Microsoft.Extensions.Hosting;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Providers;
+using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.Mcp;
+using MolaGPT.Core.Chat.Tools.Vision;
 using MolaGPT.Core.Models;
 using MolaGPT.Desktop.Services;
 using MolaGPT.Desktop.Views;
@@ -473,6 +476,13 @@ public partial class App : Application
         });
 
         services.AddSingleton<BackgroundStreamService>();
+        services.AddSingleton(sp => new McpHttpClient(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient)));
+        services.AddSingleton<McpClientManager>();
+        services.AddSingleton(sp => new VisionProxyTool(
+            sp.GetRequiredService<ProviderRegistry>(),
+            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient)));
+        services.AddSingleton<IChatToolHost, ChatToolHost>();
 
         services.AddSingleton(sp => new ConversationListViewModel(
             sp.GetRequiredService<ConversationRepository>(),
@@ -484,11 +494,13 @@ public partial class App : Application
             sp.GetRequiredService<MessageRepository>(),
             sp.GetRequiredService<ConversationRepository>(),
             sp.GetRequiredService<PersonaListViewModel>()));
+        services.AddSingleton(_ => new AttachmentStore());
         services.AddSingleton(sp => new ComposerViewModel(
             sp.GetRequiredService<ChatViewModel>(),
             sp.GetRequiredService<BackgroundStreamService>(),
             sp.GetRequiredService<SettingsViewModel>(),
-            sp.GetRequiredService<PersonaListViewModel>()));
+            sp.GetRequiredService<PersonaListViewModel>(),
+            sp.GetRequiredService<AttachmentStore>()));
         services.AddSingleton(sp => new SettingsViewModel(
             sp.GetRequiredService<ProviderRepository>(),
             sp.GetRequiredService<CredentialStore>(),
@@ -548,7 +560,8 @@ public partial class App : Application
                 sp.GetRequiredService<CloudSyncService>(),
                 sp.GetRequiredService<ConversationListViewModel>(),
                 sp.GetRequiredService<PersonaListViewModel>(),
-                factory);
+                factory,
+                sp.GetRequiredService<IChatToolHost>());
         });
         services.AddTransient(sp =>
             new AboutWindow(
@@ -581,7 +594,8 @@ public partial class App : Application
                     {
                         "openai" => OpenAIProvider.Create(row.Id, row.Name, apiKey, models, client, row.BaseUrl),
                         "openai-compat" => new OpenAICompatibleProvider(row.Id, row.Name,
-                            row.BaseUrl ?? OpenAIProvider.DefaultBaseUrl, apiKey, models, client),
+                            row.BaseUrl ?? OpenAIProvider.DefaultBaseUrl, apiKey, models, client,
+                            Services.GetService<IChatToolHost>()),
                         "anthropic" => new AnthropicProvider(row.Id, row.Name, apiKey, models, client, row.BaseUrl),
                         "gemini" => GeminiProvider.Create(row.Id, row.Name, apiKey, models, client, row.BaseUrl),
                         _ => null

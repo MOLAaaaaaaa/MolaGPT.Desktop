@@ -793,19 +793,24 @@
                         </Grid>
                     </TabItem>
 
-                    <TabItem Header="联网搜索">
+                    <TabItem Header="工具与能力">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="32,24" MaxWidth="680" HorizontalAlignment="Left">
-                                <TextBlock Text="搜索服务"
+                                <TextBlock Text="工具与能力"
                                            FontSize="{DynamicResource Font.Size.Heading}"
                                            FontWeight="SemiBold"
                                            Margin="0,0,0,6"
                                            Foreground="{DynamicResource Brush.Text.Primary}" />
-                                <TextBlock Text="为自定义模型的联网能力选择搜索服务。DuckDuckGo 无需配置；Tavily / Exa 填入 API Key 后能返回更稳定、更适合模型阅读的结果。"
+                                <TextBlock Text="为自定义模型扩展联网、外部工具与视觉能力。以下能力仅对支持工具调用的自定义（BYOK）模型生效，与 MolaGPT 账号模式互不影响。"
                                            TextWrapping="Wrap"
-                                           Margin="0,0,0,16"
+                                           Margin="0,0,0,20"
                                            FontSize="{DynamicResource Font.Size.Small}"
                                            Foreground="{DynamicResource Brush.Text.Muted}" />
+
+                                <TextBlock Text="联网搜索"
+                                           FontWeight="SemiBold"
+                                           Margin="0,0,0,8"
+                                           Foreground="{DynamicResource Brush.Text.Primary}" />
 
                                 <Border Background="{DynamicResource Brush.Bg.Secondary}"
                                         BorderBrush="{DynamicResource Brush.Border.Subtle}"
@@ -906,13 +911,189 @@
                                     </StackPanel>
                                 </Border>
 
+                                <TextBlock Text="MCP 服务器"
+                                           FontWeight="SemiBold"
+                                           Margin="0,8,0,8"
+                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+
+                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                        BorderThickness="1"
+                                        CornerRadius="{DynamicResource Radius.Md}"
+                                        Padding="18,16"
+                                        Margin="0,0,0,16">
+                                    <StackPanel>
+                                        <Grid Margin="0,0,0,12">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                                <TextBlock Text="已连接的服务器"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+                                                <TextBlock Text="通过 Model Context Protocol 接入外部工具"
+                                                           FontSize="{DynamicResource Font.Size.Small}"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                                           Margin="0,3,0,0" />
+                                            </StackPanel>
+                                            <Button Grid.Column="1"
+                                                    Style="{StaticResource OutlineButton}"
+                                                    Content="添加服务器"
+                                                    Width="120"
+                                                    VerticalAlignment="Center"
+                                                    Click="AddMcpServerClick" />
+                                        </Grid>
+
+                                        <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                                                BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                                BorderThickness="1"
+                                                CornerRadius="{DynamicResource Radius.Sm}"
+                                                Padding="6">
+                                            <Grid>
+                                                <TextBlock x:Name="McpEmptyHint"
+                                                           Text="尚未添加任何 MCP 服务器"
+                                                           Margin="10,18"
+                                                           HorizontalAlignment="Center"
+                                                           FontSize="{DynamicResource Font.Size.Small}"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}" />
+                                                <ItemsControl x:Name="McpServersList">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Border Background="{DynamicResource Brush.Bg.Elevated}"
+                                                                    BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                                                    BorderThickness="1"
+                                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                                    Padding="12,9"
+                                                                    Margin="0,0,0,4">
+                                                                <Grid>
+                                                                    <Grid.ColumnDefinitions>
+                                                                        <ColumnDefinition Width="Auto" />
+                                                                        <ColumnDefinition Width="*" />
+                                                                        <ColumnDefinition Width="Auto" />
+                                                                        <ColumnDefinition Width="Auto" />
+                                                                    </Grid.ColumnDefinitions>
+                                                                    <Ellipse Grid.Column="0"
+                                                                             Width="8" Height="8"
+                                                                             Margin="0,0,10,0"
+                                                                             VerticalAlignment="Center">
+                                                                        <Ellipse.Style>
+                                                                            <Style TargetType="Ellipse">
+                                                                                <Setter Property="Fill" Value="{DynamicResource Brush.Text.Muted}" />
+                                                                                <Style.Triggers>
+                                                                                    <DataTrigger Binding="{Binding Enabled}" Value="True">
+                                                                                        <Setter Property="Fill" Value="{DynamicResource Brush.Success}" />
+                                                                                    </DataTrigger>
+                                                                                </Style.Triggers>
+                                                                            </Style>
+                                                                        </Ellipse.Style>
+                                                                    </Ellipse>
+                                                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                                                        <TextBlock Text="{Binding Name}"
+                                                                                   FontWeight="SemiBold"
+                                                                                   FontSize="{DynamicResource Font.Size.Small}"
+                                                                                   Foreground="{DynamicResource Brush.Text.Primary}" />
+                                                                        <TextBlock Text="{Binding Url}"
+                                                                                   FontSize="{DynamicResource Font.Size.XSmall}"
+                                                                                   TextTrimming="CharacterEllipsis"
+                                                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                                                   Margin="0,2,0,0" />
+                                                                    </StackPanel>
+                                                                    <Button Grid.Column="2"
+                                                                            Style="{StaticResource InlineActionButton}"
+                                                                            Margin="4,0,0,0"
+                                                                            ToolTip="编辑"
+                                                                            Tag="{Binding}"
+                                                                            Click="EditMcpServerClick">
+                                                                        <TextBlock Text="&#xE70F;" FontFamily="{DynamicResource Font.Icon}" FontSize="13" />
+                                                                    </Button>
+                                                                    <Button Grid.Column="3"
+                                                                            Style="{StaticResource InlineActionButton}"
+                                                                            Margin="2,0,0,0"
+                                                                            ToolTip="删除"
+                                                                            Tag="{Binding}"
+                                                                            Click="DeleteMcpServerClick">
+                                                                        <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource Font.Icon}" FontSize="13" />
+                                                                    </Button>
+                                                                </Grid>
+                                                            </Border>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                            </Grid>
+                                        </Border>
+
+                                        <TextBlock Text="仅支持 HTTP (Streamable HTTP) 类型。其工具会自动提供给支持工具调用的自定义模型使用。"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,10,0,0"
+                                                   FontSize="{DynamicResource Font.Size.Small}"
+                                                   Foreground="{DynamicResource Brush.Text.Muted}" />
+                                    </StackPanel>
+                                </Border>
+
+                                <TextBlock Text="外挂视觉"
+                                           FontWeight="SemiBold"
+                                           Margin="0,8,0,8"
+                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+
+                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                        BorderThickness="1"
+                                        CornerRadius="{DynamicResource Radius.Md}"
+                                        Padding="18,16"
+                                        Margin="0,0,0,16">
+                                    <StackPanel>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                                <TextBlock Text="图片识别工具"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+                                                <TextBlock Text="开启后，纯文本输入模型可调用该工具来识别用户发送的图片"
+                                                           FontSize="{DynamicResource Font.Size.Small}"
+                                                           TextWrapping="Wrap"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                                           Margin="0,3,0,0" />
+                                            </StackPanel>
+                                            <CheckBox Grid.Column="1"
+                                                      x:Name="VisionEnabledToggle"
+                                                      IsChecked="{Binding VisionProxyEnabled, Mode=TwoWay}"
+                                                      VerticalAlignment="Center"
+                                                      Margin="12,0,0,0" />
+                                        </Grid>
+
+                                        <StackPanel x:Name="VisionConfigPanel"
+                                                    Margin="0,16,0,0"
+                                                    IsEnabled="{Binding IsChecked, ElementName=VisionEnabledToggle}">
+                                            <TextBlock Text="视觉模型"
+                                                       FontSize="{DynamicResource Font.Size.Small}"
+                                                       Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                       Margin="0,0,0,8" />
+                                            <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                    Padding="12,4">
+                                                <ComboBox x:Name="VisionExistingModelCombo"
+                                                          Style="{StaticResource SettingsComboBox}"
+                                                          Background="Transparent"
+                                                          BorderThickness="0"
+                                                          Padding="0,6"
+                                                          DisplayMemberPath="Label"
+                                                          SelectionChanged="VisionExistingModelCombo_SelectionChanged" />
+                                            </Border>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+
                                 <Border Background="{DynamicResource Brush.Primary.Blockquote}"
                                         BorderBrush="{DynamicResource Brush.Primary.Border}"
                                         BorderThickness="1"
                                         CornerRadius="{DynamicResource Radius.Md}"
                                         Padding="14,12">
                                     <StackPanel>
-                                        <TextBlock Text="当前可用能力"
+                                        <TextBlock Text="内置工具"
                                                    FontWeight="SemiBold"
                                                    Foreground="{DynamicResource Brush.Text.Primary}"
                                                    Margin="0,0,0,8" />
@@ -922,6 +1103,9 @@
                                             </Border>
                                             <Border Background="{DynamicResource Brush.Bg.Elevated}" BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="10,5" Margin="0,0,8,8">
                                                 <TextBlock Text="网页阅读" FontSize="{DynamicResource Font.Size.Small}" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                            </Border>
+                                            <Border Background="{DynamicResource Brush.Bg.Elevated}" BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="10,5" Margin="0,0,8,8">
+                                                <TextBlock Text="外挂视觉" FontSize="{DynamicResource Font.Size.Small}" Foreground="{DynamicResource Brush.Text.Secondary}" />
                                             </Border>
                                         </WrapPanel>
                                     </StackPanel>

@@ -9,6 +9,8 @@ using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Providers;
+using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Models;
 using MolaGPT.Core.Net;
 using MolaGPT.Desktop.Services;
@@ -24,6 +26,7 @@ public partial class SettingsWindow : Window
     private readonly MolaGptAuthService _auth;
     private readonly Func<HttpClient> _byokHttpFactory;
     private readonly ProviderRegistry _registry;
+    private readonly IChatToolHost _toolHost;
     private readonly CloudSyncService _cloudSync;
     private readonly ConversationListViewModel _conversationList;
     private ProviderEntry? _editing;
@@ -106,7 +109,8 @@ public partial class SettingsWindow : Window
         CloudSyncService cloudSync,
         ConversationListViewModel conversationList,
         PersonaListViewModel personas,
-        Func<HttpClient> byokHttpFactory)
+        Func<HttpClient> byokHttpFactory,
+        IChatToolHost toolHost)
     {
         InitializeComponent();
         _vm = vm;
@@ -116,6 +120,7 @@ public partial class SettingsWindow : Window
         _cloudSync = cloudSync;
         _conversationList = conversationList;
         _byokHttpFactory = byokHttpFactory;
+        _toolHost = toolHost;
         DataContext = vm;
         ProviderPresetCombo.ItemsSource = ProviderPresets;
         // The persona tab uses _personas as its DataContext so bindings inside
@@ -145,11 +150,109 @@ public partial class SettingsWindow : Window
         {
             SelectWebSearchProvider(_vm.WebSearchProvider);
             WebSearchApiKeyBox.Password = _vm.WebSearchApiKey ?? string.Empty;
+            McpServersList.ItemsSource = _vm.McpServers;
+            _vm.McpServers.CollectionChanged += (_, _) => UpdateMcpEmptyHint();
+            UpdateMcpEmptyHint();
+            PopulateVisionCombo();
+            SelectVisionModel();
             UpdateWebSearchStatusHint();
         }
         finally
         {
             _updatingWebSearchUi = false;
+        }
+    }
+
+    private void UpdateMcpEmptyHint() =>
+        McpEmptyHint.Visibility = _vm.McpServers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    private void PopulateVisionCombo()
+    {
+        VisionExistingModelCombo.Items.Clear();
+        foreach (var model in _vm.VisionProviderModels)
+            VisionExistingModelCombo.Items.Add(model);
+
+        if (_vm.VisionProviderModels.Count > 0)
+            VisionExistingModelCombo.Items.Add(new Separator());
+
+        var manageItem = new ComboBoxItem
+        {
+            Content = "模型管理...",
+            Tag = VisionManageModelsTag,
+            FontWeight = FontWeights.SemiBold
+        };
+        VisionExistingModelCombo.Items.Add(manageItem);
+    }
+
+    private void SelectVisionModel()
+    {
+        foreach (var item in VisionExistingModelCombo.Items)
+        {
+            if (item is VisionProviderModelOption option
+                && string.Equals(option.ProviderId, _vm.VisionProxyProviderId, StringComparison.Ordinal)
+                && string.Equals(option.ModelId, _vm.VisionProxyModelId, StringComparison.Ordinal))
+            {
+                VisionExistingModelCombo.SelectedItem = item;
+                return;
+            }
+        }
+    }
+
+    private McpHttpClient CreateMcpClient() => new(_byokHttpFactory());
+
+    private void AddMcpServerClick(object sender, RoutedEventArgs e)
+    {
+        var dlg = new McpServerDialog();
+        dlg.ShowEdit(null, this, CreateMcpClient);
+        if (dlg.Entry is not null)
+            _vm.UpsertMcpServer(dlg.Entry);
+    }
+
+    private void EditMcpServerClick(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not McpServerEntry entry) return;
+        var dlg = new McpServerDialog();
+        dlg.ShowEdit(entry, this, CreateMcpClient);
+        if (dlg.Entry is not null)
+            _vm.UpsertMcpServer(dlg.Entry);
+    }
+
+    private void DeleteMcpServerClick(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is McpServerEntry entry)
+            _vm.DeleteMcpServer(entry);
+    }
+
+    private const string VisionManageModelsTag = "__manage_models__";
+
+    private void VisionExistingModelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_updatingWebSearchUi) return;
+
+        if (VisionExistingModelCombo.SelectedItem is ComboBoxItem cbi
+            && string.Equals(cbi.Tag?.ToString(), VisionManageModelsTag, StringComparison.Ordinal))
+        {
+            if (e.RemovedItems.Count > 0)
+                VisionExistingModelCombo.SelectedItem = e.RemovedItems[0];
+            NavigateToTab("模型服务");
+            return;
+        }
+
+        if (VisionExistingModelCombo.SelectedItem is not VisionProviderModelOption option)
+            return;
+        _vm.VisionProxyProviderId = option.ProviderId;
+        _vm.VisionProxyModelId = option.ModelId;
+    }
+
+    private void NavigateToTab(string header)
+    {
+        foreach (TabItem tab in SettingsTabs.Items)
+        {
+            if (string.Equals(tab.Header?.ToString(), header, StringComparison.Ordinal))
+            {
+                tab.IsSelected = true;
+                return;
+            }
         }
     }
 
@@ -433,6 +536,8 @@ public partial class SettingsWindow : Window
         var existing = _vm.Providers.FirstOrDefault(p => p.Id == entry.Id);
         if (existing is not null) _vm.Providers.Remove(existing);
         _vm.Providers.Add(entry);
+        _vm.RefreshVisionProviderModels();
+        PopulateVisionCombo();
         _editing = entry;
 
         // Push runtime registration so the model selector picks it up immediately.
@@ -450,6 +555,8 @@ public partial class SettingsWindow : Window
         if (_editing is null) return;
         _vm.Delete(_editing.Id);
         _registry.Unregister(_editing.Id);
+        _vm.RefreshVisionProviderModels();
+        PopulateVisionCombo();
         _editing = null;
         ProviderEditor.IsEnabled = false;
     }
@@ -608,7 +715,7 @@ public partial class SettingsWindow : Window
         return entry.Type switch
         {
             "openai" or "openai-compat" or "openai-response" =>
-                new OpenAICompatibleProvider(entry.Id, entry.Name, entry.BaseUrl ?? OpenAIProvider.DefaultBaseUrl, entry.ApiKey ?? "", models, http),
+                new OpenAICompatibleProvider(entry.Id, entry.Name, entry.BaseUrl ?? OpenAIProvider.DefaultBaseUrl, entry.ApiKey ?? "", models, http, _toolHost),
             "anthropic" => new AnthropicProvider(entry.Id, entry.Name, entry.ApiKey ?? "", models, http, entry.BaseUrl),
             "gemini" => GeminiProvider.Create(entry.Id, entry.Name, entry.ApiKey ?? "", models, http, entry.BaseUrl),
             _ => null

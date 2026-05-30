@@ -704,23 +704,38 @@ public sealed record MessageAttempt(string Content, string? ModelLabel, Usage? U
 /// <summary>
 /// Lightweight representation of a sent attachment, kept on the message
 /// view-model after the original <see cref="MolaGPT.Core.Models.Attachment"/>
-/// (with full <see cref="byte"/> array) has been released. Persisted via
-/// <c>attachments_json</c> as <c>{ filename, label, thumbnailUrl }</c> only —
-/// the optional <see cref="Bytes"/> field is in-memory only so users can
-/// preview an image they just sent in the same session (esp. BYOK where there
-/// is no <see cref="ThumbnailUrl"/>). On reload from SQLite, <see cref="Bytes"/>
-/// is null; MolaGPT-mode messages still preview via <see cref="ThumbnailUrl"/>.
+/// (with full <see cref="byte"/> array) has been released.
+///
+/// Persisted in message meta as <c>{ filename, label, thumbnailUrl, localName,
+/// mime }</c>. Three preview/reload paths:
+///   - <see cref="Bytes"/> — in-memory only, set right after sending so the
+///     just-sent image previews without a disk round-trip;
+///   - <see cref="LocalName"/> — BYOK images are content-addressed into the
+///     local <c>AttachmentStore</c>; survives reload (bytes re-read from disk);
+///   - <see cref="ThumbnailUrl"/> — MolaGPT-account images carry a server URL.
 /// </summary>
 public sealed record AttachmentChip(string FileName, string Label, string? ThumbnailUrl = null)
 {
     public byte[]? Bytes { get; init; }
 
+    /// <summary>Relative file name in the local AttachmentStore (BYOK images).
+    /// Null for MolaGPT-account images (which use <see cref="ThumbnailUrl"/>).</summary>
+    public string? LocalName { get; init; }
+
+    /// <summary>MIME type, persisted so reloaded bytes can be re-encoded as a
+    /// data URL for the wire without re-sniffing.</summary>
+    public string? MimeType { get; init; }
+
     public bool IsImage =>
         Bytes is { Length: > 0 }
+        || !string.IsNullOrEmpty(LocalName)
         || !string.IsNullOrEmpty(ThumbnailUrl)
         || string.Equals(Label, "图片", StringComparison.Ordinal);
 
-    public bool HasInlinePreview => Bytes is { Length: > 0 } || !string.IsNullOrEmpty(ThumbnailUrl);
+    public bool HasInlinePreview =>
+        Bytes is { Length: > 0 }
+        || !string.IsNullOrEmpty(LocalName)
+        || !string.IsNullOrEmpty(ThumbnailUrl);
 }
 public sealed record ThinkingSegmentDelta(string Source, int ContentOffset, double ElapsedSeconds = 0, int? TimelineIndex = null);
 
