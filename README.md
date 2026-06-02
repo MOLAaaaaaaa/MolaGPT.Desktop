@@ -18,6 +18,7 @@ MolaGPT Desktop 是 [MolaGPT](https://chatgpt.wljay.cn) 的原生 Windows 桌面
 - 本地 SQLite 保存对话、消息、设置和 Provider 配置。
 - 流式 Markdown 渲染，支持代码块、数学公式、引用、思考过程和工具调用状态。
 - 支持图片/文件附件、网页阅读、联网搜索、后台流式任务和对话同步。
+- 支持图像生成工作台、图像生成/编辑工具，以及自定义图像服务 Provider。
 
 ## 界面预览
 
@@ -28,6 +29,10 @@ MolaGPT Desktop 是 [MolaGPT](https://chatgpt.wljay.cn) 的原生 Windows 桌面
 ### 工具使用
 
 ![工具使用](docs/images/readme/tools.png)
+
+### 图像生成工作台
+
+![图像生成工作台](docs/images/readme/image-workbench.png)
 
 ## 网络模式
 
@@ -40,6 +45,8 @@ MolaGPT Desktop 是 [MolaGPT](https://chatgpt.wljay.cn) 的原生 Windows 桌面
 你可以添加自己的 API Key，并配置 OpenAI-compatible、Anthropic、Gemini 等 Provider。BYOK 模式下，请求会直接发送到你配置的服务端点。
 
 两个模式可以同时存在，并且可以在模型选择器中随时切换。
+
+图像生成 Provider 可以单独配置聊天接口、图像生成接口、图像编辑接口和接口格式，适合接入 OpenAI Images、OpenRouter、Gemini 或其他 OpenAI-compatible 图像服务。
 
 ## 本地数据
 
@@ -58,9 +65,6 @@ src/
   MolaGPT.Core/          Provider 抽象、认证、SSE、模型协议
   MolaGPT.Storage/       SQLite 仓储和本地凭据存储
   MolaGPT.ViewModels/    MVVM 状态和应用工作流
-tests/
-  MolaGPT.Core.Tests/
-  MolaGPT.Storage.Tests/
 ```
 
 ## 构建
