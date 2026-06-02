@@ -176,7 +176,7 @@ public partial class MessageItemView : UserControl
     private static string GetCleanMarkdownForCopy(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
-        var text = raw;
+        var text = MessageViewModel.StripSystemHints(raw);
         text = Regex.Replace(text, @"<ref\s+source=""[^""]*""(?:\s*/>|>[\s\S]*?</ref>)", string.Empty, RegexOptions.IgnoreCase);
         text = Regex.Replace(text, @"<blockquote\s+class=""[^""]*\btool-status\b[^""]*""[^>]*>[\s\S]*?</blockquote>", string.Empty, RegexOptions.IgnoreCase);
         text = Regex.Replace(text, @"<DSanalysis\b[^>]*>[\s\S]*?</DSanalysis>", string.Empty, RegexOptions.IgnoreCase);

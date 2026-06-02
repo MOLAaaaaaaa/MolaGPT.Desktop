@@ -53,6 +53,22 @@ public sealed class ProviderTypeToLabelConverter : IValueConverter
         throw new NotSupportedException();
 }
 
+// Maps a provider's Purpose ("chat" | "image") to a grouped-list header label.
+public sealed class PurposeToGroupLabelConverter : IValueConverter
+{
+    public static readonly PurposeToGroupLabelConverter Instance = new();
+
+    public object Convert(object? value, Type targetType, object parameter, CultureInfo culture) =>
+        value?.ToString() switch
+        {
+            "image" => "图像生成",
+            _ => "对话模型"
+        };
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}
+
 public sealed class BadgeBackgroundConverter : IValueConverter
 {
     public static readonly BadgeBackgroundConverter Instance = new();

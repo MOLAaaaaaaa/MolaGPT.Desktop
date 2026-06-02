@@ -84,15 +84,15 @@ internal static class MolaGptMarkupBlocks
     /// While the block is still streaming (<see cref="MolaGptMarkupSplitter.MarkupUnit.IsClosed"/>
     /// is false) the header reads "工具运行中…" so the user knows it is live.
     /// </summary>
-    public static UIElement BuildDsAnalysis(MolaGptMarkupSplitter.MarkupUnit unit, FrameworkElement resourceHost)
+    public static UIElement BuildDsAnalysis(MolaGptMarkupSplitter.MarkupUnit unit, FrameworkElement resourceHost, bool hasFollowingContent = false)
     {
-        return new DsAnalysisCard(unit, resourceHost);
+        return new DsAnalysisCard(unit, resourceHost, hasFollowingContent);
     }
 
-    public static bool TryUpdateDsAnalysis(UIElement element, MolaGptMarkupSplitter.MarkupUnit unit, FrameworkElement resourceHost)
+    public static bool TryUpdateDsAnalysis(UIElement element, MolaGptMarkupSplitter.MarkupUnit unit, FrameworkElement resourceHost, bool hasFollowingContent = false)
     {
         if (element is not DsAnalysisCard card) return false;
-        card.Update(unit, resourceHost);
+        card.Update(unit, resourceHost, hasFollowingContent);
         return true;
     }
 
@@ -962,8 +962,9 @@ internal static class MolaGptMarkupBlocks
         private bool _userToggled;
         private bool _hasBody;
         private bool _wasClosed;
+        private bool _autoCollapsed;
 
-        public DsAnalysisCard(MolaGptMarkupSplitter.MarkupUnit unit, FrameworkElement host)
+        public DsAnalysisCard(MolaGptMarkupSplitter.MarkupUnit unit, FrameworkElement host, bool hasFollowingContent = false)
         {
             Margin = new Thickness(4, 8, 0, 8);
             HorizontalAlignment = HorizontalAlignment.Left;
@@ -1080,7 +1081,7 @@ internal static class MolaGptMarkupBlocks
             stack.Children.Add(_bodyFrame);
             Child = stack;
 
-            Update(unit, host);
+            Update(unit, host, hasFollowingContent);
         }
 
         private void OnHeaderClicked(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -1092,7 +1093,7 @@ internal static class MolaGptMarkupBlocks
             e.Handled = true;
         }
 
-        public void Update(MolaGptMarkupSplitter.MarkupUnit unit, FrameworkElement host)
+        public void Update(MolaGptMarkupSplitter.MarkupUnit unit, FrameworkElement host, bool hasFollowingContent = false)
         {
             Visibility = ShouldRenderDsAnalysis(unit) ? Visibility.Visible : Visibility.Collapsed;
 
@@ -1102,16 +1103,24 @@ internal static class MolaGptMarkupBlocks
                 _expanded = DefaultExpanded(unit);
                 _userToggled = false;
                 _wasClosed = unit.IsClosed;
+                _autoCollapsed = false;
             }
             else if (!_userToggled)
             {
+                // Mirror the web client (core241002.js:4783-4800): keep the card
+                // EXPANDED while streaming and even right after it closes, so the
+                // execution output stays visible. Only auto-collapse once the
+                // model's following answer has appeared — and only a single time,
+                // so a later streaming refresh can't re-collapse a card the user
+                // reopened.
                 if (!unit.IsClosed)
                 {
                     _expanded = true;
                 }
-                else if (!_wasClosed)
+                else if (hasFollowingContent && !_autoCollapsed)
                 {
                     _expanded = false;
+                    _autoCollapsed = true;
                 }
             }
             _wasClosed = unit.IsClosed;

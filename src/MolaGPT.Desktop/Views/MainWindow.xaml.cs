@@ -67,13 +67,49 @@ public partial class MainWindow : Window
         };
     }
 
+    public void ShowImageWorkbench(ImageGenerationWorkbenchWindow workbench)
+    {
+        if (ImageWorkbenchHost.Content is ImageGenerationWorkbenchWindow oldWorkbench)
+            oldWorkbench.DetachHeaderModelSelector();
+
+        ImageWorkbenchHost.Content = workbench;
+        workbench.AttachHeaderModelSelector(
+            WorkbenchModelSelectorButton,
+            WorkbenchModelSelectorPopup,
+            WorkbenchModelSelectorItems,
+            WorkbenchModelLabel);
+        if (DataContext is MainViewModel vm)
+            vm.IsImageWorkbenchVisible = true;
+    }
+
+    public void HideImageWorkbench()
+    {
+        if (ImageWorkbenchHost.Content is ImageGenerationWorkbenchWindow workbench)
+        {
+            workbench.NotifyClosedWhileGenerating();
+            workbench.DetachHeaderModelSelector();
+        }
+
+        if (DataContext is MainViewModel vm)
+            vm.CloseImageWorkbench();
+    }
+
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
-        if (e.OldValue is INotifyPropertyChanged oldVm)
+        if (e.OldValue is MainViewModel oldMainVm)
+        {
+            oldMainVm.PropertyChanged -= OnVmPropertyChanged;
+            oldMainVm.ConversationList.PropertyChanged -= OnConversationListPropertyChanged;
+        }
+        else if (e.OldValue is INotifyPropertyChanged oldVm)
+        {
             oldVm.PropertyChanged -= OnVmPropertyChanged;
+        }
+
         if (e.NewValue is MainViewModel newVm)
         {
             newVm.PropertyChanged += OnVmPropertyChanged;
+            newVm.ConversationList.PropertyChanged += OnConversationListPropertyChanged;
             // Apply initial state without animation so first paint is right.
             ApplySidebarState(newVm.SidebarCollapsed, animate: false);
         }
@@ -86,6 +122,21 @@ public partial class MainWindow : Window
         {
             ApplySidebarState(vm.SidebarCollapsed, animate: true);
         }
+    }
+
+    private void OnConversationListPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(ConversationListViewModel.SelectedId)
+            || sender is not ConversationListViewModel list)
+            return;
+
+        if (list.SelectedId is null)
+        {
+            ClearConversationGroupSelection();
+            return;
+        }
+
+        ApplyConversationGroupSelection(list.SelectedId);
     }
 
     private void ConversationListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -120,6 +171,86 @@ public partial class MainWindow : Window
         {
             vm.ConversationList.SelectById(clicked.Id);
         }
+    }
+
+    private void ClearConversationGroupSelection()
+    {
+        if ((ByokListBox?.SelectedItems.Count ?? 0) == 0
+            && (MolaGptListBox?.SelectedItems.Count ?? 0) == 0)
+            return;
+
+        _clearingOtherConversationGroupSelection = true;
+        try
+        {
+            ByokListBox?.SelectedItems.Clear();
+            MolaGptListBox?.SelectedItems.Clear();
+        }
+        finally
+        {
+            _clearingOtherConversationGroupSelection = false;
+        }
+    }
+
+    /// <summary>
+    /// SelectedValue is OneWayToSource, so VM-driven selection (draft → first
+    /// send, notification click) must push into the ListBoxes here.
+    /// </summary>
+    private void ApplyConversationGroupSelection(string id, bool allowRetry = true)
+    {
+        if (string.IsNullOrEmpty(id)) return;
+
+        var inByok = ConversationListContainsId(ByokListBox, id);
+        var inMola = ConversationListContainsId(MolaGptListBox, id);
+        if (!inByok && !inMola)
+        {
+            if (!allowRetry) return;
+            Dispatcher.InvokeAsync(
+                () => ApplyConversationGroupSelection(id, allowRetry: false),
+                DispatcherPriority.Loaded);
+            return;
+        }
+
+        if (IsConversationSelectedInListBoxes(id))
+            return;
+
+        _clearingOtherConversationGroupSelection = true;
+        try
+        {
+            if (inByok)
+            {
+                MolaGptListBox?.SelectedItems.Clear();
+                if (ByokListBox is not null)
+                    ByokListBox.SelectedValue = id;
+            }
+            else
+            {
+                ByokListBox?.SelectedItems.Clear();
+                if (MolaGptListBox is not null)
+                    MolaGptListBox.SelectedValue = id;
+            }
+        }
+        finally
+        {
+            _clearingOtherConversationGroupSelection = false;
+        }
+    }
+
+    private static bool ConversationListContainsId(ListBox? listBox, string id)
+    {
+        if (listBox?.ItemsSource is not System.Collections.IEnumerable items) return false;
+        foreach (var item in items)
+        {
+            if (item is ConversationListItem row && row.Id == id)
+                return true;
+        }
+        return false;
+    }
+
+    private bool IsConversationSelectedInListBoxes(string id)
+    {
+        if (ByokListBox?.SelectedValue is string byokId && byokId == id) return true;
+        if (MolaGptListBox?.SelectedValue is string molaId && molaId == id) return true;
+        return false;
     }
 
     private void ClearOtherConversationGroupSelection(ListBox activeList)

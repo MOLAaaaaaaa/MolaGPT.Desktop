@@ -100,6 +100,7 @@
                                   Checked="ChkThinking_Changed"
                                   Unchecked="ChkThinking_Changed" />
                         <CheckBox x:Name="ChkReasoningEffort" Content="推理强度" Margin="0,0,16,0" />
+                        <CheckBox x:Name="ChkImageEdit" Content="图像编辑" Margin="0,0,16,0" />
                     </WrapPanel>
 
                     <!-- Thinking config section -->

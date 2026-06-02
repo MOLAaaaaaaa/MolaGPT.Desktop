@@ -475,7 +475,19 @@ public sealed class MarkdownPresenter : ContentControl
     private void Flush(bool useFinalPipeline = false)
     {
         _throttleTimer.Stop();
-        var src = ProcessCitationRefs(_pendingSource ?? string.Empty);
+        // Strip PY_OUTPUT/MCP_OUTPUT marker comments up front, BEFORE any path
+        // decision. The output frame of a Python/MCP call carries the closing
+        // marker (and the result body) after the <DSanalysis> opener was
+        // consumed in an earlier frame; on an incremental/restore render the
+        // current src may hold "...END-->" with no custom-markup opener, so
+        // ContainsCustomMarkup would route it to the plain markdown path and
+        // the marker would leak as literal text (and the output body would
+        // render outside the DSanalysis card). Stripping here makes every
+        // downstream path marker-safe. Idempotent: Split() re-strips harmlessly,
+        // and _lastRenderedSource is stored post-strip so the append-only
+        // prefix check stays consistent frame to frame.
+        var src = MolaGptMarkupSplitter.NormalizeOutputSegmentMarkers(
+            ProcessCitationRefs(_pendingSource ?? string.Empty));
         var pipeline = (useFinalPipeline || !IsStreaming) ? s_finalPipeline : s_streamingPipeline;
         bool pipelineChanged = pipeline != _lastUsedPipeline;
 
@@ -972,7 +984,7 @@ public sealed class MarkdownPresenter : ContentControl
                 continue;
             }
 
-            if (TryUpdateCustomUnitInPlace(stableCount, newUnits[stableCount]))
+            if (TryUpdateCustomUnitInPlace(stableCount, newUnits[stableCount], HasFollowingContent(newUnits, stableCount)))
             {
                 stableCount++;
                 continue;
@@ -998,7 +1010,7 @@ public sealed class MarkdownPresenter : ContentControl
         for (int i = stableCount; i < newUnits.Count; i++)
         {
             var u = newUnits[i];
-            var (added, astSources, element) = AppendUnitForMixed(u, pipeline);
+            var (added, astSources, element) = AppendUnitForMixed(u, pipeline, HasFollowingContent(newUnits, i));
             _mixedUnits.Add(new CachedUnit
             {
                 Kind = u.Kind,
@@ -1014,16 +1026,40 @@ public sealed class MarkdownPresenter : ContentControl
         }
     }
 
-    private static bool IsStableUnit(CachedUnit oldU, MolaGptMarkupSplitter.MarkupUnit newU)
+    /// <summary>
+    /// True when some unit after <paramref name="index"/> carries visible,
+    /// non-whitespace content (ignoring tool-status blockquotes). Mirrors the
+    /// web client's auto-collapse guard: a completed Python/MCP analysis card
+    /// only collapses once the model's following answer has started — until
+    /// then the card stays expanded so its execution output is visible.
+    /// </summary>
+    private static bool HasFollowingContent(List<MolaGptMarkupSplitter.MarkupUnit> units, int index)
     {
-        return oldU.Kind == newU.Kind
+        for (int i = index + 1; i < units.Count; i++)
+        {
+            var u = units[i];
+            if (u.Kind == MarkupUnitKind.ToolStatus) continue;
+            if (u.Kind == MarkupUnitKind.Markdown)
+            {
+                if (!string.IsNullOrWhiteSpace(u.Source)) return true;
+                continue;
+            }
+            // Any other rendered unit (another DSanalysis, image, steel step…)
+            // counts as following content.
+            return true;
+        }
+        return false;
+    }
+
+    private static bool IsStableUnit(CachedUnit oldU, MolaGptMarkupSplitter.MarkupUnit newU)
+    {        return oldU.Kind == newU.Kind
             && oldU.Tag == newU.Tag
             && oldU.ToolVariant == newU.ToolVariant
             && oldU.AnalysisPhase == newU.AnalysisPhase
             && oldU.Source == newU.Source;
     }
 
-    private bool TryUpdateCustomUnitInPlace(int cachedIdx, MolaGptMarkupSplitter.MarkupUnit unit)
+    private bool TryUpdateCustomUnitInPlace(int cachedIdx, MolaGptMarkupSplitter.MarkupUnit unit, bool hasFollowingContent)
     {
         var cached = _mixedUnits[cachedIdx];
         if (cached.Kind != unit.Kind || cached.Tag != unit.Tag || cached.Element is null) return false;
@@ -1031,7 +1067,7 @@ public sealed class MarkdownPresenter : ContentControl
         bool updated = unit.Kind switch
         {
             MarkupUnitKind.ToolStatus => MolaGptMarkupBlocks.TryUpdateToolStatus(cached.Element, unit, this),
-            MarkupUnitKind.DsAnalysis => MolaGptMarkupBlocks.TryUpdateDsAnalysis(cached.Element, unit, this),
+            MarkupUnitKind.DsAnalysis => MolaGptMarkupBlocks.TryUpdateDsAnalysis(cached.Element, unit, this, hasFollowingContent),
             MarkupUnitKind.SteelStep => MolaGptMarkupBlocks.TryUpdateSteelStep(cached.Element, unit, this),
             MarkupUnitKind.ImagePendingSkeleton => MolaGptMarkupBlocks.TryUpdateImagePendingSkeleton(cached.Element, unit, this),
             MarkupUnitKind.ImageErrorCard => MolaGptMarkupBlocks.TryUpdateImageErrorCard(cached.Element, unit, this),
@@ -1142,7 +1178,8 @@ public sealed class MarkdownPresenter : ContentControl
     /// </summary>
     private (int Count, List<string>? AstSources, UIElement? Element) AppendUnitForMixed(
         MolaGptMarkupSplitter.MarkupUnit unit,
-        MarkdownPipeline pipeline)
+        MarkdownPipeline pipeline,
+        bool hasFollowingContent = false)
     {
         switch (unit.Kind)
         {
@@ -1161,7 +1198,7 @@ public sealed class MarkdownPresenter : ContentControl
                 if (!MolaGptMarkupBlocks.ShouldRenderDsAnalysis(unit))
                     return (0, null, null);
 
-                var ui = MolaGptMarkupBlocks.BuildDsAnalysis(unit, this);
+                var ui = MolaGptMarkupBlocks.BuildDsAnalysis(unit, this, hasFollowingContent);
                 _doc.Blocks.Add(new BlockUIContainer(ui)
                 {
                     Margin = new Thickness(0),

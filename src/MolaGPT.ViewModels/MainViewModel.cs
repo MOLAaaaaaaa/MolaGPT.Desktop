@@ -18,6 +18,7 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty] private SettingsViewModel _settings;
     [ObservableProperty] private PersonaListViewModel _personas;
     [ObservableProperty] private bool _sidebarCollapsed;
+    [ObservableProperty] private bool _isImageWorkbenchVisible;
     [ObservableProperty] private string _windowTitle = "MolaGPT";
     [ObservableProperty] private string _cloudSyncStatusKind = "Idle";
     [ObservableProperty] private string _cloudSyncStatusText = "云同步待机";
@@ -40,6 +41,9 @@ public sealed partial class MainViewModel : ObservableObject
 
     /// <summary>Opens the SettingsWindow. Set by App.xaml.cs.</summary>
     public Action? SettingsRequested { get; set; }
+
+    /// <summary>Opens a BYOK image workbench task. Set by App.xaml.cs.</summary>
+    public Action<string?>? ImageWorkbenchRequested { get; set; }
 
     /// <summary>Opens the AboutWindow. Set by App.xaml.cs.</summary>
     public Action? AboutRequested { get; set; }
@@ -78,31 +82,53 @@ public sealed partial class MainViewModel : ObservableObject
 
         _conversationList.ConversationSelected += async (_, id) =>
         {
-            if (_composer.IsSending && _chat.ConversationId != id)
-                _composer.DetachToBackground();
+            if (_conversationList.FindItem(id)?.IsImageTask == true)
+            {
+                if (Composer.IsSending && Chat.ConversationId != id)
+                    Composer.DetachToBackground();
+                IsImageWorkbenchVisible = true;
+                ImageWorkbenchRequested?.Invoke(id);
+                return;
+            }
+
+            IsImageWorkbenchVisible = false;
+
+            // Draft → first send already bound Chat to this id; only sync sidebar.
+            if (string.Equals(Chat.ConversationId, id, StringComparison.Ordinal))
+                return;
+
+            if (Composer.IsSending && Chat.ConversationId != id)
+                Composer.DetachToBackground();
 
             var hasBackgroundTask = _backgroundStreams?.HasTask(id) == true;
-            await _chat.LoadConversationAsync(id, loadAllMessagesImmediately: hasBackgroundTask);
+            await Chat.LoadConversationAsync(id, loadAllMessagesImmediately: hasBackgroundTask);
             if (EnsureConversationDetailAsync is not null && await EnsureConversationDetailAsync(id))
             {
                 hasBackgroundTask = _backgroundStreams?.HasTask(id) == true;
-                await _chat.LoadConversationAsync(id, loadAllMessagesImmediately: hasBackgroundTask);
+                await Chat.LoadConversationAsync(id, loadAllMessagesImmediately: hasBackgroundTask);
             }
 
             if (hasBackgroundTask)
             {
                 _conversationList.SetGenerating(id, false);
-                await _composer.ReattachFromBackgroundAsync(id);
+                await Composer.ReattachFromBackgroundAsync(id);
             }
         };
         _conversationList.ConversationsDeleted += (_, ids) =>
         {
-            if (!string.IsNullOrEmpty(_chat.ConversationId) && ids.Contains(_chat.ConversationId))
-                _chat.StartDraftConversation();
+            if (!string.IsNullOrEmpty(Chat.ConversationId) && ids.Contains(Chat.ConversationId))
+                Chat.StartDraftConversation();
         };
 
-        _chat.ConversationTouched += (_, e) =>
+        Chat.ConversationTouched += (_, e) =>
+        {
             _conversationList.UpsertItem(e.Id, e.Title, e.UpdatedAt, e.ProviderId, e.PersonaLabel);
+            if (string.Equals(Chat.ConversationId, e.Id, StringComparison.Ordinal)
+                && !string.Equals(_conversationList.SelectedId, e.Id, StringComparison.Ordinal))
+            {
+                _conversationList.SelectById(e.Id);
+            }
+        };
 
         if (_backgroundStreams is not null)
         {
@@ -128,12 +154,24 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void NewConversation()
     {
-        if (_composer.IsSending)
-            _composer.DetachToBackground();
+        if (Composer.IsSending)
+            Composer.DetachToBackground();
 
         ConversationList.ClearSelection();
+        IsImageWorkbenchVisible = false;
         Chat.StartDraftConversation();
     }
+
+    public void OpenImageWorkbenchTask()
+    {
+        if (Composer.IsSending)
+            Composer.DetachToBackground();
+
+        IsImageWorkbenchVisible = true;
+        ImageWorkbenchRequested?.Invoke(null);
+    }
+
+    public void CloseImageWorkbench() => IsImageWorkbenchVisible = false;
 
     [RelayCommand]
     private void OpenLogin() => LoginRequested?.Invoke();
@@ -274,10 +312,10 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void RefreshActivePromptState()
     {
-        ConversationSystemPromptVisible = _chat.ActiveProvider is not null
-            && _chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
-        _chat.ActiveModelSystemPrompt = ConversationSystemPromptVisible
-            ? _settings.GetModelSystemPrompt(_chat.ActiveProvider?.Id, _chat.ActiveModel?.Id)
+        ConversationSystemPromptVisible = Chat.ActiveProvider is not null
+            && Chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
+        Chat.ActiveModelSystemPrompt = ConversationSystemPromptVisible
+            ? Settings.GetModelSystemPrompt(Chat.ActiveProvider?.Id, Chat.ActiveModel?.Id)
             : null;
     }
 }

@@ -69,6 +69,15 @@ public sealed record MessageRow(
     string? Meta,
     long CreatedAt);
 
+public sealed record ImageWorkbenchMessageRow(
+    string Id,
+    string ConversationId,
+    string Role,
+    string Content,
+    string? Meta,
+    long CreatedAt,
+    string ConversationTitle);
+
 public sealed record ProviderRow
 {
     public string Id { get; set; } = string.Empty;
@@ -79,6 +88,10 @@ public sealed record ProviderRow
     public string Models { get; set; } = "[]";
     public bool Enabled { get; set; }
     public int SortOrder { get; set; }
+    public string Purpose { get; set; } = "chat";
+    public string? ApiPath { get; set; }
+    public string? ImageEditPath { get; set; }
+    public string? ImageFormat { get; set; }
 
     public ProviderRow() { }
 
@@ -90,7 +103,11 @@ public sealed record ProviderRow
         byte[]? ApiKeyEnc,
         string Models,
         bool Enabled,
-        int SortOrder)
+        int SortOrder,
+        string Purpose = "chat",
+        string? ApiPath = null,
+        string? ImageEditPath = null,
+        string? ImageFormat = null)
     {
         this.Id = Id;
         this.Type = Type;
@@ -100,5 +117,9 @@ public sealed record ProviderRow
         this.Models = Models;
         this.Enabled = Enabled;
         this.SortOrder = SortOrder;
+        this.Purpose = Purpose;
+        this.ApiPath = ApiPath;
+        this.ImageEditPath = ImageEditPath;
+        this.ImageFormat = ImageFormat;
     }
 }

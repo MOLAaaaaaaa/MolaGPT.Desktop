@@ -16,6 +16,7 @@ using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Chat.Tools.Vision;
 using MolaGPT.Core.Models;
@@ -219,6 +220,23 @@ public partial class App : Application
             // now owns the full conversation prompt + mode write-back rather
             // than just returning a string for the caller to handle.
             dlg.Show(chatVm, window);
+        };
+        mainVm.ImageWorkbenchRequested = conversationId =>
+        {
+            var workbench = new ImageGenerationWorkbenchWindow(
+                Services.GetRequiredService<SettingsViewModel>(),
+                Services.GetRequiredService<ImageGenerationTool>(),
+                Services.GetRequiredService<AttachmentStore>(),
+                Services.GetRequiredService<ConversationRepository>(),
+                Services.GetRequiredService<MessageRepository>(),
+                conversationId,
+                (title, modelId) => conversationListVm.CreateImageWorkbenchConversation(title, modelId),
+                () => conversationListVm.Reload(),
+                Services.GetRequiredService<NotificationService>(),
+                (id, generating) => conversationListVm.SetGenerating(id, generating),
+                window.HideImageWorkbench);
+            window.ShowImageWorkbench(workbench);
+            conversationListVm.Reload();
         };
 
         window.DataContext = mainVm;
@@ -482,6 +500,9 @@ public partial class App : Application
         services.AddSingleton(sp => new VisionProxyTool(
             sp.GetRequiredService<ProviderRegistry>(),
             () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient)));
+        services.AddSingleton(sp => new ImageGenerationTool(
+            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient),
+            sp.GetRequiredService<AttachmentStore>().Save));
         services.AddSingleton<IChatToolHost, ChatToolHost>();
 
         services.AddSingleton(sp => new ConversationListViewModel(
@@ -500,7 +521,8 @@ public partial class App : Application
             sp.GetRequiredService<BackgroundStreamService>(),
             sp.GetRequiredService<SettingsViewModel>(),
             sp.GetRequiredService<PersonaListViewModel>(),
-            sp.GetRequiredService<AttachmentStore>()));
+            sp.GetRequiredService<AttachmentStore>(),
+            sp.GetRequiredService<ImageGenerationTool>()));
         services.AddSingleton(sp => new SettingsViewModel(
             sp.GetRequiredService<ProviderRepository>(),
             sp.GetRequiredService<CredentialStore>(),
@@ -520,6 +542,8 @@ public partial class App : Application
             conversationId =>
             {
                 var listVm = sp.GetRequiredService<ConversationListViewModel>();
+                if (string.Equals(listVm.SelectedId, conversationId, StringComparison.Ordinal))
+                    listVm.SelectedId = null;
                 listVm.SelectById(conversationId);
             }));
 
@@ -583,6 +607,7 @@ public partial class App : Application
                 try
                 {
                     if (!row.Enabled) continue;
+                    if (SettingsViewModel.IsImagePurpose(row.Purpose)) continue;
                     string apiKey = string.Empty;
                     if (row.ApiKeyEnc is { Length: > 0 })
                         apiKey = creds.Decrypt(row.ApiKeyEnc) ?? "";
@@ -592,12 +617,14 @@ public partial class App : Application
 
                     IChatProvider? prov = row.Type switch
                     {
-                        "openai" => OpenAIProvider.Create(row.Id, row.Name, apiKey, models, client, row.BaseUrl),
+                        "openai" => OpenAIProvider.Create(row.Id, row.Name, apiKey, models, client, row.BaseUrl, row.ApiPath),
                         "openai-compat" => new OpenAICompatibleProvider(row.Id, row.Name,
                             row.BaseUrl ?? OpenAIProvider.DefaultBaseUrl, apiKey, models, client,
-                            Services.GetService<IChatToolHost>()),
-                        "anthropic" => new AnthropicProvider(row.Id, row.Name, apiKey, models, client, row.BaseUrl),
-                        "gemini" => GeminiProvider.Create(row.Id, row.Name, apiKey, models, client, row.BaseUrl),
+                            Services.GetService<IChatToolHost>())
+                            { ChatPath = OpenAICompatibleProvider.ResolveChatPath(row.ApiPath) },
+                        "anthropic" => new AnthropicProvider(row.Id, row.Name, apiKey, models, client, row.BaseUrl)
+                            { MessagesPath = string.IsNullOrWhiteSpace(row.ApiPath) ? "v1/messages" : row.ApiPath.Trim() },
+                        "gemini" => GeminiProvider.Create(row.Id, row.Name, apiKey, models, client, row.BaseUrl, row.ApiPath),
                         _ => null
                     };
                     if (prov is not null) registry.Register(prov);

@@ -5,6 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
         xmlns:views="clr-namespace:MolaGPT.Desktop.Views"
+        xmlns:scm="clr-namespace:System.ComponentModel;assembly=WindowsBase"
         Title="设置 — MolaGPT"
         Icon="/Assets/app-logo.png"
         Width="820" Height="640"
@@ -246,17 +247,48 @@
                             </Grid.ColumnDefinitions>
 
                             <DockPanel Grid.Column="0">
-                                <Button DockPanel.Dock="Top"
-                                        Style="{StaticResource PillPrimaryButton}"
-                                        Content="+ 添加服务"
-                                        Margin="0,0,0,12"
-                                        Click="AddProviderClick" />
+                                <DockPanel.Resources>
+                                    <CollectionViewSource x:Key="GroupedProviders"
+                                                          Source="{Binding Providers}">
+                                        <CollectionViewSource.GroupDescriptions>
+                                            <PropertyGroupDescription PropertyName="Purpose" />
+                                        </CollectionViewSource.GroupDescriptions>
+                                    </CollectionViewSource>
+                                </DockPanel.Resources>
+                                <Grid DockPanel.Dock="Top" Margin="0,0,0,12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="8" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Button Grid.Column="0"
+                                            Style="{StaticResource PillPrimaryButton}"
+                                            Content="+ 对话服务"
+                                            Click="AddChatProviderClick" />
+                                    <Button Grid.Column="2"
+                                            Style="{StaticResource OutlineButton}"
+                                            Content="+ 图像服务"
+                                            Click="AddImageProviderClick" />
+                                </Grid>
                                 <ListBox x:Name="ProviderList"
                                          BorderThickness="0"
                                          Background="Transparent"
                                          ItemContainerStyle="{StaticResource ConversationListItemStyle}"
                                          SelectionChanged="ProviderList_SelectionChanged"
-                                         ItemsSource="{Binding Providers}">
+                                         ItemsSource="{Binding Source={StaticResource GroupedProviders}}">
+                                    <ListBox.GroupStyle>
+                                        <GroupStyle>
+                                            <GroupStyle.HeaderTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding Name, Converter={x:Static views:PurposeToGroupLabelConverter.Instance}}"
+                                                               FontSize="{DynamicResource Font.Size.Small}"
+                                                               FontWeight="SemiBold"
+                                                               Margin="2,10,0,4"
+                                                               Foreground="{DynamicResource Brush.Text.Muted}" />
+                                                </DataTemplate>
+                                            </GroupStyle.HeaderTemplate>
+                                        </GroupStyle>
+                                    </ListBox.GroupStyle>
                                     <ListBox.ItemTemplate>
                                         <DataTemplate DataType="{x:Type vm:ProviderEntry}">
                                             <StackPanel>
@@ -304,15 +336,7 @@
                                               Style="{StaticResource SettingsComboBox}"
                                               Margin="0,0,0,12"
                                               DisplayMemberPath="Name"
-                                              SelectionChanged="ProviderPresetCombo_SelectionChanged">
-                                        <ComboBox.Resources>
-                                            <Style TargetType="ComboBoxItem">
-                                                <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
-                                                <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
-                                                <Setter Property="Padding" Value="10,6" />
-                                            </Style>
-                                        </ComboBox.Resources>
-                                    </ComboBox>
+                                              SelectionChanged="ProviderPresetCombo_SelectionChanged" />
 
                                     <TextBlock Text="名称" Margin="0,0,0,4"
                                                Foreground="{DynamicResource Brush.Text.Secondary}" />
@@ -325,16 +349,9 @@
                                     <StackPanel x:Name="TypePanel">
                                     <TextBlock Text="协议格式" Margin="0,0,0,4"
                                                Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                    <ComboBox x:Name="EditType"
-                                              Style="{StaticResource SettingsComboBox}"
-                                              Margin="0,0,0,12">
-                                        <ComboBox.Resources>
-                                            <Style TargetType="ComboBoxItem">
-                                                <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
-                                                <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
-                                                <Setter Property="Padding" Value="10,6" />
-                                            </Style>
-                                        </ComboBox.Resources>
+                                        <ComboBox x:Name="EditType"
+                                                  Style="{StaticResource SettingsComboBox}"
+                                                  Margin="0,0,0,12">
                                         <ComboBoxItem Content="OpenAI 兼容" Tag="openai-compat" />
                                         <ComboBoxItem Content="Claude" Tag="anthropic" />
                                         <ComboBoxItem Content="Gemini" Tag="gemini" />
@@ -348,8 +365,51 @@
                                             CornerRadius="{DynamicResource Radius.Sm}"
                                             Padding="12,8" Margin="0,0,0,12">
                                         <TextBox x:Name="EditBaseUrl"
-                                                 Style="{StaticResource InlineTextBox}" />
+                                                 Style="{StaticResource InlineTextBox}"
+                                                 TextChanged="EndpointInputChanged" />
                                     </Border>
+
+                                    <!-- API 路径 (对话: chat/completions; 图像: 生成路径) -->
+                                    <TextBlock x:Name="ApiPathLabel" Text="对话路径" Margin="0,0,0,4"
+                                               Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                    <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                                            CornerRadius="{DynamicResource Radius.Sm}"
+                                            Padding="12,8" Margin="0,0,0,12">
+                                        <TextBox x:Name="EditApiPath"
+                                                 Style="{StaticResource InlineTextBox}"
+                                                 TextChanged="EndpointInputChanged" />
+                                    </Border>
+
+                                    <!-- 图像接口格式 + 编辑路径 (仅图像服务) -->
+                                    <StackPanel x:Name="ImageFormatPanel" Visibility="Collapsed">
+                                        <TextBlock Text="接口格式" Margin="0,0,0,4"
+                                                   Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                        <ComboBox x:Name="EditImageFormat"
+                                                  Style="{StaticResource SettingsComboBox}"
+                                                  Margin="0,0,0,12"
+                                                  SelectionChanged="ImageFormatChanged">
+                                            <ComboBoxItem Content="OpenAI 图像接口（DALL·E、gpt-image）" Tag="openai-images" />
+                                            <ComboBoxItem Content="对话补全出图（OpenRouter、nano-banana）" Tag="openai-chat-image" />
+                                        </ComboBox>
+
+                                        <StackPanel x:Name="ImageEditPathPanel">
+                                            <TextBlock Text="编辑路径" Margin="0,0,0,4"
+                                                       Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                            <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                    Padding="12,8" Margin="0,0,0,12">
+                                                <TextBox x:Name="EditImageEditPath"
+                                                         Style="{StaticResource InlineTextBox}"
+                                                         TextChanged="EndpointInputChanged" />
+                                            </Border>
+                                        </StackPanel>
+                                    </StackPanel>
+
+                                    <!-- 最终端点预览 -->
+                                    <TextBlock x:Name="EndpointPreview" Margin="0,0,0,12"
+                                               TextWrapping="Wrap"
+                                               FontSize="{DynamicResource Font.Size.Small}"
+                                               Foreground="{DynamicResource Brush.Text.Muted}" />
 
                                     <TextBlock Text="API Key" Margin="0,0,0,4"
                                                Foreground="{DynamicResource Brush.Text.Secondary}" />
@@ -665,8 +725,7 @@
                                                         Padding="10,8">
                                                     <TextBox x:Name="PersonaNameBox"
                                                              Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
-                                                             Background="Transparent"
-                                                             BorderThickness="0"
+                                                             Style="{StaticResource SettingsTextBox}"
                                                              FontSize="14"
                                                              LostFocus="PersonaFormChanged" />
                                                 </Border>
@@ -743,11 +802,10 @@
                                                 Margin="0,0,0,4">
                                             <TextBox x:Name="PersonaPromptBox"
                                                      Text="{Binding SystemPrompt, UpdateSourceTrigger=PropertyChanged}"
+                                                     Style="{StaticResource SettingsTextBox}"
                                                      AcceptsReturn="True"
                                                      TextWrapping="Wrap"
                                                      VerticalScrollBarVisibility="Auto"
-                                                     Background="Transparent"
-                                                     BorderThickness="0"
                                                      FontSize="13"
                                                      LostFocus="PersonaFormChanged" />
                                         </Border>
@@ -1087,6 +1145,112 @@
                                     </StackPanel>
                                 </Border>
 
+                                <TextBlock Text="图像生成"
+                                           FontWeight="SemiBold"
+                                           Margin="0,8,0,8"
+                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+
+                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                        BorderThickness="1"
+                                        CornerRadius="{DynamicResource Radius.Md}"
+                                        Padding="18,16"
+                                        Margin="0,0,0,16">
+                                    <StackPanel>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                                <TextBlock Text="BYOK 图像生成"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+                                                <TextBlock Text="使用独立的图像服务出图，与对话模型分开配置、互不影响"
+                                                           FontSize="{DynamicResource Font.Size.Small}"
+                                                           TextWrapping="Wrap"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                                           Margin="0,3,0,0" />
+                                            </StackPanel>
+                                            <CheckBox Grid.Column="1"
+                                                      x:Name="ImageGenerationEnabledToggle"
+                                                      IsChecked="{Binding ImageGenerationEnabled, Mode=TwoWay}"
+                                                      VerticalAlignment="Center"
+                                                      Margin="12,0,0,0" />
+                                        </Grid>
+
+                                        <StackPanel Margin="0,16,0,0"
+                                                     IsEnabled="{Binding IsChecked, ElementName=ImageGenerationEnabledToggle}">
+                                            <TextBlock Text="图像服务" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                            <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8" Margin="0,0,0,12">
+                                                <ComboBox x:Name="ImageGenerationModelCombo"
+                                                          Style="{StaticResource SettingsComboBox}"
+                                                          Background="Transparent"
+                                                          BorderThickness="0"
+                                                          Padding="0,6"
+                                                          DisplayMemberPath="Label"
+                                                          SelectionChanged="ImageGenerationModelCombo_SelectionChanged" />
+                                            </Border>
+
+                                            <Grid Margin="0,0,0,12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="16" />
+                                                    <ColumnDefinition Width="160" />
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="说明" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                    <TextBlock Text="在「模型服务」中添加图像服务后，即可在此选择。"
+                                                               TextWrapping="Wrap"
+                                                               Foreground="{DynamicResource Brush.Text.Muted}"
+                                                               FontSize="{DynamicResource Font.Size.Small}" />
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2">
+                                                    <TextBlock Text="尺寸" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                    <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                        <TextBox Style="{StaticResource InlineTextBox}"
+                                                                 Text="{Binding ImageGenerationSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                    </Border>
+                                                </StackPanel>
+                                            </Grid>
+
+                                            <Grid Margin="0,0,0,12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="16" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="风格" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                    <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                        <TextBox Style="{StaticResource InlineTextBox}"
+                                                                 Text="{Binding ImageGenerationStyle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                    </Border>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2" VerticalAlignment="Bottom">
+                                                    <CheckBox Content="作为工具加入对话"
+                                                              IsChecked="{Binding ImageGenerationAsTool, Mode=TwoWay}"
+                                                              Foreground="{DynamicResource Brush.Text.Primary}" />
+                                                </StackPanel>
+                                            </Grid>
+
+                                            <DockPanel LastChildFill="True">
+                                                <Button DockPanel.Dock="Right"
+                                                        x:Name="CheckImageGenerationButton"
+                                                        Style="{StaticResource OutlineButton}"
+                                                        Content="测试连接"
+                                                        Width="110"
+                                                        Click="CheckImageGenerationClick" />
+                                                <TextBlock x:Name="ImageGenerationStatusText"
+                                                           VerticalAlignment="Center"
+                                                           TextWrapping="Wrap"
+                                                           FontSize="{DynamicResource Font.Size.Small}"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}" />
+                                            </DockPanel>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+
                                 <Border Background="{DynamicResource Brush.Primary.Blockquote}"
                                         BorderBrush="{DynamicResource Brush.Primary.Border}"
                                         BorderThickness="1"
@@ -1106,6 +1270,9 @@
                                             </Border>
                                             <Border Background="{DynamicResource Brush.Bg.Elevated}" BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="10,5" Margin="0,0,8,8">
                                                 <TextBlock Text="外挂视觉" FontSize="{DynamicResource Font.Size.Small}" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                            </Border>
+                                            <Border Background="{DynamicResource Brush.Bg.Elevated}" BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="10,5" Margin="0,0,8,8">
+                                                <TextBlock Text="图像生成" FontSize="{DynamicResource Font.Size.Small}" Foreground="{DynamicResource Brush.Text.Secondary}" />
                                             </Border>
                                         </WrapPanel>
                                     </StackPanel>

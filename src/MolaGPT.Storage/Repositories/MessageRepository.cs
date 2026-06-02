@@ -17,6 +17,20 @@ public sealed class MessageRepository
             new { c = conversationId }).ToList();
     }
 
+    public IReadOnlyList<ImageWorkbenchMessageRow> ListImageWorkbenchMessages(string providerId)
+    {
+        using var conn = _db.Open();
+        return conn.Query<ImageWorkbenchMessageRow>(
+            "SELECT m.id AS Id, m.conversation_id AS ConversationId, m.role AS Role, " +
+            "m.content AS Content, m.meta AS Meta, m.created_at AS CreatedAt, " +
+            "c.title AS ConversationTitle FROM messages m " +
+            "JOIN conversations c ON c.id = m.conversation_id " +
+            "WHERE c.provider_id = @p AND c.deleted_at IS NULL " +
+            "AND m.meta LIKE '%\"image_workbench\"%' " +
+            "ORDER BY m.created_at DESC",
+            new { p = providerId }).ToList();
+    }
+
     public void Insert(MessageRow row)
     {
         using var conn = _db.Open();

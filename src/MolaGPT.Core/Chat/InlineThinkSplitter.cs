@@ -94,6 +94,22 @@ public sealed class InlineThinkSplitter
                 // Push everything up to '<' as visible.
                 if (lt > i) visible.Append(input, i, lt - i);
 
+                // Check for HTML comment: <!--
+                if (lt + 4 <= input.Length && input.AsSpan(lt, 4).Equals("<!--".AsSpan(), StringComparison.Ordinal))
+                {
+                    // Find the closing -->
+                    int commentEnd = input.IndexOf("-->", lt + 4, StringComparison.Ordinal);
+                    if (commentEnd < 0)
+                    {
+                        // Comment not closed in this chunk — buffer it
+                        _pending = input.Substring(lt);
+                        return new SplitResult(visible.ToString(), thinking.ToString());
+                    }
+                    // Skip the entire comment (including <!--...-->)
+                    i = commentEnd + 3;
+                    continue;
+                }
+
                 // Could this be "<think"? We need at least 6 chars from lt.
                 int needed = OpenTag.Length;
                 if (lt + needed > input.Length)

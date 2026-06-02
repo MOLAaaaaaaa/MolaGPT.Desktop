@@ -16,6 +16,11 @@ public static class GeminiProvider
         string apiKey,
         IReadOnlyList<MolaGPT.Core.Models.ProviderModel> models,
         HttpClient http,
-        string? baseUrl = null) =>
-        new(id, displayName, baseUrl ?? DefaultBaseUrl, apiKey, models, http) { Kind = ProviderKind.Gemini };
+        string? baseUrl = null,
+        string? chatPath = null) =>
+        new(id, displayName, baseUrl ?? DefaultBaseUrl, apiKey, models, http)
+        {
+            Kind = ProviderKind.Gemini,
+            ChatPath = OpenAICompatibleProvider.ResolveChatPath(chatPath)
+        };
 }

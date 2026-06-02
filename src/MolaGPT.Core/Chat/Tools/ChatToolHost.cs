@@ -1,5 +1,6 @@
 using System.Text.Json;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Chat.Tools.Vision;
 
@@ -9,11 +10,13 @@ public sealed class ChatToolHost : IChatToolHost
 {
     private readonly McpClientManager _mcp;
     private readonly VisionProxyTool _vision;
+    private readonly ImageGenerationTool _imageGeneration;
 
-    public ChatToolHost(McpClientManager mcp, VisionProxyTool vision)
+    public ChatToolHost(McpClientManager mcp, VisionProxyTool vision, ImageGenerationTool imageGeneration)
     {
         _mcp = mcp;
         _vision = vision;
+        _imageGeneration = imageGeneration;
     }
 
     public async Task<IReadOnlyList<object>> BuildToolDefinitionsAsync(
@@ -25,6 +28,9 @@ public sealed class ChatToolHost : IChatToolHost
 
         if (options.Vision?.Enabled == true && !context.ModelSupportsVision)
             tools.Add(VisionProxyTool.BuildOpenAiToolDefinition());
+
+        if (options.ImageGeneration?.Enabled == true && options.ImageGeneration.AsTool)
+            tools.Add(ImageGenerationTool.BuildOpenAiToolDefinition());
 
         foreach (var server in options.McpServers?.Where(s => s.Enabled) ?? Enumerable.Empty<McpServerOptions>())
         {
@@ -50,6 +56,9 @@ public sealed class ChatToolHost : IChatToolHost
     {
         if (string.Equals(toolName, VisionProxyTool.ToolName, StringComparison.Ordinal))
             return _vision.ExecuteAsync(argumentsJson, context, options.Vision, ct);
+
+        if (string.Equals(toolName, ImageGenerationTool.ToolName, StringComparison.Ordinal))
+            return _imageGeneration.ExecuteToolAsync(argumentsJson, options.ImageGeneration, ct);
 
         if (McpToolName.TryDecode(toolName, out var serverSlug, out var toolSlug))
             return ExecuteMcpAsync(serverSlug, toolSlug, argumentsJson, options, ct);

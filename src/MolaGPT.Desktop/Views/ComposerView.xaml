@@ -9,18 +9,28 @@
              mc:Ignorable="d"
              Background="Transparent">
 
-    <!-- Floating composer card. The layout uses a compact four-row grid:
+    <!-- Floating composer card. The layout uses a compact five-row grid:
          row 0 = attachment chips +
          optional file count / row 1 = action toolbar (附件/推理/推理强度/网络) /
-         row 2 = textarea / row 3 = action bar (hint, send/stop). -->
+         row 2 = image options / row 3 = textarea / row 4 = action bar (hint, send/stop). -->
     <Border Background="{DynamicResource Brush.Bg.Elevated}"
-            BorderBrush="{DynamicResource Brush.Border.Strong}"
-            BorderThickness="1.5"
             CornerRadius="{DynamicResource Radius.Xl}"
             Padding="14,10"
             SnapsToDevicePixels="True">
+        <Border.Style>
+            <Style TargetType="Border">
+                <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Strong}" />
+                <Setter Property="BorderThickness" Value="1.5" />
+                <Style.Triggers>
+                    <DataTrigger Binding="{Binding IsImageGenerationMode}" Value="True">
+                        <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+                    </DataTrigger>
+                </Style.Triggers>
+            </Style>
+        </Border.Style>
         <Grid>
             <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
@@ -237,9 +247,70 @@
                                           HorizontalScrollBarVisibility="Disabled"
                                           MaxHeight="360"
                                           Padding="8,0,8,0">
-                                <ItemsControl ItemsSource="{Binding Personas.Personas}">
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
+                                <StackPanel>
+                                    <Button Click="OnOpenImageWorkbenchClick"
+                                            Cursor="Hand"
+                                            HorizontalContentAlignment="Stretch"
+                                            Background="Transparent"
+                                            BorderThickness="0"
+                                            FocusVisualStyle="{x:Null}"
+                                            Padding="0"
+                                            Margin="0,1">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border x:Name="row"
+                                                        Background="Transparent"
+                                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                                        Padding="10,8">
+                                                    <ContentPresenter />
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="row" Property="Background"
+                                                                Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0"
+                                                       Text="&#xE91B;"
+                                                       FontFamily="{DynamicResource Font.Icon}"
+                                                       FontSize="16"
+                                                       Width="28"
+                                                       VerticalAlignment="Center"
+                                                       TextAlignment="Center" />
+                                            <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                                                <TextBlock Text="图像创建"
+                                                           FontWeight="SemiBold"
+                                                           FontSize="13"
+                                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+                                                <TextBlock Text="打开 BYOK 图像工作台，继续生成和管理作品。"
+                                                           FontSize="11"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           Margin="0,2,0,0" />
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="2"
+                                                       Text="&#xE72A;"
+                                                       FontFamily="{DynamicResource Font.Icon}"
+                                                       FontSize="13"
+                                                       Foreground="{DynamicResource Brush.Text.Muted}"
+                                                       VerticalAlignment="Center"
+                                                       Margin="8,0,0,0" />
+                                        </Grid>
+                                    </Button>
+                                    <Border Height="1"
+                                            Margin="10,4"
+                                            Background="{DynamicResource Brush.Divider}" />
+                                    <ItemsControl ItemsSource="{Binding Personas.Personas}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
                                             <Button Click="OnPickPersonaClick"
                                                     Tag="{Binding Id}"
                                                     Cursor="Hand"
@@ -308,9 +379,10 @@
                                                     </TextBlock>
                                                 </Grid>
                                             </Button>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
                             </ScrollViewer>
 
                             <!-- Footer: new + manage -->
@@ -511,17 +583,153 @@
                         <TextBlock Text="网页阅读" />
                     </StackPanel>
                 </ToggleButton>
+
             </StackPanel>
 
-            <!-- Row 2: textarea -->
-            <TextBox x:Name="InputBox"
-                     Grid.Row="2"
-                     Style="{StaticResource ComposerTextBox}"
-                     Text="{Binding Text, UpdateSourceTrigger=PropertyChanged}"
-                     PreviewKeyDown="InputBox_PreviewKeyDown" />
+            <!-- Row 2: image generation options -->
+            <Border Grid.Row="2"
+                    Background="{DynamicResource Brush.Bg.Tertiary}"
+                    BorderBrush="{DynamicResource Brush.Border}"
+                    BorderThickness="1"
+                    CornerRadius="{DynamicResource Radius.Sm}"
+                    Padding="10,6"
+                    Margin="0,0,0,6"
+                    Visibility="{Binding IsImageOptionsVisible, Converter={x:Static views:BoolToVisibility.Instance}}">
+                <WrapPanel Orientation="Horizontal">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,16,4">
+                        <TextBlock Text="比例"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource Brush.Text.Secondary}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0" />
+                        <ListBox ItemsSource="{Binding ImageAspectRatioOptions}"
+                                 SelectedValue="{Binding ImageAspectRatio, Mode=TwoWay}"
+                                 SelectedValuePath="Value"
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 Padding="0"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                            <ListBox.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel Orientation="Horizontal" />
+                                </ItemsPanelTemplate>
+                            </ListBox.ItemsPanel>
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="Cursor" Value="Hand" />
+                                    <Setter Property="Margin" Value="0,0,4,0" />
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="ListBoxItem">
+                                                <Border x:Name="chipBorder"
+                                                        Background="Transparent"
+                                                        BorderBrush="{DynamicResource Brush.Border}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="10"
+                                                        Padding="9,3">
+                                                    <TextBlock x:Name="chipText"
+                                                               Text="{Binding Label}"
+                                                               FontSize="12"
+                                                               Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="chipBorder" Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+                                                        <Setter TargetName="chipText" Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+                                                    </Trigger>
+                                                    <Trigger Property="IsSelected" Value="True">
+                                                        <Setter TargetName="chipBorder" Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+                                                        <Setter TargetName="chipBorder" Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+                                                        <Setter TargetName="chipText" Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+                                                        <Setter TargetName="chipText" Property="FontWeight" Value="SemiBold" />
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                        </ListBox>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,4">
+                        <TextBlock Text="风格"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource Brush.Text.Secondary}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0" />
+                        <ListBox ItemsSource="{Binding ImageStyleOptions}"
+                                 SelectedValue="{Binding ImageStyle, Mode=TwoWay}"
+                                 SelectedValuePath="Value"
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 Padding="0"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                            <ListBox.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel Orientation="Horizontal" />
+                                </ItemsPanelTemplate>
+                            </ListBox.ItemsPanel>
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="Cursor" Value="Hand" />
+                                    <Setter Property="Margin" Value="0,0,4,0" />
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="ListBoxItem">
+                                                <Border x:Name="chipBorder"
+                                                        Background="Transparent"
+                                                        BorderBrush="{DynamicResource Brush.Border}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="10"
+                                                        Padding="9,3">
+                                                    <TextBlock x:Name="chipText"
+                                                               Text="{Binding Label}"
+                                                               FontSize="12"
+                                                               Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="chipBorder" Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+                                                        <Setter TargetName="chipText" Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+                                                    </Trigger>
+                                                    <Trigger Property="IsSelected" Value="True">
+                                                        <Setter TargetName="chipBorder" Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+                                                        <Setter TargetName="chipBorder" Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+                                                        <Setter TargetName="chipText" Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+                                                        <Setter TargetName="chipText" Property="FontWeight" Value="SemiBold" />
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                        </ListBox>
+                    </StackPanel>
+                </WrapPanel>
+            </Border>
 
-            <!-- Row 3: action bar (left hint, right send/stop) -->
-            <Grid Grid.Row="3" Margin="0,6,0,0">
+            <!-- Row 3: textarea -->
+            <Grid Grid.Row="3">
+                <TextBlock Text="{Binding ComposerPlaceholder}"
+                           Margin="6,4"
+                           FontFamily="{DynamicResource Font.Cjk}"
+                           FontSize="{DynamicResource Font.Size.BodyLg}"
+                           Foreground="{DynamicResource Brush.Text.Muted}"
+                           IsHitTestVisible="False"
+                           Visibility="{Binding IsComposerPlaceholderVisible, Converter={x:Static views:BoolToVisibility.Instance}}" />
+                <TextBox x:Name="InputBox"
+                         Style="{StaticResource ComposerTextBox}"
+                         Text="{Binding Text, UpdateSourceTrigger=PropertyChanged}"
+                         PreviewKeyDown="InputBox_PreviewKeyDown" />
+            </Grid>
+
+            <!-- Row 4: action bar (left hint, right send/stop) -->
+            <Grid Grid.Row="4" Margin="0,6,0,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />

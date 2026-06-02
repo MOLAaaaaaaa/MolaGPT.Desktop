@@ -20,4 +20,18 @@ public static class NetworkSecurity
         RequireHttps(new Uri(normalized, UriKind.Absolute), context);
         return normalized;
     }
+
+    /// <summary>
+    /// Joins a base URL with an explicit, user-editable endpoint path. The
+    /// convention across the app is: base URL = host root up to (but not
+    /// including) the version segment; path carries the version, e.g.
+    /// "v1/chat/completions", "v1/images/generations", "v1/models". No path
+    /// is auto-inferred — what the user/preset configures is what we POST to.
+    /// </summary>
+    public static Uri CombineEndpoint(string baseUrl, string path, string context)
+    {
+        var normalizedBase = RequireHttpsBaseUrl(baseUrl, context); // trailing slash, HTTPS-checked
+        var trimmedPath = path.Trim().TrimStart('/');
+        return new Uri(normalizedBase + trimmedPath, UriKind.Absolute);
+    }
 }

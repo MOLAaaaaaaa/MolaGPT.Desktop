@@ -30,6 +30,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string VisionProxyEnabledKey = "vision_proxy_enabled";
     private const string VisionProxyProviderIdKey = "vision_proxy_provider_id";
     private const string VisionProxyModelIdKey = "vision_proxy_model_id";
+    private const string ImageGenerationEnabledKey = "image_generation_enabled";
+    private const string ImageGenerationProviderIdKey = "image_generation_provider_id";
+    private const string ImageGenerationModelIdKey = "image_generation_model_id";
+    private const string ImageGenerationSizeKey = "image_generation_size";
+    private const string ImageGenerationStyleKey = "image_generation_style";
+    private const string ImageGenerationAsToolKey = "image_generation_as_tool";
 
     /// <summary>
     /// Raised whenever the user changes the theme mode in settings (or when
@@ -54,10 +60,17 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private bool _visionProxyEnabled;
     [ObservableProperty] private string? _visionProxyProviderId;
     [ObservableProperty] private string? _visionProxyModelId;
+    [ObservableProperty] private bool _imageGenerationEnabled;
+    [ObservableProperty] private string? _imageGenerationProviderId;
+    [ObservableProperty] private string? _imageGenerationModelId;
+    [ObservableProperty] private string _imageGenerationSize = "1024x1024";
+    [ObservableProperty] private string? _imageGenerationStyle;
+    [ObservableProperty] private bool _imageGenerationAsTool;
 
     public ObservableCollection<ProviderEntry> Providers { get; } = new();
     public ObservableCollection<McpServerEntry> McpServers { get; } = new();
     public ObservableCollection<VisionProviderModelOption> VisionProviderModels { get; } = new();
+    public ObservableCollection<ImageGenerationProviderModelOption> ImageGenerationProviderModels { get; } = new();
 
     private readonly ProviderRepository? _repo;
     private readonly CredentialStore? _credentialStore;
@@ -85,9 +98,10 @@ public sealed partial class SettingsViewModel : ObservableObject
             if (row.ApiKeyEnc is { Length: > 0 } && _credentialStore is not null)
                 plainKey = _credentialStore.Decrypt(row.ApiKeyEnc);
             var models = TryDeserializeModels(row.Models);
-            Providers.Add(new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder));
+            Providers.Add(new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat));
         }
         RefreshVisionProviderModels();
+        RefreshImageGenerationProviderModels();
     }
 
     private void LoadSettings()
@@ -116,6 +130,12 @@ public sealed partial class SettingsViewModel : ObservableObject
             VisionProxyEnabled = bool.TryParse(_settingsRepo.Get(VisionProxyEnabledKey), out var visionEnabled) && visionEnabled;
             VisionProxyProviderId = _settingsRepo.Get(VisionProxyProviderIdKey);
             VisionProxyModelId = _settingsRepo.Get(VisionProxyModelIdKey);
+            ImageGenerationEnabled = bool.TryParse(_settingsRepo.Get(ImageGenerationEnabledKey), out var imageGenEnabled) && imageGenEnabled;
+            ImageGenerationProviderId = _settingsRepo.Get(ImageGenerationProviderIdKey);
+            ImageGenerationModelId = _settingsRepo.Get(ImageGenerationModelIdKey);
+            ImageGenerationSize = _settingsRepo.Get(ImageGenerationSizeKey) ?? "1024x1024";
+            ImageGenerationStyle = _settingsRepo.Get(ImageGenerationStyleKey);
+            ImageGenerationAsTool = bool.TryParse(_settingsRepo.Get(ImageGenerationAsToolKey), out var imageGenAsTool) && imageGenAsTool;
         }
         finally
         {
@@ -231,6 +251,51 @@ public sealed partial class SettingsViewModel : ObservableObject
         SetOrRemove(VisionProxyModelIdKey, value);
     }
 
+    partial void OnImageGenerationEnabledChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsImageGenerationConfigured));
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(ImageGenerationEnabledKey, value.ToString());
+    }
+
+    partial void OnImageGenerationProviderIdChanged(string? value)
+    {
+        OnPropertyChanged(nameof(IsImageGenerationConfigured));
+        if (_loadingSettings) return;
+        SetOrRemove(ImageGenerationProviderIdKey, value);
+
+        if (_loadingSettings) return;
+        var selected = ImageGenerationProviderModels.FirstOrDefault(m =>
+            string.Equals(m.ProviderId, value, StringComparison.Ordinal));
+        if (selected is not null && !string.Equals(ImageGenerationModelId, selected.ModelId, StringComparison.Ordinal))
+            ImageGenerationModelId = selected.ModelId;
+    }
+
+    partial void OnImageGenerationModelIdChanged(string? value)
+    {
+        OnPropertyChanged(nameof(IsImageGenerationConfigured));
+        if (_loadingSettings) return;
+        SetOrRemove(ImageGenerationModelIdKey, value);
+    }
+
+    partial void OnImageGenerationSizeChanged(string value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(ImageGenerationSizeKey, value);
+    }
+
+    partial void OnImageGenerationStyleChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(ImageGenerationStyleKey, value);
+    }
+
+    partial void OnImageGenerationAsToolChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(ImageGenerationAsToolKey, value.ToString());
+    }
+
     public static string NormalizeWebSearchProvider(string? provider) =>
         string.IsNullOrWhiteSpace(provider)
             ? "duckduckgo"
@@ -264,8 +329,22 @@ public sealed partial class SettingsViewModel : ObservableObject
             ApiKeyEnc: cipher,
             Models: JsonSerializer.Serialize(entry.Models),
             Enabled: entry.Enabled,
-            SortOrder: entry.SortOrder));
+            SortOrder: entry.SortOrder,
+            Purpose: entry.Purpose,
+            ApiPath: entry.ApiPath,
+            ImageEditPath: entry.ImageEditPath,
+            ImageFormat: entry.ImageFormat));
         RefreshVisionProviderModels();
+        RefreshImageGenerationProviderModels();
+
+        if (string.Equals(entry.Purpose, "image", StringComparison.OrdinalIgnoreCase))
+        {
+            ImageGenerationEnabled = true;
+            ImageGenerationProviderId = entry.Id;
+            var firstModel = entry.Models.FirstOrDefault()?.Id;
+            if (!string.IsNullOrWhiteSpace(firstModel))
+                ImageGenerationModelId = firstModel;
+        }
     }
 
     public void UpsertMcpServer(McpServerEntry entry)
@@ -292,6 +371,65 @@ public sealed partial class SettingsViewModel : ObservableObject
         VisionProxyEnabled,
         VisionProxyProviderId,
         VisionProxyModelId);
+
+    public ImageGenerationOptions BuildImageGenerationOptions()
+    {
+        var provider = GetImageGenerationProvider();
+        return new ImageGenerationOptions(
+            ImageGenerationEnabled,
+            provider?.BaseUrl,
+            provider?.ApiKey,
+            ImageGenerationModelId,
+            string.IsNullOrWhiteSpace(ImageGenerationSize) ? "1024x1024" : ImageGenerationSize.Trim(),
+            ImageGenerationStyle,
+            ImageGenerationAsTool,
+            SelectedImageGenerationModel?.SupportsEdit == true,
+            provider?.ImageFormat,
+            provider?.ApiPath,
+            provider?.ImageEditPath);
+    }
+
+    public ImageGenerationProviderModelOption? SelectedImageGenerationModel =>
+        ImageGenerationProviderModels.FirstOrDefault(m =>
+            string.Equals(m.ProviderId, ImageGenerationProviderId, StringComparison.Ordinal)
+            && string.Equals(m.ModelId, ImageGenerationModelId, StringComparison.Ordinal));
+
+    public string? ImageGenerationBaseUrl
+    {
+        get => GetImageGenerationProvider()?.BaseUrl;
+        set
+        {
+            var provider = GetImageGenerationProvider();
+            if (provider is null) return;
+            Save(provider with { BaseUrl = string.IsNullOrWhiteSpace(value) ? null : value.Trim() });
+        }
+    }
+
+    public string? ImageGenerationApiKey
+    {
+        get => GetImageGenerationProvider()?.ApiKey;
+        set
+        {
+            var provider = GetImageGenerationProvider();
+            if (provider is null) return;
+            Save(provider with { ApiKey = string.IsNullOrWhiteSpace(value) ? null : value.Trim() });
+        }
+    }
+
+    public string? ImageGenerationModel
+    {
+        get => ImageGenerationModelId;
+        set => ImageGenerationModelId = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    public bool IsImageGenerationConfigured =>
+        ImageGenerationEnabled
+        && !string.IsNullOrWhiteSpace(ImageGenerationProviderId)
+        && !string.IsNullOrWhiteSpace(ImageGenerationModelId)
+        && GetImageGenerationProvider() is { BaseUrl: { Length: > 0 }, ApiKey: { Length: > 0 } }
+        && ImageGenerationProviderModels.Any(m =>
+            string.Equals(m.ProviderId, ImageGenerationProviderId, StringComparison.Ordinal)
+            && string.Equals(m.ModelId, ImageGenerationModelId, StringComparison.Ordinal));
 
     public bool IsVisionProxyAvailableFor(ProviderKind? providerKind, ProviderModel? model) =>
         providerKind == ProviderKind.OpenAICompatible
@@ -339,12 +477,69 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
     }
 
+    public void RefreshImageGenerationProviderModels()
+    {
+        ImageGenerationProviderModels.Clear();
+        foreach (var provider in Providers.Where(p => p.Enabled && IsImagePurpose(p.Purpose)))
+        {
+            foreach (var model in provider.Models)
+            {
+                ImageGenerationProviderModels.Add(new ImageGenerationProviderModelOption(
+                    provider.Id,
+                    model.Id,
+                    $"{provider.Name} / {model.DisplayName}",
+                    model.ImageEdit));
+            }
+        }
+
+        if (ImageGenerationProviderModels.Count == 0)
+            return;
+
+        if (!ImageGenerationProviderModels.Any(m => string.Equals(m.ProviderId, ImageGenerationProviderId, StringComparison.Ordinal)
+                                                   && string.Equals(m.ModelId, ImageGenerationModelId, StringComparison.Ordinal)))
+        {
+            var first = ImageGenerationProviderModels[0];
+            if (!string.Equals(ImageGenerationProviderId, first.ProviderId, StringComparison.Ordinal))
+                ImageGenerationProviderId = first.ProviderId;
+            if (!string.Equals(ImageGenerationModelId, first.ModelId, StringComparison.Ordinal))
+                ImageGenerationModelId = first.ModelId;
+        }
+    }
+
+    public ProviderEntry? GetImageGenerationProvider() =>
+        Providers.FirstOrDefault(p =>
+            string.Equals(p.Id, ImageGenerationProviderId, StringComparison.Ordinal)
+            && p.Enabled
+            && IsImagePurpose(p.Purpose));
+
+    public void RefreshImageGenerationSelection()
+    {
+        if (ImageGenerationProviderModels.Count == 0) return;
+
+        if (!ImageGenerationProviderModels.Any(m => string.Equals(m.ProviderId, ImageGenerationProviderId, StringComparison.Ordinal)
+                                                   && string.Equals(m.ModelId, ImageGenerationModelId, StringComparison.Ordinal)))
+        {
+            var first = ImageGenerationProviderModels[0];
+            if (!string.Equals(ImageGenerationProviderId, first.ProviderId, StringComparison.Ordinal))
+                ImageGenerationProviderId = first.ProviderId;
+            if (!string.Equals(ImageGenerationModelId, first.ModelId, StringComparison.Ordinal))
+                ImageGenerationModelId = first.ModelId;
+        }
+    }
+
     public void Delete(string id)
     {
         if (_repo is null) return;
         _repo.Delete(id);
         var existing = Providers.FirstOrDefault(p => p.Id == id);
         if (existing is not null) Providers.Remove(existing);
+        RefreshImageGenerationProviderModels();
+
+        if (string.Equals(ImageGenerationProviderId, id, StringComparison.Ordinal))
+        {
+            ImageGenerationProviderId = null;
+            ImageGenerationModelId = null;
+        }
     }
 
     private static List<ProviderModelEntry> TryDeserializeModels(string json)
@@ -353,6 +548,9 @@ public sealed partial class SettingsViewModel : ObservableObject
         try { return JsonSerializer.Deserialize<List<ProviderModelEntry>>(json) ?? new(); }
         catch (JsonException) { return new(); }
     }
+
+    public static bool IsImagePurpose(string? purpose) =>
+        string.Equals(purpose, "image", StringComparison.OrdinalIgnoreCase);
 
     public string? GetModelSystemPrompt(string? providerId, string? modelId)
     {
@@ -368,13 +566,17 @@ public enum ThemeMode { System, Light, Dark }
 
 public sealed record ProviderEntry(
     string Id,
-    string Type,                                           // openai|openai-compat|anthropic|gemini
+    string Type,                                           // 协议族: openai-compat|anthropic|gemini
     string Name,
     string? BaseUrl,
     string? ApiKey,
     List<ProviderModelEntry> Models,
     bool Enabled,
-    int SortOrder);
+    int SortOrder,
+    string Purpose = "chat",                               // 用途: chat|image
+    string? ApiPath = null,                                // chat: 对话路径; image: 生成路径 (含版本段)
+    string? ImageEditPath = null,                          // image(openai-images): 编辑路径
+    string? ImageFormat = null);                           // image: openai-images|openai-chat-image
 
 public sealed record ProviderModelEntry(
     string Id,
@@ -389,7 +591,8 @@ public sealed record ProviderModelEntry(
     int? ThinkingBudgetMax = null,
     int? ThinkingBudgetDefault = null,
     string? DefaultEffort = null,
-    string? SystemPrompt = null);
+    string? SystemPrompt = null,
+    bool ImageEdit = false);
 
 public sealed record McpServerEntry(
     string Id,
@@ -404,3 +607,9 @@ public sealed record VisionProviderModelOption(
     string ProviderId,
     string ModelId,
     string Label);
+
+public sealed record ImageGenerationProviderModelOption(
+    string ProviderId,
+    string ModelId,
+    string Label,
+    bool SupportsEdit = false);

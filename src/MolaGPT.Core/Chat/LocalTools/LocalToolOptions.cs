@@ -12,13 +12,15 @@ public sealed record LocalToolOptions(
     int SearchMaxResults = 6,
     int WebPageMaxCharacters = 12000,
     IReadOnlyList<McpServerOptions>? McpServers = null,
-    VisionProxyOptions? Vision = null)
+    VisionProxyOptions? Vision = null,
+    ImageGenerationOptions? ImageGeneration = null)
 {
     public bool HasAny =>
         Network
         || WebPage
         || McpServers?.Any(server => server.Enabled) == true
-        || Vision?.Enabled == true;
+        || Vision?.Enabled == true
+        || ImageGeneration?.Enabled == true;
 
     public static LocalToolOptions FromExtraBody(IReadOnlyDictionary<string, object>? extraBody)
     {
@@ -34,7 +36,8 @@ public sealed record LocalToolOptions(
             ReadInt(raw, "searchMaxResults") is { } maxResults ? Math.Clamp(maxResults, 1, 10) : 6,
             ReadInt(raw, "webPageMaxCharacters") is { } maxChars ? Math.Clamp(maxChars, 1000, 30000) : 12000,
             ReadMcpServers(raw),
-            ReadVision(raw));
+            ReadVision(raw),
+            ReadImageGeneration(raw));
     }
 
     private static IReadOnlyList<McpServerOptions> ReadMcpServers(object raw)
@@ -90,6 +93,25 @@ public sealed record LocalToolOptions(
             ReadBool(node, "enabled"),
             ReadString(node, "providerId"),
             ReadString(node, "modelId"));
+    }
+
+    private static ImageGenerationOptions? ReadImageGeneration(object raw)
+    {
+        var node = ReadValue(raw, "image_generation");
+        if (node is null) return null;
+
+        return new ImageGenerationOptions(
+            ReadBool(node, "enabled"),
+            ReadString(node, "baseUrl"),
+            ReadString(node, "apiKey"),
+            ReadString(node, "model"),
+            ReadString(node, "size") ?? "1024x1024",
+            ReadString(node, "style"),
+            ReadBool(node, "asTool"),
+            ReadBool(node, "supportsEdit"),
+            ReadString(node, "format"),
+            ReadString(node, "generationPath"),
+            ReadString(node, "editPath"));
     }
 
     private static bool ReadBool(object raw, string name)
@@ -244,3 +266,30 @@ public sealed record VisionProxyOptions(
     bool Enabled = false,
     string? ProviderId = null,
     string? ModelId = null);
+
+public sealed record ImageGenerationOptions(
+    bool Enabled = false,
+    string? BaseUrl = null,
+    string? ApiKey = null,
+    string? Model = null,
+    string Size = "1024x1024",
+    string? Style = null,
+    bool AsTool = false,
+    bool SupportsEdit = false,
+    // Interface dialect: "openai-images" (DALL·E / gpt-image, dedicated
+    // /images/* endpoints) or "openai-chat-image" (OpenRouter / nano-banana,
+    // image output via /chat/completions + modalities). Null => openai-images.
+    string? Format = null,
+    // Explicit, user-editable endpoint paths (carry the version segment).
+    // Null => format-specific default.
+    string? GenerationPath = null,
+    string? EditPath = null);
+
+public static class ImageApiFormat
+{
+    public const string OpenAiImages = "openai-images";
+    public const string OpenAiChatImage = "openai-chat-image";
+
+    public static bool IsChatImage(string? format) =>
+        string.Equals(format, OpenAiChatImage, StringComparison.OrdinalIgnoreCase);
+}

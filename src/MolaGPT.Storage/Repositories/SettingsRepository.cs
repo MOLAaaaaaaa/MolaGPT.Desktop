@@ -47,7 +47,8 @@ public sealed class ProviderRepository
         using var conn = _db.Open();
         return conn.Query<ProviderRow>(
             "SELECT id AS Id, type AS Type, name AS Name, base_url AS BaseUrl, " +
-            "api_key_enc AS ApiKeyEnc, models AS Models, enabled AS Enabled, sort_order AS SortOrder " +
+            "api_key_enc AS ApiKeyEnc, models AS Models, enabled AS Enabled, sort_order AS SortOrder, " +
+            "purpose AS Purpose, api_path AS ApiPath, image_edit_path AS ImageEditPath, image_format AS ImageFormat " +
             "FROM providers ORDER BY sort_order ASC, name ASC").ToList();
     }
 
@@ -55,12 +56,13 @@ public sealed class ProviderRepository
     {
         using var conn = _db.Open();
         conn.Execute(
-            @"INSERT INTO providers (id, type, name, base_url, api_key_enc, models, enabled, sort_order)
-              VALUES (@Id, @Type, @Name, @BaseUrl, @ApiKeyEnc, @Models, @Enabled, @SortOrder)
+            @"INSERT INTO providers (id, type, name, base_url, api_key_enc, models, enabled, sort_order, purpose, api_path, image_edit_path, image_format)
+              VALUES (@Id, @Type, @Name, @BaseUrl, @ApiKeyEnc, @Models, @Enabled, @SortOrder, @Purpose, @ApiPath, @ImageEditPath, @ImageFormat)
               ON CONFLICT(id) DO UPDATE SET
                 type=excluded.type, name=excluded.name, base_url=excluded.base_url,
                 api_key_enc=excluded.api_key_enc, models=excluded.models,
-                enabled=excluded.enabled, sort_order=excluded.sort_order",
+                enabled=excluded.enabled, sort_order=excluded.sort_order, purpose=excluded.purpose,
+                api_path=excluded.api_path, image_edit_path=excluded.image_edit_path, image_format=excluded.image_format",
             row);
     }
 

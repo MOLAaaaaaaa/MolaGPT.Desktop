@@ -182,6 +182,13 @@ public partial class ComposerView : UserControl
         ClosePersonaPopup();
     }
 
+    private void OnOpenImageWorkbenchClick(object sender, RoutedEventArgs e)
+    {
+        ClosePersonaPopup();
+        if (Window.GetWindow(this)?.DataContext is MainViewModel mainVm)
+            mainVm.OpenImageWorkbenchTask();
+    }
+
     /// <summary>Open Settings directly into an unsaved new-persona editor.
     /// The persona is only added to the registry after the user saves it.</summary>
     private void OnNewPersonaClick(object sender, RoutedEventArgs e)

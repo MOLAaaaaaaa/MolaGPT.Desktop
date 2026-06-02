@@ -127,15 +127,15 @@
                                                         <Style TargetType="Image">
                                                             <Setter Property="Visibility" Value="Collapsed" />
                                                             <Style.Triggers>
-                                                                <MultiDataTrigger>
-                                                                    <MultiDataTrigger.Conditions>
-                                                                        <Condition Binding="{Binding Bytes, Converter={x:Static views:NullToBoolConverter.Instance}}"
-                                                                                   Value="False" />
-                                                                        <Condition Binding="{Binding ThumbnailUrl, Converter={x:Static views:NullOrEmptyToBoolConverter.Instance}}"
-                                                                                   Value="False" />
-                                                                    </MultiDataTrigger.Conditions>
-                                                                    <Setter Property="Visibility" Value="Visible" />
-                                                                </MultiDataTrigger>
+                                                                 <MultiDataTrigger>
+                                                                     <MultiDataTrigger.Conditions>
+                                                                         <Condition Binding="{Binding Bytes, Converter={x:Static views:NullToBoolConverter.Instance}}"
+                                                                                    Value="False" />
+                                                                         <Condition Binding="{Binding ThumbnailUrl, Converter={x:Static views:NullOrEmptyToBoolConverter.Instance}}"
+                                                                                   Value="True" />
+                                                                     </MultiDataTrigger.Conditions>
+                                                                     <Setter Property="Visibility" Value="Visible" />
+                                                                 </MultiDataTrigger>
                                                             </Style.Triggers>
                                                         </Style>
                                                     </Image.Style>
@@ -868,6 +868,93 @@
                                 </StackPanel>
                             </Border>
                             </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <ItemsControl ItemsSource="{Binding Attachments}"
+                              Visibility="{Binding HasAttachments, Converter={x:Static views:BoolToVisibility.Instance}}"
+                              Margin="0,8,0,0">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <WrapPanel Orientation="Horizontal" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Background="{DynamicResource Brush.Bg.Primary}"
+                                    BorderBrush="{DynamicResource Brush.Border}"
+                                    BorderThickness="1"
+                                    CornerRadius="{DynamicResource Radius.Md}"
+                                    Padding="8"
+                                    Margin="0,0,10,10"
+                                    MaxWidth="260"
+                                    Cursor="Hand"
+                                    MouseLeftButtonUp="OnAttachmentCardClick"
+                                    ToolTip="{Binding FileName}">
+                                <StackPanel>
+                                    <Border Width="240"
+                                            Height="180"
+                                            Background="{DynamicResource Brush.Bg.Tertiary}"
+                                            CornerRadius="{DynamicResource Radius.Sm}"
+                                            ClipToBounds="True">
+                                        <Grid>
+                                            <Image Source="{Binding Converter={x:Static views:BytesToImageConverter.Instance}}"
+                                                   Stretch="UniformToFill">
+                                                <Image.Style>
+                                                    <Style TargetType="Image">
+                                                        <Setter Property="Visibility" Value="Visible" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsImage}" Value="False">
+                                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Image.Style>
+                                            </Image>
+                                            <Image Source="{Binding ThumbnailUrl}"
+                                                   Stretch="UniformToFill">
+                                                <Image.Style>
+                                                    <Style TargetType="Image">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <Style.Triggers>
+                                                            <MultiDataTrigger>
+                                                                <MultiDataTrigger.Conditions>
+                                                                    <Condition Binding="{Binding Bytes, Converter={x:Static views:NullToBoolConverter.Instance}}"
+                                                                               Value="False" />
+                                                                    <Condition Binding="{Binding LocalName, Converter={x:Static views:NullOrEmptyToBoolConverter.Instance}}"
+                                                                               Value="False" />
+                                                                    <Condition Binding="{Binding ThumbnailUrl, Converter={x:Static views:NullOrEmptyToBoolConverter.Instance}}"
+                                                                               Value="True" />
+                                                                </MultiDataTrigger.Conditions>
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </MultiDataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Image.Style>
+                                            </Image>
+                                            <TextBlock Text="&#xE91B;"
+                                                       FontFamily="{DynamicResource Font.Icon}"
+                                                       FontSize="24"
+                                                       Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"
+                                                       Visibility="{Binding HasInlinePreview, Converter={x:Static views:BoolToVisibilityInverse.Instance}}" />
+                                        </Grid>
+                                    </Border>
+                                    <TextBlock Text="{Binding FileName}"
+                                               FontSize="12"
+                                               FontWeight="Medium"
+                                               Foreground="{DynamicResource Brush.Text.Primary}"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="2,8,2,0" />
+                                    <TextBlock Text="{Binding Label}"
+                                               FontSize="10.5"
+                                               Foreground="{DynamicResource Brush.Text.Muted}"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="2,2,2,0" />
+                                </StackPanel>
+                            </Border>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>

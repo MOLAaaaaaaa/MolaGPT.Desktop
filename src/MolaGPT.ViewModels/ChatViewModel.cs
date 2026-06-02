@@ -1077,9 +1077,27 @@ public sealed partial class ChatViewModel : ObservableObject
         var hasPersistedTimeline =
             toolCalls?.Any(t => t.TimelineIndex is not null) == true
             || thinkingSegments?.Any(t => t.TimelineIndex is not null) == true;
-        if (hasPersistedTimeline)
-            return (toolCalls, thinkingSegments);
 
+        // Phase 1 — legacy data with no timeline at all: derive a display order
+        // from content offsets so tools/thinking interleave as they streamed.
+        if (!hasPersistedTimeline)
+            (toolCalls, thinkingSegments) = InferTimelineFromOffsets(toolCalls, thinkingSegments);
+
+        // Phase 2 — backfill any tool that is missing its content offset. On
+        // restore the VM already holds the full message text, so a null offset
+        // would make ApplyToolDelta pin the card to Content.Length (the very
+        // end). Inheriting the preceding element's offset (timeline order)
+        // keeps the card at its original spot — including inside the thinking
+        // area, preserving the streamed layout.
+        if (toolCalls?.Any(t => t.ContentOffset is null) == true)
+            toolCalls = BackfillMissingToolOffsets(toolCalls, thinkingSegments);
+
+        return (toolCalls, thinkingSegments);
+    }
+
+    private static (IReadOnlyList<ToolCallDelta>? ToolCalls, IReadOnlyList<ThinkingSegmentDelta>? ThinkingSegments)
+        InferTimelineFromOffsets(IReadOnlyList<ToolCallDelta>? toolCalls, IReadOnlyList<ThinkingSegmentDelta>? thinkingSegments)
+    {
         var toolIndexes = new Dictionary<int, int>();
         var thinkingIndexes = new Dictionary<int, int>();
         var toolGroups = (toolCalls ?? [])
@@ -1109,6 +1127,38 @@ public sealed partial class ChatViewModel : ObservableObject
         var restoredTools = toolCalls?.Select((t, i) => t with { TimelineIndex = toolIndexes[i] }).ToList();
         var restoredThinking = thinkingSegments?.Select((t, i) => t with { TimelineIndex = thinkingIndexes[i] }).ToList();
         return (restoredTools, restoredThinking);
+    }
+
+    private static IReadOnlyList<ToolCallDelta> BackfillMissingToolOffsets(
+        IReadOnlyList<ToolCallDelta> toolCalls,
+        IReadOnlyList<ThinkingSegmentDelta>? thinkingSegments)
+    {
+        // Walk all elements in timeline order, carrying the last known content
+        // offset forward. Thinking offsets are always concrete; only tools can
+        // be null. A null-offset tool before any known offset lands at 0.
+        var events = new List<(int? Timeline, int Order, int ToolIndex, int? Offset)>();
+        for (var i = 0; i < toolCalls.Count; i++)
+            events.Add((toolCalls[i].TimelineIndex, i, i, toolCalls[i].ContentOffset));
+        if (thinkingSegments is not null)
+            for (var i = 0; i < thinkingSegments.Count; i++)
+                events.Add((thinkingSegments[i].TimelineIndex, toolCalls.Count + i, -1, thinkingSegments[i].ContentOffset));
+
+        var resolved = new int[toolCalls.Count];
+        for (var i = 0; i < toolCalls.Count; i++)
+            resolved[i] = toolCalls[i].ContentOffset ?? 0;
+
+        var lastOffset = 0;
+        foreach (var e in events.OrderBy(e => e.Timeline ?? int.MaxValue).ThenBy(e => e.Order))
+        {
+            if (e.Offset is { } known)
+                lastOffset = known;
+            else if (e.ToolIndex >= 0)
+                resolved[e.ToolIndex] = lastOffset;
+        }
+
+        return toolCalls
+            .Select((t, i) => t.ContentOffset is null ? t with { ContentOffset = resolved[i] } : t)
+            .ToList();
     }
 
     private sealed record IndexedTool(ToolCallDelta Item, int Index);

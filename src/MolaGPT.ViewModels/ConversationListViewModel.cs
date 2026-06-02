@@ -28,6 +28,7 @@ namespace MolaGPT.ViewModels;
 /// </summary>
 public sealed partial class ConversationListViewModel : ObservableObject
 {
+    public const string ImageWorkbenchProviderId = "byok-image-workbench";
     private const string SettingByokExpandedKey = "sidebar_group_byok_expanded";
     private const string SettingMolaGptExpandedKey = "sidebar_group_molagpt_expanded";
 
@@ -68,6 +69,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
     private readonly PersonaListViewModel? _personas;
     private readonly SettingsRepository? _settingsRepo;
     private readonly HashSet<string> _selectedIds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _generatingIds = new(StringComparer.Ordinal);
     private bool _bulkUpdatingItems;
     private bool _suspendExpansionPersist;
 
@@ -268,7 +270,15 @@ public sealed partial class ConversationListViewModel : ObservableObject
                     string.IsNullOrWhiteSpace(row.Title) ? "新对话" : row.Title,
                     DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt),
                     IsByokProvider(row.ProviderId),
-                    _personas?.Find(row.PersonaId)?.Name);
+                    _personas?.Find(row.PersonaId)?.Name,
+                    IsImageWorkbenchProvider(row.ProviderId));
+
+                // Restore the spinner for any task still generating in the
+                // background — ApplyRows builds fresh items (IsGenerating
+                // defaults false), so without this a mid-flight workbench task
+                // loses its sidebar spinner on the next reload.
+                if (_generatingIds.Contains(row.Id))
+                    item.IsGenerating = true;
 
                 Items.Add(item);
                 if (item.IsByok) ByokItems.Add(item);
@@ -294,7 +304,8 @@ public sealed partial class ConversationListViewModel : ObservableObject
             if (item.Id != row.Id
                 || (!string.IsNullOrWhiteSpace(row.Title) && item.Title != row.Title)
                 || item.UpdatedAt != DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt)
-                || item.IsByok != IsByokProvider(row.ProviderId))
+                || item.IsByok != IsByokProvider(row.ProviderId)
+                || item.IsImageTask != IsImageWorkbenchProvider(row.ProviderId))
             {
                 return false;
             }
@@ -323,6 +334,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
         var isByok = providerId is null && existingIdx >= 0
             ? Items[existingIdx].IsByok
             : IsByokProvider(providerId);
+        var isImageTask = providerId is null && existingIdx >= 0
+            ? Items[existingIdx].IsImageTask
+            : IsImageWorkbenchProvider(providerId);
         var wasGenerating = existingIdx >= 0 && Items[existingIdx].IsGenerating;
         // Caller passes null personaLabel when it has no info to add (e.g.
         // sidebar refresh from cloud sync). Preserve the existing label in
@@ -334,7 +348,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
             "" => null,
             _ => personaLabel
         };
-        var next = new ConversationListItem(id, normalized, updatedAt, isByok, resolvedPersonaLabel);
+        var next = new ConversationListItem(id, normalized, updatedAt, isByok, resolvedPersonaLabel, isImageTask);
         if (wasGenerating) next.IsGenerating = true;
 
         if (existingIdx < 0)
@@ -387,6 +401,27 @@ public sealed partial class ConversationListViewModel : ObservableObject
         if (string.IsNullOrEmpty(id)) return;
         SelectedId = id;
     }
+
+    public string CreateImageWorkbenchConversation(string? title = null, string? modelId = null)
+    {
+        var id = $"image_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}_{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var row = new ConversationRow(
+            Id: id,
+            Title: string.IsNullOrWhiteSpace(title) ? "图像工作台" : title.Trim(),
+            ModelId: modelId,
+            ProviderId: ImageWorkbenchProviderId,
+            CreatedAt: now.ToUnixTimeMilliseconds(),
+            UpdatedAt: now.ToUnixTimeMilliseconds(),
+            Pinned: false,
+            DeletedAt: null);
+        _repository?.Upsert(row);
+        UpsertItem(row.Id, row.Title, now, row.ProviderId, "图像");
+        return id;
+    }
+
+    public ConversationListItem? FindItem(string id) =>
+        Items.FirstOrDefault(item => string.Equals(item.Id, id, StringComparison.Ordinal));
 
     public void SetSelectedIds(IEnumerable<string> ids)
     {
@@ -472,7 +507,8 @@ public sealed partial class ConversationListViewModel : ObservableObject
                 title,
                 DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt),
                 IsByokProvider(row.ProviderId),
-                _personas?.Find(row.PersonaId)?.Name));
+                _personas?.Find(row.PersonaId)?.Name,
+                IsImageWorkbenchProvider(row.ProviderId)));
         }
     }
 
@@ -497,6 +533,14 @@ public sealed partial class ConversationListViewModel : ObservableObject
     public void SetGenerating(string conversationId, bool isGenerating)
     {
         if (string.IsNullOrEmpty(conversationId)) return;
+
+        // Track generating ids out-of-band so a Reload() / ApplyRows() that
+        // rebuilds every item (e.g. when the workbench closes and triggers a
+        // sidebar refresh) can restore the spinner for tasks still running in
+        // the background, instead of silently dropping it to the default false.
+        if (isGenerating) _generatingIds.Add(conversationId);
+        else _generatingIds.Remove(conversationId);
+
         for (int i = 0; i < Items.Count; i++)
         {
             if (Items[i].Id == conversationId)
@@ -510,6 +554,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
     private static bool IsByokProvider(string? providerId) =>
         !string.IsNullOrWhiteSpace(providerId)
         && !string.Equals(providerId, "molagpt-proxy", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsImageWorkbenchProvider(string? providerId) =>
+        string.Equals(providerId, ImageWorkbenchProviderId, StringComparison.OrdinalIgnoreCase);
 }
 
 public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.ObservableObject
@@ -518,6 +565,8 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
     public string Title { get; }
     public DateTimeOffset UpdatedAt { get; }
     public bool IsByok { get; }
+    public bool IsImageTask { get; }
+    public string IconGlyph => IsImageTask ? "\uE91B" : "\uE8BD";
 
     private bool _isGenerating;
     public bool IsGenerating
@@ -544,18 +593,23 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
 
     /// <summary>Sidebar badge text. Falls back to "自定义" only when no
     /// persona name was resolved.</summary>
-    public string BadgeLabel => string.IsNullOrWhiteSpace(PersonaLabel) ? "自定义" : PersonaLabel!;
+    public string BadgeLabel => IsImageTask ? "图像" : string.IsNullOrWhiteSpace(PersonaLabel) ? "自定义" : PersonaLabel!;
 
     public ConversationListItem(string id, string title, DateTimeOffset updatedAt, bool isByok)
         : this(id, title, updatedAt, isByok, null) { }
 
     public ConversationListItem(
         string id, string title, DateTimeOffset updatedAt, bool isByok, string? personaLabel)
+        : this(id, title, updatedAt, isByok, personaLabel, false) { }
+
+    public ConversationListItem(
+        string id, string title, DateTimeOffset updatedAt, bool isByok, string? personaLabel, bool isImageTask)
     {
         Id = id;
         Title = title;
         UpdatedAt = updatedAt;
         IsByok = isByok;
+        IsImageTask = isImageTask;
         _personaLabel = personaLabel;
     }
 

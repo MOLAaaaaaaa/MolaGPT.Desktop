@@ -10,6 +10,7 @@ using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Models;
 using MolaGPT.Core.Net;
@@ -35,7 +36,10 @@ public partial class SettingsWindow : Window
     private bool _syncInProgress;
     private bool _applyingPreset;
     private bool _updatingWebSearchUi;
+    private bool _updatingImageGenerationUi;
     private bool _loadingPersonaForm;
+    private bool _loadingEndpointForm;
+    private string _editingPurpose = "chat";
 
     // Provider presets fill in the connection-info side (name, base URL,
     // models endpoint, default thinking-param dialect) but intentionally
@@ -52,6 +56,17 @@ public partial class SettingsWindow : Window
             ModelsPath: "v1/models",
             DefaultThinkingKind: ThinkingParamKind.OpenAiReasoningEffort,
             DefaultModels: Array.Empty<ProviderModelEntry>()),
+        new(
+            Id: "openrouter-images",
+            Name: "OpenRouter 图像",
+            Type: "openai-compat",
+            BaseUrl: "https://openrouter.ai/api/",
+            ModelsPath: "v1/models",
+            DefaultThinkingKind: ThinkingParamKind.None,
+            DefaultModels: Array.Empty<ProviderModelEntry>(),
+            Purpose: "image",
+            ApiPath: "v1/chat/completions",
+            ImageFormat: "openai-chat-image"),
         new(
             Id: "deepseek",
             Name: "DeepSeek",
@@ -76,6 +91,18 @@ public partial class SettingsWindow : Window
             ModelsPath: "v1/models",
             DefaultThinkingKind: ThinkingParamKind.OpenAiReasoningEffort,
             DefaultModels: Array.Empty<ProviderModelEntry>()),
+        new(
+            Id: "openai-images",
+            Name: "OpenAI 图像",
+            Type: "openai-compat",
+            BaseUrl: OpenAIProvider.DefaultBaseUrl,
+            ModelsPath: "v1/models",
+            DefaultThinkingKind: ThinkingParamKind.None,
+            DefaultModels: Array.Empty<ProviderModelEntry>(),
+            Purpose: "image",
+            ApiPath: "v1/images/generations",
+            ImageEditPath: "v1/images/edits",
+            ImageFormat: "openai-images"),
         new(
             Id: "anthropic",
             Name: "Anthropic (Claude)",
@@ -122,7 +149,7 @@ public partial class SettingsWindow : Window
         _byokHttpFactory = byokHttpFactory;
         _toolHost = toolHost;
         DataContext = vm;
-        ProviderPresetCombo.ItemsSource = ProviderPresets;
+        SetPresetItemsForPurpose("chat");
         // The persona tab uses _personas as its DataContext so bindings inside
         // it can target Personas (the collection) directly without going
         // through SettingsViewModel.
@@ -156,10 +183,26 @@ public partial class SettingsWindow : Window
             PopulateVisionCombo();
             SelectVisionModel();
             UpdateWebSearchStatusHint();
+            InitializeImageGenerationUi();
         }
         finally
         {
             _updatingWebSearchUi = false;
+        }
+    }
+
+    private void InitializeImageGenerationUi()
+    {
+        _updatingImageGenerationUi = true;
+        try
+        {
+            PopulateImageGenerationCombo();
+            SelectImageGenerationModel();
+            UpdateImageGenerationStatusHint();
+        }
+        finally
+        {
+            _updatingImageGenerationUi = false;
         }
     }
 
@@ -182,6 +225,25 @@ public partial class SettingsWindow : Window
             FontWeight = FontWeights.SemiBold
         };
         VisionExistingModelCombo.Items.Add(manageItem);
+    }
+
+    private void PopulateImageGenerationCombo()
+    {
+        ImageGenerationModelCombo.Items.Clear();
+        foreach (var model in _vm.ImageGenerationProviderModels)
+            ImageGenerationModelCombo.Items.Add(model);
+
+        if (_vm.ImageGenerationProviderModels.Count > 0)
+            ImageGenerationModelCombo.Items.Add(new Separator());
+
+        ImageGenerationModelCombo.Items.Add(new ComboBoxItem
+        {
+            Content = "模型管理...",
+            Tag = ImageGenerationManageModelsTag,
+            FontWeight = FontWeights.SemiBold
+        });
+
+        UpdateImageGenerationStatusHint();
     }
 
     private void SelectVisionModel()
@@ -224,6 +286,7 @@ public partial class SettingsWindow : Window
     }
 
     private const string VisionManageModelsTag = "__manage_models__";
+    private const string ImageGenerationManageModelsTag = "__manage_image_models__";
 
     private void VisionExistingModelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -242,6 +305,27 @@ public partial class SettingsWindow : Window
             return;
         _vm.VisionProxyProviderId = option.ProviderId;
         _vm.VisionProxyModelId = option.ModelId;
+    }
+
+    private void ImageGenerationModelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_updatingImageGenerationUi) return;
+
+        if (ImageGenerationModelCombo.SelectedItem is ComboBoxItem cbi
+            && string.Equals(cbi.Tag?.ToString(), ImageGenerationManageModelsTag, StringComparison.Ordinal))
+        {
+            if (e.RemovedItems.Count > 0)
+                ImageGenerationModelCombo.SelectedItem = e.RemovedItems[0];
+            NavigateToTab("模型服务");
+            return;
+        }
+
+        if (ImageGenerationModelCombo.SelectedItem is not ImageGenerationProviderModelOption option)
+            return;
+
+        _vm.ImageGenerationProviderId = option.ProviderId;
+        _vm.ImageGenerationModelId = option.ModelId;
+        UpdateImageGenerationStatusHint();
     }
 
     private void NavigateToTab(string header)
@@ -303,6 +387,19 @@ public partial class SettingsWindow : Window
         };
     }
 
+    private void UpdateImageGenerationStatusHint()
+    {
+        if (_vm.ImageGenerationProviderModels.Count == 0)
+        {
+            ImageGenerationStatusText.Text = "请先在「模型服务」中添加图像服务。";
+            return;
+        }
+
+        ImageGenerationStatusText.Text = _vm.IsImageGenerationConfigured
+            ? "已启用，BYOK 对话中会显示「创建图像」。"
+            : "选择图像服务与模型后，即可在 BYOK 对话中创建图像。";
+    }
+
     private async void CheckWebSearchClick(object sender, RoutedEventArgs e)
     {
         CheckWebSearchButton.IsEnabled = false;
@@ -338,6 +435,51 @@ public partial class SettingsWindow : Window
             CheckWebSearchButton.Content = "测试连接";
             CheckWebSearchButton.IsEnabled = true;
         }
+    }
+
+    private async void CheckImageGenerationClick(object sender, RoutedEventArgs e)
+    {
+        CheckImageGenerationButton.IsEnabled = false;
+        CheckImageGenerationButton.Content = "测试中…";
+        ImageGenerationStatusText.Text = "正在发送一次测试生成…";
+        try
+        {
+            var tool = new ImageGenerationTool(_byokHttpFactory);
+            var images = await tool.GenerateAsync(
+                _vm.BuildImageGenerationOptions(),
+                "a single black dot on a white background",
+                CancellationToken.None);
+            ImageGenerationStatusText.Text = images.Count > 0
+                ? "连接成功，图像服务可用"
+                : "连接成功，但未返回图片";
+        }
+        catch (Exception ex)
+        {
+            ImageGenerationStatusText.Text = "连接失败：" + ex.Message;
+        }
+        finally
+        {
+            CheckImageGenerationButton.Content = "测试连接";
+            CheckImageGenerationButton.IsEnabled = true;
+        }
+    }
+
+    private void SelectImageGenerationModel()
+    {
+        foreach (var item in ImageGenerationModelCombo.Items)
+        {
+            if (item is ImageGenerationProviderModelOption option
+                && string.Equals(option.ProviderId, _vm.ImageGenerationProviderId, StringComparison.Ordinal)
+                && string.Equals(option.ModelId, _vm.ImageGenerationModelId, StringComparison.Ordinal))
+            {
+                ImageGenerationModelCombo.SelectedItem = item;
+                return;
+            }
+        }
+
+        var selected = _vm.SelectedImageGenerationModel;
+        if (selected is not null)
+            ImageGenerationModelCombo.SelectedItem = selected;
     }
 
     private void HeaderMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -462,9 +604,13 @@ public partial class SettingsWindow : Window
         BeginEdit(entry);
     }
 
-    private void AddProviderClick(object sender, RoutedEventArgs e)
+    private void AddChatProviderClick(object sender, RoutedEventArgs e) => AddProvider("chat");
+
+    private void AddImageProviderClick(object sender, RoutedEventArgs e) => AddProvider("image");
+
+    private void AddProvider(string purpose)
     {
-        var preset = ProviderPresets[0];
+        var preset = PresetsForPurpose(purpose).First();
         var entry = new ProviderEntry(
             Id: Guid.NewGuid().ToString("N"),
             Type: preset.Type,
@@ -473,7 +619,11 @@ public partial class SettingsWindow : Window
             ApiKey: "",
             Models: preset.DefaultModels.ToList(),
             Enabled: true,
-            SortOrder: _vm.Providers.Count);
+            SortOrder: _vm.Providers.Count,
+            Purpose: preset.Purpose,
+            ApiPath: preset.ApiPath,
+            ImageEditPath: preset.ImageEditPath,
+            ImageFormat: preset.ImageFormat);
         _vm.Providers.Add(entry);
         ProviderList.SelectedItem = entry;
     }
@@ -484,18 +634,32 @@ public partial class SettingsWindow : Window
     {
         _editing = entry;
         ProviderEditor.IsEnabled = true;
-        var preset = FindPreset(entry);
-        SelectPreset(preset);
-        EditName.Text = entry.Name;
-        SetProviderType(entry.Type);
-        EditBaseUrl.Text = entry.BaseUrl ?? "";
-        EditApiKey.Password = entry.ApiKey ?? "";
-        _editingModels = new(entry.Models.Select(EditableModelEntry.From));
-        ModelCards.ItemsSource = _editingModels;
-        TypePanel.Visibility = (preset is null || preset.Id == "custom-openai")
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-        EditorMessage.Text = string.Empty;
+        _loadingEndpointForm = true;
+        try
+        {
+            EditName.Text = entry.Name;
+            _applyingPreset = true;
+            try { SetFormPurpose(entry.Purpose); }
+            finally { _applyingPreset = false; }
+            var preset = FindPreset(entry);
+            SelectPreset(preset);
+            SetProviderType(entry.Type);
+            EditBaseUrl.Text = entry.BaseUrl ?? "";
+            EditApiPath.Text = string.IsNullOrWhiteSpace(entry.ApiPath)
+                ? DefaultApiPathFor(entry.Purpose, entry.ImageFormat, entry.Type)
+                : entry.ApiPath;
+            SelectImageFormat(entry.ImageFormat);
+            EditImageEditPath.Text = string.IsNullOrWhiteSpace(entry.ImageEditPath) ? "v1/images/edits" : entry.ImageEditPath;
+            EditApiKey.Password = entry.ApiKey ?? "";
+            _editingModels = new(entry.Models.Select(EditableModelEntry.From));
+            ModelCards.ItemsSource = _editingModels;
+            TypePanel.Visibility = (preset is null || preset.Id == "custom-openai")
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            EditorMessage.Text = string.Empty;
+        }
+        finally { _loadingEndpointForm = false; }
+        UpdateEndpointFields();
     }
 
     private void ProviderPresetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -506,26 +670,51 @@ public partial class SettingsWindow : Window
 
     private void ApplyPresetToForm(ProviderPreset preset)
     {
-        EditName.Text = preset.Name;
-        SetProviderType(preset.Type);
-        EditBaseUrl.Text = preset.BaseUrl;
-        _editingModels = new(preset.DefaultModels.Select(EditableModelEntry.From));
-        ModelCards.ItemsSource = _editingModels;
-        TypePanel.Visibility = preset.Id == "custom-openai"
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-        EditorMessage.Text = $"已套用「{preset.Name}」预设。填入 API Key 后点「自动获取」拉取最新模型列表。";
+        _loadingEndpointForm = true;
+        try
+        {
+            EditName.Text = preset.Name;
+            SetFormPurpose(preset.Purpose);
+            SetProviderType(preset.Type);
+            EditBaseUrl.Text = preset.BaseUrl;
+            EditApiPath.Text = string.IsNullOrWhiteSpace(preset.ApiPath)
+                ? DefaultApiPathFor(preset.Purpose, preset.ImageFormat, preset.Type)
+                : preset.ApiPath;
+            SelectImageFormat(preset.ImageFormat);
+            EditImageEditPath.Text = string.IsNullOrWhiteSpace(preset.ImageEditPath) ? "v1/images/edits" : preset.ImageEditPath;
+            _editingModels = new(preset.DefaultModels.Select(EditableModelEntry.From));
+            ModelCards.ItemsSource = _editingModels;
+            TypePanel.Visibility = preset.Id == "custom-openai"
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            EditorMessage.Text = $"已套用「{preset.Name}」预设。填入 API Key 后点「自动获取」拉取最新模型列表。";
+        }
+        finally { _loadingEndpointForm = false; }
+        UpdateEndpointFields();
     }
 
-    private ProviderEntry CollectFromForm() => new(
-        Id: _editing?.Id ?? Guid.NewGuid().ToString("N"),
-        Type: (EditType.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "openai-compat",
-        Name: string.IsNullOrWhiteSpace(EditName.Text) ? "未命名" : EditName.Text,
-        BaseUrl: string.IsNullOrWhiteSpace(EditBaseUrl.Text) ? null : EditBaseUrl.Text.Trim(),
-        ApiKey: string.IsNullOrEmpty(EditApiKey.Password) ? null : EditApiKey.Password,
-        Models: _editingModels.Select(m => m.ToRecord()).ToList(),
-        Enabled: true,
-        SortOrder: _editing?.SortOrder ?? _vm.Providers.Count);
+    private ProviderEntry CollectFromForm()
+    {
+        var purpose = CurrentFormPurpose();
+        var imageProvider = SettingsViewModel.IsImagePurpose(purpose);
+        var chatImage = imageProvider
+            && string.Equals(SelectedImageFormat(), ImageApiFormat.OpenAiChatImage, StringComparison.OrdinalIgnoreCase);
+        return new ProviderEntry(
+            Id: _editing?.Id ?? Guid.NewGuid().ToString("N"),
+            Type: (EditType.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "openai-compat",
+            Name: string.IsNullOrWhiteSpace(EditName.Text) ? "未命名" : EditName.Text,
+            BaseUrl: string.IsNullOrWhiteSpace(EditBaseUrl.Text) ? null : EditBaseUrl.Text.Trim(),
+            ApiKey: string.IsNullOrEmpty(EditApiKey.Password) ? null : EditApiKey.Password,
+            Models: _editingModels.Select(m => imageProvider ? m.ToRecord() : m.ToRecord() with { ImageEdit = false }).ToList(),
+            Enabled: true,
+            SortOrder: _editing?.SortOrder ?? _vm.Providers.Count,
+            Purpose: purpose,
+            ApiPath: string.IsNullOrWhiteSpace(EditApiPath.Text) ? null : EditApiPath.Text.Trim(),
+            ImageEditPath: imageProvider && !chatImage && !string.IsNullOrWhiteSpace(EditImageEditPath.Text)
+                ? EditImageEditPath.Text.Trim()
+                : null,
+            ImageFormat: imageProvider ? SelectedImageFormat() : null);
+    }
 
     private void SaveProviderClick(object sender, RoutedEventArgs e)
     {
@@ -535,18 +724,20 @@ public partial class SettingsWindow : Window
         _vm.Save(entry);
         var existing = _vm.Providers.FirstOrDefault(p => p.Id == entry.Id);
         if (existing is not null) _vm.Providers.Remove(existing);
+        entry = NormalizeImageProviderEntry(entry);
         _vm.Providers.Add(entry);
         _vm.RefreshVisionProviderModels();
+        _vm.RefreshImageGenerationProviderModels();
         PopulateVisionCombo();
+        PopulateImageGenerationCombo();
+        SelectImageGenerationModel();
         _editing = entry;
 
         // Push runtime registration so the model selector picks it up immediately.
+        _registry.Unregister(entry.Id);
         var prov = BuildProvider(entry);
-        if (prov is not null)
-        {
-            _registry.Unregister(entry.Id);
+        if (prov is not null && !SettingsViewModel.IsImagePurpose(entry.Purpose))
             _registry.Register(prov);
-        }
         EditorMessage.Text = "设置已保存";
     }
 
@@ -556,14 +747,21 @@ public partial class SettingsWindow : Window
         _vm.Delete(_editing.Id);
         _registry.Unregister(_editing.Id);
         _vm.RefreshVisionProviderModels();
+        _vm.RefreshImageGenerationProviderModels();
         PopulateVisionCombo();
+        PopulateImageGenerationCombo();
         _editing = null;
         ProviderEditor.IsEnabled = false;
     }
 
     private void AddModelClick(object sender, RoutedEventArgs e)
     {
-        _editingModels.Add(new EditableModelEntry { Id = "new-model", DisplayName = "新模型" });
+        _editingModels.Add(new EditableModelEntry
+        {
+            Id = "new-model",
+            DisplayName = "新模型",
+            ImageEdit = SettingsViewModel.IsImagePurpose(CurrentFormPurpose()) && LooksLikeImageEditModel("new-model")
+        });
     }
 
     private void RemoveModelClick(object sender, RoutedEventArgs e)
@@ -578,7 +776,11 @@ public partial class SettingsWindow : Window
         var preset = ProviderPresetCombo.SelectedItem as ProviderPreset;
         var isCustom = preset is null || preset.Id == "custom-openai";
         var dialog = new ModelConfigDialog();
-        dialog.ShowSingleEdit(model, this, isCustomProvider: isCustom);
+        dialog.ShowSingleEdit(
+            model,
+            this,
+            isCustomProvider: isCustom,
+            isImageProvider: SettingsViewModel.IsImagePurpose(CurrentFormPurpose()));
     }
 
     private async void TestProviderClick(object sender, RoutedEventArgs e)
@@ -589,9 +791,17 @@ public partial class SettingsWindow : Window
         {
             if (!ValidateProviderBaseUrl(entry)) return;
 
+            if (SettingsViewModel.IsImagePurpose(entry.Purpose))
+            {
+                await TestImageProviderAsync(entry);
+                return;
+            }
+
             using var http = _byokHttpFactory();
             var baseUrl = NetworkSecurity.RequireHttpsBaseUrl(entry.BaseUrl ?? DefaultBaseUrl(entry.Type), $"{entry.Name} 接入地址");
-            var url = new Uri(new Uri(baseUrl), entry.Type == "anthropic" ? "v1/messages" : "v1/chat/completions");
+            var defaultPath = entry.Type == "anthropic" ? "v1/messages" : "v1/chat/completions";
+            var url = NetworkSecurity.CombineEndpoint(
+                baseUrl, string.IsNullOrWhiteSpace(entry.ApiPath) ? defaultPath : entry.ApiPath, $"{entry.Name} 接入地址");
 
             using var req = new HttpRequestMessage(HttpMethod.Post, url);
             object body = entry.Type == "anthropic"
@@ -617,6 +827,25 @@ public partial class SettingsWindow : Window
         {
             EditorMessage.Text = $"❌ {ex.GetType().Name}: {ex.Message}";
         }
+    }
+
+    private async Task TestImageProviderAsync(ProviderEntry entry)
+    {
+        var options = new ImageGenerationOptions(
+            Enabled: true,
+            BaseUrl: entry.BaseUrl,
+            ApiKey: entry.ApiKey,
+            Model: entry.Models.FirstOrDefault()?.Id,
+            Size: "1024x1024",
+            Style: null,
+            AsTool: false,
+            SupportsEdit: false,
+            Format: entry.ImageFormat,
+            GenerationPath: entry.ApiPath,
+            EditPath: entry.ImageEditPath);
+        var tool = new ImageGenerationTool(_byokHttpFactory);
+        var images = await tool.GenerateAsync(options, "a single small red dot on a white background", CancellationToken.None);
+        EditorMessage.Text = images.Count > 0 ? "连接成功，图像服务可用" : "连接成功，但未返回图片";
     }
 
     private async void DetectModelsClick(object sender, RoutedEventArgs e)
@@ -647,6 +876,14 @@ public partial class SettingsWindow : Window
             foreach (var m in selected)
                 _editingModels.Add(EditableModelEntry.From(m));
             EditorMessage.Text = $"已添加 {selected.Count} 个模型，记得保存";
+
+            if (entry.Purpose == "image")
+            {
+                _vm.RefreshImageGenerationProviderModels();
+                PopulateImageGenerationCombo();
+                SelectImageGenerationModel();
+                UpdateImageGenerationStatusHint();
+            }
         }
         catch (Exception ex)
         {
@@ -661,7 +898,7 @@ public partial class SettingsWindow : Window
     private async Task<List<ProviderModelEntry>> FetchModelListAsync(ProviderEntry entry)
     {
         var preset = FindPreset(entry);
-        var baseUrl = NetworkSecurity.RequireHttpsBaseUrl(entry.BaseUrl ?? DefaultBaseUrl(entry.Type), $"{entry.Name} Base URL");
+        var baseUrl = NetworkSecurity.RequireHttpsBaseUrl(entry.BaseUrl ?? DefaultBaseUrl(entry.Type), $"{entry.Name} 接入地址");
         var modelsPath = preset?.ModelsPath ?? "v1/models";
         var url = new Uri(new Uri(baseUrl), modelsPath);
 
@@ -683,9 +920,11 @@ public partial class SettingsWindow : Window
             throw new HttpRequestException($"HTTP {(int)resp.StatusCode}: {body}");
 
         using var doc = JsonDocument.Parse(body);
-        var models = IsOpenRouter(entry)
-            ? ParseOpenRouterModels(doc.RootElement)
-            : ParseOpenAiCompatibleModels(doc.RootElement);
+        var models = entry.Purpose == "image"
+            ? ParseOpenAiImageModels(doc.RootElement)
+            : IsOpenRouter(entry)
+                ? ParseOpenRouterModels(doc.RootElement)
+                : ParseOpenAiCompatibleModels(doc.RootElement);
 
         var thinkingKind = preset?.DefaultThinkingKind ?? InferThinkingKind(entry.Type);
         if (thinkingKind != ThinkingParamKind.None)
@@ -715,9 +954,11 @@ public partial class SettingsWindow : Window
         return entry.Type switch
         {
             "openai" or "openai-compat" or "openai-response" =>
-                new OpenAICompatibleProvider(entry.Id, entry.Name, entry.BaseUrl ?? OpenAIProvider.DefaultBaseUrl, entry.ApiKey ?? "", models, http, _toolHost),
-            "anthropic" => new AnthropicProvider(entry.Id, entry.Name, entry.ApiKey ?? "", models, http, entry.BaseUrl),
-            "gemini" => GeminiProvider.Create(entry.Id, entry.Name, entry.ApiKey ?? "", models, http, entry.BaseUrl),
+                new OpenAICompatibleProvider(entry.Id, entry.Name, entry.BaseUrl ?? OpenAIProvider.DefaultBaseUrl, entry.ApiKey ?? "", models, http, _toolHost)
+                    { ChatPath = OpenAICompatibleProvider.ResolveChatPath(entry.ApiPath) },
+            "anthropic" => new AnthropicProvider(entry.Id, entry.Name, entry.ApiKey ?? "", models, http, entry.BaseUrl)
+                { MessagesPath = string.IsNullOrWhiteSpace(entry.ApiPath) ? "v1/messages" : entry.ApiPath.Trim() },
+            "gemini" => GeminiProvider.Create(entry.Id, entry.Name, entry.ApiKey ?? "", models, http, entry.BaseUrl, entry.ApiPath),
             _ => null
         };
     }
@@ -743,6 +984,32 @@ public partial class SettingsWindow : Window
         "gemini" => GeminiProvider.DefaultBaseUrl,
         _ => "https://api.openai.com/"
     };
+
+    private static List<ProviderModelEntry> ParseOpenAiImageModels(JsonElement root)
+    {
+        if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+            return new();
+
+        var models = new List<ProviderModelEntry>();
+        foreach (var item in data.EnumerateArray())
+        {
+            if (!item.TryGetProperty("id", out var idNode) || idNode.ValueKind != JsonValueKind.String) continue;
+            var id = idNode.GetString();
+            if (string.IsNullOrWhiteSpace(id) || !LooksLikeImageModel(id)) continue;
+
+            models.Add(new ProviderModelEntry(
+                id,
+                BeautifyModelName(id),
+                ImageEdit: LooksLikeImageEditModel(id)));
+        }
+
+        return models.OrderBy(m => m.Id, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static ProviderEntry NormalizeImageProviderEntry(ProviderEntry entry) =>
+        IsImageProviderEntry(entry)
+            ? entry with { Purpose = "image" }
+            : entry;
 
     private static ProviderModel ToProviderModel(ProviderModelEntry entry)
     {
@@ -916,6 +1183,27 @@ public partial class SettingsWindow : Window
             || lower.Contains("qwen-vl", StringComparison.Ordinal);
     }
 
+    private static bool LooksLikeImageModel(string id)
+    {
+        var lower = id.ToLowerInvariant();
+        return lower.Contains("dall-e", StringComparison.Ordinal)
+            || lower.Contains("image", StringComparison.Ordinal)
+            || lower.Contains("flux", StringComparison.Ordinal)
+            || lower.Contains("midjourney", StringComparison.Ordinal)
+            || lower.Contains("sdxl", StringComparison.Ordinal)
+            || lower.Contains("stable-diffusion", StringComparison.Ordinal)
+            || lower.Contains("recraft", StringComparison.Ordinal);
+    }
+
+    private static bool LooksLikeImageEditModel(string id)
+    {
+        var lower = id.ToLowerInvariant();
+        return lower.Contains("gpt-image", StringComparison.Ordinal)
+            || lower.Contains("gpt image", StringComparison.Ordinal)
+            || lower.Contains("imagen", StringComparison.Ordinal)
+            || lower.Contains("edit", StringComparison.Ordinal);
+    }
+
     private static bool LooksLikeToolModel(string id)
     {
         var lower = id.ToLowerInvariant();
@@ -937,12 +1225,18 @@ public partial class SettingsWindow : Window
         (entry.BaseUrl ?? string.Empty).Contains("openrouter.ai", StringComparison.OrdinalIgnoreCase)
         || entry.Name.Contains("OpenRouter", StringComparison.OrdinalIgnoreCase);
 
+    private static bool IsImageProviderEntry(ProviderEntry entry) =>
+        SettingsViewModel.IsImagePurpose(entry.Purpose)
+        || string.Equals(entry.Name, "OpenAI 图像", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(entry.Name, "OpenAI Images", StringComparison.OrdinalIgnoreCase);
+
     private static ProviderPreset? FindPreset(ProviderEntry entry)
     {
-        return ProviderPresets.FirstOrDefault(p =>
+        var purpose = SettingsViewModel.IsImagePurpose(entry.Purpose) ? "image" : "chat";
+        return PresetsForPurpose(purpose).FirstOrDefault(p =>
             string.Equals(p.Type, entry.Type, StringComparison.OrdinalIgnoreCase)
             && string.Equals(NormalizeUrl(p.BaseUrl), NormalizeUrl(entry.BaseUrl), StringComparison.OrdinalIgnoreCase))
-            ?? ProviderPresets.FirstOrDefault(p => entry.Name.Contains(p.Name, StringComparison.OrdinalIgnoreCase));
+            ?? PresetsForPurpose(purpose).FirstOrDefault(p => entry.Name.Contains(p.Name, StringComparison.OrdinalIgnoreCase));
     }
 
     private void SelectPreset(ProviderPreset? preset)
@@ -972,6 +1266,151 @@ public partial class SettingsWindow : Window
         EditType.SelectedIndex = 0;
     }
 
+    // ---- Purpose (用途: chat | image) form helpers ----
+
+    private string CurrentFormPurpose() =>
+        _editingPurpose;
+
+    private void SetFormPurpose(string? purpose)
+    {
+        var target = SettingsViewModel.IsImagePurpose(purpose) ? "image" : "chat";
+        _editingPurpose = target;
+        SetPresetItemsForPurpose(target);
+        ApplyPurposeProtocolFilter(target);
+    }
+
+    private void SetPresetItemsForPurpose(string purpose)
+    {
+        var selectedId = (ProviderPresetCombo.SelectedItem as ProviderPreset)?.Id;
+        var presets = PresetsForPurpose(purpose).ToArray();
+        ProviderPresetCombo.ItemsSource = presets;
+        ProviderPresetCombo.SelectedItem = presets.FirstOrDefault(p => p.Id == selectedId)
+                                           ?? presets.FirstOrDefault();
+    }
+
+    private static IEnumerable<ProviderPreset> PresetsForPurpose(string? purpose)
+    {
+        var image = SettingsViewModel.IsImagePurpose(purpose);
+        return ProviderPresets.Where(p => SettingsViewModel.IsImagePurpose(p.Purpose) == image);
+    }
+
+    // Only OpenAI-compatible protocol can currently back an image service, so
+    // when the purpose is image we restrict the protocol dropdown to it and
+    // force the selection there; chat purpose re-enables every protocol.
+    private void ApplyPurposeProtocolFilter(string purpose)
+    {
+        var imageOnly = SettingsViewModel.IsImagePurpose(purpose);
+        ComboBoxItem? firstVisible = null;
+        foreach (var item in EditType.Items.OfType<ComboBoxItem>())
+        {
+            var tag = item.Tag?.ToString();
+            var allowed = !imageOnly || tag is "openai-compat" or "openai-response";
+            item.Visibility = allowed ? Visibility.Visible : Visibility.Collapsed;
+            item.IsEnabled = allowed;
+            if (allowed) firstVisible ??= item;
+        }
+        if (imageOnly && EditType.SelectedItem is ComboBoxItem cur
+            && cur.Visibility == Visibility.Collapsed)
+        {
+            EditType.SelectedItem = firstVisible;
+        }
+    }
+
+    // ---- Endpoint / API path form helpers ----
+
+    private string SelectedImageFormat() =>
+        (EditImageFormat.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? ImageApiFormat.OpenAiImages;
+
+    private void SelectImageFormat(string? format)
+    {
+        var target = ImageApiFormat.IsChatImage(format) ? ImageApiFormat.OpenAiChatImage : ImageApiFormat.OpenAiImages;
+        foreach (var item in EditImageFormat.Items.OfType<ComboBoxItem>())
+        {
+            if (string.Equals(item.Tag?.ToString(), target, StringComparison.OrdinalIgnoreCase))
+            {
+                EditImageFormat.SelectedItem = item;
+                return;
+            }
+        }
+        EditImageFormat.SelectedIndex = 0;
+    }
+
+    private static string DefaultApiPathFor(string? purpose, string? imageFormat, string? type)
+    {
+        if (SettingsViewModel.IsImagePurpose(purpose))
+            return ImageApiFormat.IsChatImage(imageFormat) ? "v1/chat/completions" : "v1/images/generations";
+        return string.Equals(type, "anthropic", StringComparison.OrdinalIgnoreCase) ? "v1/messages" : "v1/chat/completions";
+    }
+
+    private void EndpointInputChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_loadingEndpointForm) return;
+        UpdateEndpointPreview();
+    }
+
+    private void ImageFormatChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loadingEndpointForm) return;
+        var chatImage = string.Equals(SelectedImageFormat(), ImageApiFormat.OpenAiChatImage, StringComparison.OrdinalIgnoreCase);
+
+        // Re-default the generation path when it still holds the other format's
+        // default, so switching format doesn't leave a stale path. A genuinely
+        // custom path (not one of the known defaults) is left untouched.
+        var known = new[] { "v1/chat/completions", "v1/images/generations" };
+        var cur = EditApiPath.Text?.Trim() ?? string.Empty;
+        if (cur.Length == 0 || known.Contains(cur, StringComparer.OrdinalIgnoreCase))
+            EditApiPath.Text = chatImage ? "v1/chat/completions" : "v1/images/generations";
+        if (!chatImage && string.IsNullOrWhiteSpace(EditImageEditPath.Text))
+            EditImageEditPath.Text = "v1/images/edits";
+
+        UpdateEndpointFields();
+    }
+
+    private void UpdateEndpointFields()
+    {
+        if (EndpointPreview is null) return;   // early TextChanged during InitializeComponent
+        var image = SettingsViewModel.IsImagePurpose(CurrentFormPurpose());
+        ApiPathLabel.Text = image ? "生成路径" : "对话路径";
+        ImageFormatPanel.Visibility = image ? Visibility.Visible : Visibility.Collapsed;
+
+        var chatImage = image
+            && string.Equals(SelectedImageFormat(), ImageApiFormat.OpenAiChatImage, StringComparison.OrdinalIgnoreCase);
+        // chat-image edits run through the generation endpoint, so the separate
+        // edit-path field is irrelevant for that format.
+        ImageEditPathPanel.Visibility = image && !chatImage ? Visibility.Visible : Visibility.Collapsed;
+
+        UpdateEndpointPreview();
+    }
+
+    private void UpdateEndpointPreview()
+    {
+        if (EndpointPreview is null) return;
+        var baseUrl = EditBaseUrl.Text?.Trim() ?? string.Empty;
+        if (baseUrl.Length == 0)
+        {
+            EndpointPreview.Text = string.Empty;
+            return;
+        }
+
+        string Join(string? path, string fallback) =>
+            baseUrl.TrimEnd('/') + "/" + (string.IsNullOrWhiteSpace(path) ? fallback : path!.Trim()).TrimStart('/');
+
+        if (!SettingsViewModel.IsImagePurpose(CurrentFormPurpose()))
+        {
+            var fallback = (EditType.SelectedItem as ComboBoxItem)?.Tag?.ToString() == "anthropic"
+                ? "v1/messages"
+                : "v1/chat/completions";
+            EndpointPreview.Text = $"实际请求地址：{Join(EditApiPath.Text, fallback)}";
+            return;
+        }
+
+        var chatImage = string.Equals(SelectedImageFormat(), ImageApiFormat.OpenAiChatImage, StringComparison.OrdinalIgnoreCase);
+        var gen = Join(EditApiPath.Text, chatImage ? "v1/chat/completions" : "v1/images/generations");
+        EndpointPreview.Text = chatImage
+            ? $"生成 / 编辑地址：{gen}"
+            : $"生成地址：{gen}\n编辑地址：{Join(EditImageEditPath.Text, "v1/images/edits")}";
+    }
+
     private sealed record ProviderPreset(
         string Id,
         string Name,
@@ -979,7 +1418,11 @@ public partial class SettingsWindow : Window
         string BaseUrl,
         string ModelsPath,
         ThinkingParamKind DefaultThinkingKind,
-        IReadOnlyList<ProviderModelEntry> DefaultModels);
+        IReadOnlyList<ProviderModelEntry> DefaultModels,
+        string Purpose = "chat",
+        string? ApiPath = null,           // chat: 对话路径; image: 生成路径
+        string? ImageEditPath = null,     // image(openai-images): 编辑路径
+        string? ImageFormat = null);      // image: openai-images|openai-chat-image
 
     // ================================================================
     // Persona tab handlers
@@ -1179,6 +1622,7 @@ public sealed class EditableModelEntry : System.ComponentModel.INotifyPropertyCh
     private int? _thinkingBudgetDefault;
     private string? _defaultEffort;
     private string? _systemPrompt;
+    private bool _imageEdit;
 
     public string Id { get => _id; set { _id = value; OnPropertyChanged(nameof(Id)); } }
     public string DisplayName { get => _displayName; set { _displayName = value; OnPropertyChanged(nameof(DisplayName)); } }
@@ -1193,6 +1637,7 @@ public sealed class EditableModelEntry : System.ComponentModel.INotifyPropertyCh
     public int? ThinkingBudgetDefault { get => _thinkingBudgetDefault; set { _thinkingBudgetDefault = value; OnPropertyChanged(nameof(ThinkingBudgetDefault)); } }
     public string? DefaultEffort { get => _defaultEffort; set { _defaultEffort = value; OnPropertyChanged(nameof(DefaultEffort)); } }
     public string? SystemPrompt { get => _systemPrompt; set { _systemPrompt = value; OnPropertyChanged(nameof(SystemPrompt)); } }
+    public bool ImageEdit { get => _imageEdit; set { _imageEdit = value; OnPropertyChanged(nameof(ImageEdit)); } }
 
     public string CapabilityTags
     {
@@ -1217,6 +1662,7 @@ public sealed class EditableModelEntry : System.ComponentModel.INotifyPropertyCh
             if (Tools) badges.Add(new("工具调用", "Success"));
             if (Thinking) badges.Add(new("推理", "Primary"));
             if (ReasoningEffort) badges.Add(new("推理强度", "Warning"));
+            if (ImageEdit) badges.Add(new("图像编辑", "Primary"));
             if (ContextWindow is { } ctx) badges.Add(new($"{ctx / 1000}K", "Muted"));
             return badges;
         }
@@ -1231,11 +1677,11 @@ public sealed class EditableModelEntry : System.ComponentModel.INotifyPropertyCh
         Thinking = e.Thinking, ReasoningEffort = e.ReasoningEffort, ContextWindow = e.ContextWindow,
         ThinkingParamKind = e.ThinkingParamKind, ThinkingBudgetMin = e.ThinkingBudgetMin,
         ThinkingBudgetMax = e.ThinkingBudgetMax, ThinkingBudgetDefault = e.ThinkingBudgetDefault,
-        DefaultEffort = e.DefaultEffort, SystemPrompt = e.SystemPrompt
+        DefaultEffort = e.DefaultEffort, SystemPrompt = e.SystemPrompt, ImageEdit = e.ImageEdit
     };
 
     public ProviderModelEntry ToRecord() => new(
         Id, DisplayName, Vision, ContextWindow, Thinking, ReasoningEffort, Tools,
-        ThinkingParamKind, ThinkingBudgetMin, ThinkingBudgetMax, ThinkingBudgetDefault, DefaultEffort, SystemPrompt);
+        ThinkingParamKind, ThinkingBudgetMin, ThinkingBudgetMax, ThinkingBudgetDefault, DefaultEffort, SystemPrompt, ImageEdit);
 }
 public sealed record CapabilityBadge(string Label, string ColorKey);

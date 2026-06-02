@@ -14,6 +14,11 @@ public sealed class OpenAIProvider
         string apiKey,
         IReadOnlyList<MolaGPT.Core.Models.ProviderModel> models,
         HttpClient http,
-        string? baseUrl = null) =>
-        new(id, displayName, baseUrl ?? DefaultBaseUrl, apiKey, models, http) { Kind = ProviderKind.OpenAI };
+        string? baseUrl = null,
+        string? chatPath = null) =>
+        new(id, displayName, baseUrl ?? DefaultBaseUrl, apiKey, models, http)
+        {
+            Kind = ProviderKind.OpenAI,
+            ChatPath = OpenAICompatibleProvider.ResolveChatPath(chatPath)
+        };
 }

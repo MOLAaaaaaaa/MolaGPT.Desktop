@@ -29,6 +29,11 @@ public sealed class AnthropicProvider : IChatProvider
 
     public string BaseUrl { get; }
     public string ApiKey { get; }
+
+    /// <summary>Messages path, relative to <see cref="BaseUrl"/> (carries the version
+    /// segment, e.g. "v1/messages"). User-configurable per provider.</summary>
+    public string MessagesPath { get; init; } = "v1/messages";
+
     private readonly HttpClient _http;
 
     public AnthropicProvider(string id, string displayName, string apiKey,
@@ -94,7 +99,7 @@ public sealed class AnthropicProvider : IChatProvider
         if (request.ExtraBody is not null)
             foreach (var kv in request.ExtraBody) body[kv.Key] = kv.Value;
 
-        var url = new Uri(new Uri(BaseUrl), "v1/messages");
+        var url = NetworkSecurity.CombineEndpoint(BaseUrl, MessagesPath, DisplayName);
         using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = JsonContent.Create(body) };
         req.Headers.Add("x-api-key", ApiKey);
         req.Headers.Add("anthropic-version", AnthropicVersion);

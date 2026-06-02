@@ -189,7 +189,7 @@
                                                LineStackingStrategy="BlockLineHeight" />
                                 </Border>
                                 <TextBlock DockPanel.Dock="Left"
-                                           Text="&#xE8BD;"
+                                           Text="{Binding IconGlyph}"
                                            FontFamily="{DynamicResource Font.Icon}"
                                            FontSize="13"
                                            Opacity="0.7"
@@ -380,6 +380,8 @@
                 BorderThickness="1"
                 ClipToBounds="True">
             <Grid>
+                <Grid x:Name="ChatSurface"
+                      Visibility="{Binding IsImageWorkbenchVisible, Converter={x:Static views:BoolToVisibilityInverse.Instance}}">
                 <!-- Welcome screen — separate overlay (NOT inside the
                      virtualizing scroller) so its presence/absence doesn't
                      interfere with VirtualizingStackPanel's IScrollInfo
@@ -432,7 +434,9 @@
                     </ItemsControl>
                 </ScrollViewer>
 
-                <!-- Floating top header centered above the message stream. -->
+                </Grid>
+
+                <!-- Floating top header centered above the active page. -->
                 <Border VerticalAlignment="Top"
                         Margin="16,16,16,0"
                         Background="Transparent"
@@ -473,12 +477,14 @@
 
                         <!-- Center: model selector pill -->
                         <Button Grid.Column="1"
+                                x:Name="ChatModelSelectorButton"
                                 HorizontalAlignment="Left"
                                 Style="{StaticResource OutlineButton}"
                                 Padding="14,6"
                                 Margin="16,0,0,0"
                                 Click="OpenModelSelector_Click"
-                                ToolTip="选择模型">
+                                ToolTip="选择模型"
+                                Visibility="{Binding IsImageWorkbenchVisible, Converter={x:Static views:BoolToVisibilityInverse.Instance}}">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE99A;" FontFamily="{DynamicResource Font.Icon}" FontSize="14" Margin="0,0,8,0" />
                                 <TextBlock Text="{Binding Chat.ActiveModelLabel}" FontWeight="SemiBold" />
@@ -487,6 +493,25 @@
                                            FontSize="{DynamicResource Font.Size.XSmall}"
                                            Margin="8,1,0,0" />
                                 <TextBlock Text="&#xE70D;" FontFamily="{DynamicResource Font.Icon}" FontSize="10" Margin="8,0,0,0" Opacity="0.6" />
+                            </StackPanel>
+                        </Button>
+                        <Button Grid.Column="1"
+                                x:Name="WorkbenchModelSelectorButton"
+                                HorizontalAlignment="Left"
+                                Style="{StaticResource OutlineButton}"
+                                Padding="14,6"
+                                Margin="16,0,0,0"
+                                ToolTip="选择图像模型"
+                                Visibility="{Binding IsImageWorkbenchVisible, Converter={x:Static views:BoolToVisibility.Instance}}">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE91B;" FontFamily="{DynamicResource Font.Icon}" FontSize="14" Margin="0,0,8,0" VerticalAlignment="Center" />
+                                <TextBlock x:Name="WorkbenchModelLabel"
+                                           Text="图像模型"
+                                           FontWeight="SemiBold"
+                                           TextTrimming="CharacterEllipsis"
+                                           MaxWidth="260"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Text="&#xE70D;" FontFamily="{DynamicResource Font.Icon}" FontSize="10" Margin="8,0,0,0" Opacity="0.6" VerticalAlignment="Center" />
                             </StackPanel>
                         </Button>
 
@@ -635,6 +660,30 @@
                     </Grid>
                 </Border>
 
+                <Popup x:Name="WorkbenchModelSelectorPopup"
+                       StaysOpen="False"
+                       AllowsTransparency="True"
+                       Placement="Bottom"
+                       PlacementTarget="{Binding ElementName=WorkbenchModelSelectorButton}"
+                       HorizontalOffset="0"
+                       VerticalOffset="6">
+                    <Grid Margin="14">
+                        <Border Background="{DynamicResource Brush.Bg.Elevated}"
+                                BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                BorderThickness="1"
+                                CornerRadius="{DynamicResource Radius.Md}"
+                                Padding="6"
+                                MinWidth="320"
+                                MaxHeight="420">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <ItemsControl x:Name="WorkbenchModelSelectorItems" />
+                            </ScrollViewer>
+                        </Border>
+                    </Grid>
+                </Popup>
+
+                <Grid x:Name="ChatComposerSurface"
+                      Visibility="{Binding IsImageWorkbenchVisible, Converter={x:Static views:BoolToVisibilityInverse.Instance}}">
                 <!-- Floating composer -->
                 <Border x:Name="ComposerHost"
                         VerticalAlignment="Bottom"
@@ -670,6 +719,11 @@
                         </Border>
                     </Grid>
                 </Popup>
+                </Grid>
+
+                <ContentControl x:Name="ImageWorkbenchHost"
+                                Margin="0,72,0,0"
+                                Visibility="{Binding IsImageWorkbenchVisible, Converter={x:Static views:BoolToVisibility.Instance}}" />
             </Grid>
         </Border>
     </Grid>

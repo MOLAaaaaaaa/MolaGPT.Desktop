@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Chat.Tools.Vision;
 using MolaGPT.Core.Models;
@@ -33,7 +34,16 @@ public sealed class OpenAICompatibleProvider : IChatProvider
     public IReadOnlyList<ProviderModel> Models { get; private set; }
     public string BaseUrl { get; }
     public string ApiKey { get; }
-    public string ChatPath { get; init; } = "v1/chat/completions";
+
+    public const string DefaultChatPath = "v1/chat/completions";
+
+    /// <summary>Chat-completions path, relative to <see cref="BaseUrl"/> and carrying
+    /// the version segment (e.g. "v1/chat/completions"). User-configurable per provider.</summary>
+    public string ChatPath { get; init; } = DefaultChatPath;
+
+    /// <summary>Falls back to <see cref="DefaultChatPath"/> when no path is configured.</summary>
+    public static string ResolveChatPath(string? configured) =>
+        string.IsNullOrWhiteSpace(configured) ? DefaultChatPath : configured.Trim();
 
     private readonly HttpClient _http;
     private readonly IChatToolHost? _toolHost;
@@ -86,7 +96,7 @@ public sealed class OpenAICompatibleProvider : IChatProvider
 
         for (var turn = 0; turn < maxToolTurns; turn++)
         {
-            var url = new Uri(new Uri(BaseUrl), ChatPath);
+            var url = NetworkSecurity.CombineEndpoint(BaseUrl, ChatPath, DisplayName);
             var body = BuildRequestBody(request, wireMessages);
             if (useLocalTools)
             {
@@ -491,6 +501,8 @@ public sealed class OpenAICompatibleProvider : IChatProvider
                 return ReadString(root, "url") ?? "等待网页地址";
             if (name == VisionProxyTool.ToolName)
                 return ReadString(root, "query") ?? "查看图片";
+            if (name == ImageGenerationTool.ToolName)
+                return ReadString(root, "prompt") ?? "生成图片";
             if (McpToolName.TryDecode(name, out var server, out var tool))
                 return $"{server} / {tool}";
         }
@@ -520,6 +532,8 @@ public sealed class OpenAICompatibleProvider : IChatProvider
             return "读取页面标题、正文和链接";
         if (name == VisionProxyTool.ToolName)
             return "通过视觉模型读取图片";
+        if (name == ImageGenerationTool.ToolName)
+            return "通过图像生成 API 创建图片";
         if (McpToolName.TryDecode(name, out var server, out _))
             return $"MCP: {server}";
         return null;

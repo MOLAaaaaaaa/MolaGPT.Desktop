@@ -12,6 +12,7 @@ public partial class ModelConfigDialog : Window
     private EditableModelEntry? _model;
     private ObservableCollection<BatchModelItem>? _batchItems;
     private bool _isCustomProvider;
+    private bool _isImageProvider;
 
     public bool Confirmed { get; private set; }
     public List<ProviderModelEntry>? SelectedModels { get; private set; }
@@ -21,10 +22,11 @@ public partial class ModelConfigDialog : Window
         InitializeComponent();
     }
 
-    public void ShowSingleEdit(EditableModelEntry model, Window owner, bool isCustomProvider = false)
+    public void ShowSingleEdit(EditableModelEntry model, Window owner, bool isCustomProvider = false, bool isImageProvider = false)
     {
         _model = model;
         _isCustomProvider = isCustomProvider;
+        _isImageProvider = isImageProvider;
         Owner = owner;
         DialogTitle.Text = "模型配置";
         SingleEditPanel.Visibility = Visibility.Visible;
@@ -73,6 +75,8 @@ public partial class ModelConfigDialog : Window
         ChkTools.IsChecked = m.Tools;
         ChkThinking.IsChecked = m.Thinking;
         ChkReasoningEffort.IsChecked = m.ReasoningEffort;
+        ChkImageEdit.IsChecked = m.ImageEdit;
+        ChkImageEdit.Visibility = _isImageProvider ? Visibility.Visible : Visibility.Collapsed;
         EditSystemPrompt.Text = m.SystemPrompt ?? "";
 
         if (_isCustomProvider && m.Thinking)
@@ -100,6 +104,7 @@ public partial class ModelConfigDialog : Window
         _model.Tools = ChkTools.IsChecked == true;
         _model.Thinking = ChkThinking.IsChecked == true;
         _model.ReasoningEffort = ChkReasoningEffort.IsChecked == true;
+        _model.ImageEdit = _isImageProvider && ChkImageEdit.IsChecked == true;
         _model.SystemPrompt = string.IsNullOrWhiteSpace(EditSystemPrompt.Text) ? null : EditSystemPrompt.Text.Trim();
 
         if (_isCustomProvider && _model.Thinking)
@@ -212,6 +217,7 @@ public sealed class BatchModelItem : INotifyPropertyChanged
             if (Entry.Tools) parts.Add("工具");
             if (Entry.Thinking) parts.Add("思考");
             if (Entry.ReasoningEffort) parts.Add("强度");
+            if (Entry.ImageEdit) parts.Add("图像编辑");
             return parts.Count > 0 ? string.Join(" · ", parts) : "基础对话";
         }
     }

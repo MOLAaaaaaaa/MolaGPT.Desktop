@@ -52,6 +52,41 @@ public sealed class NotificationService : IDisposable
             .Show();
     }
 
+    public void ShowImageGenerationStarted(string conversationId, string? taskTitle)
+    {
+        if (!_settings.EnableCompletionNotification) return;
+
+        new ToastContentBuilder()
+            .AddArgument("conversationId", conversationId)
+            .AddText("图像正在后台生成")
+            .AddText(string.IsNullOrWhiteSpace(taskTitle)
+                ? "完成后将通知你"
+                : $"「{taskTitle}」完成后将通知你")
+            .Show();
+    }
+
+    public void ShowImageGenerationCompleted(string conversationId, string? taskTitle, int imageCount, bool force = false)
+    {
+        if (!force && !_settings.EnableCompletionNotification) return;
+
+        new ToastContentBuilder()
+            .AddArgument("conversationId", conversationId)
+            .AddText(string.IsNullOrWhiteSpace(taskTitle) ? "图像生成完成" : $"「{taskTitle}」生成完成")
+            .AddText(imageCount > 0 ? $"已生成 {imageCount} 张图片，点击查看" : "点击查看结果")
+            .Show();
+    }
+
+    public void ShowImageGenerationFailed(string conversationId, string? taskTitle, string message, bool force = false)
+    {
+        if (!force && !_settings.EnableCompletionNotification) return;
+
+        new ToastContentBuilder()
+            .AddArgument("conversationId", conversationId)
+            .AddText(string.IsNullOrWhiteSpace(taskTitle) ? "图像生成失败" : $"「{taskTitle}」生成失败")
+            .AddText(message)
+            .Show();
+    }
+
     private void OnToastActivated(string argument)
     {
         var args = ToastArguments.Parse(argument);

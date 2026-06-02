@@ -84,7 +84,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public bool HasAttachments => Attachments is { Count: > 0 };
     public bool HasToolCalls => ToolCalls.Count > 0;
     public string VisibleContent => StripSystemHints(Content);
-    public bool HasRetryBar => RetryAttempts is { Count: > 1 };
+    public bool HasRetryBar => IsLatestAssistant && RetryAttempts is { Count: > 1 };
     public string RetryCounter => HasRetryBar ? $"{RetryCurrentIndex + 1}/{RetryAttempts!.Count}" : string.Empty;
     public string ResponseStatsText
     {
@@ -375,6 +375,15 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         if (RetryAttempts is not { Count: > 0 } attempts) return;
         index = Math.Max(0, Math.Min(index, attempts.Count - 1));
         var attempt = attempts[index];
+
+        // Retry version switching should replace the whole rendered answer,
+        // not keep tool/thinking UI fragments from another attempt.
+        StopPending();
+        IsStreaming = false;
+        StopThinking();
+        ToolCalls.Clear();
+        ThinkingSegments.Clear();
+
         Content = attempt.Content;
         ModelLabel = attempt.ModelLabel;
         Usage = attempt.Usage;
@@ -537,6 +546,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         PreviousAttemptCommand.NotifyCanExecuteChanged();
         NextAttemptCommand.NotifyCanExecuteChanged();
     }
+    partial void OnIsLatestAssistantChanged(bool value) => OnPropertyChanged(nameof(HasRetryBar));
 
     private void OnActionStateChanged()
     {

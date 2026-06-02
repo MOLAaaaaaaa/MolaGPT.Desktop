@@ -2,6 +2,9 @@ using System.Globalization;
 using System.IO;
 using System.Windows.Data;
 using System.Windows.Media.Imaging;
+using Microsoft.Extensions.DependencyInjection;
+using MolaGPT.Storage;
+using MolaGPT.ViewModels;
 
 namespace MolaGPT.Desktop.Views;
 
@@ -16,7 +19,16 @@ public sealed class BytesToImageConverter : IValueConverter
 
     public object? Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        if (value is not byte[] bytes || bytes.Length == 0) return null;
+        byte[]? bytes = value switch
+        {
+            byte[] raw when raw.Length > 0 => raw,
+            AttachmentChip { Bytes.Length: > 0 } chip => chip.Bytes,
+            AttachmentChip chip when !string.IsNullOrWhiteSpace(chip.LocalName)
+                => TryLoadLocalAttachment(chip.LocalName),
+            _ => null
+        };
+
+        if (bytes is not { Length: > 0 }) return null;
 
         try
         {
@@ -29,6 +41,18 @@ public sealed class BytesToImageConverter : IValueConverter
             image.EndInit();
             image.Freeze();
             return image;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static byte[]? TryLoadLocalAttachment(string? localName)
+    {
+        try
+        {
+            return App.Services.GetRequiredService<AttachmentStore>().Load(localName);
         }
         catch
         {

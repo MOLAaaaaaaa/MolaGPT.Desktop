@@ -69,6 +69,9 @@
     <SolidColorBrush x:Key="Brush.Error" Color="{StaticResource Color.Error}" />
     <SolidColorBrush x:Key="Brush.Info" Color="{StaticResource Color.Info}" />
 
+    <SolidColorBrush x:Key="Brush.Workbench.SkeletonBadge" Color="#CCFFFFFF" />
+    <SolidColorBrush x:Key="Brush.Workbench.SkeletonHint" Color="#F2FFFFFF" />
+
     <!-- Sizing tokens. -->
     <sys:Double x:Key="Size.Sidebar.Width">280</sys:Double>
     <sys:Double x:Key="Size.Sidebar.Collapsed">80</sys:Double>

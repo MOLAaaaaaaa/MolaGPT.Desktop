@@ -257,6 +257,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
                 sandboxEntries.Add(new MolaGptSandboxEntry(
                     preparedAttachment.Kind == AttachmentKind.Image ? "图片文件" : "数据文件",
                     preparedAttachment.FileName ?? "附件",
+                    preparedAttachment.SandboxPath!,
                     preparedAttachment.RemoteUrl));
             }
         }
@@ -543,9 +544,18 @@ public sealed class MolaGptProxyProvider : IChatProvider
         var lines = entries.Select((entry, index) =>
         {
             var urlInfo = string.IsNullOrWhiteSpace(entry.Url) ? string.Empty : $"\n   公网URL: {entry.Url}";
-            return $"{index + 1}. {entry.TypeLabel}：{entry.FileName} → Python访问路径: /input/{entry.FileName}{urlInfo}";
+            return $"{index + 1}. {entry.TypeLabel}：{entry.FileName} → Python访问路径: {ToSandboxInputPath(entry.SandboxPath, entry.FileName)}{urlInfo}";
         });
         return "✝[系统提示: 用户已上传以下文件到沙箱：\n" + string.Join("\n", lines) + "]✝";
+    }
+
+    private static string ToSandboxInputPath(string? sandboxPath, string fileName)
+    {
+        var name = string.IsNullOrWhiteSpace(sandboxPath)
+            ? fileName
+            : sandboxPath.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? fileName;
+
+        return "/input/" + name;
     }
 
     private static bool IsMolaGptPublicImageSupported(Attachment attachment)
@@ -1236,7 +1246,7 @@ public sealed record StreamSessionStatus(string Status, int ChunksCount, long To
 public sealed record CompletedStreamData(string Text, IReadOnlyList<SourceReference>? Sources);
 public sealed record MolaGptPreparedAttachments(IReadOnlyList<Attachment> Attachments, string? SystemHint);
 internal sealed record MolaGptUploadResult(string FileName, string? Url, string FilePathOnHost);
-internal sealed record MolaGptSandboxEntry(string TypeLabel, string FileName, string? Url);
+internal sealed record MolaGptSandboxEntry(string TypeLabel, string FileName, string SandboxPath, string? Url);
 
 /// <summary>
 /// Snapshot of an authenticated user's quota / usage from

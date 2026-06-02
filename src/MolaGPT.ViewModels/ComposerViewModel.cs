@@ -7,6 +7,8 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Models;
 using MolaGPT.ViewModels.Services;
@@ -25,7 +27,11 @@ namespace MolaGPT.ViewModels;
 /// </summary>
 public sealed partial class ComposerViewModel : ObservableObject
 {
-    [ObservableProperty] private string _text = string.Empty;
+    private const string SystemHintDelimiter = "✝";
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsComposerPlaceholderVisible))]
+    private string _text = string.Empty;
     [ObservableProperty] private bool _isSending;
     [ObservableProperty] private bool _enterToSend = true;
 
@@ -53,6 +59,14 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// 与代理后端通信（向前兼容）。</summary>
     [ObservableProperty] private bool _enableWebFetch;
 
+    /// <summary>Image generation mode. MolaGPT account mode uses the proxy
+    /// image flow; BYOK mode enables the configured local image tool for the
+    /// current model turn.</summary>
+    [ObservableProperty] private bool _isImageGenerationMode;
+
+    [ObservableProperty] private string _imageAspectRatio = "1:1";
+    [ObservableProperty] private string _imageStyle = string.Empty;
+
     public ObservableCollection<Attachment> Attachments { get; } = new();
 
     public Func<string, CancellationToken, Task<string?>>? ConversationCompletedAsync { get; set; }
@@ -62,6 +76,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     private readonly SettingsViewModel? _settings;
     private readonly PersonaListViewModel? _personas;
     private readonly MolaGPT.Storage.AttachmentStore? _attachmentStore;
+    private readonly ImageGenerationTool? _imageGenerationTool;
     private CancellationTokenSource? _cts;
     private Task? _activeStreamTask;
     private MessageViewModel? _activeAssistantMsg;
@@ -83,27 +98,29 @@ public sealed partial class ComposerViewModel : ObservableObject
         _chat.ActiveProvider is not null && _chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
 
     public ComposerViewModel(ChatViewModel chat, BackgroundStreamService? backgroundStreams = null, SettingsViewModel? settings = null)
-        : this(chat, backgroundStreams, settings, null, null) { }
+        : this(chat, backgroundStreams, settings, null, null, null) { }
 
     public ComposerViewModel(
         ChatViewModel chat,
         BackgroundStreamService? backgroundStreams,
         SettingsViewModel? settings,
         PersonaListViewModel? personas)
-        : this(chat, backgroundStreams, settings, personas, null) { }
+        : this(chat, backgroundStreams, settings, personas, null, null) { }
 
     public ComposerViewModel(
         ChatViewModel chat,
         BackgroundStreamService? backgroundStreams,
         SettingsViewModel? settings,
         PersonaListViewModel? personas,
-        MolaGPT.Storage.AttachmentStore? attachmentStore)
+        MolaGPT.Storage.AttachmentStore? attachmentStore,
+        ImageGenerationTool? imageGenerationTool = null)
     {
         _chat = chat;
         _backgroundStreams = backgroundStreams;
         _settings = settings;
         _personas = personas;
         _attachmentStore = attachmentStore;
+        _imageGenerationTool = imageGenerationTool;
         _chat.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(ChatViewModel.ActiveProvider) or nameof(ChatViewModel.ActiveModel))
@@ -117,6 +134,8 @@ public sealed partial class ComposerViewModel : ObservableObject
                 OnPropertyChanged(nameof(CanAcceptFileAttachments));
                 OnPropertyChanged(nameof(AreNetworkToolsEnabled));
                 OnPropertyChanged(nameof(IsPersonaPickerVisible));
+                OnPropertyChanged(nameof(IsImageGenerationAvailable));
+                OnPropertyChanged(nameof(IsImageOptionsVisible));
 
                 if (!IsThinkingVisible && EnableThinking) EnableThinking = false;
                 if (!AreNetworkToolsEnabled)
@@ -124,6 +143,8 @@ public sealed partial class ComposerViewModel : ObservableObject
                     EnableNetwork = false;
                     EnableWebFetch = false;
                 }
+                if (!IsImageGenerationAvailable && IsImageGenerationMode)
+                    IsImageGenerationMode = false;
 
                 ActiveThinkingKind = _chat.ActiveModel?.ThinkingConfig?.Kind
                     ?? MolaGPT.Core.Models.ThinkingParamKind.None;
@@ -150,6 +171,26 @@ public sealed partial class ComposerViewModel : ObservableObject
                     ThinkingBudgetTokens = defBudget;
             }
         };
+        if (_settings is not null)
+        {
+            _settings.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName is nameof(SettingsViewModel.ImageGenerationEnabled)
+                    or nameof(SettingsViewModel.ImageGenerationProviderId)
+                    or nameof(SettingsViewModel.ImageGenerationModelId)
+                    or nameof(SettingsViewModel.ImageGenerationBaseUrl)
+                    or nameof(SettingsViewModel.ImageGenerationApiKey)
+                    or nameof(SettingsViewModel.ImageGenerationModel)
+                    or nameof(SettingsViewModel.IsImageGenerationConfigured))
+                {
+                    OnPropertyChanged(nameof(IsImageGenerationAvailable));
+                    OnPropertyChanged(nameof(IsImageOptionsVisible));
+                    SendCommand.NotifyCanExecuteChanged();
+                    if (!IsImageGenerationAvailable && IsImageGenerationMode)
+                        IsImageGenerationMode = false;
+                }
+            };
+        }
         Attachments.CollectionChanged += (_, _) =>
         {
             OnPropertyChanged(nameof(HasAttachments));
@@ -180,8 +221,48 @@ public sealed partial class ComposerViewModel : ObservableObject
         _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy;
     public bool AreNetworkToolsEnabled =>
         _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy || _chat.ActiveModel?.SupportsToolCalling == true;
+    // The in-composer image button / aspect-ratio / style options exist only for
+    // MolaGPT-account mode. BYOK image generation is driven entirely by settings
+    // (the "作为工具加入对话" toggle) and registered as a tool — no per-turn UI.
+    public bool IsImageGenerationAvailable =>
+        _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy;
+    public bool IsImageOptionsVisible =>
+        IsImageGenerationAvailable
+        && IsImageGenerationMode;
+    public string ComposerPlaceholder => IsImageGenerationMode
+        ? "描述你想要的画面；如有参考图，可在左侧上传..."
+        : "输入消息...";
+    public bool IsComposerPlaceholderVisible => string.IsNullOrEmpty(Text);
 
     public bool HasAttachments => Attachments.Count > 0;
+
+    private bool IsByokImageGeneration =>
+        _chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy
+        && _chat.ActiveModel?.SupportsToolCalling == true
+        && _settings?.IsImageGenerationConfigured == true
+        && _imageGenerationTool is not null;
+
+    public IReadOnlyList<ImageGenerationOption> ImageAspectRatioOptions { get; } =
+    [
+        new("1:1", "1:1"),
+        new("16:9", "16:9"),
+        new("9:16", "9:16"),
+        new("4:3", "4:3"),
+        new("3:4", "3:4"),
+        new("21:9", "21:9")
+    ];
+
+    public IReadOnlyList<ImageGenerationOption> ImageStyleOptions { get; } =
+    [
+        new("默认", ""),
+        new("写实", "photorealistic"),
+        new("动漫", "anime"),
+        new("油画", "oil painting"),
+        new("水彩", "watercolor"),
+        new("3D", "3D render"),
+        new("像素", "pixel art"),
+        new("极简", "minimalist")
+    ];
 
     /// <summary>Display label for the current effort, "低 / 中 / 高".</summary>
     public string ReasoningEffortLabel => ReasoningEffort switch
@@ -258,6 +339,15 @@ public sealed partial class ComposerViewModel : ObservableObject
     }
 
     [RelayCommand]
+    public void ToggleImageGenerationMode()
+    {
+        if (!IsImageGenerationAvailable)
+            return;
+
+        IsImageGenerationMode = !IsImageGenerationMode;
+    }
+
+    [RelayCommand]
     public void RemoveAttachment(Attachment? a)
     {
         if (a is null) return;
@@ -273,6 +363,10 @@ public sealed partial class ComposerViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(Text) && Attachments.Count == 0) return;
         if (_chat.ActiveProvider is null || _chat.ActiveModel is null) return;
         if (HasUnsupportedImages(Attachments, _chat.ActiveProvider, _chat.ActiveModel))
+            return;
+        var isMolaGptImageGenerationSend =
+            _chat.ActiveProvider.Kind == ProviderKind.MolaGptProxy && IsImageGenerationMode;
+        if (isMolaGptImageGenerationSend && string.IsNullOrWhiteSpace(Text))
             return;
 
         if (string.IsNullOrEmpty(_chat.ConversationId))
@@ -308,17 +402,25 @@ public sealed partial class ComposerViewModel : ObservableObject
                 var prepared = await proxyForUploads.PrepareAttachmentsAsync(
                     queuedAttachments,
                     conversationId,
-                    model.SupportsVision,
+                    model.SupportsVision || isMolaGptImageGenerationSend,
                     cts.Token);
                 outgoingAttachments = prepared.Attachments.ToList();
-                if (!string.IsNullOrWhiteSpace(prepared.SystemHint))
+                if (isMolaGptImageGenerationSend)
+                {
+                    outgoingUserText = BuildImageGenerationPrompt(userText, outgoingAttachments, prepared.SystemHint);
+                }
+                else if (!string.IsNullOrWhiteSpace(prepared.SystemHint))
+                {
                     outgoingUserText = AppendHiddenSystemHint(userText, prepared.SystemHint!);
+                }
 
                 if (userMsg is not null)
                 {
                     userMsg.Content = outgoingUserText;
                     userMsg.Attachments = BuildAttachmentChips(outgoingAttachments);
-                    userMsg.ContentPartsJson = BuildOpenAiContentPartsJson(outgoingUserText, outgoingAttachments);
+                    userMsg.ContentPartsJson = model.SupportsVision
+                        ? BuildOpenAiContentPartsJson(outgoingUserText, outgoingAttachments)
+                        : null;
                     _chat.UpdatePersistedMessage(userMsg);
                 }
             }
@@ -337,6 +439,15 @@ public sealed partial class ComposerViewModel : ObservableObject
                 _cts = null;
                 cts.Dispose();
                 return;
+            }
+        }
+        else if (isMolaGptImageGenerationSend)
+        {
+            outgoingUserText = BuildImageGenerationPrompt(userText, outgoingAttachments, null);
+            if (userMsg is not null)
+            {
+                userMsg.Content = outgoingUserText;
+                _chat.UpdatePersistedMessage(userMsg);
             }
         }
         else if (userMsg is not null && outgoingAttachments.Any(a => a.Kind == AttachmentKind.Image && !string.IsNullOrWhiteSpace(a.RemoteUrl)))
@@ -577,7 +688,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         _chat.IsStreaming = true;
     }
 
-    private static async Task RunStreamLoopAsync(
+    private async Task RunStreamLoopAsync(
         IChatProvider provider,
         ChatRequest req,
         MessageViewModel assistantMsg,
@@ -594,7 +705,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
     }
 
-    private static async Task RunResumeStreamLoopAsync(
+    private async Task RunResumeStreamLoopAsync(
         MolaGptProxyProvider provider,
         string sessionId,
         int offset,
@@ -632,6 +743,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             enabledTools["webPageMaxCharacters"] = _settings?.WebPageMaxCharacters ?? 12000;
             enabledTools["mcpServers"] = _settings?.BuildMcpServerOptions() ?? Array.Empty<MolaGPT.Core.Chat.LocalTools.McpServerOptions>();
             enabledTools["vision"] = _settings?.BuildVisionProxyOptions();
+            if (IsByokImageGeneration && _settings?.ImageGenerationAsTool == true)
+                enabledTools["image_generation"] = BuildActiveImageGenerationToolOptions();
         }
 
         var extras = new Dictionary<string, object>
@@ -644,6 +757,30 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         return extras;
     }
+
+    private ImageGenerationOptions BuildActiveImageGenerationToolOptions()
+    {
+        var options = _settings!.BuildImageGenerationOptions();
+        return options with
+        {
+            Enabled = true,
+            Size = SizeForAspectRatio(ImageAspectRatio, options.Size),
+            Style = string.IsNullOrWhiteSpace(ImageStyle) ? options.Style : ImageStyle,
+            AsTool = true
+        };
+    }
+
+    private static string SizeForAspectRatio(string? ratio, string fallback) =>
+        ratio switch
+        {
+            "1:1" => "1024x1024",
+            "16:9" => "1792x1024",
+            "9:16" => "1024x1792",
+            "4:3" => "1536x1024",
+            "3:4" => "1024x1536",
+            "21:9" => "1792x1024",
+            _ => string.IsNullOrWhiteSpace(fallback) ? "1024x1024" : fallback
+        };
 
     private static object BuildContentForHistory(MessageViewModel message)
     {
@@ -784,6 +921,9 @@ public sealed partial class ComposerViewModel : ObservableObject
         return text.TrimEnd() + "\n\n" + hint;
     }
 
+    private static string BuildHiddenSystemHint(string hint) =>
+        $"{SystemHintDelimiter}{hint}{SystemHintDelimiter}";
+
     private string? ResolveSystemPrompt()
     {
         if (_chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy)
@@ -923,6 +1063,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     private bool CanSend() =>
         !IsSending &&
         (!string.IsNullOrWhiteSpace(Text) || Attachments.Count > 0) &&
+        (!(IsImageGenerationAvailable && IsImageGenerationMode) || !string.IsNullOrWhiteSpace(Text)) &&
         _chat.ActiveProvider is not null &&
         _chat.ActiveModel is not null &&
         !HasUnsupportedImages(Attachments, _chat.ActiveProvider, _chat.ActiveModel);
@@ -955,7 +1096,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             || model.DisplayName.Contains("MolaGPT Routes", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static void ApplyStreamChunk(MessageViewModel assistantMsg, ChatChunk chunk, ToolProgressRoutingState toolProgressRouting)
+    private void ApplyStreamChunk(MessageViewModel assistantMsg, ChatChunk chunk, ToolProgressRoutingState toolProgressRouting)
     {
         if (chunk.Pending is { } pending)
             assistantMsg.SetPendingStatus(pending.Label, pending.Detail, pending.IsRoutes);
@@ -963,6 +1104,11 @@ public sealed partial class ComposerViewModel : ObservableObject
         {
             assistantMsg.FlushPendingDelta();
             assistantMsg.ApplyToolDelta(tool);
+            if (string.Equals(tool.Status, "completed", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(tool.Name, ImageGenerationTool.ToolName, StringComparison.Ordinal))
+            {
+                AttachGeneratedImages(assistantMsg, tool.ResultPreviewJson);
+            }
         }
         if (chunk.Sources is { Count: > 0 })
             assistantMsg.Sources = chunk.Sources;
@@ -985,6 +1131,70 @@ public sealed partial class ComposerViewModel : ObservableObject
         if (chunk.DeltaThinking is { Length: > 0 } th)
             assistantMsg.AppendThinking(th);
     }
+
+    /// <summary>
+    /// Render images produced by the BYOK <c>generate_image</c> tool. The tool
+    /// saves bytes to the local <see cref="MolaGPT.Storage.AttachmentStore"/> and
+    /// returns JSON carrying each image's <c>local_name</c>; here we re-read those
+    /// bytes and attach them to the assistant message so they show inline (and
+    /// persist via message meta). Dedupes by LocalName because a tool call can be
+    /// re-applied (running→completed, display-block rebuilds).
+    /// </summary>
+    private void AttachGeneratedImages(MessageViewModel assistantMsg, string? resultJson)
+    {
+        if (_attachmentStore is null || string.IsNullOrWhiteSpace(resultJson)) return;
+
+        List<AttachmentChip>? added = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(resultJson);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return;
+            if (!(root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True)) return;
+            if (!root.TryGetProperty("images", out var images) || images.ValueKind != JsonValueKind.Array) return;
+
+            var existing = new HashSet<string>(
+                (assistantMsg.Attachments ?? Array.Empty<AttachmentChip>())
+                    .Select(c => c.LocalName)
+                    .Where(n => !string.IsNullOrEmpty(n))!,
+                StringComparer.Ordinal);
+
+            foreach (var img in images.EnumerateArray())
+            {
+                if (img.ValueKind != JsonValueKind.Object) continue;
+                var localName = ReadJsonString(img, "local_name");
+                if (string.IsNullOrEmpty(localName) || !existing.Add(localName!)) continue;
+
+                var bytes = _attachmentStore.Load(localName);
+                if (bytes is not { Length: > 0 }) continue;
+
+                added ??= new List<AttachmentChip>();
+                added.Add(new AttachmentChip(
+                    ReadJsonString(img, "file_name") ?? localName!,
+                    "图片")
+                {
+                    Bytes = bytes,
+                    LocalName = localName,
+                    MimeType = ReadJsonString(img, "mime_type") ?? "image/png"
+                });
+            }
+        }
+        catch (JsonException)
+        {
+            return;
+        }
+
+        if (added is not { Count: > 0 }) return;
+
+        var merged = new List<AttachmentChip>(assistantMsg.Attachments ?? Array.Empty<AttachmentChip>());
+        merged.AddRange(added);
+        assistantMsg.Attachments = merged;
+    }
+
+    private static string? ReadJsonString(JsonElement obj, string name) =>
+        obj.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 
     private void CompleteStreamContext(BackgroundStreamTask streamContext, bool publishNotification)
     {
@@ -1025,7 +1235,11 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
     }
 
-    partial void OnTextChanged(string value) => SendCommand.NotifyCanExecuteChanged();
+    partial void OnTextChanged(string value)
+    {
+        OnPropertyChanged(nameof(IsComposerPlaceholderVisible));
+        SendCommand.NotifyCanExecuteChanged();
+    }
     partial void OnIsSendingChanged(bool value)
     {
         SendCommand.NotifyCanExecuteChanged();
@@ -1041,6 +1255,19 @@ public sealed partial class ComposerViewModel : ObservableObject
     partial void OnReasoningEffortChanged(string value)
     {
         OnPropertyChanged(nameof(ReasoningEffortLabel));
+    }
+
+    partial void OnIsImageGenerationModeChanged(bool value)
+    {
+        if (!value)
+        {
+            ImageAspectRatio = "1:1";
+            ImageStyle = string.Empty;
+        }
+
+        OnPropertyChanged(nameof(IsImageOptionsVisible));
+        OnPropertyChanged(nameof(ComposerPlaceholder));
+        SendCommand.NotifyCanExecuteChanged();
     }
 
     private MolaGPT.Core.Models.ThinkingParamKind? ResolveActiveThinkingParamKind()
@@ -1224,4 +1451,39 @@ public sealed partial class ComposerViewModel : ObservableObject
             suffix[i] = alphabet[random.Next(alphabet.Length)];
         return $"chat_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}_{new string(suffix)}";
     }
+
+    private string BuildImageGenerationPrompt(
+        string userText,
+        IReadOnlyList<Attachment> preparedAttachments,
+        string? sandboxHint)
+    {
+        var referenceImageUrl = preparedAttachments
+            .Where(a => a.Kind == AttachmentKind.Image)
+            .Select(a => a.RemoteUrl)
+            .FirstOrDefault(url => !string.IsNullOrWhiteSpace(url));
+
+        if (!string.IsNullOrWhiteSpace(referenceImageUrl))
+        {
+            return AppendHiddenSystemHint(
+                userText,
+                BuildHiddenSystemHint($"[重要提示: 用户已上传参考图片，公网访问地址为: {referenceImageUrl}。若需编辑此图片，请调用 image_generation_and_editing 工具时使用 action=\"edit\" 并将此 URL 作为 image_url 参数传递。]"));
+        }
+
+        var prompt = string.IsNullOrWhiteSpace(sandboxHint)
+            ? userText
+            : AppendHiddenSystemHint(userText, sandboxHint!);
+
+        var ratioHint = !string.IsNullOrWhiteSpace(ImageAspectRatio) && ImageAspectRatio != "1:1"
+            ? $"，必须使用 aspect_ratio=\"{ImageAspectRatio}\""
+            : string.Empty;
+        var styleHint = !string.IsNullOrWhiteSpace(ImageStyle)
+            ? $"，必须使用 style=\"{ImageStyle}\""
+            : string.Empty;
+
+        return AppendHiddenSystemHint(
+            prompt,
+            BuildHiddenSystemHint($"[提示：可以使用 image_generation_and_editing 工具创建图片。工具支持 action=\"generate\"（生成新图片）和 action=\"edit\"（编辑现有图片）。生成时可指定 style（风格）和 aspect_ratio（宽高比）{ratioHint}{styleHint}。]"));
+    }
 }
+
+public sealed record ImageGenerationOption(string Label, string Value);

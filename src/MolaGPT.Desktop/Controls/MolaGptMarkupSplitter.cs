@@ -336,12 +336,39 @@ public static class MolaGptMarkupSplitter
     /// preserving the payload. A dangling begin marker means the tool output
     /// payload is still streaming, so hide the partial tail until the end
     /// marker arrives.
+    ///
+    /// Exposed so <c>MarkdownPresenter</c> can strip these markers up front for
+    /// EVERY render path (not just the splitter path): the output frame of a
+    /// Python/MCP call arrives after the <c>&lt;DSanalysis&gt;</c> open tag was
+    /// already consumed in an earlier frame, so an incremental frame may carry
+    /// <c>...END--&gt;</c> with no custom-markup opener — without an up-front
+    /// strip it would leak to the markdown renderer as literal text.
     /// </summary>
-    private static string NormalizeOutputSegmentMarkers(string source)
+    public static string NormalizeOutputSegmentMarkers(string source)
     {
         source = NormalizeMarkerPair(source, PyOutputBegin, PyOutputEnd);
         source = NormalizeMarkerPair(source, McpOutputBegin, McpOutputEnd);
+        source = RemoveOrphanOutputMarkers(source);
         return HideDanglingMarkerPrefix(source);
+    }
+
+    /// <summary>
+    /// After pairing, remove any COMPLETE but unpaired marker comments left in
+    /// the middle of the text. The common case: an output frame whose closing
+    /// <c>END</c> has no preceding <c>BEGIN</c> in the current source slice
+    /// (the BEGIN lived in an earlier, already-consumed frame), so
+    /// <see cref="NormalizeMarkerPair"/> appends it verbatim. These markers are
+    /// protocol delimiters, never legitimate visible content, so dropping the
+    /// whole comment is always safe and stops it leaking as literal text.
+    /// </summary>
+    private static string RemoveOrphanOutputMarkers(string source)
+    {
+        if (source.IndexOf("<!--PY_OUTPUT", StringComparison.Ordinal) < 0
+            && source.IndexOf("<!--MCP_OUTPUT", StringComparison.Ordinal) < 0)
+            return source;
+        foreach (var marker in new[] { PyOutputBegin, PyOutputEnd, McpOutputBegin, McpOutputEnd })
+            source = source.Replace(marker, string.Empty);
+        return source;
     }
 
     private static string StripOrphanSteelMetaFragments(string source)
