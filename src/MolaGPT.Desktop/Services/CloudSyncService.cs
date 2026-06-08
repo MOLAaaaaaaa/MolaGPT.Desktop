@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -936,6 +937,8 @@ public sealed class CloudSyncService
         {
             var splitThinking = ChatViewModel.SplitInlineThinking(row.Content);
             var content = splitThinking.Visible;
+            JsonArray? toolCalls = null;
+            JsonArray? thinkingSegments = null;
             var message = new JsonObject
             {
                 ["role"] = row.Role,
@@ -953,6 +956,10 @@ public sealed class CloudSyncService
                     {
                         if (metaNode["content_parts"] is JsonNode contentParts)
                             message["content"] = contentParts.DeepClone();
+                        if (metaNode["tool_calls"] is JsonArray toolCallsNode)
+                            toolCalls = toolCallsNode.DeepClone() as JsonArray;
+                        if (metaNode["thinking_segments"] is JsonArray thinkingSegmentsNode)
+                            thinkingSegments = thinkingSegmentsNode.DeepClone() as JsonArray;
                         metaNode.Remove("thinking");
                         metaNode.Remove("provider");
                         metaNode.Remove("content_parts");
@@ -966,13 +973,24 @@ public sealed class CloudSyncService
                 }
                 catch (JsonException) { }
             }
-            if (!string.IsNullOrWhiteSpace(thinkingText))
+
+            var canUseTimelineContent = message["content"] is not JsonArray;
+            if (canUseTimelineContent && HasTimelineItems(toolCalls, thinkingSegments))
+            {
+                message["content"] = BuildWebTimelineContent(content, toolCalls, thinkingSegments);
+            }
+            else if (!string.IsNullOrWhiteSpace(thinkingText))
             {
                 var folded = ChatViewModel.FoldLeadingThinkingToolMarkup(content, thinkingText);
                 content = folded.Visible;
-                message["content"] = content;
                 if (!string.IsNullOrWhiteSpace(folded.Thinking))
-                    message["reasoning_content"] = folded.Thinking;
+                {
+                    message["content"] = BuildWebCompatibleThinkingContent(content, folded.Thinking);
+                }
+                else
+                {
+                    message["content"] = content;
+                }
             }
 
             array.Add(message);
@@ -980,6 +998,641 @@ public sealed class CloudSyncService
 
         return array;
     }
+
+    private static bool HasTimelineItems(JsonArray? toolCalls, JsonArray? thinkingSegments) =>
+        (toolCalls is { Count: > 0 }) || (thinkingSegments is { Count: > 0 });
+
+    private static string BuildWebTimelineContent(string visible, JsonArray? toolCalls, JsonArray? thinkingSegments)
+    {
+        var events = new List<CloudTimelineItem>();
+        var order = 0;
+
+        if (thinkingSegments is not null)
+        {
+            foreach (var node in thinkingSegments)
+            {
+                if (node is not JsonObject item) continue;
+                var source = ReadString(item, "source");
+                if (string.IsNullOrWhiteSpace(source)) continue;
+                events.Add(new CloudTimelineItem(
+                    ReadInt(item, "content_offset", "contentOffset") ?? 0,
+                    ReadInt(item, "timeline_index", "timelineIndex") ?? order,
+                    order++,
+                    BuildWebThink(source!)));
+            }
+        }
+
+        if (toolCalls is not null)
+        {
+            foreach (var node in toolCalls)
+            {
+                if (node is not JsonObject item) continue;
+                var markup = BuildWebToolMarkup(item);
+                if (string.IsNullOrWhiteSpace(markup)) continue;
+                events.Add(new CloudTimelineItem(
+                    ReadInt(item, "content_offset", "contentOffset") ?? 0,
+                    ReadInt(item, "timeline_index", "timelineIndex") ?? order,
+                    order++,
+                    markup));
+            }
+        }
+
+        if (events.Count == 0) return visible;
+
+        var body = visible ?? string.Empty;
+        var builder = new StringBuilder();
+        var cursor = 0;
+        foreach (var item in events
+                     .OrderBy(e => Math.Clamp(e.ContentOffset, 0, body.Length))
+                     .ThenBy(e => e.TimelineIndex)
+                     .ThenBy(e => e.Order))
+        {
+            var offset = Math.Clamp(item.ContentOffset, 0, body.Length);
+            if (offset > cursor)
+            {
+                builder.Append(body, cursor, offset - cursor);
+                cursor = offset;
+            }
+            builder.Append(item.Markup);
+        }
+
+        if (cursor < body.Length)
+            builder.Append(body, cursor, body.Length - cursor);
+
+        return builder.ToString().Trim();
+    }
+
+    private static string BuildWebThink(string source)
+    {
+        var thinking = source.Trim();
+        if (string.IsNullOrWhiteSpace(thinking)) return string.Empty;
+        return "\n\n<think>\n" + thinking + "\n</think>\n\n";
+    }
+
+    private static string BuildWebCompatibleThinkingContent(string visible, string thinking)
+    {
+        var trimmedThinking = thinking.Trim();
+        var trimmedVisible = visible.TrimStart();
+        if (string.IsNullOrWhiteSpace(trimmedVisible))
+            return "<think>\n" + trimmedThinking + "\n</think>";
+
+        return "<think>\n" + trimmedThinking + "\n</think>\n\n" + trimmedVisible;
+    }
+
+    private static string BuildWebToolMarkup(JsonObject tool)
+    {
+        var name = ReadString(tool, "name") ?? "tool";
+        var phase = MapWebToolPhase(ReadString(tool, "status"));
+        var label = ReadString(tool, "label");
+        if (string.IsNullOrWhiteSpace(label))
+            label = ReadableToolLabel(name, phase);
+
+        var toolType = WebToolType(name);
+        if (toolType == "web_search")
+            return BuildWebSearchMarkup(SearchChipsFromTool(tool, label!), phase);
+
+        var extraClass = toolType == "image-gen" ? " tool-image-blockquote" : string.Empty;
+        var dsBody = new StringBuilder();
+        var args = ReadString(tool, "arguments_json", "argumentsJson");
+        if (!string.IsNullOrWhiteSpace(args))
+            dsBody.Append("**参数：**\n\n```json\n").Append(args).Append("\n```\n");
+        var result = ReadString(tool, "result_preview_json", "resultPreviewJson");
+        if (!string.IsNullOrWhiteSpace(result))
+        {
+            if (dsBody.Length > 0) dsBody.Append('\n');
+            dsBody.Append(result);
+        }
+
+        return "\n\n<blockquote class=\"tool-status " + phase + extraClass + "\"><p>" + EscapeHtml(label!) + "</p></blockquote>\n\n"
+               + "<DSanalysis data-tool-type=\"" + toolType + "\" data-analysis-phase=\"" + phase + "\">"
+               + dsBody
+               + "</DSanalysis>\n\n";
+    }
+
+    private static string BuildWebSearchMarkup(IReadOnlyList<SearchChip> chips, string phase)
+    {
+        var safePhase = phase is "completed" or "error" or "analyzing" ? phase : "completed";
+        var chipHtml = new StringBuilder();
+        var renderChips = chips.Count == 0
+            ? new[] { new SearchChip("联网搜索", Array.Empty<string>()) }
+            : chips;
+        foreach (var chip in renderChips)
+        {
+            chipHtml.Append("<span class=\"tool-search-chip\"><span class=\"tool-search-chip-icon\" aria-hidden=\"true\"><i class=\"fas fa-search\"></i></span>")
+                .Append("<span class=\"tool-search-chip-text\">").Append(EscapeHtml(chip.Text)).Append("</span>");
+            foreach (var badge in chip.Badges)
+            {
+                chipHtml.Append("<span class=\"tool-search-chip-badge\"><span class=\"tool-search-chip-badge-icon\"><i class=\"")
+                    .Append(SearchBadgeIcon(badge))
+                    .Append("\"></i></span>")
+                    .Append(EscapeHtml(badge))
+                    .Append("</span>");
+            }
+            chipHtml.Append("</span>");
+        }
+
+        return "\n\n<blockquote class=\"tool-status " + safePhase + " tool-search-blockquote\" data-search-phase=\"" + safePhase + "\">"
+               + "<p class=\"tool-search-title\">网络搜索</p><div class=\"tool-search-chip-wrap\">" + chipHtml + "</div></blockquote>\n\n"
+               + "<DSanalysis data-tool-type=\"web_search\" data-analysis-phase=\"" + safePhase + "\"></DSanalysis>\n\n";
+    }
+
+    private static IReadOnlyList<SearchChip> SearchChipsFromTool(JsonObject tool, string label)
+    {
+        var args = ReadString(tool, "arguments_json", "argumentsJson");
+        var fromArgs = SearchChipsFromArgs(args);
+        return fromArgs.Count > 0 ? fromArgs : SplitSearchChipText(label);
+    }
+
+    private static IReadOnlyList<SearchChip> SearchChipsFromArgs(string? argsJson)
+    {
+        if (string.IsNullOrWhiteSpace(argsJson)) return [];
+        try
+        {
+            using var doc = JsonDocument.Parse(argsJson);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return [];
+            if (root.TryGetProperty("queries", out var queries) && queries.ValueKind == JsonValueKind.Array)
+            {
+                var chips = new List<SearchChip>();
+                foreach (var item in queries.EnumerateArray())
+                {
+                    if (item.ValueKind == JsonValueKind.String)
+                    {
+                        var text = item.GetString();
+                        if (!string.IsNullOrWhiteSpace(text)) chips.Add(new SearchChip(text!, []));
+                        continue;
+                    }
+                    if (item.ValueKind != JsonValueKind.Object) continue;
+                    var query = ReadString(item, "query") ?? ReadString(item, "text") ?? ReadString(item, "q");
+                    if (!string.IsNullOrWhiteSpace(query))
+                        chips.Add(new SearchChip(query!, SearchBadgesFrom(item)));
+                }
+                return chips;
+            }
+
+            var single = ReadString(root, "query") ?? ReadString(root, "search_query") ?? ReadString(root, "q");
+            return string.IsNullOrWhiteSpace(single) ? [] : [new SearchChip(single!, SearchBadgesFrom(root))];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static IReadOnlyList<SearchChip> SplitSearchChipText(string rawText)
+    {
+        var normalized = Regex.Replace(rawText, "\\s+", " ");
+        normalized = Regex.Replace(
+            normalized,
+            "^\\s*(?:✓\\s*)?(?:网络搜索|联网搜索|搜索完成|网络搜索完成|联网搜索完成)\\s*[:：-]?\\s*",
+            string.Empty,
+            RegexOptions.IgnoreCase).Trim();
+        if (string.IsNullOrWhiteSpace(normalized)) return [];
+
+        var slashParts = Regex.Split(normalized, "\\s*/\\s*")
+            .Select(p => p.Trim())
+            .Where(p => p.Length > 0)
+            .ToList();
+        if (slashParts.Count > 1)
+            return slashParts.Select(ParseSearchChipWithTrailingBadge).ToList();
+
+        var matches = Regex.Matches(normalized, "(.+?)\\s+(news|finance|paper|technology|day|week|month|year)(?=\\s+|$)", RegexOptions.IgnoreCase);
+        if (matches.Count > 0)
+        {
+            return matches
+                .Select(m => new SearchChip(m.Groups[1].Value.Trim(), [m.Groups[2].Value.ToLowerInvariant()]))
+                .Where(c => c.Text.Length > 0)
+                .ToList();
+        }
+
+        return [ParseSearchChipWithTrailingBadge(normalized)];
+    }
+
+    private static SearchChip ParseSearchChipWithTrailingBadge(string value)
+    {
+        var match = Regex.Match(value.Trim(), "^(.+?)\\s+(news|finance|paper|technology|day|week|month|year)$", RegexOptions.IgnoreCase);
+        return match.Success
+            ? new SearchChip(match.Groups[1].Value.Trim(), [match.Groups[2].Value.ToLowerInvariant()])
+            : new SearchChip(value.Trim(), []);
+    }
+
+    private static IReadOnlyList<string> SearchBadgesFrom(JsonElement obj)
+    {
+        var badges = new List<string>();
+        foreach (var name in new[] { "topic", "time_range", "country" })
+        {
+            var value = ReadString(obj, name);
+            if (string.IsNullOrWhiteSpace(value)) continue;
+            badges.Add(name == "country" ? value!.ToUpperInvariant() : value!);
+        }
+        return badges;
+    }
+
+    private static string SearchBadgeIcon(string badge) => badge.ToLowerInvariant() switch
+    {
+        "news" => "far fa-newspaper",
+        "finance" => "fas fa-chart-line",
+        "paper" => "fas fa-graduation-cap",
+        "technology" => "fas fa-microchip",
+        "day" or "week" or "month" or "year" => "far fa-clock",
+        _ => badge.Length == 2 && badge.All(char.IsLetter) ? "fas fa-globe-asia" : "fas fa-tag"
+    };
+
+    private static string WebToolType(string name) => name switch
+    {
+        "image-gen" or "image_generation" or "image_generation_and_editing" or "draw_with_canvas" => "image-gen",
+        "image-analyze" or "image_analyze" or "analyze_sandbox_image" => "image-analyze",
+        "image-action" or "image_action" or "image_file_process" => "image-action",
+        "search_web" or "web_search" => "web_search",
+        "steel_browser" or "browser" or "web_fetch" => "tool-call",
+        "execute_python_code" or "python" => "python",
+        "mcp" => "mcp",
+        _ => "tool-call"
+    };
+
+    private static string ReadableToolLabel(string name, string phase)
+    {
+        var completed = phase == "completed";
+        var error = phase == "error";
+        return WebToolType(name) switch
+        {
+            "image-gen" => completed ? "绘制完成" : error ? "绘制失败" : "正在绘制",
+            "image-analyze" => completed ? "图片分析完成" : error ? "图片分析失败" : "正在查看图片",
+            "image-action" => completed ? "图片处理完成" : error ? "图片处理失败" : "正在处理图片",
+            "python" => completed ? "Python 执行完成" : error ? "Python 执行失败" : "正在执行 Python",
+            "mcp" => completed ? "连接器调用完成" : error ? "连接器调用失败" : "正在调用连接器",
+            "web_search" => completed ? "联网搜索完成" : error ? "联网搜索失败" : "正在访问互联网",
+            _ when name is "web_fetch" or "steel_browser" => completed ? "阅读网页" : error ? "网页阅读失败" : "正在阅读网页",
+            _ => completed ? "工具调用完成" : error ? "工具调用失败" : "正在处理..."
+        };
+    }
+
+    private static string MapWebToolPhase(string? status) => status?.ToLowerInvariant() switch
+    {
+        "completed" or "complete" or "success" or "succeeded" => "completed",
+        "error" or "failed" or "failure" => "error",
+        _ => "analyzing"
+    };
+
+    private static string? ReadString(JsonObject obj, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (obj[name] is JsonValue value && value.TryGetValue<string>(out var text))
+                return text;
+        }
+        return null;
+    }
+
+    private static int? ReadInt(JsonObject obj, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (obj[name] is JsonValue value && value.TryGetValue<int>(out var number))
+                return number;
+        }
+        return null;
+    }
+
+    private static string? ReadString(JsonElement obj, string name)
+    {
+        if (!obj.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String) return null;
+        return value.GetString();
+    }
+
+    private static string EscapeHtml(string value) =>
+        System.Net.WebUtility.HtmlEncode(value);
+
+    private sealed record CloudTimelineItem(int ContentOffset, int TimelineIndex, int Order, string Markup);
+
+    private sealed record SearchChip(string Text, IReadOnlyList<string> Badges);
+
+    private static LocalTimelineParse ParseWebTimelineForLocal(string source)
+    {
+        var visible = new StringBuilder();
+        var thinkingSegments = new JsonArray();
+        var toolCalls = new JsonArray();
+        var thinking = new StringBuilder();
+        var pos = 0;
+        var timeline = 0;
+        var hasTimeline = false;
+        var lastTimelineItemWasTool = false;
+
+        void AppendVisible(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            var clean = MessageViewModel.StripSystemHints(text);
+            visible.Append(clean);
+            if (!string.IsNullOrWhiteSpace(clean))
+                lastTimelineItemWasTool = false;
+        }
+
+        void AppendThinking(string text)
+        {
+            var clean = text.Trim();
+            if (string.IsNullOrWhiteSpace(clean)) return;
+            var offset = visible.Length;
+            thinkingSegments.Add(new JsonObject
+            {
+                ["source"] = clean,
+                ["content_offset"] = offset,
+                ["timeline_index"] = timeline++,
+                ["elapsed_seconds"] = 0
+            });
+            if (thinking.Length > 0) thinking.Append("\n\n");
+            thinking.Append(clean);
+            hasTimeline = true;
+            lastTimelineItemWasTool = false;
+        }
+
+        void AppendTool(string unit)
+        {
+            if (StartsWithIgnoreCase(unit, 0, "<DSanalysis")
+                && lastTimelineItemWasTool
+                && TryMergeDsAnalysisWithPreviousTool(unit, toolCalls))
+            {
+                hasTimeline = true;
+                return;
+            }
+
+            var tool = ParseWebToolUnitForLocal(unit, visible.Length, timeline);
+            if (tool is null) return;
+            toolCalls.Add(tool);
+            timeline++;
+            hasTimeline = true;
+            lastTimelineItemWasTool = true;
+        }
+
+        while (pos < source.Length)
+        {
+            var next = FindNextWebTimelineMarker(source, pos);
+            if (next < 0)
+            {
+                AppendVisible(source[pos..]);
+                break;
+            }
+
+            if (next > pos)
+                AppendVisible(source[pos..next]);
+
+            if (StartsWithIgnoreCase(source, next, "<think"))
+            {
+                var openEnd = source.IndexOf('>', next);
+                if (openEnd < 0)
+                {
+                    AppendThinking(source[next..]);
+                    break;
+                }
+
+                var close = IndexOfIgnoreCase(source, "</think>", openEnd + 1);
+                var body = close < 0
+                    ? source[(openEnd + 1)..]
+                    : source.Substring(openEnd + 1, close - openEnd - 1);
+                AppendThinking(body);
+                pos = close < 0 ? source.Length : close + "</think>".Length;
+                continue;
+            }
+
+            var end = FindWebTimelineMarkerEnd(source, next);
+            if (end < 0)
+            {
+                AppendVisible(source.Substring(next, 1));
+                pos = next + 1;
+                continue;
+            }
+
+            AppendTool(source[next..end]);
+            pos = end;
+        }
+
+        return new LocalTimelineParse(
+            visible.ToString(),
+            thinking.Length == 0 ? null : thinking.ToString(),
+            toolCalls,
+            thinkingSegments,
+            hasTimeline);
+    }
+
+    private static JsonObject? ParseWebToolUnitForLocal(string unit, int contentOffset, int timelineIndex)
+    {
+        if (string.IsNullOrWhiteSpace(unit)) return null;
+        var isDs = StartsWithIgnoreCase(unit, 0, "<DSanalysis");
+        var body = isDs ? StripTagPair(unit, "DSanalysis").Trim() : string.Empty;
+        if (isDs && string.IsNullOrWhiteSpace(body)) return null;
+
+        var name = isDs ? DsToolName(unit) : ToolNameFromStatusMarkup(unit);
+        var phase = ExtractToolPhase(unit);
+        var label = isDs
+            ? ReadableToolLabel(name, phase)
+            : ExtractSteelStepTitle(unit) ?? HtmlToText(unit);
+        if (string.IsNullOrWhiteSpace(label))
+            label = ReadableToolLabel(name, phase);
+
+        var obj = new JsonObject
+        {
+            ["id"] = "cloud-tool-" + timelineIndex,
+            ["name"] = name,
+            ["status"] = phase == "error" ? "error" : phase == "completed" ? "completed" : "running",
+            ["label"] = label,
+            ["content_offset"] = contentOffset,
+            ["timeline_index"] = timelineIndex,
+            ["provider"] = "MolaGPT"
+        };
+        if (name == "web_search")
+            obj["summary"] = string.Join(" / ", ExtractSearchChipTexts(unit)).Trim();
+        else if (!string.IsNullOrWhiteSpace(body))
+            obj["detail"] = body;
+        else if (StartsWithIgnoreCase(unit, 0, "<steel-step"))
+        {
+            var preview = ExtractSteelStepPreview(unit);
+            if (!string.IsNullOrWhiteSpace(preview))
+                obj["detail"] = preview;
+        }
+        return obj;
+    }
+
+    private static bool TryMergeDsAnalysisWithPreviousTool(string unit, JsonArray toolCalls)
+    {
+        var body = StripTagPair(unit, "DSanalysis").Trim();
+        if (string.IsNullOrWhiteSpace(body)) return true;
+        if (toolCalls.Count == 0 || toolCalls[toolCalls.Count - 1] is not JsonObject previous) return false;
+
+        var name = DsToolName(unit);
+        var phase = ExtractToolPhase(unit);
+        previous["name"] = name;
+        previous["status"] = phase == "error" ? "error" : phase == "completed" ? "completed" : "running";
+        previous["label"] = ReadableToolLabel(name, phase);
+        previous["detail"] = body;
+        return true;
+    }
+
+    private static string ToolNameFromStatusMarkup(string unit)
+    {
+        if (unit.Contains("tool-search-blockquote", StringComparison.OrdinalIgnoreCase)) return "web_search";
+        if (unit.Contains("tool-steel-step", StringComparison.OrdinalIgnoreCase)) return SteelStepToolName(unit);
+        var text = HtmlToText(unit);
+        if (text.Contains("搜索", StringComparison.OrdinalIgnoreCase)) return "web_search";
+        if (text.Contains("查看图片", StringComparison.OrdinalIgnoreCase) || text.Contains("图片分析", StringComparison.OrdinalIgnoreCase)) return "image-analyze";
+        if (text.Contains("绘制", StringComparison.OrdinalIgnoreCase)) return "image-gen";
+        if (text.Contains("Python", StringComparison.OrdinalIgnoreCase)) return "python";
+        if (text.Contains("阅读网页", StringComparison.OrdinalIgnoreCase) || text.Contains("读取网页", StringComparison.OrdinalIgnoreCase)) return "web_fetch";
+        return "tool";
+    }
+
+    private static string DsToolName(string unit)
+    {
+        var lower = unit.ToLowerInvariant();
+        if (lower.Contains("web_search")) return "web_search";
+        if (lower.Contains("image-analyze")) return "image-analyze";
+        if (lower.Contains("image-gen")) return "image-gen";
+        if (lower.Contains("image-action")) return "image-action";
+        if (lower.Contains("操作类型: scrape")
+            || lower.Contains("**操作类型:** scrape")
+            || lower.Contains("operation type: scrape")
+            || (lower.Contains("页面标题") && lower.Contains("内容长度")))
+            return "web_fetch";
+        if (lower.Contains("python")) return "python";
+        if (lower.Contains("mcp")) return "mcp";
+        return "tool";
+    }
+
+    private static string SteelStepToolName(string unit)
+    {
+        var title = ExtractSteelStepTitle(unit) ?? string.Empty;
+        if (unit.Contains("data-steel-action=\"scrape\"", StringComparison.OrdinalIgnoreCase)
+            || unit.Contains("data-steel-action='scrape'", StringComparison.OrdinalIgnoreCase)
+            || title.Contains("阅读网页", StringComparison.OrdinalIgnoreCase)
+            || title.Contains("读取网页", StringComparison.OrdinalIgnoreCase))
+            return "web_fetch";
+        return "steel_browser";
+    }
+
+    private static string? ExtractSteelStepTitle(string html)
+    {
+        var match = Regex.Match(
+            html,
+            "<p\\b[^>]*class=[\"'][^\"']*\\btool-steel-step-title\\b[^\"']*[\"'][^>]*>([\\s\\S]*?)</p>",
+            RegexOptions.IgnoreCase);
+        return match.Success ? HtmlToText(match.Groups[1].Value) : null;
+    }
+
+    private static string? ExtractSteelStepPreview(string html)
+    {
+        var matches = Regex.Matches(
+            html,
+            "<span\\b[^>]*class=[\"'][^\"']*\\btool-steel-meta-item\\b[^\"']*[\"'][^>]*>([\\s\\S]*?)</span>",
+            RegexOptions.IgnoreCase);
+        var items = matches
+            .Select(match => HtmlToText(match.Groups[1].Value))
+            .Where(text => !string.IsNullOrWhiteSpace(text))
+            .Distinct()
+            .ToArray();
+        return items.Length == 0 ? null : string.Join("\n", items);
+    }
+
+    private static string ExtractToolPhase(string unit)
+    {
+        var lower = unit.ToLowerInvariant();
+        if (lower.Contains("data-analysis-phase=\"error\"") || lower.Contains(" tool-status error") || lower.Contains(" error\"")) return "error";
+        return "completed";
+    }
+
+    private static IEnumerable<string> ExtractSearchChipTexts(string html)
+    {
+        var matches = Regex.Matches(
+            html,
+            "<span\\b[^>]*class=[\"'][^\"']*\\btool-search-chip-text\\b[^\"']*[\"'][^>]*>([\\s\\S]*?)</span>",
+            RegexOptions.IgnoreCase);
+        foreach (Match match in matches)
+        {
+            var text = HtmlToText(match.Groups[1].Value);
+            if (!string.IsNullOrWhiteSpace(text)) yield return text;
+        }
+    }
+
+    private static string StripTagPair(string source, string tag)
+    {
+        var openEnd = source.IndexOf('>');
+        if (openEnd < 0) return source;
+        var close = IndexOfIgnoreCase(source, "</" + tag + ">", openEnd + 1);
+        return close < 0 ? source[(openEnd + 1)..] : source.Substring(openEnd + 1, close - openEnd - 1);
+    }
+
+    private static string HtmlToText(string html) =>
+        Regex.Replace(html, "<[^>]+>", string.Empty)
+            .Replace("&nbsp;", " ")
+            .Replace("&amp;", "&")
+            .Replace("&lt;", "<")
+            .Replace("&gt;", ">")
+            .Replace("&quot;", "\"")
+            .Replace("&#39;", "'")
+            .Trim();
+
+    private static int FindNextWebTimelineMarker(string source, int start) =>
+        MinPositive(
+            IndexOfIgnoreCase(source, "<think", start),
+            IndexOfIgnoreCase(source, "<steel-step", start),
+            IndexOfIgnoreCase(source, "<DSanalysis", start),
+            IndexOfNextToolStatusBlockquote(source, start));
+
+    private static int FindWebTimelineMarkerEnd(string source, int start)
+    {
+        if (StartsWithIgnoreCase(source, start, "<steel-step")) return FindTagEnd(source, start, "</steel-step>");
+        if (StartsWithIgnoreCase(source, start, "<DSanalysis")) return FindTagEnd(source, start, "</DSanalysis>");
+        if (StartsWithToolStatusBlockquote(source, start)) return FindTagEnd(source, start, "</blockquote>");
+        return -1;
+    }
+
+    private static int FindTagEnd(string source, int start, string closeTag)
+    {
+        var close = IndexOfIgnoreCase(source, closeTag, start);
+        return close < 0 ? source.Length : close + closeTag.Length;
+    }
+
+    private static int IndexOfNextToolStatusBlockquote(string source, int start)
+    {
+        var pos = IndexOfIgnoreCase(source, "<blockquote", start);
+        while (pos >= 0)
+        {
+            if (StartsWithToolStatusBlockquote(source, pos)) return pos;
+            pos = IndexOfIgnoreCase(source, "<blockquote", pos + "<blockquote".Length);
+        }
+        return -1;
+    }
+
+    private static bool StartsWithToolStatusBlockquote(string source, int start)
+    {
+        if (!StartsWithIgnoreCase(source, start, "<blockquote")) return false;
+        var openEnd = source.IndexOf('>', start);
+        if (openEnd < 0) return false;
+        return source.Substring(start, openEnd - start + 1).Contains("tool-status", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool StartsWithIgnoreCase(string source, int start, string value) =>
+        start >= 0
+        && start + value.Length <= source.Length
+        && source.AsSpan(start, value.Length).Equals(value.AsSpan(), StringComparison.OrdinalIgnoreCase);
+
+    private static int IndexOfIgnoreCase(string source, string value, int start = 0) =>
+        source.IndexOf(value, start, StringComparison.OrdinalIgnoreCase);
+
+    private static int MinPositive(params int[] values)
+    {
+        var min = -1;
+        foreach (var value in values)
+        {
+            if (value < 0) continue;
+            if (min < 0 || value < min) min = value;
+        }
+        return min;
+    }
+
+    private sealed record LocalTimelineParse(
+        string Visible,
+        string? Thinking,
+        JsonArray ToolCalls,
+        JsonArray ThinkingSegments,
+        bool HasTimeline);
 
     private static ConversationRow ToLocalConversation(JsonObject metadata, ConversationRow? existing)
     {
@@ -1050,7 +1703,12 @@ public sealed class CloudSyncService
             if (node is not JsonObject msg) continue;
             var role = msg["role"]?.GetValue<string>() ?? "assistant";
             var content = ExtractContentText(msg["content"]);
-            var splitThinking = ChatViewModel.SplitInlineThinking(content);
+            var timeline = role == "assistant"
+                ? ParseWebTimelineForLocal(content)
+                : new LocalTimelineParse(content, null, new JsonArray(), new JsonArray(), false);
+            var splitThinking = timeline.HasTimeline
+                ? new InlineThinkingParts(timeline.Visible, timeline.Thinking)
+                : ChatViewModel.SplitInlineThinking(content);
             content = splitThinking.Visible;
             if (string.IsNullOrWhiteSpace(content) && role != "assistant") continue;
 
@@ -1068,6 +1726,10 @@ public sealed class CloudSyncService
                 meta["content_parts"] = rawContent.DeepClone();
             if (!meta.ContainsKey("sources") && msg["sources"] is JsonNode directSources)
                 meta["sources"] = directSources.DeepClone();
+            if (timeline.ToolCalls.Count > 0 && !meta.ContainsKey("tool_calls"))
+                meta["tool_calls"] = timeline.ToolCalls.DeepClone();
+            if (timeline.ThinkingSegments.Count > 0 && !meta.ContainsKey("thinking_segments"))
+                meta["thinking_segments"] = timeline.ThinkingSegments.DeepClone();
             string? thinkingText = null;
             if (msg["reasoning_content"] is JsonNode thinking)
             {
