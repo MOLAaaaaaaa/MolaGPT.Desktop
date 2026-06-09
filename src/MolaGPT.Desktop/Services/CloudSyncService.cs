@@ -59,6 +59,7 @@ public sealed class CloudSyncService
 
     public event EventHandler<CloudSyncStatusChangedEventArgs>? StatusChanged;
     public event EventHandler? LocalConversationsChanged;
+    public bool IsSyncing => Volatile.Read(ref _isSyncing) == 1;
 
     public CloudSyncService(
         HttpClient http,

@@ -1,7 +1,10 @@
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Runtime;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -42,11 +45,16 @@ public partial class App : Application
     private ResourceDictionary? _activeTheme;
     private string _currentThemeKey = "Light";
     private ThemeMode _themePreference = ThemeMode.System;
+    private CancellationTokenSource? _backgroundMemoryTrimCts;
     private static bool s_languageMetadataApplied;
     private static bool s_focusVisualHandlerRegistered;
     private CancellationTokenSource? _cloudStatusHideCts;
     private string? _pendingUpdateInstallerPath;
     private bool _installingUpdateWithRestart;
+
+    [DllImport("psapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EmptyWorkingSet(IntPtr hProcess);
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -243,7 +251,10 @@ public partial class App : Application
         };
 
         var trayIcon = Services.GetRequiredService<TrayIconService>();
+        var backgroundStreams = Services.GetRequiredService<BackgroundStreamService>();
         trayIcon.Attach(window, () => mainVm.SettingsRequested?.Invoke());
+        trayIcon.BackgroundModeChanged += inBackground =>
+            ApplyBackgroundPowerMode(inBackground, cloudSync, conversationListVm, mainVm, backgroundStreams, window);
 
         window.DataContext = mainVm;
         window.Show();
@@ -901,6 +912,132 @@ public partial class App : Application
         }
     }
 
+    private void ApplyBackgroundPowerMode(
+        bool inBackground,
+        CloudSyncService cloudSync,
+        ConversationListViewModel conversationListVm,
+        MainViewModel mainVm,
+        BackgroundStreamService backgroundStreams,
+        MainWindow window)
+    {
+        CancelBackgroundMemoryTrim();
+
+        if (inBackground)
+        {
+            cloudSync.StopPeriodicSync();
+            ScheduleBackgroundMemoryTrim(cloudSync, conversationListVm, mainVm, backgroundStreams, window);
+            DiagnosticLog.Write("BackgroundMode", "entered power-save mode; periodic cloud sync paused");
+            return;
+        }
+
+        cloudSync.StartPeriodicSync();
+        DiagnosticLog.Write("BackgroundMode", "left power-save mode; periodic cloud sync resumed");
+        _ = Dispatcher.InvokeAsync(
+            () => _ = RunCloudSyncAndReloadAsync(cloudSync, conversationListVm),
+            DispatcherPriority.ContextIdle);
+    }
+
+    private void ScheduleBackgroundMemoryTrim(
+        CloudSyncService cloudSync,
+        ConversationListViewModel conversationListVm,
+        MainViewModel mainVm,
+        BackgroundStreamService backgroundStreams,
+        MainWindow window)
+    {
+        var cts = new CancellationTokenSource();
+        _backgroundMemoryTrimCts = cts;
+        var token = cts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5), token).ConfigureAwait(false);
+                if (token.IsCancellationRequested || Dispatcher.HasShutdownStarted)
+                    return;
+
+                var blocker = await GetBackgroundMemoryTrimBlockerAsync(
+                    cloudSync,
+                    conversationListVm,
+                    mainVm,
+                    backgroundStreams,
+                    window,
+                    token).ConfigureAwait(false);
+                if (blocker is not null)
+                {
+                    DiagnosticLog.Write("BackgroundMode", $"skipped background memory trim: {blocker}");
+                    return;
+                }
+
+                using var process = Process.GetCurrentProcess();
+                var managedBefore = GC.GetTotalMemory(forceFullCollection: false);
+                var workingSetBefore = process.WorkingSet64;
+
+                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Optimized, blocking: true, compacting: true);
+
+                if (token.IsCancellationRequested || Dispatcher.HasShutdownStarted)
+                    return;
+
+                var managedAfterGc = GC.GetTotalMemory(forceFullCollection: false);
+                var trimmed = EmptyWorkingSet(process.Handle);
+                var error = trimmed ? 0 : Marshal.GetLastWin32Error();
+                process.Refresh();
+
+                DiagnosticLog.Write(
+                    "BackgroundMode",
+                    "trimmed background memory after minimizing or hiding the window "
+                    + $"managed={FormatMegabytes(managedBefore)}->{FormatMegabytes(managedAfterGc)} "
+                    + $"workingSet={FormatMegabytes(workingSetBefore)}->{FormatMegabytes(process.WorkingSet64)} "
+                    + $"emptyWorkingSet={(trimmed ? "ok" : $"failed:{error}")}");
+            }
+            catch (OperationCanceledException) { }
+        }, token);
+    }
+
+    private async Task<string?> GetBackgroundMemoryTrimBlockerAsync(
+        CloudSyncService cloudSync,
+        ConversationListViewModel conversationListVm,
+        MainViewModel mainVm,
+        BackgroundStreamService backgroundStreams,
+        MainWindow window,
+        CancellationToken token)
+    {
+        if (cloudSync.IsSyncing)
+            return "cloud sync is active";
+
+        var activeStreamCount = backgroundStreams.ActiveTaskCount;
+        if (activeStreamCount > 0)
+            return $"background stream active ({activeStreamCount})";
+
+        if (Dispatcher.HasShutdownStarted)
+            return "dispatcher is shutting down";
+
+        return await Dispatcher.InvokeAsync(() =>
+        {
+            if (mainVm.Composer.IsSending)
+                return "composer is sending";
+            if (window.IsImageWorkbenchGenerating)
+                return "image workbench is generating";
+
+            var generatingCount = conversationListVm.Items.Count(item => item.IsGenerating);
+            return generatingCount > 0
+                ? $"conversation task active ({generatingCount})"
+                : null;
+        }, DispatcherPriority.Background, token).Task.ConfigureAwait(false);
+    }
+
+    private static string FormatMegabytes(long bytes) => $"{bytes / 1024d / 1024d:0.##}MB";
+
+    private void CancelBackgroundMemoryTrim()
+    {
+        var cts = _backgroundMemoryTrimCts;
+        _backgroundMemoryTrimCts = null;
+        if (cts is null) return;
+        cts.Cancel();
+        cts.Dispose();
+    }
+
     private async Task RunStartupCloudSyncAfterFirstPaintAsync(
         CloudSyncService cloudSync,
         ConversationListViewModel conversationListVm)
@@ -974,6 +1111,7 @@ public partial class App : Application
         SingleInstanceGuard.Release();
         _cloudStatusHideCts?.Cancel();
         _cloudStatusHideCts?.Dispose();
+        CancelBackgroundMemoryTrim();
         if (Host is not null)
         {
             Host.Services.GetService<TrayIconService>()?.Dispose();

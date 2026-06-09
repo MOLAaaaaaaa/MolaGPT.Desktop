@@ -47,6 +47,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
     private bool _editReferenceEnabled = true;
 
     private bool CurrentModelSupportsEdit => _settings.SelectedWorkbenchImageGenerationModel?.SupportsEdit == true;
+    public bool IsGenerating => _cts is not null;
 
     public ImageGenerationWorkbenchWindow(
         SettingsViewModel settings,

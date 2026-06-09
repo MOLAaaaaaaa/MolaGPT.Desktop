@@ -95,6 +95,9 @@ public partial class MainWindow : Window
             vm.CloseImageWorkbench();
     }
 
+    public bool IsImageWorkbenchGenerating =>
+        ImageWorkbenchHost.Content is ImageGenerationWorkbenchWindow { IsGenerating: true };
+
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         if (e.OldValue is MainViewModel oldMainVm)

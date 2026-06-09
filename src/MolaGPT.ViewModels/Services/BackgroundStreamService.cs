@@ -39,6 +39,7 @@ public sealed class BackgroundStreamService
     public event EventHandler<string>? TaskRegistered;
 
     public bool HasTask(string conversationId) => _tasks.ContainsKey(conversationId);
+    public int ActiveTaskCount => _tasks.Values.Count(task => !task.IsCompleted);
 
     public BackgroundStreamTask? GetTask(string conversationId) =>
         _tasks.TryGetValue(conversationId, out var task) ? task : null;

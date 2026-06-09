@@ -98,6 +98,8 @@ public sealed class NotificationService : IDisposable
                 var window = Application.Current.MainWindow;
                 if (window is not null)
                 {
+                    if (!window.IsVisible)
+                        window.Show();
                     window.Activate();
                     if (window.WindowState == WindowState.Minimized)
                         window.WindowState = WindowState.Normal;

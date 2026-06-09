@@ -17,7 +17,11 @@ public sealed class TrayIconService : IDisposable
     private Window? _window;
     private Action? _openSettingsRequested;
     private bool _allowExit;
+    private bool _hiddenToTray;
+    private bool _inBackgroundMode;
     private bool _disposed;
+
+    public event Action<bool>? BackgroundModeChanged;
 
     public TrayIconService(SettingsViewModel settings)
     {
@@ -34,6 +38,8 @@ public sealed class TrayIconService : IDisposable
         _settings.PropertyChanged += OnSettingsChanged;
         window.Closing += OnWindowClosing;
         window.Closed += OnWindowClosed;
+        window.IsVisibleChanged += OnWindowIsVisibleChanged;
+        window.StateChanged += OnWindowStateChanged;
 
         EnsureNotifyIcon();
         UpdateVisibility();
@@ -145,6 +151,8 @@ public sealed class TrayIconService : IDisposable
         var window = _window ?? Application.Current?.MainWindow;
         if (window is null) return;
         window.Hide();
+        _hiddenToTray = true;
+        UpdateBackgroundMode();
     }
 
     private void ShowMainWindow()
@@ -157,12 +165,16 @@ public sealed class TrayIconService : IDisposable
         if (window.WindowState == WindowState.Minimized)
             window.WindowState = WindowState.Normal;
 
+        _hiddenToTray = false;
+        UpdateBackgroundMode();
         window.Activate();
     }
 
     private void ExitApplication()
     {
         _allowExit = true;
+        _hiddenToTray = false;
+        UpdateBackgroundMode();
         if (_notifyIcon is not null)
             _notifyIcon.Visible = false;
         Application.Current?.Shutdown();
@@ -170,12 +182,44 @@ public sealed class TrayIconService : IDisposable
 
     private void OnWindowClosed(object? sender, EventArgs e) => DetachWindow();
 
+    private void OnWindowIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (e.NewValue is true)
+        {
+            _hiddenToTray = false;
+            UpdateBackgroundMode();
+        }
+        else if (_settings.EnableTrayIcon
+                 && !_allowExit
+                 && Application.Current?.Dispatcher.HasShutdownStarted != true)
+        {
+            _hiddenToTray = true;
+            UpdateBackgroundMode();
+        }
+    }
+
+    private void OnWindowStateChanged(object? sender, EventArgs e) => UpdateBackgroundMode();
+
+    private void UpdateBackgroundMode()
+    {
+        var window = _window ?? Application.Current?.MainWindow;
+        var inBackgroundMode = !_allowExit
+                               && Application.Current?.Dispatcher.HasShutdownStarted != true
+                               && (_hiddenToTray || window?.WindowState == WindowState.Minimized);
+
+        if (_inBackgroundMode == inBackgroundMode) return;
+        _inBackgroundMode = inBackgroundMode;
+        BackgroundModeChanged?.Invoke(inBackgroundMode);
+    }
+
     private void DetachWindow()
     {
         if (_window is not null)
         {
             _window.Closing -= OnWindowClosing;
             _window.Closed -= OnWindowClosed;
+            _window.IsVisibleChanged -= OnWindowIsVisibleChanged;
+            _window.StateChanged -= OnWindowStateChanged;
             _window = null;
         }
 
