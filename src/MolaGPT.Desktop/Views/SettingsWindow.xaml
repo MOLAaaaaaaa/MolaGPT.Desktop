@@ -310,7 +310,7 @@
                                                FontWeight="SemiBold"
                                                Margin="0,0,0,4"
                                                Foreground="{DynamicResource Brush.Text.Primary}" />
-                                    <TextBlock Text="接入你自己的 OpenAI、Claude、Gemini 或兼容服务。填入 API Key 后可自动获取模型列表，能力开关随每个模型单独保存。"
+                                    <TextBlock Text="接入您自己的 OpenAI、Claude、Gemini 或兼容服务。填入 API Key 后可自动获取模型列表。"
                                                TextWrapping="Wrap"
                                                Margin="0,0,0,16"
                                                FontSize="{DynamicResource Font.Size.Small}"
@@ -1107,7 +1107,7 @@
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
                                             <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                                <TextBlock Text="图片识别工具"
+                                                <TextBlock Text="图片识别"
                                                            FontWeight="SemiBold"
                                                            Foreground="{DynamicResource Brush.Text.Primary}" />
                                                 <TextBlock Text="开启后，纯文本输入模型可调用该工具来识别用户发送的图片"
@@ -1163,10 +1163,10 @@
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
                                             <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                                <TextBlock Text="BYOK 图像生成"
+                                                <TextBlock Text="图像生成"
                                                            FontWeight="SemiBold"
                                                            Foreground="{DynamicResource Brush.Text.Primary}" />
-                                                <TextBlock Text="使用独立的图像服务出图，与对话模型分开配置、互不影响"
+                                                <TextBlock Text="为 BYOK 文本对话配置可调用的图像生成服务"
                                                            FontSize="{DynamicResource Font.Size.Small}"
                                                            TextWrapping="Wrap"
                                                            Foreground="{DynamicResource Brush.Text.Muted}"
@@ -1199,8 +1199,8 @@
                                                     <ColumnDefinition Width="160" />
                                                 </Grid.ColumnDefinitions>
                                                 <StackPanel Grid.Column="0">
-                                                    <TextBlock Text="说明" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                    <TextBlock Text="在「模型服务」中添加图像服务后，即可在此选择。"
+                                                    <TextBlock Text="使用范围" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                    <TextBlock Text="开启后，支持工具调用的 BYOK 模型可调用此图像服务。"
                                                                TextWrapping="Wrap"
                                                                Foreground="{DynamicResource Brush.Text.Muted}"
                                                                FontSize="{DynamicResource Font.Size.Small}" />
@@ -1214,25 +1214,13 @@
                                                 </StackPanel>
                                             </Grid>
 
-                                            <Grid Margin="0,0,0,12">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="*" />
-                                                    <ColumnDefinition Width="16" />
-                                                    <ColumnDefinition Width="*" />
-                                                </Grid.ColumnDefinitions>
-                                                <StackPanel Grid.Column="0">
-                                                    <TextBlock Text="风格" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                    <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                        <TextBox Style="{StaticResource InlineTextBox}"
-                                                                 Text="{Binding ImageGenerationStyle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                                                    </Border>
-                                                </StackPanel>
-                                                <StackPanel Grid.Column="2" VerticalAlignment="Bottom">
-                                                    <CheckBox Content="作为工具加入对话"
-                                                              IsChecked="{Binding ImageGenerationAsTool, Mode=TwoWay}"
-                                                              Foreground="{DynamicResource Brush.Text.Primary}" />
-                                                </StackPanel>
-                                            </Grid>
+                                            <StackPanel Margin="0,0,0,12">
+                                                <TextBlock Text="风格" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                             Text="{Binding ImageGenerationStyle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                </Border>
+                                            </StackPanel>
 
                                             <DockPanel LastChildFill="True">
                                                 <Button DockPanel.Dock="Right"
@@ -1281,60 +1269,86 @@
                         </ScrollViewer>
                     </TabItem>
 
-                    <!-- ===== Tab: 外观与主题 ===== -->
-                    <TabItem Header="外观与主题">
-                        <StackPanel Margin="32,24" MaxWidth="640" HorizontalAlignment="Left">
-                            <TextBlock Text="主题"
-                                       FontSize="{DynamicResource Font.Size.Heading}"
-                                       FontWeight="SemiBold"
-                                       Margin="0,0,0,12"
-                                       Foreground="{DynamicResource Brush.Text.Primary}" />
-                            <StackPanel Orientation="Horizontal">
-                                <RadioButton x:Name="ThemeSystem" Content="跟随系统" GroupName="theme" Margin="0,0,16,0"
-                                             Foreground="{DynamicResource Brush.Text.Primary}"
-                                             IsChecked="{Binding ThemeMode, Converter={StaticResource EnumEq}, ConverterParameter=System}" />
-                                <RadioButton x:Name="ThemeLight" Content="浅色" GroupName="theme" Margin="0,0,16,0"
-                                             Foreground="{DynamicResource Brush.Text.Primary}"
-                                             IsChecked="{Binding ThemeMode, Converter={StaticResource EnumEq}, ConverterParameter=Light}" />
-                                <RadioButton x:Name="ThemeDark" Content="深色" GroupName="theme"
-                                             Foreground="{DynamicResource Brush.Text.Primary}"
-                                             IsChecked="{Binding ThemeMode, Converter={StaticResource EnumEq}, ConverterParameter=Dark}" />
+                    <!-- ===== Tab: 界面与偏好 ===== -->
+                    <TabItem Header="界面与偏好">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="32,24" MaxWidth="640" HorizontalAlignment="Left">
+                                <TextBlock Text="主题"
+                                           FontSize="{DynamicResource Font.Size.Heading}"
+                                           FontWeight="SemiBold"
+                                           Margin="0,0,0,12"
+                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+                                <StackPanel Orientation="Horizontal">
+                                    <RadioButton x:Name="ThemeSystem" Content="跟随系统" GroupName="theme" Margin="0,0,16,0"
+                                                 Foreground="{DynamicResource Brush.Text.Primary}"
+                                                 IsChecked="{Binding ThemeMode, Converter={StaticResource EnumEq}, ConverterParameter=System}" />
+                                    <RadioButton x:Name="ThemeLight" Content="浅色" GroupName="theme" Margin="0,0,16,0"
+                                                 Foreground="{DynamicResource Brush.Text.Primary}"
+                                                 IsChecked="{Binding ThemeMode, Converter={StaticResource EnumEq}, ConverterParameter=Light}" />
+                                    <RadioButton x:Name="ThemeDark" Content="深色" GroupName="theme"
+                                                 Foreground="{DynamicResource Brush.Text.Primary}"
+                                                 IsChecked="{Binding ThemeMode, Converter={StaticResource EnumEq}, ConverterParameter=Dark}" />
+                                </StackPanel>
+
+                                <TextBlock Text="Enter 键行为"
+                                           FontSize="{DynamicResource Font.Size.Heading}"
+                                           FontWeight="SemiBold"
+                                           Margin="0,26,0,12"
+                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+                                <CheckBox Content="按 Enter 直接发送消息"
+                                          Foreground="{DynamicResource Brush.Text.Primary}"
+                                          IsChecked="{Binding EnterToSend}" />
+                                <TextBlock Text="关闭时 Enter 换行，Ctrl+Enter 发送；开启时 Shift+Enter 仍可换行。"
+                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                           TextWrapping="Wrap"
+                                           Margin="0,4,0,0"
+                                           FontSize="{DynamicResource Font.Size.Small}" />
+
+                                <TextBlock Text="通知和提醒"
+                                           FontSize="{DynamicResource Font.Size.Heading}"
+                                           FontWeight="SemiBold"
+                                           Margin="0,26,0,12"
+                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+                                <CheckBox Content="后台回答完成时通知"
+                                          Foreground="{DynamicResource Brush.Text.Primary}"
+                                          IsChecked="{Binding EnableCompletionNotification}" />
+                                <TextBlock Text="开启后，若窗口最小化或切换到其它对话，回答完成时系统会弹出通知。"
+                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                           TextWrapping="Wrap"
+                                           Margin="0,4,0,0"
+                                           FontSize="{DynamicResource Font.Size.Small}" />
+
+                                <TextBlock Text="系统托盘"
+                                           FontSize="{DynamicResource Font.Size.Heading}"
+                                           FontWeight="SemiBold"
+                                           Margin="0,26,0,12"
+                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+                                <CheckBox Content="启用系统托盘"
+                                          Foreground="{DynamicResource Brush.Text.Primary}"
+                                          IsChecked="{Binding EnableTrayIcon}" />
+                                <StackPanel Margin="24,12,0,0"
+                                            Visibility="{Binding EnableTrayIcon, Converter={StaticResource BoolVis}}">
+                                    <TextBlock Text="关闭按钮行为"
+                                               FontWeight="SemiBold"
+                                               Foreground="{DynamicResource Brush.Text.Primary}"
+                                               Margin="0,0,0,8" />
+                                    <RadioButton Content="最小化到托盘"
+                                                 GroupName="trayClose"
+                                                 Margin="0,0,0,8"
+                                                 Foreground="{DynamicResource Brush.Text.Primary}"
+                                                 IsChecked="{Binding TrayCloseBehavior, Converter={StaticResource EnumEq}, ConverterParameter=MinimizeToTray}" />
+                                    <RadioButton Content="关闭软件"
+                                                 GroupName="trayClose"
+                                                 Foreground="{DynamicResource Brush.Text.Primary}"
+                                                 IsChecked="{Binding TrayCloseBehavior, Converter={StaticResource EnumEq}, ConverterParameter=Exit}" />
+                                    <TextBlock Text="您可选择单击关闭按钮时的处理方式。"
+                                               Foreground="{DynamicResource Brush.Text.Muted}"
+                                               TextWrapping="Wrap"
+                                               Margin="0,8,0,0"
+                                               FontSize="{DynamicResource Font.Size.Small}" />
+                                </StackPanel>
                             </StackPanel>
-                        </StackPanel>
-                    </TabItem>
-
-                    <!-- ===== Tab: 输入与通知 ===== -->
-                    <TabItem Header="输入与通知">
-                        <StackPanel Margin="32,24" MaxWidth="640" HorizontalAlignment="Left">
-                            <TextBlock Text="Enter 键行为"
-                                       FontSize="{DynamicResource Font.Size.Heading}"
-                                       FontWeight="SemiBold"
-                                       Margin="0,0,0,12"
-                                       Foreground="{DynamicResource Brush.Text.Primary}" />
-                            <CheckBox Content="按 Enter 直接发送消息"
-                                      Foreground="{DynamicResource Brush.Text.Primary}"
-                                      IsChecked="{Binding EnterToSend}" />
-                            <TextBlock Text="关闭时 Enter 换行，Ctrl+Enter 发送；开启时 Shift+Enter 仍可换行。"
-                                       Foreground="{DynamicResource Brush.Text.Muted}"
-                                       TextWrapping="Wrap"
-                                       Margin="0,4,0,0"
-                                       FontSize="{DynamicResource Font.Size.Small}" />
-
-                            <TextBlock Text="通知和提醒"
-                                       FontSize="{DynamicResource Font.Size.Heading}"
-                                       FontWeight="SemiBold"
-                                       Margin="0,24,0,12"
-                                       Foreground="{DynamicResource Brush.Text.Primary}" />
-                            <CheckBox Content="后台回答完成时通知"
-                                      Foreground="{DynamicResource Brush.Text.Primary}"
-                                      IsChecked="{Binding EnableCompletionNotification}" />
-                            <TextBlock Text="开启后，若窗口最小化或切换到其它对话，回答完成时系统会弹出通知。"
-                                       Foreground="{DynamicResource Brush.Text.Muted}"
-                                       TextWrapping="Wrap"
-                                       Margin="0,4,0,0"
-                                       FontSize="{DynamicResource Font.Size.Small}" />
-
-                        </StackPanel>
+                        </ScrollViewer>
                     </TabItem>
                 </TabControl>
             </DockPanel>

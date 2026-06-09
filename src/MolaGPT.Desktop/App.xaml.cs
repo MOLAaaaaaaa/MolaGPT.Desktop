@@ -31,6 +31,8 @@ namespace MolaGPT.Desktop;
 
 public partial class App : Application
 {
+    private const int CloudSyncSidebarIncrementalLimit = 100;
+
     public IHost? Host { get; private set; }
     public static IServiceProvider Services => ((App)Current).Host!.Services;
 
@@ -157,8 +159,7 @@ public partial class App : Application
             try
             {
                 var result = await cloudSync.SyncAsync(progress);
-                if (ShouldReloadConversationsAfterSync(result))
-                    await Services.GetRequiredService<ConversationListViewModel>().ReloadAsync();
+                await ApplyCloudSyncConversationChangesAsync(result, conversationListVm);
             }
             catch
             {
@@ -240,6 +241,9 @@ public partial class App : Application
                 window.HideImageWorkbench);
             window.ShowImageWorkbench(workbench);
         };
+
+        var trayIcon = Services.GetRequiredService<TrayIconService>();
+        trayIcon.Attach(window, () => mainVm.SettingsRequested?.Invoke());
 
         window.DataContext = mainVm;
         window.Show();
@@ -524,8 +528,7 @@ public partial class App : Application
             sp.GetRequiredService<BackgroundStreamService>(),
             sp.GetRequiredService<SettingsViewModel>(),
             sp.GetRequiredService<PersonaListViewModel>(),
-            sp.GetRequiredService<AttachmentStore>(),
-            sp.GetRequiredService<ImageGenerationTool>()));
+            sp.GetRequiredService<AttachmentStore>()));
         services.AddSingleton(sp => new SettingsViewModel(
             sp.GetRequiredService<ProviderRepository>(),
             sp.GetRequiredService<CredentialStore>(),
@@ -549,6 +552,8 @@ public partial class App : Application
                     listVm.SelectedId = null;
                 listVm.SelectById(conversationId);
             }));
+        services.AddSingleton(sp => new TrayIconService(
+            sp.GetRequiredService<SettingsViewModel>()));
 
         services.AddSingleton(sp =>
         {
@@ -888,8 +893,7 @@ public partial class App : Application
         try
         {
             var result = await Task.Run(() => cloudSync.RequestForegroundSyncAsync());
-            if (ShouldReloadConversationsAfterSync(result))
-                await conversationListVm.ReloadAsync();
+            await ApplyCloudSyncConversationChangesAsync(result, conversationListVm);
         }
         catch
         {
@@ -909,8 +913,60 @@ public partial class App : Application
             DispatcherPriority.ContextIdle);
     }
 
-    private static bool ShouldReloadConversationsAfterSync(CloudSyncResult? result) =>
-        result is not null && (result.Uploaded > 0 || result.Downloaded > 0 || result.Deleted > 0);
+    private static async Task ApplyCloudSyncConversationChangesAsync(
+        CloudSyncResult? result,
+        ConversationListViewModel conversationListVm)
+    {
+        if (result is null)
+            return;
+
+        var changedRows = result.ChangedRows
+            .Where(row => !string.IsNullOrWhiteSpace(row.Id))
+            .GroupBy(row => row.Id, StringComparer.Ordinal)
+            .Select(group => group.OrderBy(row => row.UpdatedAt).Last())
+            .OrderBy(row => row.UpdatedAt)
+            .ToList();
+        var removedIds = result.RemovedIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        var changeCount = changedRows.Count + removedIds.Count;
+        if (changeCount == 0)
+            return;
+
+        if (result.RequiresFullReload)
+        {
+            DiagnosticLog.Write(
+                "CloudSync",
+                $"sidebar reload full changed={changedRows.Count} removed={removedIds.Count} force={result.RequiresFullReload}");
+            await conversationListVm.ReloadAsync();
+            return;
+        }
+
+        if (changeCount <= CloudSyncSidebarIncrementalLimit)
+        {
+            foreach (var id in removedIds)
+                conversationListVm.RemoveItem(id);
+
+            foreach (var row in changedRows)
+            {
+                conversationListVm.UpsertItem(
+                    row.Id,
+                    string.IsNullOrWhiteSpace(row.Title) ? "新对话" : row.Title,
+                    DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt),
+                    row.ProviderId,
+                    pinned: row.Pinned);
+            }
+        }
+        else
+        {
+            conversationListVm.ApplyCloudSyncChanges(changedRows, removedIds);
+        }
+
+        DiagnosticLog.Write(
+            "CloudSync",
+            $"sidebar patch changed={changedRows.Count} removed={removedIds.Count} mode={(changeCount <= CloudSyncSidebarIncrementalLimit ? "incremental" : "bulk")}");
+    }
 
     protected override async void OnExit(ExitEventArgs e)
     {
@@ -920,6 +976,7 @@ public partial class App : Application
         _cloudStatusHideCts?.Dispose();
         if (Host is not null)
         {
+            Host.Services.GetService<TrayIconService>()?.Dispose();
             Host.Services.GetService<CloudSyncService>()?.StopPeriodicSync();
             await Host.StopAsync(TimeSpan.FromSeconds(2));
             Host.Dispose();

@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
+using System.ComponentModel;
 using MolaGPT.Storage;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -32,13 +33,17 @@ public sealed partial class ConversationListViewModel : ObservableObject
     private const string SettingByokExpandedKey = "sidebar_group_byok_expanded";
     private const string SettingMolaGptExpandedKey = "sidebar_group_molagpt_expanded";
 
-    public ObservableCollection<ConversationListItem> Items { get; } = new();
+    private readonly BulkObservableCollection<ConversationListItem> _items = new();
+    private readonly BulkObservableCollection<ConversationListItem> _byokItems = new();
+    private readonly BulkObservableCollection<ConversationListItem> _molaGptItems = new();
+
+    public ObservableCollection<ConversationListItem> Items => _items;
 
     /// <summary>BYOK conversations only — bound to the BYOK ListBox in the sidebar.</summary>
-    public ObservableCollection<ConversationListItem> ByokItems { get; } = new();
+    public ObservableCollection<ConversationListItem> ByokItems => _byokItems;
 
     /// <summary>MolaGPT-account conversations only — bound to the MolaGPT ListBox.</summary>
-    public ObservableCollection<ConversationListItem> MolaGptItems { get; } = new();
+    public ObservableCollection<ConversationListItem> MolaGptItems => _molaGptItems;
 
     [ObservableProperty] private string? _selectedId;
     [ObservableProperty] private string _searchQuery = string.Empty;
@@ -255,35 +260,79 @@ public sealed partial class ConversationListViewModel : ObservableObject
         if (RowsMatchCurrentItems(rows))
             return;
 
+        ReplaceAllItems(rows.Select(row => BuildItem(row)).ToList(), clearSelection: true);
+    }
+
+    public void ApplyCloudSyncChanges(
+        IReadOnlyList<ConversationRow> changedRows,
+        IReadOnlyList<string> removedIds)
+    {
+        var removed = removedIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.Ordinal);
+        var changed = changedRows
+            .Where(row => !string.IsNullOrWhiteSpace(row.Id))
+            .GroupBy(row => row.Id, StringComparer.Ordinal)
+            .Select(group => group.OrderBy(row => row.UpdatedAt).Last())
+            .ToDictionary(row => row.Id, StringComparer.Ordinal);
+
+        if (removed.Count == 0 && changed.Count == 0)
+            return;
+
+        var existingById = Items.ToDictionary(item => item.Id, StringComparer.Ordinal);
+        var nextItems = new List<ConversationListItem>(Items.Count + changed.Count);
+        foreach (var item in Items)
+        {
+            if (removed.Contains(item.Id) || changed.ContainsKey(item.Id))
+                continue;
+            nextItems.Add(item);
+        }
+
+        foreach (var row in changed.Values)
+        {
+            existingById.TryGetValue(row.Id, out var existing);
+            nextItems.Add(BuildItem(row, existing));
+        }
+
+        nextItems.Sort(CompareSidebarItems);
+        ReplaceAllItems(nextItems, clearSelection: false);
+
+        if (SelectedId is not null && !nextItems.Any(item => item.Id == SelectedId))
+            SelectedId = null;
+
+        var visibleIds = nextItems.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+        if (_selectedIds.RemoveWhere(id => !visibleIds.Contains(id)) > 0)
+            RefreshSelectionProperties();
+    }
+
+    private ConversationListItem BuildItem(ConversationRow row, ConversationListItem? existing = null)
+    {
+        var item = new ConversationListItem(
+            row.Id,
+            string.IsNullOrWhiteSpace(row.Title) ? "新对话" : row.Title,
+            DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt),
+            IsByokProvider(row.ProviderId),
+            _personas?.Find(row.PersonaId)?.Name ?? existing?.PersonaLabel,
+            IsImageWorkbenchProvider(row.ProviderId),
+            row.Pinned);
+
+        if (_generatingIds.Contains(row.Id) || existing?.IsGenerating == true)
+            item.IsGenerating = true;
+
+        return item;
+    }
+
+    private void ReplaceAllItems(IReadOnlyList<ConversationListItem> items, bool clearSelection)
+    {
         _bulkUpdatingItems = true;
         try
         {
-            Items.Clear();
-            ByokItems.Clear();
-            MolaGptItems.Clear();
-            SetSelectedIds(Array.Empty<string>());
+            if (clearSelection)
+                SetSelectedIds(Array.Empty<string>());
 
-            foreach (var row in rows)
-            {
-                var item = new ConversationListItem(
-                    row.Id,
-                    string.IsNullOrWhiteSpace(row.Title) ? "新对话" : row.Title,
-                    DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt),
-                    IsByokProvider(row.ProviderId),
-                    _personas?.Find(row.PersonaId)?.Name,
-                    IsImageWorkbenchProvider(row.ProviderId));
-
-                // Restore the spinner for any task still generating in the
-                // background — ApplyRows builds fresh items (IsGenerating
-                // defaults false), so without this a mid-flight workbench task
-                // loses its sidebar spinner on the next reload.
-                if (_generatingIds.Contains(row.Id))
-                    item.IsGenerating = true;
-
-                Items.Add(item);
-                if (item.IsByok) ByokItems.Add(item);
-                else MolaGptItems.Add(item);
-            }
+            _items.ReplaceAll(items);
+            _byokItems.ReplaceAll(items.Where(item => item.IsByok));
+            _molaGptItems.ReplaceAll(items.Where(item => !item.IsByok));
         }
         finally
         {
@@ -291,6 +340,17 @@ public sealed partial class ConversationListViewModel : ObservableObject
         }
 
         RaiseGroupCountChanges();
+    }
+
+    private static int CompareSidebarItems(ConversationListItem left, ConversationListItem right)
+    {
+        var pinned = right.Pinned.CompareTo(left.Pinned);
+        if (pinned != 0) return pinned;
+
+        var updated = right.UpdatedAt.CompareTo(left.UpdatedAt);
+        if (updated != 0) return updated;
+
+        return string.CompareOrdinal(left.Id, right.Id);
     }
 
     private bool RowsMatchCurrentItems(IReadOnlyList<ConversationRow> rows)
@@ -305,7 +365,8 @@ public sealed partial class ConversationListViewModel : ObservableObject
                 || (!string.IsNullOrWhiteSpace(row.Title) && item.Title != row.Title)
                 || item.UpdatedAt != DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt)
                 || item.IsByok != IsByokProvider(row.ProviderId)
-                || item.IsImageTask != IsImageWorkbenchProvider(row.ProviderId))
+                || item.IsImageTask != IsImageWorkbenchProvider(row.ProviderId)
+                || item.Pinned != row.Pinned)
             {
                 return false;
             }
@@ -321,7 +382,13 @@ public sealed partial class ConversationListViewModel : ObservableObject
     /// and the title / updated_at move. If the id is already present we
     /// update the title and move it to the top on message commit.
     /// </summary>
-    public void UpsertItem(string id, string title, DateTimeOffset updatedAt, string? providerId = null, string? personaLabel = null)
+    public void UpsertItem(
+        string id,
+        string title,
+        DateTimeOffset updatedAt,
+        string? providerId = null,
+        string? personaLabel = null,
+        bool? pinned = null)
     {
         if (string.IsNullOrEmpty(id)) return;
         var existingIdx = -1;
@@ -337,6 +404,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
         var isImageTask = providerId is null && existingIdx >= 0
             ? Items[existingIdx].IsImageTask
             : IsImageWorkbenchProvider(providerId);
+        var isPinned = pinned ?? (existingIdx >= 0 && Items[existingIdx].Pinned);
         var wasGenerating = existingIdx >= 0 && Items[existingIdx].IsGenerating;
         // Caller passes null personaLabel when it has no info to add (e.g.
         // sidebar refresh from cloud sync). Preserve the existing label in
@@ -348,7 +416,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
             "" => null,
             _ => personaLabel
         };
-        var next = new ConversationListItem(id, normalized, updatedAt, isByok, resolvedPersonaLabel, isImageTask);
+        var next = new ConversationListItem(id, normalized, updatedAt, isByok, resolvedPersonaLabel, isImageTask, isPinned);
         if (wasGenerating) next.IsGenerating = true;
 
         if (existingIdx < 0)
@@ -566,6 +634,7 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
     public DateTimeOffset UpdatedAt { get; }
     public bool IsByok { get; }
     public bool IsImageTask { get; }
+    public bool Pinned { get; }
     public string IconGlyph => IsImageTask ? "\uE91B" : "\uE8BD";
 
     private bool _isGenerating;
@@ -603,16 +672,38 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
         : this(id, title, updatedAt, isByok, personaLabel, false) { }
 
     public ConversationListItem(
-        string id, string title, DateTimeOffset updatedAt, bool isByok, string? personaLabel, bool isImageTask)
+        string id,
+        string title,
+        DateTimeOffset updatedAt,
+        bool isByok,
+        string? personaLabel,
+        bool isImageTask,
+        bool pinned = false)
     {
         Id = id;
         Title = title;
         UpdatedAt = updatedAt;
         IsByok = isByok;
         IsImageTask = isImageTask;
+        Pinned = pinned;
         _personaLabel = personaLabel;
     }
 
     public string TimeLabel => UpdatedAt.ToLocalTime().ToString(
         UpdatedAt.Date == DateTime.UtcNow.Date ? "HH:mm" : "M/d");
+}
+
+internal sealed class BulkObservableCollection<T> : ObservableCollection<T>
+{
+    public void ReplaceAll(IEnumerable<T> items)
+    {
+        CheckReentrancy();
+        Items.Clear();
+        foreach (var item in items)
+            Items.Add(item);
+
+        OnPropertyChanged(new PropertyChangedEventArgs(nameof(Count)));
+        OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
+        OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+    }
 }

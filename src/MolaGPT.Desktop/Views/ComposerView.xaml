@@ -290,7 +290,7 @@
                                                            FontWeight="SemiBold"
                                                            FontSize="13"
                                                            Foreground="{DynamicResource Brush.Text.Primary}" />
-                                                <TextBlock Text="打开 BYOK 图像工作台，继续生成和管理作品。"
+                                                <TextBlock Text="打开图像工作台，继续生成和管理作品。"
                                                            FontSize="11"
                                                            Foreground="{DynamicResource Brush.Text.Muted}"
                                                            TextTrimming="CharacterEllipsis"

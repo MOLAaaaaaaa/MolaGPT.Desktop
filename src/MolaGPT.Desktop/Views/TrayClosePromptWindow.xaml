@@ -1,0 +1,73 @@
+<Window x:Class="MolaGPT.Desktop.Views.TrayClosePromptWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="关闭 MolaGPT"
+        Icon="/Assets/app-logo.png"
+        Width="480" Height="310"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        ResizeMode="NoResize"
+        Background="Transparent"
+        FontFamily="{DynamicResource Font.Cjk}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+    <Grid Margin="24">
+        <Border Style="{StaticResource ModalWindowGlow}" />
+        <Border Style="{StaticResource ModalWindowSurface}">
+            <DockPanel LastChildFill="True">
+                <Border DockPanel.Dock="Top"
+                        Padding="22,16"
+                        BorderBrush="{DynamicResource Brush.Divider}"
+                        BorderThickness="0,0,0,1"
+                        MouseLeftButtonDown="HeaderMouseLeftButtonDown">
+                    <Grid>
+                        <TextBlock Text="关闭 MolaGPT"
+                                   FontSize="{DynamicResource Font.Size.Title}"
+                                   FontWeight="Bold" />
+                        <Button HorizontalAlignment="Right"
+                                Style="{StaticResource HeaderIconButton}"
+                                Click="CancelClick"
+                                ToolTip="取消">
+                            <TextBlock Text="&#xE711;" FontFamily="{DynamicResource Font.Icon}" FontSize="14" />
+                        </Button>
+                    </Grid>
+                </Border>
+
+                <StackPanel Margin="28,24,28,28">
+                    <TextBlock Text="点击右上角关闭按钮时，要怎么处理？"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource Brush.Text.Secondary}"
+                               Margin="0,0,0,18" />
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="12" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Button Grid.Column="0"
+                                Style="{StaticResource PillPrimaryButton}"
+                                Padding="14,10"
+                                Click="MinimizeClick">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                <TextBlock Text="&#xE921;" FontFamily="{DynamicResource Font.Icon}" Margin="0,0,8,0" />
+                                <TextBlock Text="最小化到托盘" />
+                            </StackPanel>
+                        </Button>
+                        <Button Grid.Column="2"
+                                Style="{StaticResource OutlineButton}"
+                                Padding="14,10"
+                                Click="ExitClick">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                <TextBlock Text="&#xE8BB;" FontFamily="{DynamicResource Font.Icon}" Margin="0,0,8,0" />
+                                <TextBlock Text="关闭软件" />
+                            </StackPanel>
+                        </Button>
+                    </Grid>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>

@@ -396,8 +396,8 @@ public partial class SettingsWindow : Window
         }
 
         ImageGenerationStatusText.Text = _vm.IsImageGenerationConfigured
-            ? "已启用，BYOK 对话中会显示「创建图像」。"
-            : "选择图像服务与模型后，即可在 BYOK 对话中创建图像。";
+            ? "已启用，BYOK 对话可调用该图像服务。"
+            : "选择图像服务与模型后，即可在 BYOK 对话中创建图片。";
     }
 
     private async void CheckWebSearchClick(object sender, RoutedEventArgs e)

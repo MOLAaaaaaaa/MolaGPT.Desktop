@@ -60,8 +60,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     [ObservableProperty] private bool _enableWebFetch;
 
     /// <summary>Image generation mode. MolaGPT account mode uses the proxy
-    /// image flow; BYOK mode enables the configured local image tool for the
-    /// current model turn.</summary>
+    /// image flow; BYOK image work is handled by the separate workbench.</summary>
     [ObservableProperty] private bool _isImageGenerationMode;
 
     [ObservableProperty] private string _imageAspectRatio = "1:1";
@@ -76,7 +75,6 @@ public sealed partial class ComposerViewModel : ObservableObject
     private readonly SettingsViewModel? _settings;
     private readonly PersonaListViewModel? _personas;
     private readonly MolaGPT.Storage.AttachmentStore? _attachmentStore;
-    private readonly ImageGenerationTool? _imageGenerationTool;
     private CancellationTokenSource? _cts;
     private Task? _activeStreamTask;
     private MessageViewModel? _activeAssistantMsg;
@@ -98,29 +96,27 @@ public sealed partial class ComposerViewModel : ObservableObject
         _chat.ActiveProvider is not null && _chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
 
     public ComposerViewModel(ChatViewModel chat, BackgroundStreamService? backgroundStreams = null, SettingsViewModel? settings = null)
-        : this(chat, backgroundStreams, settings, null, null, null) { }
+        : this(chat, backgroundStreams, settings, null, null) { }
 
     public ComposerViewModel(
         ChatViewModel chat,
         BackgroundStreamService? backgroundStreams,
         SettingsViewModel? settings,
         PersonaListViewModel? personas)
-        : this(chat, backgroundStreams, settings, personas, null, null) { }
+        : this(chat, backgroundStreams, settings, personas, null) { }
 
     public ComposerViewModel(
         ChatViewModel chat,
         BackgroundStreamService? backgroundStreams,
         SettingsViewModel? settings,
         PersonaListViewModel? personas,
-        MolaGPT.Storage.AttachmentStore? attachmentStore,
-        ImageGenerationTool? imageGenerationTool = null)
+        MolaGPT.Storage.AttachmentStore? attachmentStore)
     {
         _chat = chat;
         _backgroundStreams = backgroundStreams;
         _settings = settings;
         _personas = personas;
         _attachmentStore = attachmentStore;
-        _imageGenerationTool = imageGenerationTool;
         _chat.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(ChatViewModel.ActiveProvider) or nameof(ChatViewModel.ActiveModel))
@@ -222,8 +218,8 @@ public sealed partial class ComposerViewModel : ObservableObject
     public bool AreNetworkToolsEnabled =>
         _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy || _chat.ActiveModel?.SupportsToolCalling == true;
     // The in-composer image button / aspect-ratio / style options exist only for
-    // MolaGPT-account mode. BYOK image generation is driven entirely by settings
-    // (the "作为工具加入对话" toggle) and registered as a tool — no per-turn UI.
+    // MolaGPT-account mode. BYOK chats can still call the configured image
+    // generation service as a model tool when enabled in settings.
     public bool IsImageGenerationAvailable =>
         _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy;
     public bool IsImageOptionsVisible =>
@@ -236,11 +232,10 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     public bool HasAttachments => Attachments.Count > 0;
 
-    private bool IsByokImageGeneration =>
+    private bool CanUseByokImageGenerationTool =>
         _chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy
         && _chat.ActiveModel?.SupportsToolCalling == true
-        && _settings?.IsImageGenerationConfigured == true
-        && _imageGenerationTool is not null;
+        && _settings?.IsImageGenerationConfigured == true;
 
     public IReadOnlyList<ImageGenerationOption> ImageAspectRatioOptions { get; } =
     [
@@ -743,8 +738,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             enabledTools["webPageMaxCharacters"] = _settings?.WebPageMaxCharacters ?? 12000;
             enabledTools["mcpServers"] = _settings?.BuildMcpServerOptions() ?? Array.Empty<MolaGPT.Core.Chat.LocalTools.McpServerOptions>();
             enabledTools["vision"] = _settings?.BuildVisionProxyOptions();
-            if (IsByokImageGeneration && _settings?.ImageGenerationAsTool == true)
-                enabledTools["image_generation"] = BuildActiveImageGenerationToolOptions();
+            if (CanUseByokImageGenerationTool)
+                enabledTools["image_generation"] = _settings!.BuildImageGenerationOptions();
         }
 
         var extras = new Dictionary<string, object>
@@ -757,30 +752,6 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         return extras;
     }
-
-    private ImageGenerationOptions BuildActiveImageGenerationToolOptions()
-    {
-        var options = _settings!.BuildImageGenerationOptions();
-        return options with
-        {
-            Enabled = true,
-            Size = SizeForAspectRatio(ImageAspectRatio, options.Size),
-            Style = string.IsNullOrWhiteSpace(ImageStyle) ? options.Style : ImageStyle,
-            AsTool = true
-        };
-    }
-
-    private static string SizeForAspectRatio(string? ratio, string fallback) =>
-        ratio switch
-        {
-            "1:1" => "1024x1024",
-            "16:9" => "1792x1024",
-            "9:16" => "1024x1792",
-            "4:3" => "1536x1024",
-            "3:4" => "1024x1536",
-            "21:9" => "1792x1024",
-            _ => string.IsNullOrWhiteSpace(fallback) ? "1024x1024" : fallback
-        };
 
     private static object BuildContentForHistory(MessageViewModel message)
     {

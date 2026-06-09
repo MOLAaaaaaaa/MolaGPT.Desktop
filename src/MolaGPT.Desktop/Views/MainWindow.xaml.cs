@@ -77,6 +77,7 @@ public partial class MainWindow : Window
             WorkbenchModelSelectorButton,
             WorkbenchModelSelectorPopup,
             WorkbenchModelSelectorItems,
+            WorkbenchModelSelectorSearchBox,
             WorkbenchModelLabel);
         if (DataContext is MainViewModel vm)
             vm.IsImageWorkbenchVisible = true;
@@ -529,9 +530,27 @@ public partial class MainWindow : Window
 
     private void OpenModelSelector_Click(object sender, RoutedEventArgs e)
     {
+        var opening = !ModelSelectorPopup.IsOpen;
+        if (opening)
+            ModelSelectorSearchBox.Text = string.Empty;
+
         RebuildModelSelector();
         ModelSelectorPopup.PlacementTarget = (UIElement)sender;
-        ModelSelectorPopup.IsOpen = !ModelSelectorPopup.IsOpen;
+        ModelSelectorPopup.IsOpen = opening;
+        if (opening)
+            Dispatcher.BeginInvoke(new Action(() => ModelSelectorSearchBox.Focus()), DispatcherPriority.Input);
+    }
+
+    private void ModelSelectorSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (ModelSelectorPopup?.IsOpen == true)
+            RebuildModelSelector();
+    }
+
+    private void WorkbenchModelSelectorSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (ImageWorkbenchHost?.Content is ImageGenerationWorkbenchWindow workbench)
+            workbench.RebuildHeaderModelSelector();
     }
 
     private void ComposerHost_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -611,7 +630,8 @@ public partial class MainWindow : Window
     private void RebuildModelSelector()
     {
         if (DataContext is not MainViewModel vm) return;
-        ModelSelectorItems.Items.Clear();
+        var rows = new List<ModelSelectorRow>();
+        var query = ModelSelectorSearchBox?.Text?.Trim() ?? string.Empty;
 
         var providers = _providers.Providers
             .Where(vm.Chat.CanSwitchToProvider)
@@ -620,52 +640,62 @@ public partial class MainWindow : Window
 
         foreach (var prov in providers)
         {
-            // Provider group label
-            var label = new TextBlock
-            {
-                Text = prov.DisplayName,
-                FontSize = 11,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = (Brush)FindResource("Brush.Text.Muted"),
-                Margin = new Thickness(10, 8, 6, 4),
-                Opacity = 0.85
-            };
-            ModelSelectorItems.Items.Add(label);
+            var providerMatches = MatchesModelSearch(query, prov.DisplayName, prov.Id);
+            var models = prov.Models
+                .Where(model => providerMatches || MatchesModelSearch(query, model.DisplayName, model.Id))
+                .ToList();
+            if (models.Count == 0)
+                continue;
 
-            foreach (var model in prov.Models)
-            {
-                var btn = new Button
-                {
-                    Style = (Style)FindResource("HintChip"),
-                    Margin = new Thickness(4, 2, 4, 2),
-                    Padding = new Thickness(12, 6, 12, 6),
-                    HorizontalAlignment = HorizontalAlignment.Stretch,
-                    HorizontalContentAlignment = HorizontalAlignment.Left,
-                    Content = BuildModelSelectorContent(model),
-                    Tag = (prov, model)
-                };
-                btn.Click += (_, _) =>
-                {
-                    if (btn.Tag is ValueTuple<IChatProvider, ProviderModel> tuple)
-                    {
-                        vm.Chat.SetActiveByIds(tuple.Item1.Id, tuple.Item2.Id);
-                        ModelSelectorPopup.IsOpen = false;
-                    }
-                };
-                ModelSelectorItems.Items.Add(btn);
-            }
+            rows.Add(ModelSelectorRow.ForHeader(prov.DisplayName));
+
+            foreach (var model in models)
+                rows.Add(ModelSelectorRow.ForModel(prov, model));
         }
 
-        if (ModelSelectorItems.Items.Count == 0)
+        if (rows.Count == 0)
         {
-            ModelSelectorItems.Items.Add(new TextBlock
-            {
-                Text = "当前对话没有可切换的同类型模型",
-                Margin = new Thickness(12, 12, 12, 12),
-                Foreground = (Brush)FindResource("Brush.Text.Muted"),
-                FontSize = 13
-            });
+            rows.Add(ModelSelectorRow.ForEmpty(
+                string.IsNullOrWhiteSpace(query)
+                    ? "当前对话没有可切换的同类型模型"
+                    : "没有匹配的模型"));
         }
+
+        ModelSelectorItems.ItemsSource = rows;
+    }
+
+    private void ModelSelectorRow_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm
+            || (sender as FrameworkElement)?.DataContext is not ModelSelectorRow row
+            || row.Provider is null
+            || row.Model is null)
+        {
+            return;
+        }
+
+        vm.Chat.SetActiveByIds(row.Provider.Id, row.Model.Id);
+        ModelSelectorPopup.IsOpen = false;
+    }
+
+    private void WorkbenchModelSelectorRow_Click(object sender, RoutedEventArgs e)
+    {
+        if (ImageWorkbenchHost?.Content is not ImageGenerationWorkbenchWindow workbench)
+            return;
+
+        workbench.SelectHeaderModelFromRow((sender as FrameworkElement)?.DataContext);
+    }
+
+    private static bool MatchesModelSearch(string query, params string?[] values)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return true;
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value)
+                && value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+        return false;
     }
 
     private UIElement BuildModelSelectorContent(ProviderModel model)
@@ -781,4 +811,35 @@ public partial class MainWindow : Window
 
         return null;
     }
+}
+
+public sealed class ModelSelectorRow
+{
+    private ModelSelectorRow(
+        string? headerText,
+        string? emptyText,
+        IChatProvider? provider,
+        ProviderModel? model)
+    {
+        HeaderText = headerText;
+        EmptyText = emptyText;
+        Provider = provider;
+        Model = model;
+    }
+
+    public string? HeaderText { get; }
+    public string? EmptyText { get; }
+    public IChatProvider? Provider { get; }
+    public ProviderModel? Model { get; }
+    public string? ModelName => Model?.DisplayName;
+    public Visibility HeaderVisibility => HeaderText is null ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility EmptyVisibility => EmptyText is null ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility ModelVisibility => Model is null ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility ThinkingVisibility => Model?.SupportsThinking == true ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility ToolsVisibility => Model?.SupportsToolCalling == true ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility VisionVisibility => Model?.SupportsVision == true ? Visibility.Visible : Visibility.Collapsed;
+
+    public static ModelSelectorRow ForHeader(string text) => new(text, null, null, null);
+    public static ModelSelectorRow ForEmpty(string text) => new(null, text, null, null);
+    public static ModelSelectorRow ForModel(IChatProvider provider, ProviderModel model) => new(null, null, provider, model);
 }

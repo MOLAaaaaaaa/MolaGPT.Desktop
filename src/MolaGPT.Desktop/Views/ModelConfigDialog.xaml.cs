@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using MolaGPT.ViewModels;
 
@@ -11,8 +12,10 @@ public partial class ModelConfigDialog : Window
 {
     private EditableModelEntry? _model;
     private ObservableCollection<BatchModelItem>? _batchItems;
+    private ICollectionView? _batchView;
     private bool _isCustomProvider;
     private bool _isImageProvider;
+    private bool _updatingSelectAll;
 
     public bool Confirmed { get; private set; }
     public List<ProviderModelEntry>? SelectedModels { get; private set; }
@@ -59,8 +62,14 @@ public partial class ModelConfigDialog : Window
                     StatusText = exists ? "(已存在)" : ""
                 };
             }));
-        BatchModelList.ItemsSource = _batchItems;
-        ChkSelectAll.IsChecked = _batchItems.All(i => i.IsSelected || !i.IsEnabled);
+        foreach (var item in _batchItems)
+            item.PropertyChanged += BatchModelItem_PropertyChanged;
+
+        BatchModelSearchBox.Text = string.Empty;
+        _batchView = CollectionViewSource.GetDefaultView(_batchItems);
+        _batchView.Filter = BatchModelFilter;
+        BatchModelList.ItemsSource = _batchView;
+        UpdateBatchSelectAllState();
 
         ShowDialog();
         return SelectedModels;
@@ -163,10 +172,89 @@ public partial class ModelConfigDialog : Window
 
     private void SelectAll_Changed(object sender, RoutedEventArgs e)
     {
+        if (_updatingSelectAll)
+            return;
         if (_batchItems is null) return;
         var check = ChkSelectAll.IsChecked == true;
-        foreach (var item in _batchItems.Where(i => i.IsEnabled))
+        foreach (var item in CurrentBatchSelectionScope().Where(i => i.IsEnabled))
             item.IsSelected = check;
+        UpdateBatchSelectAllState();
+    }
+
+    private void BatchModelSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        _batchView?.Refresh();
+        UpdateBatchSelectAllState();
+    }
+
+    private bool BatchModelFilter(object item)
+    {
+        if (item is not BatchModelItem model)
+            return false;
+        var query = BatchModelSearchBox?.Text?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(query))
+            return true;
+
+        return ContainsModelText(model.Entry.Id, query)
+               || ContainsModelText(model.Entry.DisplayName, query)
+               || ContainsModelText(model.CapabilitySummary, query);
+    }
+
+    private static bool ContainsModelText(string? value, string query) =>
+        !string.IsNullOrWhiteSpace(value)
+        && value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+
+    private IEnumerable<BatchModelItem> CurrentBatchSelectionScope()
+    {
+        if (_batchView is not null)
+        {
+            foreach (var item in _batchView)
+            {
+                if (item is BatchModelItem model)
+                    yield return model;
+            }
+            yield break;
+        }
+
+        if (_batchItems is null)
+            yield break;
+        foreach (var item in _batchItems)
+            yield return item;
+    }
+
+    private void BatchModelItem_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(BatchModelItem.IsSelected))
+            UpdateBatchSelectAllState();
+    }
+
+    private void UpdateBatchSelectAllState()
+    {
+        if (_batchItems is null)
+            return;
+
+        var matched = CurrentBatchSelectionScope().ToList();
+        BatchEmptyText.Visibility = matched.Count > 0 ? Visibility.Collapsed : Visibility.Visible;
+
+        bool? state = false;
+        var visible = matched.Where(i => i.IsEnabled).ToList();
+        if (visible.Count > 0)
+        {
+            var selected = visible.Count(i => i.IsSelected);
+            state = selected == visible.Count
+                ? true
+                : selected == 0 ? false : null;
+        }
+
+        _updatingSelectAll = true;
+        try
+        {
+            ChkSelectAll.IsChecked = state;
+        }
+        finally
+        {
+            _updatingSelectAll = false;
+        }
     }
 
     private void ConfirmClick(object sender, RoutedEventArgs e)

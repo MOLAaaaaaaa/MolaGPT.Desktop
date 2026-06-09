@@ -202,16 +202,62 @@
 
             <!-- Batch detect panel (hidden by default) -->
             <DockPanel x:Name="BatchPanel" Visibility="Collapsed">
-                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal"
-                            Margin="20,12,20,8">
+                <Grid DockPanel.Dock="Top"
+                      Margin="20,12,20,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                            BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                            BorderThickness="1"
+                            CornerRadius="{DynamicResource Radius.Sm}"
+                            Padding="10,6"
+                            Margin="0,0,12,0">
+                        <DockPanel LastChildFill="True">
+                            <TextBlock Text="&#xE721;"
+                                       DockPanel.Dock="Left"
+                                       FontFamily="{DynamicResource Font.Icon}"
+                                       FontSize="12"
+                                       Foreground="{DynamicResource Brush.Text.Muted}"
+                                       Margin="0,0,8,0"
+                                       VerticalAlignment="Center" />
+                            <TextBox x:Name="BatchModelSearchBox"
+                                     Style="{StaticResource InlineTextBox}"
+                                     ToolTip="搜索模型"
+                                     TextChanged="BatchModelSearchBox_TextChanged" />
+                        </DockPanel>
+                    </Border>
                     <CheckBox x:Name="ChkSelectAll"
+                              Grid.Column="1"
                               Content="全选"
+                              IsThreeState="True"
+                              VerticalAlignment="Center"
                               Checked="SelectAll_Changed"
+                              Indeterminate="SelectAll_Changed"
                               Unchecked="SelectAll_Changed" />
-                </StackPanel>
-                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20,0,20,8">
-                    <ItemsControl x:Name="BatchModelList">
-                        <ItemsControl.ItemTemplate>
+                </Grid>
+                <Grid>
+                    <ListBox x:Name="BatchModelList"
+                             Padding="20,0,20,8"
+                             Background="Transparent"
+                             BorderThickness="0"
+                             ScrollViewer.CanContentScroll="True"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             VirtualizingStackPanel.IsVirtualizing="True"
+                             VirtualizingStackPanel.VirtualizationMode="Recycling"
+                             VirtualizingStackPanel.ScrollUnit="Pixel">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="Padding" Value="0" />
+                                <Setter Property="Margin" Value="0" />
+                                <Setter Property="Focusable" Value="False" />
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="Background" Value="Transparent" />
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <Border Background="{DynamicResource Brush.Bg.Tertiary}"
                                         CornerRadius="{DynamicResource Radius.Sm}"
@@ -246,9 +292,15 @@
                                     </Grid>
                                 </Border>
                             </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </ScrollViewer>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <TextBlock x:Name="BatchEmptyText"
+                               Text="没有匹配的模型"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource Brush.Text.Muted}"
+                               Visibility="Collapsed" />
+                </Grid>
             </DockPanel>
             </Grid>
         </DockPanel>

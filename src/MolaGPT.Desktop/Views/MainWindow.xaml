@@ -675,9 +675,76 @@
                                 Padding="6"
                                 MinWidth="320"
                                 MaxHeight="420">
-                            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                <ItemsControl x:Name="WorkbenchModelSelectorItems" />
-                            </ScrollViewer>
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+                                <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                        BorderThickness="1"
+                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                        Padding="10,6"
+                                        Margin="4,4,4,6">
+                                    <DockPanel LastChildFill="True">
+                                        <TextBlock Text="&#xE721;"
+                                                   DockPanel.Dock="Left"
+                                                   FontFamily="{DynamicResource Font.Icon}"
+                                                   FontSize="12"
+                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                   Margin="0,0,8,0"
+                                                   VerticalAlignment="Center" />
+                                        <TextBox x:Name="WorkbenchModelSelectorSearchBox"
+                                                 Style="{StaticResource InlineTextBox}"
+                                                 ToolTip="搜索图像模型"
+                                                 TextChanged="WorkbenchModelSelectorSearchBox_TextChanged" />
+                                    </DockPanel>
+                                </Border>
+                                <ListBox Grid.Row="1"
+                                         x:Name="WorkbenchModelSelectorItems"
+                                         Background="Transparent"
+                                         BorderThickness="0"
+                                         ScrollViewer.CanContentScroll="True"
+                                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                         VirtualizingStackPanel.IsVirtualizing="True"
+                                         VirtualizingStackPanel.VirtualizationMode="Recycling"
+                                         VirtualizingStackPanel.ScrollUnit="Pixel">
+                                    <ListBox.ItemContainerStyle>
+                                        <Style TargetType="ListBoxItem">
+                                            <Setter Property="Padding" Value="0" />
+                                            <Setter Property="Margin" Value="0" />
+                                            <Setter Property="Focusable" Value="False" />
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            <Setter Property="Background" Value="Transparent" />
+                                        </Style>
+                                    </ListBox.ItemContainerStyle>
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid>
+                                                <Button Style="{StaticResource HintChip}"
+                                                        Margin="4,2"
+                                                        Padding="12,6"
+                                                        HorizontalAlignment="Stretch"
+                                                        HorizontalContentAlignment="Left"
+                                                        Visibility="{Binding ModelVisibility}"
+                                                        Click="WorkbenchModelSelectorRow_Click">
+                                                    <TextBlock Text="{Binding Label}"
+                                                               FontSize="13"
+                                                               FontWeight="Medium"
+                                                               TextTrimming="CharacterEllipsis"
+                                                               VerticalAlignment="Center" />
+                                                </Button>
+                                                <TextBlock Text="{Binding EmptyText}"
+                                                           Margin="12"
+                                                           FontSize="13"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                                           Visibility="{Binding EmptyVisibility}" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                            </Grid>
                         </Border>
                     </Grid>
                 </Popup>
@@ -713,9 +780,122 @@
                                 Padding="6"
                                 MinWidth="280"
                                 MaxHeight="420">
-                            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                <ItemsControl x:Name="ModelSelectorItems" />
-                            </ScrollViewer>
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+                                <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                        BorderThickness="1"
+                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                        Padding="10,6"
+                                        Margin="4,4,4,6">
+                                    <DockPanel LastChildFill="True">
+                                        <TextBlock Text="&#xE721;"
+                                                   DockPanel.Dock="Left"
+                                                   FontFamily="{DynamicResource Font.Icon}"
+                                                   FontSize="12"
+                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                   Margin="0,0,8,0"
+                                                   VerticalAlignment="Center" />
+                                        <TextBox x:Name="ModelSelectorSearchBox"
+                                                 Style="{StaticResource InlineTextBox}"
+                                                 ToolTip="搜索模型"
+                                                 TextChanged="ModelSelectorSearchBox_TextChanged" />
+                                    </DockPanel>
+                                </Border>
+                                <ListBox Grid.Row="1"
+                                         x:Name="ModelSelectorItems"
+                                         Background="Transparent"
+                                         BorderThickness="0"
+                                         ScrollViewer.CanContentScroll="True"
+                                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                         VirtualizingStackPanel.IsVirtualizing="True"
+                                         VirtualizingStackPanel.VirtualizationMode="Recycling"
+                                         VirtualizingStackPanel.ScrollUnit="Pixel">
+                                    <ListBox.ItemContainerStyle>
+                                        <Style TargetType="ListBoxItem">
+                                            <Setter Property="Padding" Value="0" />
+                                            <Setter Property="Margin" Value="0" />
+                                            <Setter Property="Focusable" Value="False" />
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            <Setter Property="Background" Value="Transparent" />
+                                        </Style>
+                                    </ListBox.ItemContainerStyle>
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid>
+                                                <TextBlock Text="{Binding HeaderText}"
+                                                           FontSize="11"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                                           Margin="10,8,6,4"
+                                                           Opacity="0.85"
+                                                           Visibility="{Binding HeaderVisibility}" />
+                                                <Button Style="{StaticResource HintChip}"
+                                                        Margin="4,2"
+                                                        Padding="12,6"
+                                                        HorizontalAlignment="Stretch"
+                                                        HorizontalContentAlignment="Left"
+                                                        Visibility="{Binding ModelVisibility}"
+                                                        Click="ModelSelectorRow_Click">
+                                                    <DockPanel LastChildFill="True">
+                                                        <StackPanel DockPanel.Dock="Right"
+                                                                    Orientation="Horizontal"
+                                                                    VerticalAlignment="Center">
+                                                            <Border Margin="6,0,0,0"
+                                                                    Padding="5,1"
+                                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                                    Background="{DynamicResource Brush.Bg.Tertiary}"
+                                                                    BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                                                    BorderThickness="1"
+                                                                    Visibility="{Binding ThinkingVisibility}">
+                                                                <TextBlock Text="推理"
+                                                                           FontSize="10"
+                                                                           Foreground="{DynamicResource Brush.Text.Muted}" />
+                                                            </Border>
+                                                            <Border Margin="6,0,0,0"
+                                                                    Padding="5,1"
+                                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                                    Background="{DynamicResource Brush.Bg.Tertiary}"
+                                                                    BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                                                    BorderThickness="1"
+                                                                    Visibility="{Binding ToolsVisibility}">
+                                                                <TextBlock Text="工具"
+                                                                           FontSize="10"
+                                                                           Foreground="{DynamicResource Brush.Text.Muted}" />
+                                                            </Border>
+                                                            <Border Margin="6,0,0,0"
+                                                                    Padding="5,1"
+                                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                                    Background="{DynamicResource Brush.Bg.Tertiary}"
+                                                                    BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                                                    BorderThickness="1"
+                                                                    Visibility="{Binding VisionVisibility}">
+                                                                <TextBlock Text="视觉"
+                                                                           FontSize="10"
+                                                                           Foreground="{DynamicResource Brush.Text.Muted}" />
+                                                            </Border>
+                                                        </StackPanel>
+                                                        <TextBlock Text="{Binding ModelName}"
+                                                                   FontSize="13"
+                                                                   FontWeight="Medium"
+                                                                   TextTrimming="CharacterEllipsis"
+                                                                   VerticalAlignment="Center" />
+                                                    </DockPanel>
+                                                </Button>
+                                                <TextBlock Text="{Binding EmptyText}"
+                                                           Margin="12"
+                                                           FontSize="13"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                                           Visibility="{Binding EmptyVisibility}" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                            </Grid>
                         </Border>
                     </Grid>
                 </Popup>

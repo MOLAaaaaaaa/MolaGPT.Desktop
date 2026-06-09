@@ -32,6 +32,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
     private Button? _headerModelButton;
     private Popup? _headerModelPopup;
     private ItemsControl? _headerModelItems;
+    private TextBox? _headerModelSearchBox;
     private TextBlock? _headerModelLabel;
     private readonly ObservableCollection<ImageGenerationWorkbenchResult> _results = new();
     private readonly ObservableCollection<ImageGenerationWorkbenchResult> _gallery = new();
@@ -45,7 +46,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
     // generate-only models. Session-only, defaults to "reference latest".
     private bool _editReferenceEnabled = true;
 
-    private bool CurrentModelSupportsEdit => _settings.SelectedImageGenerationModel?.SupportsEdit == true;
+    private bool CurrentModelSupportsEdit => _settings.SelectedWorkbenchImageGenerationModel?.SupportsEdit == true;
 
     public ImageGenerationWorkbenchWindow(
         SettingsViewModel settings,
@@ -82,10 +83,10 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         _loading = true;
         try
         {
-            var configuredSize = string.IsNullOrWhiteSpace(_settings.ImageGenerationSize)
+            var configuredSize = string.IsNullOrWhiteSpace(_settings.WorkbenchImageGenerationSize)
                 ? "1024x1024"
-                : _settings.ImageGenerationSize;
-            StyleTextBox.Text = _settings.ImageGenerationStyle ?? string.Empty;
+                : _settings.WorkbenchImageGenerationSize;
+            StyleTextBox.Text = _settings.WorkbenchImageGenerationStyle ?? string.Empty;
 
             foreach (var item in SizePresetCombo.Items.OfType<ComboBoxItem>())
             {
@@ -110,18 +111,19 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         UpdateEmptyState();
     }
 
-    public void AttachHeaderModelSelector(Button button, Popup popup, ItemsControl items, TextBlock label)
+    public void AttachHeaderModelSelector(Button button, Popup popup, ItemsControl items, TextBox searchBox, TextBlock label)
     {
         DetachHeaderModelSelector();
 
         _headerModelButton = button;
         _headerModelPopup = popup;
         _headerModelItems = items;
+        _headerModelSearchBox = searchBox;
         _headerModelLabel = label;
         _headerModelButton.Click += HeaderModelButton_Click;
 
         RebuildHeaderModelSelector();
-        if ((_settings.SelectedImageGenerationModel ?? _settings.ImageGenerationProviderModels.FirstOrDefault()) is { } option)
+        if ((_settings.SelectedWorkbenchImageGenerationModel ?? _settings.ImageGenerationProviderModels.FirstOrDefault()) is { } option)
             SelectImageGenerationModel(option);
     }
 
@@ -132,58 +134,75 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         if (_headerModelPopup is not null)
             _headerModelPopup.IsOpen = false;
         if (_headerModelItems is not null)
-            _headerModelItems.Items.Clear();
+            _headerModelItems.ItemsSource = null;
 
         _headerModelButton = null;
         _headerModelPopup = null;
         _headerModelItems = null;
+        _headerModelSearchBox = null;
         _headerModelLabel = null;
     }
 
     private void HeaderModelButton_Click(object sender, RoutedEventArgs e)
     {
+        var opening = _headerModelPopup?.IsOpen != true;
+        if (opening && _headerModelSearchBox is not null)
+            _headerModelSearchBox.Text = string.Empty;
+
         RebuildHeaderModelSelector();
         if (_headerModelPopup is not null)
-            _headerModelPopup.IsOpen = !_headerModelPopup.IsOpen;
+        {
+            _headerModelPopup.IsOpen = opening;
+            if (opening && _headerModelSearchBox is not null)
+                Dispatcher.BeginInvoke(new Action(() => _headerModelSearchBox.Focus()), DispatcherPriority.Input);
+        }
     }
 
-    private void RebuildHeaderModelSelector()
+    public void RebuildHeaderModelSelector()
     {
         if (_headerModelItems is null) return;
 
-        _headerModelItems.Items.Clear();
-        foreach (var option in _settings.ImageGenerationProviderModels)
+        var query = _headerModelSearchBox?.Text?.Trim() ?? string.Empty;
+        var rows = _settings.ImageGenerationProviderModels
+            .Where(option => MatchesModelSearch(query, option.Label, option.ProviderId, option.ModelId))
+            .Select(ImageHeaderModelSelectorRow.ForModel)
+            .ToList();
+
+        if (rows.Count == 0)
         {
-            var button = new Button
+            if (!string.IsNullOrWhiteSpace(query))
             {
-                Style = (Style)FindResource("HintChip"),
-                Margin = new Thickness(4, 2, 4, 2),
-                Padding = new Thickness(12, 6, 12, 6),
-                HorizontalAlignment = HorizontalAlignment.Stretch,
-                HorizontalContentAlignment = HorizontalAlignment.Left,
-                Content = BuildHeaderModelSelectorContent(option),
-                Tag = option
-            };
-            button.Click += (_, _) =>
+                rows.Add(ImageHeaderModelSelectorRow.ForEmpty("没有匹配的图像模型"));
+            }
+            else
             {
-                if (button.Tag is ImageGenerationProviderModelOption selected)
-                    SelectImageGenerationModel(selected);
-                if (_headerModelPopup is not null)
-                    _headerModelPopup.IsOpen = false;
-            };
-            _headerModelItems.Items.Add(button);
+                rows.Add(ImageHeaderModelSelectorRow.ForEmpty("当前没有可用的图像模型"));
+            }
         }
 
-        if (_headerModelItems.Items.Count == 0)
+        _headerModelItems.ItemsSource = rows;
+    }
+
+    public void SelectHeaderModelFromRow(object? row)
+    {
+        if (row is not ImageHeaderModelSelectorRow { Option: { } selected })
+            return;
+
+        SelectImageGenerationModel(selected);
+        if (_headerModelPopup is not null)
+            _headerModelPopup.IsOpen = false;
+    }
+
+    private static bool MatchesModelSearch(string query, params string?[] values)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return true;
+        foreach (var value in values)
         {
-            _headerModelItems.Items.Add(new TextBlock
-            {
-                Text = "当前没有可用的图像模型",
-                Margin = new Thickness(12),
-                Foreground = ResolveBrush("Brush.Text.Muted"),
-                FontSize = 13
-            });
+            if (!string.IsNullOrWhiteSpace(value)
+                && value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
         }
+        return false;
     }
 
     private static UIElement BuildHeaderModelSelectorContent(ImageGenerationProviderModelOption option)
@@ -203,9 +222,8 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         if (_loading)
             return;
 
-        _settings.ImageGenerationEnabled = true;
-        _settings.ImageGenerationProviderId = option.ProviderId;
-        _settings.ImageGenerationModelId = option.ModelId;
+        _settings.WorkbenchImageGenerationProviderId = option.ProviderId;
+        _settings.WorkbenchImageGenerationModelId = option.ModelId;
         if (_headerModelLabel is not null)
             _headerModelLabel.Text = option.Label;
         ApplyWorkbenchMode();
@@ -220,7 +238,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
 
         var tag = item.Tag?.ToString();
         if (!string.IsNullOrWhiteSpace(tag))
-            _settings.ImageGenerationSize = tag;
+            _settings.WorkbenchImageGenerationSize = tag;
         UpdateStatus();
         UpdateOptionChips();
     }
@@ -228,7 +246,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
     private void OptionTextChanged(object sender, TextChangedEventArgs e)
     {
         if (_loading) return;
-        _settings.ImageGenerationStyle = string.IsNullOrWhiteSpace(StyleTextBox.Text)
+        _settings.WorkbenchImageGenerationStyle = string.IsNullOrWhiteSpace(StyleTextBox.Text)
             ? null
             : StyleTextBox.Text.Trim();
         UpdateStatus();
@@ -280,7 +298,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
             StatusText.Text = isEdit
                 ? "正在编辑图片，完成后会通知你。"
                 : "正在生成图片，完成后会通知你。";
-            var options = _settings.BuildImageGenerationOptions() with
+            var options = _settings.BuildWorkbenchImageGenerationOptions() with
             {
                 Size = SelectedSize(),
                 Style = string.IsNullOrWhiteSpace(StyleTextBox.Text) ? null : StyleTextBox.Text.Trim(),
@@ -377,15 +395,15 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         if (_createConversation is null)
             return false;
 
-        _conversationId = _createConversation(BuildTaskTitle(prompt), _settings.ImageGenerationModelId);
+        _conversationId = _createConversation(BuildTaskTitle(prompt), _settings.WorkbenchImageGenerationModelId);
         return !string.IsNullOrWhiteSpace(_conversationId);
     }
 
     private (string? ProviderId, string? ModelId, string? Label) CurrentImageGenerationModel()
     {
-        var selected = _settings.SelectedImageGenerationModel;
-        var providerId = selected?.ProviderId ?? _settings.ImageGenerationProviderId;
-        var modelId = selected?.ModelId ?? _settings.ImageGenerationModelId;
+        var selected = _settings.SelectedWorkbenchImageGenerationModel;
+        var providerId = selected?.ProviderId ?? _settings.WorkbenchImageGenerationProviderId;
+        var modelId = selected?.ModelId ?? _settings.WorkbenchImageGenerationModelId;
         var label = selected?.Label;
         if (string.IsNullOrWhiteSpace(label))
             label = modelId;
@@ -748,7 +766,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         _conversationRepo.Upsert(row with
         {
             Title = title,
-            ModelId = result.ModelId ?? _settings.ImageGenerationModelId,
+            ModelId = result.ModelId ?? _settings.WorkbenchImageGenerationModelId,
             UpdatedAt = now
         });
     }
@@ -784,7 +802,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         GenerateButton.ToolTip = generating ? "停止" : "生成";
         GenerateButton.Style = (Style)FindResource(generating ? "StopButton" : "SendButton");
         GenerateButtonIcon.Text = generating ? "\uE71A" : "\uE724";
-        GenerateButton.IsEnabled = generating || _settings.IsImageGenerationConfigured;
+        GenerateButton.IsEnabled = generating || _settings.IsWorkbenchImageGenerationConfigured;
         if (!generating)
             UpdateGenerateButton();
         UpdateEmptyState();
@@ -793,7 +811,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
     private void UpdateStatus()
     {
         ApplyWorkbenchMode();
-        var provider = _settings.GetImageGenerationProvider();
+        var provider = _settings.GetWorkbenchImageGenerationProvider();
         if (provider is null)
         {
             ConfigSummaryText.Text = "暂无可用的图像服务，请在设置的「模型服务」中添加图像服务。";
@@ -802,8 +820,8 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         }
 
         ConfigSummaryText.Text =
-            $"服务：{provider.Name}\n模型：{_settings.ImageGenerationModelId}\n尺寸：{ReadableSize(SelectedSize())}";
-        StatusText.Text = _settings.IsImageGenerationConfigured
+            $"服务：{provider.Name}\n模型：{_settings.WorkbenchImageGenerationModelId}\n尺寸：{ReadableSize(SelectedSize())}";
+        StatusText.Text = _settings.IsWorkbenchImageGenerationConfigured
             ? CurrentModelSupportsEdit
                 ? "已就绪。当前模型支持在上一张图的基础上继续编辑。"
                 : "已就绪。当前模型仅支持生成新图。"
@@ -843,7 +861,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
     private void UpdateGenerateButton()
     {
         GenerateButton.IsEnabled =
-            (_cts is not null || _settings.IsImageGenerationConfigured)
+            (_cts is not null || _settings.IsWorkbenchImageGenerationConfigured)
             && !string.IsNullOrWhiteSpace(PromptBox.Text);
     }
 
@@ -1004,6 +1022,24 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
             _closeToastShown = true;
         }
     }
+}
+
+public sealed class ImageHeaderModelSelectorRow
+{
+    private ImageHeaderModelSelectorRow(ImageGenerationProviderModelOption? option, string? emptyText)
+    {
+        Option = option;
+        EmptyText = emptyText;
+    }
+
+    public ImageGenerationProviderModelOption? Option { get; }
+    public string? EmptyText { get; }
+    public string? Label => Option?.Label;
+    public Visibility ModelVisibility => Option is null ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility EmptyVisibility => EmptyText is null ? Visibility.Collapsed : Visibility.Visible;
+
+    public static ImageHeaderModelSelectorRow ForModel(ImageGenerationProviderModelOption option) => new(option, null);
+    public static ImageHeaderModelSelectorRow ForEmpty(string text) => new(null, text);
 }
 
 public sealed record ImageGenerationWorkbenchResult(

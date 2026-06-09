@@ -20,6 +20,8 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string TracksEnabledKey = "molagpt_tracks_enabled";
     private const string CompletionNotificationKey = "completion_notification";
     private const string ThemeModeKey = "theme_mode";
+    private const string TrayIconEnabledKey = "tray_icon_enabled";
+    private const string TrayCloseBehaviorKey = "tray_close_behavior";
     private const string WebSearchProviderKey = "web_search_provider";
     private const string WebSearchBaseUrlKey = "web_search_base_url";
     private const string WebSearchMaxResultsKey = "web_search_max_results";
@@ -35,7 +37,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string ImageGenerationModelIdKey = "image_generation_model_id";
     private const string ImageGenerationSizeKey = "image_generation_size";
     private const string ImageGenerationStyleKey = "image_generation_style";
-    private const string ImageGenerationAsToolKey = "image_generation_as_tool";
+    private const string WorkbenchImageGenerationProviderIdKey = "image_workbench_provider_id";
+    private const string WorkbenchImageGenerationModelIdKey = "image_workbench_model_id";
+    private const string WorkbenchImageGenerationSizeKey = "image_workbench_size";
+    private const string WorkbenchImageGenerationStyleKey = "image_workbench_style";
 
     /// <summary>
     /// Raised whenever the user changes the theme mode in settings (or when
@@ -52,6 +57,8 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private bool _syncConversations = true;
     [ObservableProperty] private bool _tracksEnabled = true;
     [ObservableProperty] private bool _enableCompletionNotification = true;
+    [ObservableProperty] private bool _enableTrayIcon;
+    [ObservableProperty] private TrayCloseBehavior _trayCloseBehavior = TrayCloseBehavior.Ask;
     [ObservableProperty] private string _webSearchProvider = "duckduckgo";
     [ObservableProperty] private string? _webSearchBaseUrl;
     [ObservableProperty] private string? _webSearchApiKey;
@@ -65,7 +72,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string? _imageGenerationModelId;
     [ObservableProperty] private string _imageGenerationSize = "1024x1024";
     [ObservableProperty] private string? _imageGenerationStyle;
-    [ObservableProperty] private bool _imageGenerationAsTool;
+    [ObservableProperty] private string? _workbenchImageGenerationProviderId;
+    [ObservableProperty] private string? _workbenchImageGenerationModelId;
+    [ObservableProperty] private string _workbenchImageGenerationSize = "1024x1024";
+    [ObservableProperty] private string? _workbenchImageGenerationStyle;
 
     public ObservableCollection<ProviderEntry> Providers { get; } = new();
     public ObservableCollection<McpServerEntry> McpServers { get; } = new();
@@ -116,6 +126,14 @@ public sealed partial class SettingsViewModel : ObservableObject
                 TracksEnabled = tracksEnabled;
             if (bool.TryParse(_settingsRepo.Get(CompletionNotificationKey), out var completionNotification))
                 EnableCompletionNotification = completionNotification;
+            if (bool.TryParse(_settingsRepo.Get(TrayIconEnabledKey), out var trayIconEnabled))
+                EnableTrayIcon = trayIconEnabled;
+            var trayBehaviorRaw = _settingsRepo.Get(TrayCloseBehaviorKey);
+            if (!string.IsNullOrEmpty(trayBehaviorRaw)
+                && Enum.TryParse<TrayCloseBehavior>(trayBehaviorRaw, true, out var trayBehavior))
+            {
+                TrayCloseBehavior = trayBehavior;
+            }
             var themeRaw = _settingsRepo.Get(ThemeModeKey);
             if (!string.IsNullOrEmpty(themeRaw) && Enum.TryParse<ThemeMode>(themeRaw, true, out var theme))
                 ThemeMode = theme;
@@ -135,7 +153,10 @@ public sealed partial class SettingsViewModel : ObservableObject
             ImageGenerationModelId = _settingsRepo.Get(ImageGenerationModelIdKey);
             ImageGenerationSize = _settingsRepo.Get(ImageGenerationSizeKey) ?? "1024x1024";
             ImageGenerationStyle = _settingsRepo.Get(ImageGenerationStyleKey);
-            ImageGenerationAsTool = bool.TryParse(_settingsRepo.Get(ImageGenerationAsToolKey), out var imageGenAsTool) && imageGenAsTool;
+            WorkbenchImageGenerationProviderId = _settingsRepo.Get(WorkbenchImageGenerationProviderIdKey) ?? ImageGenerationProviderId;
+            WorkbenchImageGenerationModelId = _settingsRepo.Get(WorkbenchImageGenerationModelIdKey) ?? ImageGenerationModelId;
+            WorkbenchImageGenerationSize = _settingsRepo.Get(WorkbenchImageGenerationSizeKey) ?? ImageGenerationSize;
+            WorkbenchImageGenerationStyle = _settingsRepo.Get(WorkbenchImageGenerationStyleKey) ?? ImageGenerationStyle;
         }
         finally
         {
@@ -178,6 +199,18 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(CompletionNotificationKey, value.ToString());
+    }
+
+    partial void OnEnableTrayIconChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(TrayIconEnabledKey, value.ToString());
+    }
+
+    partial void OnTrayCloseBehaviorChanged(TrayCloseBehavior value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(TrayCloseBehaviorKey, value.ToString());
     }
 
     partial void OnThemeModeChanged(ThemeMode value)
@@ -290,10 +323,35 @@ public sealed partial class SettingsViewModel : ObservableObject
         SetOrRemove(ImageGenerationStyleKey, value);
     }
 
-    partial void OnImageGenerationAsToolChanged(bool value)
+    partial void OnWorkbenchImageGenerationProviderIdChanged(string? value)
     {
-        if (_loadingSettings || _settingsRepo is null) return;
-        _settingsRepo.Set(ImageGenerationAsToolKey, value.ToString());
+        OnPropertyChanged(nameof(IsWorkbenchImageGenerationConfigured));
+        if (_loadingSettings) return;
+        SetOrRemove(WorkbenchImageGenerationProviderIdKey, value);
+
+        var selected = ImageGenerationProviderModels.FirstOrDefault(m =>
+            string.Equals(m.ProviderId, value, StringComparison.Ordinal));
+        if (selected is not null && !string.Equals(WorkbenchImageGenerationModelId, selected.ModelId, StringComparison.Ordinal))
+            WorkbenchImageGenerationModelId = selected.ModelId;
+    }
+
+    partial void OnWorkbenchImageGenerationModelIdChanged(string? value)
+    {
+        OnPropertyChanged(nameof(IsWorkbenchImageGenerationConfigured));
+        if (_loadingSettings) return;
+        SetOrRemove(WorkbenchImageGenerationModelIdKey, value);
+    }
+
+    partial void OnWorkbenchImageGenerationSizeChanged(string value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(WorkbenchImageGenerationSizeKey, value);
+    }
+
+    partial void OnWorkbenchImageGenerationStyleChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(WorkbenchImageGenerationStyleKey, value);
     }
 
     public static string NormalizeWebSearchProvider(string? provider) =>
@@ -343,7 +401,14 @@ public sealed partial class SettingsViewModel : ObservableObject
             ImageGenerationProviderId = entry.Id;
             var firstModel = entry.Models.FirstOrDefault()?.Id;
             if (!string.IsNullOrWhiteSpace(firstModel))
+            {
                 ImageGenerationModelId = firstModel;
+                if (string.IsNullOrWhiteSpace(WorkbenchImageGenerationProviderId))
+                {
+                    WorkbenchImageGenerationProviderId = entry.Id;
+                    WorkbenchImageGenerationModelId = firstModel;
+                }
+            }
         }
     }
 
@@ -382,8 +447,25 @@ public sealed partial class SettingsViewModel : ObservableObject
             ImageGenerationModelId,
             string.IsNullOrWhiteSpace(ImageGenerationSize) ? "1024x1024" : ImageGenerationSize.Trim(),
             ImageGenerationStyle,
-            ImageGenerationAsTool,
+            true,
             SelectedImageGenerationModel?.SupportsEdit == true,
+            provider?.ImageFormat,
+            provider?.ApiPath,
+            provider?.ImageEditPath);
+    }
+
+    public ImageGenerationOptions BuildWorkbenchImageGenerationOptions()
+    {
+        var provider = GetWorkbenchImageGenerationProvider();
+        return new ImageGenerationOptions(
+            true,
+            provider?.BaseUrl,
+            provider?.ApiKey,
+            WorkbenchImageGenerationModelId,
+            string.IsNullOrWhiteSpace(WorkbenchImageGenerationSize) ? "1024x1024" : WorkbenchImageGenerationSize.Trim(),
+            WorkbenchImageGenerationStyle,
+            false,
+            SelectedWorkbenchImageGenerationModel?.SupportsEdit == true,
             provider?.ImageFormat,
             provider?.ApiPath,
             provider?.ImageEditPath);
@@ -393,6 +475,11 @@ public sealed partial class SettingsViewModel : ObservableObject
         ImageGenerationProviderModels.FirstOrDefault(m =>
             string.Equals(m.ProviderId, ImageGenerationProviderId, StringComparison.Ordinal)
             && string.Equals(m.ModelId, ImageGenerationModelId, StringComparison.Ordinal));
+
+    public ImageGenerationProviderModelOption? SelectedWorkbenchImageGenerationModel =>
+        ImageGenerationProviderModels.FirstOrDefault(m =>
+            string.Equals(m.ProviderId, WorkbenchImageGenerationProviderId, StringComparison.Ordinal)
+            && string.Equals(m.ModelId, WorkbenchImageGenerationModelId, StringComparison.Ordinal));
 
     public string? ImageGenerationBaseUrl
     {
@@ -430,6 +517,14 @@ public sealed partial class SettingsViewModel : ObservableObject
         && ImageGenerationProviderModels.Any(m =>
             string.Equals(m.ProviderId, ImageGenerationProviderId, StringComparison.Ordinal)
             && string.Equals(m.ModelId, ImageGenerationModelId, StringComparison.Ordinal));
+
+    public bool IsWorkbenchImageGenerationConfigured =>
+        !string.IsNullOrWhiteSpace(WorkbenchImageGenerationProviderId)
+        && !string.IsNullOrWhiteSpace(WorkbenchImageGenerationModelId)
+        && GetWorkbenchImageGenerationProvider() is { BaseUrl: { Length: > 0 }, ApiKey: { Length: > 0 } }
+        && ImageGenerationProviderModels.Any(m =>
+            string.Equals(m.ProviderId, WorkbenchImageGenerationProviderId, StringComparison.Ordinal)
+            && string.Equals(m.ModelId, WorkbenchImageGenerationModelId, StringComparison.Ordinal));
 
     public bool IsVisionProxyAvailableFor(ProviderKind? providerKind, ProviderModel? model) =>
         providerKind == ProviderKind.OpenAICompatible
@@ -495,6 +590,32 @@ public sealed partial class SettingsViewModel : ObservableObject
         if (ImageGenerationProviderModels.Count == 0)
             return;
 
+        EnsureImageGenerationSelection();
+        EnsureWorkbenchImageGenerationSelection();
+    }
+
+    public ProviderEntry? GetImageGenerationProvider() =>
+        GetImageProvider(ImageGenerationProviderId);
+
+    public ProviderEntry? GetWorkbenchImageGenerationProvider() =>
+        GetImageProvider(WorkbenchImageGenerationProviderId);
+
+    private ProviderEntry? GetImageProvider(string? providerId) =>
+        Providers.FirstOrDefault(p =>
+            string.Equals(p.Id, providerId, StringComparison.Ordinal)
+            && p.Enabled
+            && IsImagePurpose(p.Purpose));
+
+    public void RefreshImageGenerationSelection()
+    {
+        if (ImageGenerationProviderModels.Count == 0) return;
+
+        EnsureImageGenerationSelection();
+        EnsureWorkbenchImageGenerationSelection();
+    }
+
+    private void EnsureImageGenerationSelection()
+    {
         if (!ImageGenerationProviderModels.Any(m => string.Equals(m.ProviderId, ImageGenerationProviderId, StringComparison.Ordinal)
                                                    && string.Equals(m.ModelId, ImageGenerationModelId, StringComparison.Ordinal)))
         {
@@ -506,24 +627,16 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
     }
 
-    public ProviderEntry? GetImageGenerationProvider() =>
-        Providers.FirstOrDefault(p =>
-            string.Equals(p.Id, ImageGenerationProviderId, StringComparison.Ordinal)
-            && p.Enabled
-            && IsImagePurpose(p.Purpose));
-
-    public void RefreshImageGenerationSelection()
+    private void EnsureWorkbenchImageGenerationSelection()
     {
-        if (ImageGenerationProviderModels.Count == 0) return;
-
-        if (!ImageGenerationProviderModels.Any(m => string.Equals(m.ProviderId, ImageGenerationProviderId, StringComparison.Ordinal)
-                                                   && string.Equals(m.ModelId, ImageGenerationModelId, StringComparison.Ordinal)))
+        if (!ImageGenerationProviderModels.Any(m => string.Equals(m.ProviderId, WorkbenchImageGenerationProviderId, StringComparison.Ordinal)
+                                                   && string.Equals(m.ModelId, WorkbenchImageGenerationModelId, StringComparison.Ordinal)))
         {
             var first = ImageGenerationProviderModels[0];
-            if (!string.Equals(ImageGenerationProviderId, first.ProviderId, StringComparison.Ordinal))
-                ImageGenerationProviderId = first.ProviderId;
-            if (!string.Equals(ImageGenerationModelId, first.ModelId, StringComparison.Ordinal))
-                ImageGenerationModelId = first.ModelId;
+            if (!string.Equals(WorkbenchImageGenerationProviderId, first.ProviderId, StringComparison.Ordinal))
+                WorkbenchImageGenerationProviderId = first.ProviderId;
+            if (!string.Equals(WorkbenchImageGenerationModelId, first.ModelId, StringComparison.Ordinal))
+                WorkbenchImageGenerationModelId = first.ModelId;
         }
     }
 
@@ -539,6 +652,11 @@ public sealed partial class SettingsViewModel : ObservableObject
         {
             ImageGenerationProviderId = null;
             ImageGenerationModelId = null;
+        }
+        if (string.Equals(WorkbenchImageGenerationProviderId, id, StringComparison.Ordinal))
+        {
+            WorkbenchImageGenerationProviderId = null;
+            WorkbenchImageGenerationModelId = null;
         }
     }
 
@@ -563,6 +681,13 @@ public sealed partial class SettingsViewModel : ObservableObject
 }
 
 public enum ThemeMode { System, Light, Dark }
+
+public enum TrayCloseBehavior
+{
+    Ask,
+    MinimizeToTray,
+    Exit
+}
 
 public sealed record ProviderEntry(
     string Id,

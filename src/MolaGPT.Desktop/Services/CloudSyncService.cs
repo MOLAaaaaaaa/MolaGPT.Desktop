@@ -25,7 +25,7 @@ public sealed class CloudSyncService
     private const string BoundAccountKey = "cloud_sync.bound_account";
     private const string DetailRefreshPrefix = "cloud_sync.detail_refresh.";
     private const string DetailParserVersionPrefix = "cloud_sync.detail_parser_version.";
-    private const string DetailParserVersion = "2026-06-08.timeline-order-v1";
+    private const string DetailParserVersion = "2026-06-09.visible-python-dsanalysis-v1";
     private const string ConversationSyncPrefix = "cloud_sync.conversation_timestamp.";
     private const string ConversationMetadataPrefix = "cloud_sync.metadata.";
     private const string TitleGeneratedPrefix = "cloud_sync.ai_title_generated.";
@@ -159,8 +159,8 @@ public sealed class CloudSyncService
             {
                 var result = MergeServerMetadata(syncResult, syncTimestamp);
                 _settings.Set(LastSyncKey, syncTimestamp);
-                MarkUploadedConversations(dirty, syncTimestamp);
-                return result;
+                var uploadedRows = MarkUploadedConversations(dirty, syncTimestamp);
+                return result with { ChangedRows = result.ChangedRows.Concat(uploadedRows).ToList() };
             }, token).ConfigureAwait(false);
 
             if (publishStatus)
@@ -169,7 +169,14 @@ public sealed class CloudSyncService
                 Uploaded: dirty.Count,
                 Downloaded: merge.Upserted,
                 Deleted: accountBinding.PurgedConversationCount + deletedIds.Length + merge.RemoteDeleted,
-                LastSyncTimestamp: syncTimestamp);
+                LastSyncTimestamp: syncTimestamp,
+                ChangedRows: merge.ChangedRows,
+                RemovedIds: accountBinding.PurgedIds
+                    .Concat(deletedIds)
+                    .Concat(merge.RemovedIds)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList(),
+                RequiresFullReload: false);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -573,7 +580,7 @@ public sealed class CloudSyncService
     private AccountBindingResult EnforceAccountBinding()
     {
         var current = _auth.CurrentUsername;
-        if (string.IsNullOrWhiteSpace(current)) return new AccountBindingResult(0);
+        if (string.IsNullOrWhiteSpace(current)) return AccountBindingResult.Empty;
 
         var bound = _settings.Get(BoundAccountKey);
         if (string.IsNullOrWhiteSpace(bound))
@@ -582,10 +589,10 @@ public sealed class CloudSyncService
             // the current account without purging. Existing local data is
             // assumed to belong to this account.
             _settings.Set(BoundAccountKey, current);
-            return new AccountBindingResult(0);
+            return AccountBindingResult.Empty;
         }
 
-        if (string.Equals(bound, current, StringComparison.Ordinal)) return new AccountBindingResult(0);
+        if (string.Equals(bound, current, StringComparison.Ordinal)) return AccountBindingResult.Empty;
 
         // Different account: purge previous account's local MolaGPT data.
         var purged = _conversations.PurgeAllByProvider(MolaGptProviderId);
@@ -601,7 +608,7 @@ public sealed class CloudSyncService
         _settings.Set(BoundAccountKey, current);
         if (purged.Count > 0)
             LocalConversationsChanged?.Invoke(this, EventArgs.Empty);
-        return new AccountBindingResult(purged.Count);
+        return new AccountBindingResult(purged.Count, purged);
     }
 
     private JsonArray BuildDirtyConversations(long lastSyncMs, bool isFirstSync)
@@ -636,6 +643,8 @@ public sealed class CloudSyncService
     {
         var upserted = 0;
         var remoteDeleted = 0;
+        var changedRows = new List<ConversationRow>();
+        var removedIds = new List<string>();
 
         if (syncResult["updated_content"] is JsonArray updatedContent)
         {
@@ -646,17 +655,19 @@ public sealed class CloudSyncService
                 if (string.IsNullOrWhiteSpace(id)) continue;
 
                 var existing = _conversations.Get(id);
-                _conversations.Upsert(ToLocalConversation(metadata, existing));
+                var row = ToLocalConversation(metadata, existing);
+                _conversations.Upsert(row);
                 SaveCloudMetadata(id, metadata);
                 SetConversationSyncTimestamp(id, syncTimestamp);
                 if (node["messages"] is JsonArray messages && messages.Count > 0)
                     _messages.ReplaceConversationMessages(id, ToLocalMessages(id, messages));
+                changedRows.Add(row);
                 upserted++;
             }
         }
 
         if (syncResult["full_metadata_list"] is not JsonArray serverList)
-            return new CloudMetadataMergeResult(upserted, remoteDeleted);
+            return new CloudMetadataMergeResult(upserted, remoteDeleted, changedRows, removedIds);
 
         var serverIds = new HashSet<string>(StringComparer.Ordinal);
         var merged = 0;
@@ -688,6 +699,7 @@ public sealed class CloudSyncService
             SetConversationSyncTimestamp(id, syncTimestamp);
             if (shouldRefreshDetail)
                 _settings.Set(DetailRefreshKey(id), serverUpdatedAt.ToString(CultureInfo.InvariantCulture));
+            changedRows.Add(row);
             merged++;
         }
 
@@ -700,10 +712,11 @@ public sealed class CloudSyncService
             _conversations.SoftDelete(row.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             _settings.Remove(ConversationSyncKey(row.Id));
             _settings.Remove(CloudMetadataKey(row.Id));
+            removedIds.Add(row.Id);
             remoteDeleted++;
         }
 
-        return new CloudMetadataMergeResult(upserted + merged, remoteDeleted);
+        return new CloudMetadataMergeResult(upserted + merged, remoteDeleted, changedRows, removedIds);
     }
 
     private static bool HasServerMetadata(JsonObject syncResult) =>
@@ -1482,7 +1495,30 @@ public sealed class CloudSyncService
                 continue;
             }
 
-            AppendTool(source[next..end]);
+            var unit = source[next..end];
+            if (StartsWithToolStatusBlockquote(source, next))
+            {
+                var afterStatus = SkipWhitespace(source, end);
+                if (StartsWithIgnoreCase(source, afterStatus, "<DSanalysis"))
+                {
+                    var dsEnd = FindWebTimelineMarkerEnd(source, afterStatus);
+                    if (dsEnd > afterStatus)
+                    {
+                        var dsUnit = source[afterStatus..dsEnd];
+                        if (ShouldKeepDsAnalysisInVisibleContent(dsUnit))
+                        {
+                            AppendVisible(source[next..dsEnd]);
+                            pos = dsEnd;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            if (ShouldKeepDsAnalysisInVisibleContent(unit))
+                AppendVisible(unit);
+            else
+                AppendTool(unit);
             pos = end;
         }
 
@@ -1492,6 +1528,32 @@ public sealed class CloudSyncService
             toolCalls,
             thinkingSegments,
             hasTimeline);
+    }
+
+    private static int SkipWhitespace(string source, int start)
+    {
+        var pos = Math.Clamp(start, 0, source.Length);
+        while (pos < source.Length && char.IsWhiteSpace(source[pos]))
+            pos++;
+        return pos;
+    }
+
+    private static bool ShouldKeepDsAnalysisInVisibleContent(string unit)
+    {
+        return DsDataToolType(unit) is "python" or "mcp" or "image-action";
+    }
+
+    private static string? DsDataToolType(string unit)
+    {
+        if (!StartsWithIgnoreCase(unit, 0, "<DSanalysis")) return null;
+        var openEnd = unit.IndexOf('>');
+        if (openEnd < 0) return null;
+
+        var match = Regex.Match(
+            unit[..openEnd],
+            "\\bdata-tool-type\\s*=\\s*([\"'])(?<type>[^\"']+)\\1",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return match.Success ? match.Groups["type"].Value.Trim().ToLowerInvariant() : null;
     }
 
     private static JsonObject? ParseWebToolUnitForLocal(string unit, int contentOffset, int timelineIndex)
@@ -1866,8 +1928,9 @@ public sealed class CloudSyncService
         _settings.Set(ConversationSyncKey(conversationId), timestamp);
     }
 
-    private void MarkUploadedConversations(JsonArray dirty, string syncTimestamp)
+    private IReadOnlyList<ConversationRow> MarkUploadedConversations(JsonArray dirty, string syncTimestamp)
     {
+        var rows = new List<ConversationRow>();
         foreach (var item in dirty.OfType<JsonObject>())
         {
             if (item["metadata"] is not JsonObject metadata) continue;
@@ -1875,7 +1938,11 @@ public sealed class CloudSyncService
             if (string.IsNullOrWhiteSpace(id)) continue;
             SetConversationSyncTimestamp(id, syncTimestamp);
             SaveCloudMetadata(id, metadata);
+            if (_conversations.Get(id) is { } row)
+                rows.Add(row);
         }
+
+        return rows;
     }
 
     private JsonObject? LoadCloudMetadata(string conversationId)
@@ -2031,11 +2098,27 @@ public sealed class CloudSyncService
     }
 }
 
-public sealed record CloudSyncResult(int Uploaded, int Downloaded, int Deleted, string LastSyncTimestamp);
+public sealed record CloudSyncResult(
+    int Uploaded,
+    int Downloaded,
+    int Deleted,
+    string LastSyncTimestamp,
+    IReadOnlyList<ConversationRow> ChangedRows,
+    IReadOnlyList<string> RemovedIds,
+    bool RequiresFullReload);
 
-public sealed record CloudMetadataMergeResult(int Upserted, int RemoteDeleted);
+public sealed record CloudMetadataMergeResult(
+    int Upserted,
+    int RemoteDeleted,
+    IReadOnlyList<ConversationRow> ChangedRows,
+    IReadOnlyList<string> RemovedIds);
 
-internal readonly record struct AccountBindingResult(int PurgedConversationCount);
+internal readonly record struct AccountBindingResult(
+    int PurgedConversationCount,
+    IReadOnlyList<string> PurgedIds)
+{
+    public static AccountBindingResult Empty { get; } = new(0, Array.Empty<string>());
+}
 
 public enum CloudSyncState
 {
