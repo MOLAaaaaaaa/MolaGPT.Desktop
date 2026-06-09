@@ -87,6 +87,7 @@ public partial class App : Application
         var registry = Services.GetRequiredService<ProviderRegistry>();
 
         RestoreSavedProviders();
+        var logoutCoordinator = Services.GetRequiredService<MolaGptLogoutCoordinator>();
 
         // Validate the persisted JWT against the current UA hash. If they
         // disagree (e.g. we shipped a new app version with a different UA),
@@ -108,6 +109,9 @@ public partial class App : Application
             if (!string.IsNullOrEmpty(auth.CurrentJwt))
                 registry.Register(proxy);
         }
+
+        if (string.IsNullOrEmpty(auth.CurrentJwt))
+            logoutCoordinator.CleanupLoggedOutAccountState("startup-no-jwt");
 
         var window = Services.GetRequiredService<MainWindow>();
         var mainVm = Services.GetRequiredService<MainViewModel>();
@@ -231,12 +235,10 @@ public partial class App : Application
                 Services.GetRequiredService<MessageRepository>(),
                 conversationId,
                 (title, modelId) => conversationListVm.CreateImageWorkbenchConversation(title, modelId),
-                () => conversationListVm.Reload(),
                 Services.GetRequiredService<NotificationService>(),
                 (id, generating) => conversationListVm.SetGenerating(id, generating),
                 window.HideImageWorkbench);
             window.ShowImageWorkbench(workbench);
-            conversationListVm.Reload();
         };
 
         window.DataContext = mainVm;
@@ -492,6 +494,7 @@ public partial class App : Application
                 sp.GetRequiredService<MessageRepository>(),
                 sp.GetRequiredService<SettingsRepository>());
         });
+        services.AddSingleton<MolaGptLogoutCoordinator>();
 
         services.AddSingleton<BackgroundStreamService>();
         services.AddSingleton(sp => new McpHttpClient(
@@ -569,10 +572,7 @@ public partial class App : Application
             sp.GetRequiredService<ProviderRegistry>()));
         services.AddTransient(sp => new AccountDialog(
             sp.GetRequiredService<MolaGptAuthService>(),
-            sp.GetRequiredService<MolaGptProxyProvider>(),
-            sp.GetRequiredService<ProviderRegistry>(),
-            sp.GetRequiredService<CloudSyncService>(),
-            sp.GetRequiredService<ConversationListViewModel>()));
+            sp.GetRequiredService<MolaGptProxyProvider>()));
         services.AddTransient(sp =>
         {
             Func<HttpClient> factory = () =>

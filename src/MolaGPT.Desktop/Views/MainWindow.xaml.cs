@@ -613,10 +613,13 @@ public partial class MainWindow : Window
         if (DataContext is not MainViewModel vm) return;
         ModelSelectorItems.Items.Clear();
 
-        foreach (var prov in _providers.Providers)
-        {
-            if (!vm.Chat.CanSwitchToProvider(prov)) continue;
+        var providers = _providers.Providers
+            .Where(vm.Chat.CanSwitchToProvider)
+            .OrderBy(prov => prov.Kind == ProviderKind.MolaGptProxy ? 1 : 0)
+            .ToList();
 
+        foreach (var prov in providers)
+        {
             // Provider group label
             var label = new TextBlock
             {

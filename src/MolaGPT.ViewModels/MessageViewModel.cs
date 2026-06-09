@@ -843,11 +843,12 @@ public sealed partial class ToolCallViewModel : ObservableObject
     public string? DisplayResultPreviewJson => FormatDisplayJson(ResultPreviewJson);
     public bool IsCompleted => Status.Equals("completed", StringComparison.OrdinalIgnoreCase);
     public bool IsError => Status.Equals("error", StringComparison.OrdinalIgnoreCase);
-    public bool IsSearch => Name.Equals("search_web", StringComparison.OrdinalIgnoreCase);
+    public bool IsSearch => Name.Equals("search_web", StringComparison.OrdinalIgnoreCase)
+                            || Name.Equals("web_search", StringComparison.OrdinalIgnoreCase);
     public bool IsGenericTool => !IsSearch;
     public string IconGlyph => Name switch
     {
-        "search_web" => "\uE721",
+        "search_web" or "web_search" => "\uE721",
         "web_fetch" or "steel_browser" => "\uE774",
         _ => "\uE90F"
     };
@@ -866,7 +867,9 @@ public sealed partial class ToolCallViewModel : ObservableObject
         Label = string.IsNullOrWhiteSpace(delta.Label) ? ToolLabelFor(delta.Name) : delta.Label!;
         Summary = delta.Summary;
         Detail = delta.Detail;
-        ArgumentsJson = delta.ArgumentsJson;
+        ArgumentsJson = string.IsNullOrWhiteSpace(delta.ArgumentsJson) && IsSearch
+            ? BuildSearchArgumentsFromSummary(delta.Summary)
+            : delta.ArgumentsJson;
         ResultPreviewJson = delta.ResultPreviewJson;
         Provider = delta.Provider;
         RefreshComputed();
@@ -897,10 +900,22 @@ public sealed partial class ToolCallViewModel : ObservableObject
 
     private static string ToolLabelFor(string name) => name switch
     {
-        "search_web" => "联网搜索",
+        "search_web" or "web_search" => "联网搜索",
         "web_fetch" or "steel_browser" => "网页阅读",
         _ => string.IsNullOrWhiteSpace(name) ? "工具调用" : name
     };
+
+    private static string? BuildSearchArgumentsFromSummary(string? summary)
+    {
+        if (string.IsNullOrWhiteSpace(summary)) return null;
+        var queries = summary
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(query => !string.IsNullOrWhiteSpace(query))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(query => new Dictionary<string, string> { ["query"] = query })
+            .ToArray();
+        return queries.Length == 0 ? null : JsonSerializer.Serialize(new Dictionary<string, object> { ["queries"] = queries });
+    }
 
     private static string? FormatDisplayJson(string? json)
     {

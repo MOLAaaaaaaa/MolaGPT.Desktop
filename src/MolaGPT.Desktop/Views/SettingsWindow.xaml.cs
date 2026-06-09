@@ -517,9 +517,6 @@ public partial class SettingsWindow : Window
         if (!string.IsNullOrEmpty(_auth.CurrentJwt))
         {
             _auth.Logout();
-            try { _registry.Unregister("molagpt-proxy"); } catch { /* tolerate */ }
-            _cloudSync.CleanupLocalPlaceholdersForLogout();
-            _ = _conversationList.ReloadAsync();
             UpdateAccountUi();
         }
         else

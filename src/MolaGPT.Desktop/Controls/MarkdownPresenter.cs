@@ -588,6 +588,13 @@ public sealed class MarkdownPresenter : ContentControl
         preserveMarkdownImages |= _preserveMarkdownImagesDuringThemeRefresh;
 
         _doc.Blocks.Clear();
+        // The rendered document is now empty, so the "already rendered" cache
+        // must be invalidated too — otherwise the next Flush() can see an
+        // unchanged source (e.g. OnSourcesChanged re-renders the same plain-text
+        // body that carries no <ref> to re-link, or a recycled container gets an
+        // identical Markdown) and early-return without refilling the blocks we
+        // just cleared, leaving the message body permanently blank.
+        _lastRenderedSource = string.Empty;
         _fastBlockSources.Clear();
         _mixedUnits.Clear();
         _cachePath = CachePath.Empty;

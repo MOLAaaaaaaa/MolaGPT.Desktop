@@ -26,7 +26,6 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
     private readonly ConversationRepository _conversationRepo;
     private readonly MessageRepository _messageRepo;
     private readonly Func<string, string?, string>? _createConversation;
-    private readonly Action? _conversationsChanged;
     private readonly Action<string, bool>? _onGeneratingChanged;
     private readonly NotificationService? _notificationService;
     private readonly Action? _closeRequested;
@@ -56,7 +55,6 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         MessageRepository messageRepo,
         string? conversationId,
         Func<string, string?, string>? createConversation = null,
-        Action? conversationsChanged = null,
         NotificationService? notificationService = null,
         Action<string, bool>? onGeneratingChanged = null,
         Action? closeRequested = null)
@@ -69,7 +67,6 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         _messageRepo = messageRepo;
         _conversationId = conversationId;
         _createConversation = createConversation;
-        _conversationsChanged = conversationsChanged;
         _notificationService = notificationService;
         _onGeneratingChanged = onGeneratingChanged;
         _closeRequested = closeRequested;
@@ -263,12 +260,13 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
             return;
         }
 
+        var modelSnapshot = CurrentImageGenerationModel();
         var editSource = (CurrentModelSupportsEdit && _editReferenceEnabled) ? LatestEditableResult() : null;
         var isEdit = editSource is not null;
         var taskTitle = CurrentTaskTitle();
         if (IsDefaultTaskTitle(taskTitle))
             taskTitle = BuildTaskTitle(prompt);
-        var pending = CreatePendingResult(prompt, taskTitle, isEdit, editSource);
+        var pending = CreatePendingResult(prompt, taskTitle, isEdit, editSource, modelSnapshot.Label);
 
         _closedWhileGenerating = false;
         _closeToastShown = false;
@@ -294,7 +292,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
             if (images.Count == 0)
             {
                 StatusText.Text = "未返回图片，请调整描述后重试。";
-                ReplacePendingWithError(pending, prompt, taskTitle, isEdit, editSource, "未返回图片，请调整描述后重试。");
+                ReplacePendingWithError(pending, prompt, taskTitle, isEdit, editSource, modelSnapshot, "未返回图片，请调整描述后重试。");
                 return;
             }
 
@@ -321,11 +319,14 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
                     DateTimeOffset.Now,
                     isEdit,
                     SourceThumbnail: editSource?.Thumbnail,
-                    SourceTitle: editSource?.TaskTitle);
+                    SourceTitle: editSource?.TaskTitle,
+                    ModelLabel: modelSnapshot.Label,
+                    ModelId: modelSnapshot.ModelId,
+                    ProviderId: modelSnapshot.ProviderId);
 
                 _results.Insert(Math.Min(insertIndex + added, _results.Count), result);
                 _gallery.Insert(0, result);
-                PersistGeneratedImage(prompt, result);
+                PersistWorkbenchResult(prompt, result);
                 added++;
             }
 
@@ -333,13 +334,12 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
             StatusText.Text = isEdit
                 ? $"编辑完成，共 {added} 张图片。"
                 : $"生成完成，共 {added} 张图片。";
-            _conversationsChanged?.Invoke();
             _notificationService?.ShowImageGenerationCompleted(_conversationId!, taskTitle, added, force: _closedWhileGenerating || !IsVisible);
         }
         catch (OperationCanceledException)
         {
             StatusText.Text = "已取消本次生成。";
-            ReplacePendingWithError(pending, prompt, taskTitle, isEdit, editSource, "已取消本次生成。");
+            ReplacePendingWithError(pending, prompt, taskTitle, isEdit, editSource, modelSnapshot, "已取消本次生成。");
             if (_notificationService is not null && !string.IsNullOrWhiteSpace(_conversationId) && (_closedWhileGenerating || !IsVisible))
             {
                 _notificationService.ShowImageGenerationFailed(
@@ -352,7 +352,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         catch (Exception ex)
         {
             StatusText.Text = "生成失败：" + ex.Message;
-            ReplacePendingWithError(pending, prompt, taskTitle, isEdit, editSource, ex.Message);
+            ReplacePendingWithError(pending, prompt, taskTitle, isEdit, editSource, modelSnapshot, ex.Message);
             if (_notificationService is not null && !string.IsNullOrWhiteSpace(_conversationId))
             {
                 _notificationService.ShowImageGenerationFailed(
@@ -378,8 +378,22 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
             return false;
 
         _conversationId = _createConversation(BuildTaskTitle(prompt), _settings.ImageGenerationModelId);
-        _conversationsChanged?.Invoke();
         return !string.IsNullOrWhiteSpace(_conversationId);
+    }
+
+    private (string? ProviderId, string? ModelId, string? Label) CurrentImageGenerationModel()
+    {
+        var selected = _settings.SelectedImageGenerationModel;
+        var providerId = selected?.ProviderId ?? _settings.ImageGenerationProviderId;
+        var modelId = selected?.ModelId ?? _settings.ImageGenerationModelId;
+        var label = selected?.Label;
+        if (string.IsNullOrWhiteSpace(label))
+            label = modelId;
+
+        return (
+            string.IsNullOrWhiteSpace(providerId) ? null : providerId.Trim(),
+            string.IsNullOrWhiteSpace(modelId) ? null : modelId.Trim(),
+            string.IsNullOrWhiteSpace(label) ? null : label.Trim());
     }
 
     private ImageGenerationWorkbenchResult? LatestEditableResult() =>
@@ -389,7 +403,8 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         string prompt,
         string taskTitle,
         bool isEdit,
-        ImageGenerationWorkbenchResult? editSource) =>
+        ImageGenerationWorkbenchResult? editSource,
+        string? modelLabel) =>
         new(
             string.Empty,
             "image/png",
@@ -403,13 +418,15 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
             isEdit,
             IsPending: true,
             SourceThumbnail: editSource?.Thumbnail,
-            SourceTitle: editSource?.TaskTitle);
+            SourceTitle: editSource?.TaskTitle,
+            ModelLabel: modelLabel);
 
     private ImageGenerationWorkbenchResult CreateErrorResult(
         string prompt,
         string taskTitle,
         bool isEdit,
         ImageGenerationWorkbenchResult? editSource,
+        (string? ProviderId, string? ModelId, string? Label) modelSnapshot,
         string message) =>
         new(
             string.Empty,
@@ -425,7 +442,10 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
             IsError: true,
             ErrorMessage: message,
             SourceThumbnail: editSource?.Thumbnail,
-            SourceTitle: editSource?.TaskTitle);
+            SourceTitle: editSource?.TaskTitle,
+            ModelLabel: modelSnapshot.Label,
+            ModelId: modelSnapshot.ModelId,
+            ProviderId: modelSnapshot.ProviderId);
 
     private int IndexOfPendingOrStart(ImageGenerationWorkbenchResult pending)
     {
@@ -444,14 +464,17 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         string taskTitle,
         bool isEdit,
         ImageGenerationWorkbenchResult? editSource,
+        (string? ProviderId, string? ModelId, string? Label) modelSnapshot,
         string message)
     {
-        var error = CreateErrorResult(prompt, taskTitle, isEdit, editSource, message);
+        var error = CreateErrorResult(prompt, taskTitle, isEdit, editSource, modelSnapshot, message);
         var index = IndexOfPendingOrStart(pending);
         if (index >= 0)
             _results[index] = error;
         else
             _results.Add(error);
+
+        PersistWorkbenchResult(prompt, error);
     }
 
     private void PreviewResultClick(object sender, RoutedEventArgs e)
@@ -545,7 +568,8 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
                     row.Meta,
                     row.Content,
                     row.CreatedAt,
-                    currentTitle))
+                    currentTitle,
+                    includeErrors: true))
                 .OrderBy(item => item.CreatedAt);
 
             foreach (var item in current)
@@ -558,7 +582,8 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
                 row.Meta,
                 row.Content,
                 row.CreatedAt,
-                row.ConversationTitle))
+                row.ConversationTitle,
+                includeErrors: false))
             .OrderByDescending(item => item.CreatedAt);
 
         foreach (var item in gallery)
@@ -574,7 +599,8 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         string? meta,
         string content,
         long createdAt,
-        string taskTitle)
+        string taskTitle,
+        bool includeErrors)
     {
         if (string.IsNullOrWhiteSpace(meta))
             yield break;
@@ -600,6 +626,38 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
 
             var prompt = ReadString(root, "prompt") ?? content;
             var revisedPrompt = ReadString(root, "revised_prompt") ?? content;
+            var modelLabel = ReadString(root, "model_label")
+                ?? ReadString(root, "model")
+                ?? ReadString(root, "model_id");
+            var modelId = ReadString(root, "model_id");
+            var providerId = ReadString(root, "provider_id");
+            var isError = string.Equals(ReadString(root, "status"), "error", StringComparison.OrdinalIgnoreCase);
+            var errorMessage = ReadString(root, "error_message") ?? content;
+            if (isError)
+            {
+                if (includeErrors)
+                {
+                    yield return new ImageGenerationWorkbenchResult(
+                        string.Empty,
+                        "image/png",
+                        Array.Empty<byte>(),
+                        null,
+                        null,
+                        null,
+                        prompt,
+                        taskTitle,
+                        DateTimeOffset.FromUnixTimeMilliseconds(createdAt).ToLocalTime(),
+                        ReadBool(root, "image_edit"),
+                        IsError: true,
+                        ErrorMessage: errorMessage,
+                        ModelLabel: modelLabel,
+                        ModelId: modelId,
+                        ProviderId: providerId);
+                }
+
+                yield break;
+            }
+
             if (!root.TryGetProperty("attachments", out var attachments)
                 || attachments.ValueKind != JsonValueKind.Array)
             {
@@ -626,14 +684,19 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
                     prompt,
                     taskTitle,
                     DateTimeOffset.FromUnixTimeMilliseconds(createdAt).ToLocalTime(),
-                    ReadBool(root, "image_edit"));
+                    ReadBool(root, "image_edit"),
+                    ModelLabel: modelLabel,
+                    ModelId: modelId,
+                    ProviderId: providerId);
             }
         }
     }
 
-    private void PersistGeneratedImage(string prompt, ImageGenerationWorkbenchResult result)
+    private void PersistWorkbenchResult(string prompt, ImageGenerationWorkbenchResult result)
     {
-        if (string.IsNullOrWhiteSpace(_conversationId) || string.IsNullOrWhiteSpace(result.LocalName))
+        if (string.IsNullOrWhiteSpace(_conversationId))
+            return;
+        if (!result.IsError && string.IsNullOrWhiteSpace(result.LocalName))
             return;
 
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -641,22 +704,40 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         {
             ["image_workbench"] = true,
             ["prompt"] = prompt,
-            ["revised_prompt"] = result.RevisedPrompt,
             ["image_edit"] = result.IsEditMode,
-            ["attachments"] = new JsonArray(new JsonObject
+            ["model_label"] = result.ModelLabel,
+            ["model"] = result.ModelLabel,
+            ["model_id"] = result.ModelId,
+            ["provider_id"] = result.ProviderId,
+            ["status"] = result.IsError ? "error" : "completed"
+        };
+
+        string content;
+        if (result.IsError)
+        {
+            meta["error_message"] = result.ErrorDisplay;
+            content = (result.IsEditMode ? "图像编辑失败：" : "图像生成失败：") + result.ErrorDisplay;
+        }
+        else
+        {
+            meta["revised_prompt"] = result.RevisedPrompt;
+            meta["attachments"] = new JsonArray(new JsonObject
             {
                 ["filename"] = result.FileName,
                 ["label"] = "图片",
                 ["localName"] = result.LocalName,
                 ["mime"] = result.MimeType
-            })
-        };
+            });
+            content = string.IsNullOrWhiteSpace(result.RevisedPrompt)
+                ? "图像生成完成"
+                : result.RevisedPrompt;
+        }
 
         _messageRepo.Insert(new MessageRow(
             Guid.NewGuid().ToString("N"),
             _conversationId,
             "assistant",
-            string.IsNullOrWhiteSpace(result.RevisedPrompt) ? "图像生成完成" : result.RevisedPrompt,
+            content,
             meta.ToJsonString(),
             now));
 
@@ -667,7 +748,7 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         _conversationRepo.Upsert(row with
         {
             Title = title,
-            ModelId = _settings.ImageGenerationModelId,
+            ModelId = result.ModelId ?? _settings.ImageGenerationModelId,
             UpdatedAt = now
         });
     }
@@ -940,7 +1021,10 @@ public sealed record ImageGenerationWorkbenchResult(
     bool IsError = false,
     string? ErrorMessage = null,
     BitmapImage? SourceThumbnail = null,
-    string? SourceTitle = null)
+    string? SourceTitle = null,
+    string? ModelLabel = null,
+    string? ModelId = null,
+    string? ProviderId = null)
 {
     public bool HasImage => !IsPending && !IsError && Bytes.Length > 0 && Thumbnail is not null;
 
@@ -952,6 +1036,7 @@ public sealed record ImageGenerationWorkbenchResult(
     public Visibility PendingVisibility => IsPending ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ErrorVisibility => IsError ? Visibility.Visible : Visibility.Collapsed;
     public Visibility FooterVisibility => IsPending ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility ModelLabelVisibility => string.IsNullOrWhiteSpace(ModelLabel) ? Visibility.Collapsed : Visibility.Visible;
     public string PromptHeader => IsEditMode ? "修改指令" : "生成提示词";
     public string ModeLabel => IsPending
         ? IsEditMode ? "编辑中" : "生成中"

@@ -10,23 +10,57 @@ namespace MolaGPT.Core.Chat;
 public sealed class ProviderRegistry
 {
     private readonly ConcurrentDictionary<string, IChatProvider> _providers = new();
+    private readonly object _orderGate = new();
+    private readonly List<string> _providerOrder = new();
 
     /// <summary>Notified whenever the provider set changes (add / remove / refresh).</summary>
     public event EventHandler? Changed;
 
-    public IReadOnlyCollection<IChatProvider> Providers => _providers.Values.ToList();
+    public IReadOnlyCollection<IChatProvider> Providers
+    {
+        get
+        {
+            lock (_orderGate)
+            {
+                var providers = new List<IChatProvider>(_providers.Count);
+                foreach (var id in _providerOrder)
+                {
+                    if (_providers.TryGetValue(id, out var provider))
+                        providers.Add(provider);
+                }
+
+                foreach (var provider in _providers.Values)
+                {
+                    if (!_providerOrder.Contains(provider.Id))
+                        providers.Add(provider);
+                }
+
+                return providers;
+            }
+        }
+    }
 
     public void Register(IChatProvider provider)
     {
         ArgumentNullException.ThrowIfNull(provider);
         _providers[provider.Id] = provider;
+        lock (_orderGate)
+        {
+            if (!_providerOrder.Contains(provider.Id))
+                _providerOrder.Add(provider.Id);
+        }
         Changed?.Invoke(this, EventArgs.Empty);
     }
 
     public bool Unregister(string providerId)
     {
         var removed = _providers.TryRemove(providerId, out _);
-        if (removed) Changed?.Invoke(this, EventArgs.Empty);
+        if (removed)
+        {
+            lock (_orderGate)
+                _providerOrder.Remove(providerId);
+            Changed?.Invoke(this, EventArgs.Empty);
+        }
         return removed;
     }
 

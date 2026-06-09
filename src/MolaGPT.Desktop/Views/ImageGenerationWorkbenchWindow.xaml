@@ -214,12 +214,25 @@
                                                    FontWeight="SemiBold"
                                                    Foreground="{DynamicResource Brush.Primary}" />
                                     </Border>
+                                    <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                                            BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                            BorderThickness="1"
+                                            CornerRadius="{DynamicResource Radius.Sm}"
+                                            Padding="7,2"
+                                            Margin="0,0,8,0"
+                                            Visibility="{Binding ModelLabelVisibility}">
+                                        <TextBlock Text="{Binding ModelLabel}"
+                                                   FontSize="10"
+                                                   Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   MaxWidth="170" />
+                                    </Border>
                                     <TextBlock Text="{Binding TaskTitle}"
                                                FontSize="12"
                                                FontWeight="SemiBold"
                                                Foreground="{DynamicResource Brush.Text.Primary}"
                                                TextTrimming="CharacterEllipsis"
-                                               MaxWidth="260" />
+                                               MaxWidth="170" />
                                 </StackPanel>
                             </DockPanel>
 

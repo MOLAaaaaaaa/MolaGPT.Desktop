@@ -13,7 +13,7 @@ public sealed class MessageRepository
         return conn.Query<MessageRow>(
             "SELECT id AS Id, conversation_id AS ConversationId, role AS Role, content AS Content, " +
             "meta AS Meta, created_at AS CreatedAt FROM messages " +
-            "WHERE conversation_id = @c ORDER BY created_at ASC",
+            "WHERE conversation_id = @c ORDER BY created_at ASC, rowid ASC",
             new { c = conversationId }).ToList();
     }
 

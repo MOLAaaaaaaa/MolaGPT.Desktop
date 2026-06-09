@@ -24,6 +24,8 @@ public sealed class CloudSyncService
     private const string SyncEnabledKey = "sync_conversations";
     private const string BoundAccountKey = "cloud_sync.bound_account";
     private const string DetailRefreshPrefix = "cloud_sync.detail_refresh.";
+    private const string DetailParserVersionPrefix = "cloud_sync.detail_parser_version.";
+    private const string DetailParserVersion = "2026-06-08.timeline-order-v1";
     private const string ConversationSyncPrefix = "cloud_sync.conversation_timestamp.";
     private const string ConversationMetadataPrefix = "cloud_sync.metadata.";
     private const string TitleGeneratedPrefix = "cloud_sync.ai_title_generated.";
@@ -267,14 +269,17 @@ public sealed class CloudSyncService
 
         var refreshKey = DetailRefreshKey(conversationId);
         var needsRefresh = !string.IsNullOrWhiteSpace(_settings.Get(refreshKey));
+        var isSyncedConversation = HasConversationSyncTimestamp(conversationId);
+        var needsParserRefresh = isSyncedConversation
+                                 && _settings.Get(DetailParserVersionKey(conversationId)) != DetailParserVersion;
         var existingMessages = await Task.Run(() => _messages.List(conversationId), ct)
             .ConfigureAwait(false);
-        if (existingMessages.Count > 0 && !needsRefresh) return false;
+        if (existingMessages.Count > 0 && !needsRefresh && !needsParserRefresh) return false;
 
         JsonObject? detail;
         try
         {
-            PublishStatus(CloudSyncState.Syncing, "正在拉取对话...");
+            PublishStatus(CloudSyncState.Syncing, needsParserRefresh ? "正在修复对话显示..." : "正在拉取对话...");
             detail = await FetchConversationAsync(jwt, conversationId, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -300,6 +305,7 @@ public sealed class CloudSyncService
 
         _messages.ReplaceConversationMessages(conversationId, ToLocalMessages(conversationId, messages));
         _settings.Remove(refreshKey);
+        _settings.Set(DetailParserVersionKey(conversationId), DetailParserVersion);
         PublishStatus(CloudSyncState.Success, "对话已更新");
         return true;
     }
@@ -443,6 +449,9 @@ public sealed class CloudSyncService
             {
                 _settings.Remove(ConversationSyncKey(id));
                 _settings.Remove(CloudMetadataKey(id));
+                _settings.Remove(DetailRefreshKey(id));
+                _settings.Remove(DetailParserVersionKey(id));
+                _settings.Remove(TitleGeneratedKey(id));
             }
             PublishStatus(CloudSyncState.Success, "删除已同步");
         }
@@ -465,6 +474,7 @@ public sealed class CloudSyncService
             _settings.Remove(ConversationSyncKey(id));
             _settings.Remove(CloudMetadataKey(id));
             _settings.Remove(DetailRefreshKey(id));
+            _settings.Remove(DetailParserVersionKey(id));
             _settings.Remove(TitleGeneratedKey(id));
         }
     }
@@ -542,6 +552,7 @@ public sealed class CloudSyncService
             _settings.Remove(ConversationSyncKey(id));
             _settings.Remove(CloudMetadataKey(id));
             _settings.Remove(DetailRefreshKey(id));
+            _settings.Remove(DetailParserVersionKey(id));
             _settings.Remove(TitleGeneratedKey(id));
         }
 
@@ -583,6 +594,7 @@ public sealed class CloudSyncService
             _settings.Remove(ConversationSyncKey(id));
             _settings.Remove(CloudMetadataKey(id));
             _settings.Remove(DetailRefreshKey(id));
+            _settings.Remove(DetailParserVersionKey(id));
             _settings.Remove(TitleGeneratedKey(id));
         }
         _settings.Remove(LastSyncKey);
@@ -698,6 +710,8 @@ public sealed class CloudSyncService
         syncResult["full_metadata_list"] is JsonArray { Count: > 0 };
 
     private static string DetailRefreshKey(string conversationId) => DetailRefreshPrefix + conversationId;
+
+    private static string DetailParserVersionKey(string conversationId) => DetailParserVersionPrefix + conversationId;
 
     private static string TitleGeneratedKey(string conversationId) => TitleGeneratedPrefix + conversationId;
 
@@ -1014,11 +1028,12 @@ public sealed class CloudSyncService
                 if (node is not JsonObject item) continue;
                 var source = ReadString(item, "source");
                 if (string.IsNullOrWhiteSpace(source)) continue;
+                var hasExplicitToolCalls = toolCalls is { Count: > 0 };
                 events.Add(new CloudTimelineItem(
                     ReadInt(item, "content_offset", "contentOffset") ?? 0,
                     ReadInt(item, "timeline_index", "timelineIndex") ?? order,
                     order++,
-                    BuildWebThink(source!)));
+                    BuildWebThink(source!, emitEmbeddedTools: !hasExplicitToolCalls)));
             }
         }
 
@@ -1062,21 +1077,60 @@ public sealed class CloudSyncService
         return builder.ToString().Trim();
     }
 
-    private static string BuildWebThink(string source)
+    private static string BuildWebThink(string source, bool emitEmbeddedTools = true)
     {
         var thinking = source.Trim();
         if (string.IsNullOrWhiteSpace(thinking)) return string.Empty;
-        return "\n\n<think>\n" + thinking + "\n</think>\n\n";
+        var firstTool = FindNextWebToolMarker(thinking, 0);
+        if (firstTool < 0)
+            return "\n\n<think>\n" + thinking + "\n</think>\n\n";
+
+        var builder = new StringBuilder();
+        var pos = 0;
+
+        void AppendThinkingText(string text)
+        {
+            var clean = text.Trim();
+            if (string.IsNullOrWhiteSpace(clean)) return;
+            builder.Append("\n\n<think>\n").Append(clean).Append("\n</think>\n\n");
+        }
+
+        while (pos < thinking.Length)
+        {
+            var next = FindNextWebToolMarker(thinking, pos);
+            if (next < 0)
+            {
+                AppendThinkingText(thinking[pos..]);
+                break;
+            }
+
+            if (next > pos)
+                AppendThinkingText(thinking[pos..next]);
+
+            var end = FindWebTimelineMarkerEnd(thinking, next);
+            if (end < 0)
+            {
+                AppendThinkingText(thinking[next..]);
+                break;
+            }
+
+            if (emitEmbeddedTools)
+                builder.Append("\n\n").Append(thinking[next..end].Trim()).Append("\n\n");
+            pos = end;
+        }
+
+        return builder.ToString();
     }
 
     private static string BuildWebCompatibleThinkingContent(string visible, string thinking)
     {
         var trimmedThinking = thinking.Trim();
         var trimmedVisible = visible.TrimStart();
+        var thinkingMarkup = BuildWebThink(trimmedThinking).Trim();
         if (string.IsNullOrWhiteSpace(trimmedVisible))
-            return "<think>\n" + trimmedThinking + "\n</think>";
+            return thinkingMarkup;
 
-        return "<think>\n" + trimmedThinking + "\n</think>\n\n" + trimmedVisible;
+        return thinkingMarkup + "\n\n" + trimmedVisible;
     }
 
     private static string BuildWebToolMarkup(JsonObject tool)
@@ -1261,7 +1315,7 @@ public sealed class CloudSyncService
             "image-action" => completed ? "图片处理完成" : error ? "图片处理失败" : "正在处理图片",
             "python" => completed ? "Python 执行完成" : error ? "Python 执行失败" : "正在执行 Python",
             "mcp" => completed ? "连接器调用完成" : error ? "连接器调用失败" : "正在调用连接器",
-            "web_search" => completed ? "联网搜索完成" : error ? "联网搜索失败" : "正在访问互联网",
+            "web_search" or "search_web" => completed ? "联网搜索完成" : error ? "联网搜索失败" : "正在访问互联网",
             _ when name is "web_fetch" or "steel_browser" => completed ? "阅读网页" : error ? "网页阅读失败" : "正在阅读网页",
             _ => completed ? "工具调用完成" : error ? "工具调用失败" : "正在处理..."
         };
@@ -1345,6 +1399,33 @@ public sealed class CloudSyncService
             lastTimelineItemWasTool = false;
         }
 
+        void AppendThinkingWithEmbeddedTools(string text)
+        {
+            var posInThinking = 0;
+            while (posInThinking < text.Length)
+            {
+                var nextTool = FindNextWebToolMarker(text, posInThinking);
+                if (nextTool < 0)
+                {
+                    AppendThinking(text[posInThinking..]);
+                    break;
+                }
+
+                if (nextTool > posInThinking)
+                    AppendThinking(text[posInThinking..nextTool]);
+
+                var end = FindWebTimelineMarkerEnd(text, nextTool);
+                if (end < 0)
+                {
+                    AppendThinking(text[nextTool..]);
+                    break;
+                }
+
+                AppendTool(text[nextTool..end]);
+                posInThinking = end;
+            }
+        }
+
         void AppendTool(string unit)
         {
             if (StartsWithIgnoreCase(unit, 0, "<DSanalysis")
@@ -1388,7 +1469,7 @@ public sealed class CloudSyncService
                 var body = close < 0
                     ? source[(openEnd + 1)..]
                     : source.Substring(openEnd + 1, close - openEnd - 1);
-                AppendThinking(body);
+                AppendThinkingWithEmbeddedTools(body);
                 pos = close < 0 ? source.Length : close + "</think>".Length;
                 continue;
             }
@@ -1438,8 +1519,15 @@ public sealed class CloudSyncService
             ["timeline_index"] = timelineIndex,
             ["provider"] = "MolaGPT"
         };
-        if (name == "web_search")
-            obj["summary"] = string.Join(" / ", ExtractSearchChipTexts(unit)).Trim();
+        if (name == "search_web")
+        {
+            var chips = ExtractSearchChips(unit);
+            obj["label"] = "网络搜索";
+            obj["summary"] = string.Join(" / ", chips.Select(c => c.Text)).Trim();
+            obj["arguments_json"] = BuildSearchArgumentsJson(chips);
+        }
+        else if (name == "web_fetch" && !string.IsNullOrWhiteSpace(body))
+            ApplyWebFetchResult(obj, body);
         else if (!string.IsNullOrWhiteSpace(body))
             obj["detail"] = body;
         else if (StartsWithIgnoreCase(unit, 0, "<steel-step"))
@@ -1447,6 +1535,8 @@ public sealed class CloudSyncService
             var preview = ExtractSteelStepPreview(unit);
             if (!string.IsNullOrWhiteSpace(preview))
                 obj["detail"] = preview;
+            if (name is "web_fetch" or "steel_browser")
+                obj["provider"] = "Steel Browser";
         }
         return obj;
     }
@@ -1461,34 +1551,84 @@ public sealed class CloudSyncService
         var phase = ExtractToolPhase(unit);
         previous["name"] = name;
         previous["status"] = phase == "error" ? "error" : phase == "completed" ? "completed" : "running";
-        previous["label"] = ReadableToolLabel(name, phase);
-        previous["detail"] = body;
+        if (name == "web_fetch")
+        {
+            if (string.IsNullOrWhiteSpace(ReadString(previous, "label")))
+                previous["label"] = ReadableToolLabel(name, phase);
+            ApplyWebFetchResult(previous, body);
+        }
+        else
+        {
+            previous["label"] = ReadableToolLabel(name, phase);
+            previous["detail"] = body;
+        }
         return true;
+    }
+
+    private static void ApplyWebFetchResult(JsonObject tool, string body)
+    {
+        tool["provider"] = "Steel Browser";
+        tool["result_preview_json"] = body;
+
+        var existingDetail = ReadString(tool, "detail");
+        if (!string.IsNullOrWhiteSpace(existingDetail)) return;
+
+        var summary = ExtractDsField(body, "URL")
+            ?? ExtractDsField(body, "页面标题")
+            ?? ExtractMarkdownLinkTarget(body);
+        if (!string.IsNullOrWhiteSpace(summary))
+            tool["detail"] = TruncateSingleLine(summary!, 180);
+    }
+
+    private static string? ExtractDsField(string body, string fieldName)
+    {
+        var match = Regex.Match(
+            body,
+            @"(?im)^\s*-\s*(?:\*\*)?" + Regex.Escape(fieldName) + @"(?:\*\*)?\s*[:：]\s*(.+?)\s*$");
+        return match.Success ? match.Groups[1].Value.Trim() : null;
+    }
+
+    private static string? ExtractMarkdownLinkTarget(string body)
+    {
+        var match = Regex.Match(body, @"\[[^\]]+\]\((https?://[^)\s]+)\)", RegexOptions.IgnoreCase);
+        return match.Success ? match.Groups[1].Value.Trim() : null;
+    }
+
+    private static string TruncateSingleLine(string value, int maxLength)
+    {
+        var normalized = Regex.Replace(value.Trim(), @"\s+", " ");
+        return normalized.Length <= maxLength ? normalized : normalized[..Math.Max(0, maxLength - 1)] + "…";
     }
 
     private static string ToolNameFromStatusMarkup(string unit)
     {
-        if (unit.Contains("tool-search-blockquote", StringComparison.OrdinalIgnoreCase)) return "web_search";
+        if (unit.Contains("tool-search-blockquote", StringComparison.OrdinalIgnoreCase)) return "search_web";
         if (unit.Contains("tool-steel-step", StringComparison.OrdinalIgnoreCase)) return SteelStepToolName(unit);
         var text = HtmlToText(unit);
-        if (text.Contains("搜索", StringComparison.OrdinalIgnoreCase)) return "web_search";
+        if (text.Contains("搜索", StringComparison.OrdinalIgnoreCase)) return "search_web";
         if (text.Contains("查看图片", StringComparison.OrdinalIgnoreCase) || text.Contains("图片分析", StringComparison.OrdinalIgnoreCase)) return "image-analyze";
         if (text.Contains("绘制", StringComparison.OrdinalIgnoreCase)) return "image-gen";
         if (text.Contains("Python", StringComparison.OrdinalIgnoreCase)) return "python";
-        if (text.Contains("阅读网页", StringComparison.OrdinalIgnoreCase) || text.Contains("读取网页", StringComparison.OrdinalIgnoreCase)) return "web_fetch";
+        if (text.Contains("阅读网页", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("读取网页", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("查看网页", StringComparison.OrdinalIgnoreCase)) return "web_fetch";
         return "tool";
     }
 
     private static string DsToolName(string unit)
     {
         var lower = unit.ToLowerInvariant();
-        if (lower.Contains("web_search")) return "web_search";
+        if (lower.Contains("web_search") || lower.Contains("search_web")) return "search_web";
         if (lower.Contains("image-analyze")) return "image-analyze";
         if (lower.Contains("image-gen")) return "image-gen";
         if (lower.Contains("image-action")) return "image-action";
-        if (lower.Contains("操作类型: scrape")
+        if (lower.Contains("操作类型: screenshot_analyze")
+            || lower.Contains("**操作类型:** screenshot_analyze")
+            || lower.Contains("operation type: screenshot_analyze")
+            || lower.Contains("操作类型: scrape")
             || lower.Contains("**操作类型:** scrape")
             || lower.Contains("operation type: scrape")
+            || lower.Contains("steel browser截图")
             || (lower.Contains("页面标题") && lower.Contains("内容长度")))
             return "web_fetch";
         if (lower.Contains("python")) return "python";
@@ -1501,8 +1641,11 @@ public sealed class CloudSyncService
         var title = ExtractSteelStepTitle(unit) ?? string.Empty;
         if (unit.Contains("data-steel-action=\"scrape\"", StringComparison.OrdinalIgnoreCase)
             || unit.Contains("data-steel-action='scrape'", StringComparison.OrdinalIgnoreCase)
+            || unit.Contains("data-steel-action=\"screenshot_analyze\"", StringComparison.OrdinalIgnoreCase)
+            || unit.Contains("data-steel-action='screenshot_analyze'", StringComparison.OrdinalIgnoreCase)
             || title.Contains("阅读网页", StringComparison.OrdinalIgnoreCase)
-            || title.Contains("读取网页", StringComparison.OrdinalIgnoreCase))
+            || title.Contains("读取网页", StringComparison.OrdinalIgnoreCase)
+            || title.Contains("查看网页", StringComparison.OrdinalIgnoreCase))
             return "web_fetch";
         return "steel_browser";
     }
@@ -1537,17 +1680,70 @@ public sealed class CloudSyncService
         return "completed";
     }
 
-    private static IEnumerable<string> ExtractSearchChipTexts(string html)
+    private static IReadOnlyList<SearchChip> ExtractSearchChips(string html)
     {
-        var matches = Regex.Matches(
+        var chipMatches = Regex.Matches(
+            html,
+            "<span\\b[^>]*class=[\"'][^\"']*(?<![\\w-])tool-search-chip(?![\\w-])[^\"']*[\"'][^>]*>([\\s\\S]*?)(?=<span\\b[^>]*class=[\"'][^\"']*(?<![\\w-])tool-search-chip(?![\\w-])|</div>|</blockquote>|$)",
+            RegexOptions.IgnoreCase);
+        var chips = new List<SearchChip>();
+        foreach (Match chipMatch in chipMatches)
+        {
+            var chipHtml = chipMatch.Groups[1].Value;
+            var textMatch = Regex.Match(
+                chipHtml,
+                "<span\\b[^>]*class=[\"'][^\"']*\\btool-search-chip-text\\b[^\"']*[\"'][^>]*>([\\s\\S]*?)</span>",
+                RegexOptions.IgnoreCase);
+            if (!textMatch.Success) continue;
+            var text = HtmlToText(textMatch.Groups[1].Value);
+            if (string.IsNullOrWhiteSpace(text)) continue;
+
+            var badges = Regex.Matches(
+                    chipHtml,
+                    "<span\\b[^>]*class=[\"'][^\"']*\\btool-search-chip-badge\\b[^\"']*[\"'][^>]*>\\s*(?:<span\\b[\\s\\S]*?</span>)?\\s*([^<]+)\\s*</span>",
+                    RegexOptions.IgnoreCase)
+                .Select(match => HtmlToText(match.Groups[1].Value))
+                .Where(badge => !string.IsNullOrWhiteSpace(badge))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            chips.Add(new SearchChip(text, badges));
+        }
+
+        if (chips.Count > 0) return chips;
+
+        var textMatches = Regex.Matches(
             html,
             "<span\\b[^>]*class=[\"'][^\"']*\\btool-search-chip-text\\b[^\"']*[\"'][^>]*>([\\s\\S]*?)</span>",
             RegexOptions.IgnoreCase);
-        foreach (Match match in matches)
+        return textMatches
+            .Select(match => HtmlToText(match.Groups[1].Value))
+            .Where(text => !string.IsNullOrWhiteSpace(text))
+            .Select(text => new SearchChip(text, []))
+            .ToArray();
+    }
+
+    private static string BuildSearchArgumentsJson(IReadOnlyList<SearchChip> chips)
+    {
+        var queries = new JsonArray();
+        foreach (var chip in chips)
         {
-            var text = HtmlToText(match.Groups[1].Value);
-            if (!string.IsNullOrWhiteSpace(text)) yield return text;
+            var query = new JsonObject { ["query"] = chip.Text };
+            foreach (var badge in chip.Badges)
+            {
+                var normalized = badge.Trim();
+                if (normalized.Length == 0) continue;
+                var lower = normalized.ToLowerInvariant();
+                if (lower is "day" or "week" or "month" or "year")
+                    query["time_range"] = lower;
+                else if (normalized.Length == 2 && normalized.All(char.IsLetter))
+                    query["country"] = normalized.ToUpperInvariant();
+                else if (!query.ContainsKey("topic"))
+                    query["topic"] = lower;
+            }
+            queries.Add(query);
         }
+
+        return new JsonObject { ["queries"] = queries }.ToJsonString(JsonOptions);
     }
 
     private static string StripTagPair(string source, string tag)
@@ -1571,6 +1767,10 @@ public sealed class CloudSyncService
     private static int FindNextWebTimelineMarker(string source, int start) =>
         MinPositive(
             IndexOfIgnoreCase(source, "<think", start),
+            FindNextWebToolMarker(source, start));
+
+    private static int FindNextWebToolMarker(string source, int start) =>
+        MinPositive(
             IndexOfIgnoreCase(source, "<steel-step", start),
             IndexOfIgnoreCase(source, "<DSanalysis", start),
             IndexOfNextToolStatusBlockquote(source, start));
@@ -1698,6 +1898,7 @@ public sealed class CloudSyncService
 
     private static IEnumerable<MessageRow> ToLocalMessages(string conversationId, JsonArray messages)
     {
+        var lastCreatedAt = long.MinValue;
         foreach (var node in messages)
         {
             if (node is not JsonObject msg) continue;
@@ -1713,6 +1914,9 @@ public sealed class CloudSyncService
             if (string.IsNullOrWhiteSpace(content) && role != "assistant") continue;
 
             var createdAt = ParseMessageTimestamp(msg["timestamp"]);
+            if (createdAt <= lastCreatedAt)
+                createdAt = lastCreatedAt + 1;
+            lastCreatedAt = createdAt;
             var meta = new JsonObject();
             if (msg["model_label"] is JsonNode modelLabel) meta["model"] = modelLabel.DeepClone();
             if (msg["model"] is JsonNode model) meta["model"] = model.DeepClone();

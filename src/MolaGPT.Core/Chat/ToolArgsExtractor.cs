@@ -49,7 +49,8 @@ public static class ToolArgsExtractor
             if (root.ValueKind != JsonValueKind.Object)
                 return ToolArgsView.Empty;
 
-            if (string.Equals(toolName, "search_web", System.StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(toolName, "search_web", System.StringComparison.OrdinalIgnoreCase)
+                || string.Equals(toolName, "web_search", System.StringComparison.OrdinalIgnoreCase))
             {
                 var queries = ExtractSearchQueries(root);
                 if (queries is not null)
@@ -87,9 +88,9 @@ public static class ToolArgsExtractor
                 }
                 if (item.ValueKind != JsonValueKind.Object) continue;
 
-                var q = ReadString(item, "query");
+                var q = ReadString(item, "query") ?? ReadString(item, "text") ?? ReadString(item, "q");
                 if (string.IsNullOrWhiteSpace(q)) continue;
-                var topic = ReadString(item, "topic");
+                var topic = ReadString(item, "topic") ?? ReadString(item, "time_range") ?? ReadString(item, "country");
                 list.Add(new ToolSearchQueryView(
                     q!.Trim(),
                     string.IsNullOrWhiteSpace(topic) ? null : topic!.Trim()));
@@ -98,7 +99,7 @@ public static class ToolArgsExtractor
 
         if (list.Count == 0)
         {
-            var legacy = ReadString(root, "query");
+            var legacy = ReadString(root, "query") ?? ReadString(root, "search_query") ?? ReadString(root, "text") ?? ReadString(root, "q");
             if (!string.IsNullOrWhiteSpace(legacy))
                 list.Add(new ToolSearchQueryView(legacy!.Trim(), null));
         }

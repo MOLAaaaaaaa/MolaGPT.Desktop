@@ -42,6 +42,8 @@ public sealed class MolaGptAuthService
     private readonly string _warmupUrl;
     private bool _warmedUp;
 
+    public event EventHandler? LoggedOut;
+
     public MolaGptAuthService(
         HttpClient http,
         CredentialStore store,
@@ -135,9 +137,17 @@ public sealed class MolaGptAuthService
 
     public void Logout()
     {
+        var hadAuthState =
+            !string.IsNullOrEmpty(CurrentJwt)
+            || !string.IsNullOrEmpty(CurrentUsername)
+            || !string.IsNullOrEmpty(StoredUaHash);
+
         _store.RemoveSecret(JwtKey);
         _store.RemoveSecret(UsernameKey);
         _store.RemoveSecret(UaHashKey);
+
+        if (hadAuthState)
+            LoggedOut?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>

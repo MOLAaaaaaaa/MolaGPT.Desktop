@@ -4,10 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using MolaGPT.Core.Auth;
-using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Providers;
-using MolaGPT.Desktop.Services;
-using MolaGPT.ViewModels;
 
 namespace MolaGPT.Desktop.Views;
 
@@ -16,30 +13,22 @@ namespace MolaGPT.Desktop.Views;
 /// <c>api/auth/status.php</c> via
 /// <see cref="MolaGptProxyProvider.FetchStatusAsync"/>, renders one row per
 /// model with a request progress bar and a tokens progress bar, and offers
-/// a logout action that wipes the JWT + unregisters the proxy provider so
-/// the next chat falls back to MockEcho or a BYOK provider.
+/// a logout action that clears the account token. Desktop-wide account state
+/// cleanup is coordinated from
+/// <see cref="MolaGPT.Desktop.Services.MolaGptLogoutCoordinator"/>.
 /// </summary>
 public partial class AccountDialog : Window
 {
     private readonly MolaGptAuthService _auth;
     private readonly MolaGptProxyProvider _proxy;
-    private readonly ProviderRegistry _registry;
-    private readonly CloudSyncService _cloudSync;
-    private readonly ConversationListViewModel _conversationListVm;
 
     public AccountDialog(
         MolaGptAuthService auth,
-        MolaGptProxyProvider proxy,
-        ProviderRegistry registry,
-        CloudSyncService cloudSync,
-        ConversationListViewModel conversationListVm)
+        MolaGptProxyProvider proxy)
     {
         InitializeComponent();
         _auth = auth;
         _proxy = proxy;
-        _registry = registry;
-        _cloudSync = cloudSync;
-        _conversationListVm = conversationListVm;
 
         MouseLeftButtonDown += (_, e) =>
         {
@@ -285,25 +274,6 @@ public partial class AccountDialog : Window
         if (confirm != MessageBoxResult.OK) return;
 
         _auth.Logout();
-        try { _registry.Unregister(_proxy.Id); } catch { /* tolerate */ }
-
-        // Remove only the metadata-only placeholders (conversations with no
-        // local messages). These are cloud-list entries the user never opened;
-        // the server keeps full copies, so re-login repopulates them. Any
-        // conversation with actual local content is preserved — this is what
-        // protects offline / sync-disabled users from data loss.
-        //
-        // Hard delete (not soft) so the next login's cloud sync does not push
-        // these ids as deletions to the server. messages cascade via
-        // ON DELETE CASCADE (a no-op here since these rows have none).
-        _cloudSync.CleanupLocalPlaceholdersForLogout();
-        // NOTE: cloud_sync.last_sync_timestamp is intentionally preserved.
-        // Clearing it would force the next login into a "first sync" that
-        // re-uploads every retained local conversation. Same-account re-login
-        // then runs an incremental sync; cross-account switches are handled by
-        // CloudSyncService's account-binding check before sync runs.
-
-        _ = _conversationListVm.ReloadAsync();
 
         DialogResult = true;
         Close();
