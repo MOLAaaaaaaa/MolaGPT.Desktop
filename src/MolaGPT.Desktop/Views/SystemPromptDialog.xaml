@@ -31,19 +31,18 @@
                         BorderThickness="0,0,0,1"
                         MouseLeftButtonDown="Header_MouseLeftButtonDown">
                     <Grid Margin="20,0">
-                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <StackPanel Style="{StaticResource InlineIconTextPanel}">
                             <TextBlock Text="&#xE8A5;"
-                                       FontFamily="{DynamicResource Font.Icon}"
+                                       Style="{StaticResource InlineIconTextBlock}"
                                        FontSize="14"
                                        Margin="0,0,8,0"
-                                       Foreground="{DynamicResource Brush.Primary}"
-                                       VerticalAlignment="Center" />
-                            <TextBlock Text="会话提示词" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Brush.Primary}" />
+                            <TextBlock Text="会话提示词" Style="{StaticResource InlineTextBlock}"
                                        FontWeight="SemiBold" FontSize="14"
                                        Foreground="{DynamicResource Brush.Text.Primary}" />
                             <TextBlock Text="为当前对话临时改写系统提示词"
-                                       VerticalAlignment="Center"
-                                       Margin="10,1,0,0"
+                                       Style="{StaticResource InlineTextBlock.Small}"
+                                       Margin="10,0,0,0"
                                        FontSize="11"
                                        Foreground="{DynamicResource Brush.Text.Muted}" />
                         </StackPanel>

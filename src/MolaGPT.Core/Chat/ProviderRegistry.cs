@@ -10,7 +10,7 @@ namespace MolaGPT.Core.Chat;
 public sealed class ProviderRegistry
 {
     private readonly ConcurrentDictionary<string, IChatProvider> _providers = new();
-    private readonly object _orderGate = new();
+    private readonly System.Threading.Lock _orderGate = new();
     private readonly List<string> _providerOrder = new();
 
     /// <summary>Notified whenever the provider set changes (add / remove / refresh).</summary>

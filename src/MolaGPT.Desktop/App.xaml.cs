@@ -29,6 +29,7 @@ using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels;
 using MolaGPT.ViewModels.Services;
+using AppThemeMode = MolaGPT.ViewModels.ThemeMode;
 
 namespace MolaGPT.Desktop;
 
@@ -44,7 +45,7 @@ public partial class App : Application
 
     private ResourceDictionary? _activeTheme;
     private string _currentThemeKey = "Light";
-    private ThemeMode _themePreference = ThemeMode.System;
+    private AppThemeMode _themePreference = AppThemeMode.System;
     private CancellationTokenSource? _backgroundMemoryTrimCts;
     private static bool s_languageMetadataApplied;
     private static bool s_focusVisualHandlerRegistered;
@@ -220,7 +221,7 @@ public partial class App : Application
             // the settings VM ensures the persisted preference and the radio
             // buttons in the settings window stay in sync.
             var settingsVm = Services.GetRequiredService<SettingsViewModel>();
-            settingsVm.ThemeMode = _currentThemeKey == "Light" ? ThemeMode.Dark : ThemeMode.Light;
+            settingsVm.ThemeMode = _currentThemeKey == "Light" ? AppThemeMode.Dark : AppThemeMode.Light;
         };
         mainVm.SystemPromptRequested = () =>
         {
@@ -694,7 +695,7 @@ public partial class App : Application
 
         return new(
             entry.Id,
-            entry.DisplayName,
+            NormalizeAutoModelDisplayName(entry.Id, entry.DisplayName),
             SupportsVision: entry.Vision,
             SupportsThinking: entry.Thinking,
             SupportsReasoningEffort: entry.ReasoningEffort,
@@ -703,10 +704,33 @@ public partial class App : Application
             ThinkingConfig: thinkingConfig);
     }
 
-    private string ResolveThemeKey(ThemeMode mode) => mode switch
+    private static string NormalizeAutoModelDisplayName(string id, string displayName)
     {
-        ThemeMode.Light => "Light",
-        ThemeMode.Dark => "Dark",
+        var trimmed = (displayName ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(trimmed))
+            return BeautifyModelName(id);
+
+        return string.Equals(trimmed, LegacyBeautifyModelName(id), StringComparison.Ordinal)
+            ? BeautifyModelName(id)
+            : trimmed;
+    }
+
+    private static string BeautifyModelName(string id)
+    {
+        var name = id.Contains('/') ? id[(id.LastIndexOf('/') + 1)..] : id;
+        return name.Replace('_', ' ');
+    }
+
+    private static string LegacyBeautifyModelName(string id)
+    {
+        var name = id.Contains('/') ? id[(id.LastIndexOf('/') + 1)..] : id;
+        return name.Replace('-', ' ').Replace('_', ' ');
+    }
+
+    private string ResolveThemeKey(AppThemeMode mode) => mode switch
+    {
+        AppThemeMode.Light => "Light",
+        AppThemeMode.Dark => "Dark",
         _ => ReadSystemAppTheme()
     };
 
@@ -737,7 +761,7 @@ public partial class App : Application
         // Only react when "follow system" is the active mode and the General
         // category fires (this is what Windows raises for app theme flips).
         if (e.Category != UserPreferenceCategory.General) return;
-        if (_themePreference != ThemeMode.System) return;
+        if (_themePreference != AppThemeMode.System) return;
         Dispatcher.InvokeAsync(() => ApplyTheme(ReadSystemAppTheme()));
     }
 

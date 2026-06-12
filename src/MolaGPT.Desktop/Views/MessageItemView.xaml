@@ -22,33 +22,11 @@
                     Orientation="Horizontal"
                     HorizontalAlignment="Right"
                     Visibility="Collapsed"
-                    Opacity="0"
+                    Opacity="1"
                     RenderTransformOrigin="1,0.5">
             <StackPanel.RenderTransform>
-                <TranslateTransform x:Name="UserSlide" Y="6" />
+                <TranslateTransform x:Name="UserSlide" Y="0" />
             </StackPanel.RenderTransform>
-            <StackPanel.Triggers>
-                <!-- User bubbles enter with a short slide/fade. -->
-                <EventTrigger RoutedEvent="FrameworkElement.Loaded">
-                    <BeginStoryboard>
-                        <Storyboard>
-                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                             From="0" To="1" Duration="0:0:0.3">
-                                <DoubleAnimation.EasingFunction>
-                                    <CubicEase EasingMode="EaseOut" />
-                                </DoubleAnimation.EasingFunction>
-                            </DoubleAnimation>
-                            <DoubleAnimation Storyboard.TargetName="UserSlide"
-                                             Storyboard.TargetProperty="Y"
-                                             From="6" To="0" Duration="0:0:0.3">
-                                <DoubleAnimation.EasingFunction>
-                                    <CubicEase EasingMode="EaseOut" />
-                                </DoubleAnimation.EasingFunction>
-                            </DoubleAnimation>
-                        </Storyboard>
-                    </BeginStoryboard>
-                </EventTrigger>
-            </StackPanel.Triggers>
             <Border x:Name="UserBubbleBorder"
                     Style="{StaticResource UserBubble}"
                     Padding="14,10"
@@ -81,8 +59,16 @@
                                         MaxWidth="220"
                                         MinWidth="96"
                                         Opacity="0.95"
+                                        Tag="{Binding FileName}"
                                         MouseLeftButtonUp="OnAttachmentCardClick"
                                         ToolTip="{Binding FileName}">
+                                    <Border.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="复制文件名"
+                                                      CommandParameter="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      Click="CopyTextMenuItem_Click" />
+                                        </ContextMenu>
+                                    </Border.ContextMenu>
                                     <Border.Style>
                                         <Style TargetType="Border">
                                             <Style.Triggers>
@@ -165,6 +151,15 @@
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
+                    <Button Style="{StaticResource InlineActionButton}"
+                            Width="26"
+                            Height="24"
+                            HorizontalAlignment="Right"
+                            Margin="0,6,-4,-4"
+                            ToolTip="复制消息"
+                            Click="CopyMessage_Click">
+                        <TextBlock Text="&#xE8C8;" FontFamily="{DynamicResource Font.Icon}" FontSize="13" />
+                    </Button>
                 </StackPanel>
             </Border>
             <Border Width="32" Height="32"
@@ -186,33 +181,11 @@
              row 2 spanning both columns. -->
         <Grid x:Name="AssistantGrid"
               Visibility="Collapsed"
-              Opacity="0"
+              Opacity="1"
               RenderTransformOrigin="0,0.5">
             <Grid.RenderTransform>
-                <TranslateTransform x:Name="AssistantSlide" Y="8" />
+                <TranslateTransform x:Name="AssistantSlide" Y="0" />
             </Grid.RenderTransform>
-            <Grid.Triggers>
-                <!-- Assistant messages enter with a short slide/fade. -->
-                <EventTrigger RoutedEvent="FrameworkElement.Loaded">
-                    <BeginStoryboard>
-                        <Storyboard>
-                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                             From="0" To="1" Duration="0:0:0.5">
-                                <DoubleAnimation.EasingFunction>
-                                    <CubicEase EasingMode="EaseOut" />
-                                </DoubleAnimation.EasingFunction>
-                            </DoubleAnimation>
-                            <DoubleAnimation Storyboard.TargetName="AssistantSlide"
-                                             Storyboard.TargetProperty="Y"
-                                             From="8" To="0" Duration="0:0:0.5">
-                                <DoubleAnimation.EasingFunction>
-                                    <CubicEase EasingMode="EaseOut" />
-                                </DoubleAnimation.EasingFunction>
-                            </DoubleAnimation>
-                        </Storyboard>
-                    </BeginStoryboard>
-                </EventTrigger>
-            </Grid.Triggers>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="32" />
                 <ColumnDefinition Width="*" />
@@ -434,6 +407,7 @@
                                             <ColumnDefinition Width="10" />
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
 
                                         <Border Grid.Column="0"
@@ -494,8 +468,10 @@
 
                                         <Border Grid.Column="3"
                                                 CornerRadius="{DynamicResource Radius.Sm}"
-                                                Padding="9,3"
-                                                VerticalAlignment="Top">
+                                                Padding="8,2"
+                                                VerticalAlignment="Center"
+                                                SnapsToDevicePixels="True"
+                                                UseLayoutRounding="True">
                                             <Border.Style>
                                                 <Style TargetType="Border">
                                                     <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
@@ -506,8 +482,12 @@
                                                     </Style.Triggers>
                                                 </Style>
                                             </Border.Style>
-                                            <StackPanel Orientation="Horizontal">
-                                                <Ellipse Width="6" Height="6" Margin="0,0,5,0" VerticalAlignment="Center">
+                                            <StackPanel Style="{StaticResource InlineIconTextPanel}">
+                                                <Ellipse Width="6"
+                                                         Height="6"
+                                                         Margin="0,0,5,0"
+                                                         VerticalAlignment="Center"
+                                                         SnapsToDevicePixels="True">
                                                     <Ellipse.Style>
                                                         <Style TargetType="Ellipse">
                                                             <Setter Property="Fill" Value="{DynamicResource Brush.Primary}" />
@@ -523,9 +503,10 @@
                                                     </Ellipse.Style>
                                                 </Ellipse>
                                                 <TextBlock Text="{Binding Tool.StatusText}"
+                                                           FontFamily="{DynamicResource Font.Cjk}"
                                                            FontSize="11">
                                                     <TextBlock.Style>
-                                                        <Style TargetType="TextBlock">
+                                                        <Style TargetType="TextBlock" BasedOn="{StaticResource InlineTextBlock.Small}">
                                                             <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
                                                             <Style.Triggers>
                                                                 <DataTrigger Binding="{Binding Tool.IsError}" Value="True">
@@ -537,6 +518,16 @@
                                                 </TextBlock>
                                             </StackPanel>
                                         </Border>
+                                        <Button Grid.Column="4"
+                                                Style="{StaticResource InlineActionButton}"
+                                                Width="28"
+                                                Height="28"
+                                                Margin="6,0,-4,0"
+                                                VerticalAlignment="Top"
+                                                ToolTip="复制工具信息"
+                                                Click="CopyTool_Click">
+                                            <TextBlock Text="&#xE8C8;" FontFamily="{DynamicResource Font.Icon}" FontSize="13" />
+                                        </Button>
                                     </Grid>
 
                                     <!-- ┌─ Body: search chips (search_web) ─┐ -->
@@ -555,20 +546,27 @@
                                                         BorderThickness="1"
                                                         CornerRadius="{DynamicResource Radius.Sm}"
                                                         Padding="11,5"
-                                                        Margin="0,0,6,6">
-                                                    <StackPanel Orientation="Horizontal">
+                                                        Margin="0,0,6,6"
+                                                        Tag="{Binding Text}">
+                                                    <Border.ContextMenu>
+                                                        <ContextMenu>
+                                                            <MenuItem Header="复制搜索词"
+                                                                      CommandParameter="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                                      Click="CopyTextMenuItem_Click" />
+                                                        </ContextMenu>
+                                                    </Border.ContextMenu>
+                                                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                                         <TextBlock Text="&#xE721;"
-                                                                   FontFamily="{DynamicResource Font.Icon}"
+                                                                   Style="{StaticResource InlineIconTextBlock.Small}"
                                                                    FontSize="10"
-                                                                   Foreground="{DynamicResource Brush.Text.Muted}"
-                                                                   VerticalAlignment="Center" />
+                                                                   Foreground="{DynamicResource Brush.Text.Muted}" />
                                                         <TextBlock Text="{Binding Text}"
+                                                                   Style="{StaticResource InlineTextBlock.Small}"
                                                                    FontSize="12.5"
                                                                    Margin="6,0,0,0"
                                                                    Foreground="{DynamicResource Brush.Text.Primary}"
                                                                    TextTrimming="CharacterEllipsis"
-                                                                   MaxWidth="480"
-                                                                   VerticalAlignment="Center" />
+                                                                   MaxWidth="480" />
                                                         <Border Background="{DynamicResource Brush.Bg.Tertiary}"
                                                                 CornerRadius="{DynamicResource Radius.Xs}"
                                                                 Padding="6,1"
@@ -592,21 +590,28 @@
                                             CornerRadius="{DynamicResource Radius.Sm}"
                                             Padding="11,8"
                                             Margin="0,12,0,0"
+                                            Tag="{Binding Tool.ArgsView.PrimaryArg.Value}"
                                             Visibility="{Binding Tool.ArgsView.IsUrlPrimary, Converter={x:Static views:BoolToVisibility.Instance}}">
-                                        <StackPanel Orientation="Horizontal">
+                                        <Border.ContextMenu>
+                                            <ContextMenu>
+                                                <MenuItem Header="复制 URL"
+                                                          CommandParameter="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          Click="CopyTextMenuItem_Click" />
+                                            </ContextMenu>
+                                        </Border.ContextMenu>
+                                        <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                             <TextBlock Text="&#xE71B;"
-                                                       FontFamily="{DynamicResource Font.Icon}"
+                                                       Style="{StaticResource InlineIconTextBlock.Small}"
                                                        FontSize="12"
-                                                       Foreground="{DynamicResource Brush.Text.Muted}"
-                                                       VerticalAlignment="Center" />
+                                                       Foreground="{DynamicResource Brush.Text.Muted}" />
                                             <TextBlock Text="{Binding Tool.ArgsView.PrimaryArg.Value}"
+                                                       Style="{StaticResource InlineTextBlock.Small}"
                                                        FontFamily="{DynamicResource Font.Mono}"
                                                        FontSize="12"
                                                        Margin="8,0,0,0"
                                                        Foreground="{DynamicResource Brush.Text.Primary}"
                                                        TextTrimming="CharacterEllipsis"
-                                                       MaxWidth="500"
-                                                       VerticalAlignment="Center" />
+                                                       MaxWidth="500" />
                                             <Border Background="{DynamicResource Brush.Bg.Tertiary}"
                                                     CornerRadius="{DynamicResource Radius.Xs}"
                                                     Padding="7,1"
@@ -627,21 +632,28 @@
                                             CornerRadius="{DynamicResource Radius.Sm}"
                                             Padding="11,8"
                                             Margin="0,12,0,0"
+                                            Tag="{Binding Tool.ArgsView.PrimaryArg.Value}"
                                             Visibility="{Binding Tool.ArgsView.IsPathPrimary, Converter={x:Static views:BoolToVisibility.Instance}}">
-                                        <StackPanel Orientation="Horizontal">
+                                        <Border.ContextMenu>
+                                            <ContextMenu>
+                                                <MenuItem Header="复制路径"
+                                                          CommandParameter="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          Click="CopyTextMenuItem_Click" />
+                                            </ContextMenu>
+                                        </Border.ContextMenu>
+                                        <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                             <TextBlock Text="&#xE7C3;"
-                                                       FontFamily="{DynamicResource Font.Icon}"
+                                                       Style="{StaticResource InlineIconTextBlock.Small}"
                                                        FontSize="12"
-                                                       Foreground="{DynamicResource Brush.Text.Muted}"
-                                                       VerticalAlignment="Center" />
+                                                       Foreground="{DynamicResource Brush.Text.Muted}" />
                                             <TextBlock Text="{Binding Tool.ArgsView.PrimaryArg.Value}"
+                                                       Style="{StaticResource InlineTextBlock.Small}"
                                                        FontFamily="{DynamicResource Font.Mono}"
                                                        FontSize="12"
                                                        Margin="8,0,0,0"
                                                        Foreground="{DynamicResource Brush.Text.Primary}"
                                                        TextTrimming="CharacterEllipsis"
-                                                       MaxWidth="500"
-                                                       VerticalAlignment="Center" />
+                                                       MaxWidth="500" />
                                             <Border Background="{DynamicResource Brush.Bg.Tertiary}"
                                                     CornerRadius="{DynamicResource Radius.Xs}"
                                                     Padding="7,1"
@@ -663,7 +675,15 @@
                                             Padding="11,5"
                                             Margin="0,12,6,0"
                                             HorizontalAlignment="Left"
+                                            Tag="{Binding Tool.ArgsView.PrimaryArg.Value}"
                                             Visibility="{Binding Tool.ArgsView.IsTextPrimary, Converter={x:Static views:BoolToVisibility.Instance}}">
+                                        <Border.ContextMenu>
+                                            <ContextMenu>
+                                                <MenuItem Header="复制文本"
+                                                          CommandParameter="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          Click="CopyTextMenuItem_Click" />
+                                            </ContextMenu>
+                                        </Border.ContextMenu>
                                         <StackPanel Orientation="Horizontal">
                                             <TextBlock Text="{Binding Tool.ArgsView.PrimaryArg.Value}"
                                                        FontSize="12.5"
@@ -700,7 +720,15 @@
                                                         BorderThickness="1"
                                                         CornerRadius="{DynamicResource Radius.Sm}"
                                                         Padding="8,4"
-                                                        Margin="0,0,6,6">
+                                                        Margin="0,0,6,6"
+                                                        Tag="{Binding Value}">
+                                                    <Border.ContextMenu>
+                                                        <ContextMenu>
+                                                            <MenuItem Header="复制值"
+                                                                      CommandParameter="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                                      Click="CopyTextMenuItem_Click" />
+                                                        </ContextMenu>
+                                                    </Border.ContextMenu>
                                                     <StackPanel Orientation="Horizontal">
                                                         <Border Background="{DynamicResource Brush.Bg.Tertiary}"
                                                                 CornerRadius="{DynamicResource Radius.Xs}"
@@ -800,11 +828,11 @@
                                                 Visibility="{Binding IsChecked, ElementName=ArgsToggle, Converter={x:Static views:BoolToVisibility.Instance}}">
                                             <ScrollViewer VerticalScrollBarVisibility="Auto"
                                                           HorizontalScrollBarVisibility="Auto">
-                                                <TextBlock Text="{Binding Tool.DisplayArgumentsJson}"
-                                                           FontFamily="{DynamicResource Font.Mono}"
-                                                           FontSize="11"
-                                                           Foreground="{DynamicResource Brush.Text.Secondary}"
-                                                           TextWrapping="Wrap" />
+                                                <TextBox Text="{Binding Tool.DisplayArgumentsJson, Mode=OneWay}"
+                                                         Style="{StaticResource SelectableBlockTextBox}"
+                                                         FontFamily="{DynamicResource Font.Mono}"
+                                                         FontSize="11"
+                                                         Foreground="{DynamicResource Brush.Text.Secondary}" />
                                             </ScrollViewer>
                                         </Border>
 
@@ -857,11 +885,11 @@
                                                 Visibility="{Binding IsChecked, ElementName=ResultToggle, Converter={x:Static views:BoolToVisibility.Instance}}">
                                             <ScrollViewer VerticalScrollBarVisibility="Auto"
                                                           HorizontalScrollBarVisibility="Auto">
-                                                <TextBlock Text="{Binding Tool.DisplayResultPreviewJson}"
-                                                           FontFamily="{DynamicResource Font.Mono}"
-                                                           FontSize="11"
-                                                           Foreground="{DynamicResource Brush.Text.Secondary}"
-                                                           TextWrapping="Wrap" />
+                                                <TextBox Text="{Binding Tool.DisplayResultPreviewJson, Mode=OneWay}"
+                                                         Style="{StaticResource SelectableBlockTextBox}"
+                                                         FontFamily="{DynamicResource Font.Mono}"
+                                                         FontSize="11"
+                                                         Foreground="{DynamicResource Brush.Text.Secondary}" />
                                             </ScrollViewer>
                                         </Border>
                                     </StackPanel>
@@ -890,8 +918,16 @@
                                     Margin="0,0,10,10"
                                     MaxWidth="260"
                                     Cursor="Hand"
+                                    Tag="{Binding FileName}"
                                     MouseLeftButtonUp="OnAttachmentCardClick"
                                     ToolTip="{Binding FileName}">
+                                <Border.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="复制文件名"
+                                                  CommandParameter="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                  Click="CopyTextMenuItem_Click" />
+                                    </ContextMenu>
+                                </Border.ContextMenu>
                                 <StackPanel>
                                     <Border Width="240"
                                             Height="180"

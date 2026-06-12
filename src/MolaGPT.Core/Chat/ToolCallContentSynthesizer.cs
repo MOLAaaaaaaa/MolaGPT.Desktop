@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -10,6 +11,12 @@ namespace MolaGPT.Core.Chat;
 /// </summary>
 public sealed class ToolCallContentSynthesizer
 {
+    private static readonly JsonSerializerOptions DisplayJsonOptions = new()
+    {
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
     private sealed class State
     {
         public string Name { get; set; } = string.Empty;
@@ -134,7 +141,7 @@ public sealed class ToolCallContentSynthesizer
         try
         {
             using var doc = JsonDocument.Parse(rawArgs);
-            return JsonSerializer.Serialize(doc.RootElement, new JsonSerializerOptions { WriteIndented = true });
+            return JsonSerializer.Serialize(doc.RootElement, DisplayJsonOptions);
         }
         catch (JsonException)
         {

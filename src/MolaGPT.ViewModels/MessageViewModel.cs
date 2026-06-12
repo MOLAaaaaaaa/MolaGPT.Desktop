@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Chat;
@@ -17,9 +19,8 @@ namespace MolaGPT.ViewModels;
 ///   <item><see cref="AppendThinking"/> first call → record
 ///         <see cref="_thinkingStartedAt"/>, mark <see cref="IsThinkingActive"/>=true,
 ///         start a 100ms timer so <see cref="ThinkingElapsedSeconds"/> ticks live.</item>
-///   <item>Visible answer text after thinking is allowed a short 80-char
-///         grace window before we auto-collapse thinking, so short text
-///         between tool calls can still be treated as a reasoning gap.</item>
+///   <item>The first visible answer/tool delta after thinking freezes the
+///         elapsed counter and closes the current thinking segment.</item>
 ///   <item><see cref="StopThinking"/> is also called by FinalizeAssistantMessage
 ///         to handle the edge case where reasoning fired but no normal
 ///         content arrived (e.g. cancelled mid-thought).</item>
@@ -32,21 +33,22 @@ namespace MolaGPT.ViewModels;
 /// </summary>
 public sealed partial class MessageViewModel : ObservableObject, IDisposable
 {
-    private const int ThinkingAutoCollapseVisibleChars = 80;
-    private const int ThinkingToolGapVisibleChars = ThinkingAutoCollapseVisibleChars;
     private static readonly TimeSpan StreamFlushInterval = TimeSpan.FromMilliseconds(16);
-    private static readonly System.Text.RegularExpressions.Regex ImageGenDsAnalysisRegex = new(
-        "<DSanalysis\\b(?=[^>]*\\bdata-tool-type\\s*=\\s*['\"]image-gen['\"])[^>]*>[\\s\\S]*?</DSanalysis>",
-        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
-    private static readonly System.Text.RegularExpressions.Regex HiddenDsAnalysisRegex = new(
-        "<DSanalysis\\b(?=[^>]*\\bdata-tool-type\\s*=\\s*['\"](?!(?:python|mcp|image-action)['\"])[^'\"]+['\"])[^>]*>[\\s\\S]*?</DSanalysis>",
-        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
-    private static readonly System.Text.RegularExpressions.Regex EmptyDsAnalysisRegex = new(
-        "<DSanalysis\\b[^>]*>\\s*</DSanalysis>",
-        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
-    private static readonly System.Text.RegularExpressions.Regex HtmlCommentRegex = new(
-        "<!--[\\s\\S]*?-->",
-        System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    [GeneratedRegex("<DSanalysis\\b(?=[^>]*\\bdata-tool-type\\s*=\\s*['\"]image-gen['\"])[^>]*>[\\s\\S]*?</DSanalysis>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ImageGenDsAnalysisRegex();
+
+    [GeneratedRegex("<DSanalysis\\b(?=[^>]*\\bdata-tool-type\\s*=\\s*['\"](?!(?:python|mcp|image-action)['\"])[^'\"]+['\"])[^>]*>[\\s\\S]*?</DSanalysis>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex HiddenDsAnalysisRegex();
+
+    [GeneratedRegex("<DSanalysis\\b[^>]*>\\s*</DSanalysis>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex EmptyDsAnalysisRegex();
+
+    [GeneratedRegex("<!--[\\s\\S]*?-->", RegexOptions.CultureInvariant)]
+    private static partial Regex HtmlCommentRegex();
+
+    [GeneratedRegex("✝[^✝]*✝")]
+    private static partial Regex DaggerWrappedTokenRegex();
 
     [ObservableProperty] private string _role;
     [ObservableProperty] private string _content;
@@ -104,7 +106,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     private System.Threading.Timer? _elapsedTimer;
     private System.Threading.Timer? _pendingTimer;
     private System.Threading.Timer? _streamFlushTimer;
-    private readonly object _streamLock = new();
+    private readonly System.Threading.Lock _streamLock = new();
     private readonly System.Text.StringBuilder _pendingDelta = new();
     private readonly SynchronizationContext? _syncContext;
     private ThinkingSegmentViewModel? _activeThinkingSegment;
@@ -157,9 +159,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
 
         // First content delta after thinking → freeze the elapsed counter
         // and stop the pulsing UI. This is the "思考已完成" transition.
-        if (IsThinkingActive
-            && HasThinking
-            && CountVisibleCharsAfterThinking(Content) > ThinkingAutoCollapseVisibleChars)
+        if (IsThinkingActive && HasThinking)
         {
             StopThinking();
         }
@@ -272,38 +272,6 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         RebuildDisplayBlocks();
     }
 
-    public bool ReclaimRecentVisibleContentForThinking(int maxVisibleChars = ThinkingToolGapVisibleChars)
-    {
-        if (_disposed || maxVisibleChars < 0) return false;
-        // Guard: only reclaim into a thinking block that's already been opened
-        // (active now, or auto-collapsed earlier in the same message). When the
-        // model never engaged thinking — e.g. user has 推理 off and the model
-        // just says "我调用一次 search_web 工具" before emitting a tool-status
-        // blockquote — that lead-in is plain content and must NOT be vacuumed
-        // into a phantom thinking segment.
-        if (!IsThinkingActive && ThinkingSegments.Count == 0) return false;
-
-        FlushPendingDelta();
-
-        var segment = ThinkingSegments
-            .OrderByDescending(t => t.ContentOffset)
-            .ThenByDescending(t => t.TimelineIndex)
-            .FirstOrDefault();
-
-        var offset = segment is null ? 0 : Math.Clamp(segment.ContentOffset, 0, Content.Length);
-        if (offset >= Content.Length) return false;
-
-        var suffix = Content[offset..];
-        if (string.IsNullOrWhiteSpace(suffix) || CountVisibleChars(suffix) > maxVisibleChars)
-            return false;
-
-        Content = Content[..offset];
-        segment ??= CreateThinkingSegmentAt(offset);
-        ResumeThinkingSegment(segment);
-        AppendThinking(suffix);
-        return true;
-    }
-
     /// <summary>Freeze the elapsed counter and clear active state. Called
     /// when normal content starts arriving or when streaming finalizes.</summary>
     public void StopThinking()
@@ -321,16 +289,6 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         IsThinkingActive = false;
         _elapsedTimer?.Dispose();
         _elapsedTimer = null;
-    }
-
-    private void ResumeThinkingSegment(ThinkingSegmentViewModel segment)
-    {
-        _activeThinkingSegment = segment;
-        _thinkingStartedAt ??= DateTimeOffset.UtcNow - TimeSpan.FromSeconds(Math.Max(0, ThinkingElapsedSeconds));
-        segment.IsThinking = true;
-        segment.ElapsedSeconds = ThinkingElapsedSeconds;
-        IsThinkingActive = true;
-        EnsureElapsedTimer();
     }
 
     public void BeginRetryAttempt()
@@ -553,34 +511,6 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(HasActions));
     }
 
-    private static int CountVisibleCharsAfterThinking(string content)
-        => CountVisibleChars(content);
-
-    private static int CountVisibleChars(string content)
-    {
-        if (string.IsNullOrWhiteSpace(content)) return 0;
-
-        var count = 0;
-        var inTag = false;
-        foreach (var ch in content)
-        {
-            if (ch == '<')
-            {
-                inTag = true;
-                continue;
-            }
-            if (ch == '>')
-            {
-                inTag = false;
-                continue;
-            }
-            if (inTag || char.IsWhiteSpace(ch)) continue;
-            count++;
-        }
-
-        return count;
-    }
-
     private void RebuildDisplayBlocks()
     {
         var next = new List<MessageDisplayBlockViewModel>();
@@ -629,10 +559,10 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         var source = thinking.Source;
         if (string.IsNullOrWhiteSpace(source)) return false;
 
-        var visible = ImageGenDsAnalysisRegex.Replace(source, string.Empty);
-        visible = HiddenDsAnalysisRegex.Replace(visible, string.Empty);
-        visible = EmptyDsAnalysisRegex.Replace(visible, string.Empty);
-        visible = HtmlCommentRegex.Replace(visible, string.Empty);
+        var visible = ImageGenDsAnalysisRegex().Replace(source, string.Empty);
+        visible = HiddenDsAnalysisRegex().Replace(visible, string.Empty);
+        visible = EmptyDsAnalysisRegex().Replace(visible, string.Empty);
+        visible = HtmlCommentRegex().Replace(visible, string.Empty);
         return visible.Any(ch => !char.IsWhiteSpace(ch) && ch != '\u200B' && ch != '\uFEFF');
     }
 
@@ -694,7 +624,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public static string StripSystemHints(string? content)
     {
         if (string.IsNullOrEmpty(content)) return string.Empty;
-        return System.Text.RegularExpressions.Regex.Replace(content, "✝[^✝]*✝", string.Empty).Trim();
+        return DaggerWrappedTokenRegex().Replace(content, string.Empty).Trim();
     }
 
     public void Dispose()
@@ -925,11 +855,83 @@ public sealed partial class ToolCallViewModel : ObservableObject
         try
         {
             using var doc = JsonDocument.Parse(json);
-            return JsonSerializer.Serialize(doc.RootElement, DisplayJsonOptions);
+            var displayRoot = DecodeJsonStringValues(doc.RootElement);
+            return JsonSerializer.Serialize(displayRoot, DisplayJsonOptions);
         }
         catch (JsonException)
         {
-            return json;
+            return DecodeUnicodeEscapes(json);
         }
     }
+
+    private static JsonNode? DecodeJsonStringValues(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                var obj = new JsonObject();
+                foreach (var property in element.EnumerateObject())
+                    obj[property.Name] = DecodeJsonStringValues(property.Value);
+                return obj;
+
+            case JsonValueKind.Array:
+                var array = new JsonArray();
+                foreach (var item in element.EnumerateArray())
+                    array.Add(DecodeJsonStringValues(item));
+                return array;
+
+            case JsonValueKind.String:
+                return JsonValue.Create(DecodeUnicodeEscapes(element.GetString() ?? string.Empty));
+
+            case JsonValueKind.Number:
+                return JsonNode.Parse(element.GetRawText());
+
+            case JsonValueKind.True:
+                return JsonValue.Create(true);
+
+            case JsonValueKind.False:
+                return JsonValue.Create(false);
+
+            case JsonValueKind.Null:
+            case JsonValueKind.Undefined:
+            default:
+                return null;
+        }
+    }
+
+    private static string DecodeUnicodeEscapes(string text)
+    {
+        if (string.IsNullOrEmpty(text)
+            || (!text.Contains(@"\u", StringComparison.Ordinal)
+                && !text.Contains(@"\U", StringComparison.Ordinal)))
+        {
+            return text;
+        }
+
+        return UnicodeEscapeRegex().Replace(text, match =>
+        {
+            var isLong = match.Groups["long"].Success;
+            var hex = isLong ? match.Groups["long"].Value : match.Groups["short"].Value;
+            try
+            {
+                var value = Convert.ToInt32(hex, 16);
+                return isLong ? char.ConvertFromUtf32(value) : ((char)value).ToString();
+            }
+            catch (ArgumentException)
+            {
+                return match.Value;
+            }
+            catch (OverflowException)
+            {
+                return match.Value;
+            }
+            catch (FormatException)
+            {
+                return match.Value;
+            }
+        });
+    }
+
+    [GeneratedRegex(@"\\(?:u(?<short>[0-9a-fA-F]{4})|U(?<long>[0-9a-fA-F]{8}))", RegexOptions.CultureInvariant)]
+    private static partial Regex UnicodeEscapeRegex();
 }

@@ -690,10 +690,9 @@ public sealed partial class ComposerViewModel : ObservableObject
         CancellationTokenSource cts,
         BackgroundStreamTask? trackingTask = null)
     {
-        var toolProgressRouting = new ToolProgressRoutingState();
         await foreach (var chunk in provider.StreamChatAsync(req, cts.Token).WithCancellation(cts.Token))
         {
-            ApplyStreamChunk(assistantMsg, chunk, toolProgressRouting);
+            ApplyStreamChunk(assistantMsg, chunk);
             if (trackingTask is not null && chunk.RawJson is not null)
                 trackingTask.ReceivedChunkCount++;
             if (chunk.FinishReason is not null) break;
@@ -709,10 +708,9 @@ public sealed partial class ComposerViewModel : ObservableObject
         CancellationTokenSource cts,
         BackgroundStreamTask? trackingTask = null)
     {
-        var toolProgressRouting = new ToolProgressRoutingState();
         await foreach (var chunk in provider.ResumeStreamAsync(sessionId, offset, apiUrl, cts.Token).WithCancellation(cts.Token))
         {
-            ApplyStreamChunk(assistantMsg, chunk, toolProgressRouting);
+            ApplyStreamChunk(assistantMsg, chunk);
             if (trackingTask is not null && chunk.RawJson is not null)
                 trackingTask.ReceivedChunkCount++;
             if (chunk.FinishReason is not null) break;
@@ -1004,10 +1002,9 @@ public sealed partial class ComposerViewModel : ObservableObject
                 ThinkingBudgetTokens: EnableThinking ? ThinkingBudgetTokens : null,
                 ThinkingParamKind: thinkingKind);
 
-            var toolProgressRouting = new ToolProgressRoutingState();
             await foreach (var chunk in activeProvider.StreamChatAsync(req, _cts.Token).WithCancellation(_cts.Token))
             {
-                ApplyStreamChunk(assistantMsg, chunk, toolProgressRouting);
+                ApplyStreamChunk(assistantMsg, chunk);
                 if (chunk.FinishReason is not null) break;
             }
         }
@@ -1067,7 +1064,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             || model.DisplayName.Contains("MolaGPT Routes", StringComparison.OrdinalIgnoreCase);
     }
 
-    private void ApplyStreamChunk(MessageViewModel assistantMsg, ChatChunk chunk, ToolProgressRoutingState toolProgressRouting)
+    private void ApplyStreamChunk(MessageViewModel assistantMsg, ChatChunk chunk)
     {
         if (chunk.Pending is { } pending)
             assistantMsg.SetPendingStatus(pending.Label, pending.Detail, pending.IsRoutes);
@@ -1086,19 +1083,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         if (chunk.Usage is not null)
             assistantMsg.Usage = chunk.Usage;
         if (chunk.DeltaText is { Length: > 0 } t)
-        {
-            var routed = RouteToolProgressDelta(t, toolProgressRouting);
-            if (!string.IsNullOrEmpty(routed.Thinking))
-            {
-                var reclaimed = assistantMsg.ReclaimRecentVisibleContentForThinking();
-                if (assistantMsg.IsThinkingActive || reclaimed)
-                    assistantMsg.AppendThinking(routed.Thinking);
-                else
-                    assistantMsg.AppendDelta(routed.Thinking);
-            }
-            if (!string.IsNullOrEmpty(routed.Visible))
-                assistantMsg.AppendDelta(routed.Visible);
-        }
+            assistantMsg.AppendDelta(t);
         if (chunk.DeltaThinking is { Length: > 0 } th)
             assistantMsg.AppendThinking(th);
     }
@@ -1250,167 +1235,6 @@ public sealed partial class ComposerViewModel : ObservableObject
             kind = MolaGPT.Core.Models.ThinkingParamKindInference.InferFromModelId(_chat.ActiveModel?.Id);
 
         return kind == MolaGPT.Core.Models.ThinkingParamKind.None ? null : kind;
-    }
-
-    private static RoutedToolProgressDelta RouteToolProgressDelta(string text, ToolProgressRoutingState state)
-    {
-        if (string.IsNullOrEmpty(text))
-            return new RoutedToolProgressDelta(null, null);
-
-        if (state.IsInsideToolMarkup)
-        {
-            var balancedEnd = state.FindBalancedEnd(text);
-            if (balancedEnd.HasValue && balancedEnd.Value > 0 && balancedEnd.Value < text.Length)
-            {
-                var thinking = text[..balancedEnd.Value];
-                state.Absorb(thinking);
-                var tail = RouteToolProgressDelta(text[balancedEnd.Value..], state);
-                return new RoutedToolProgressDelta(thinking + tail.Thinking, tail.Visible);
-            }
-
-            state.Absorb(text);
-            return new RoutedToolProgressDelta(text, null);
-        }
-
-        if (!IsMolaGptToolProgressMarkup(text))
-            return new RoutedToolProgressDelta(null, text);
-
-        var completeEnd = state.FindBalancedEnd(text);
-        if (completeEnd.HasValue && completeEnd.Value > 0 && completeEnd.Value < text.Length)
-        {
-            var thinking = text[..completeEnd.Value];
-            state.Absorb(thinking);
-            var tail = RouteToolProgressDelta(text[completeEnd.Value..], state);
-            return new RoutedToolProgressDelta(thinking + tail.Thinking, tail.Visible);
-        }
-
-        state.Absorb(text);
-        return new RoutedToolProgressDelta(text, null);
-    }
-
-    private static bool IsMolaGptToolProgressMarkup(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return false;
-        return text.Contains("tool-status", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("<DSanalysis", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("</DSanalysis>", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("<steel-step", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("</steel-step>", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("ai-image-pending-skeleton", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("ai-image-error-card", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("tool-steel-step", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("tool-steel-step-card", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("tool-steel-step-meta", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("tool-steel-meta-item", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("tool-search-chip", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("</blockquote>", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private sealed class ToolProgressRoutingState
-    {
-        private int _steelDepth;
-        private int _dsDepth;
-        private int _toolStatusDepth;
-
-        public bool IsInsideToolMarkup => _steelDepth > 0 || _dsDepth > 0 || _toolStatusDepth > 0;
-
-        public int? FindBalancedEnd(string text)
-        {
-            var steelDepth = _steelDepth;
-            var dsDepth = _dsDepth;
-            var toolStatusDepth = _toolStatusDepth;
-            var pos = 0;
-
-            while (pos < text.Length)
-            {
-                var marker = FindNextMarker(text, pos);
-                if (marker is null) return null;
-
-                var (index, token, delta) = marker.Value;
-                if (token == ToolMarkupToken.Steel) steelDepth = Math.Max(0, steelDepth + delta);
-                else if (token == ToolMarkupToken.DsAnalysis) dsDepth = Math.Max(0, dsDepth + delta);
-                else toolStatusDepth = Math.Max(0, toolStatusDepth + delta);
-
-                var eventEnd = index + MarkerLength(token, delta);
-                if (steelDepth == 0 && dsDepth == 0 && toolStatusDepth == 0)
-                    return eventEnd;
-
-                pos = eventEnd;
-            }
-
-            return null;
-        }
-
-        public void Absorb(string text)
-        {
-            _steelDepth = Math.Max(0, _steelDepth + Count(text, "<steel-step") - Count(text, "</steel-step>"));
-            _dsDepth = Math.Max(0, _dsDepth + Count(text, "<DSanalysis") - Count(text, "</DSanalysis>"));
-            _toolStatusDepth = Math.Max(0, _toolStatusDepth + Count(text, "<blockquote class=\"tool-status") - Count(text, "</blockquote>"));
-        }
-
-        private static int Count(string text, string needle)
-        {
-            var count = 0;
-            var index = 0;
-            while ((index = text.IndexOf(needle, index, StringComparison.OrdinalIgnoreCase)) >= 0)
-            {
-                count++;
-                index += needle.Length;
-            }
-            return count;
-        }
-
-        private static (int Index, ToolMarkupToken Token, int Delta)? FindNextMarker(string text, int start)
-        {
-            var bestIndex = -1;
-            var bestToken = ToolMarkupToken.Steel;
-            var bestDelta = 0;
-
-            Consider(text, "<steel-step", ToolMarkupToken.Steel, +1, start, ref bestIndex, ref bestToken, ref bestDelta);
-            Consider(text, "</steel-step>", ToolMarkupToken.Steel, -1, start, ref bestIndex, ref bestToken, ref bestDelta);
-            Consider(text, "<DSanalysis", ToolMarkupToken.DsAnalysis, +1, start, ref bestIndex, ref bestToken, ref bestDelta);
-            Consider(text, "</DSanalysis>", ToolMarkupToken.DsAnalysis, -1, start, ref bestIndex, ref bestToken, ref bestDelta);
-            Consider(text, "<blockquote class=\"tool-status", ToolMarkupToken.ToolStatus, +1, start, ref bestIndex, ref bestToken, ref bestDelta);
-            Consider(text, "</blockquote>", ToolMarkupToken.ToolStatus, -1, start, ref bestIndex, ref bestToken, ref bestDelta);
-
-            return bestIndex < 0 ? null : (bestIndex, bestToken, bestDelta);
-        }
-
-        private static void Consider(
-            string text,
-            string marker,
-            ToolMarkupToken token,
-            int delta,
-            int start,
-            ref int bestIndex,
-            ref ToolMarkupToken bestToken,
-            ref int bestDelta)
-        {
-            var index = text.IndexOf(marker, start, StringComparison.OrdinalIgnoreCase);
-            if (index < 0 || (bestIndex >= 0 && index >= bestIndex)) return;
-            bestIndex = index;
-            bestToken = token;
-            bestDelta = delta;
-        }
-
-        private static int MarkerLength(ToolMarkupToken token, int delta) => (token, delta) switch
-        {
-            (ToolMarkupToken.Steel, > 0) => "<steel-step".Length,
-            (ToolMarkupToken.Steel, _) => "</steel-step>".Length,
-            (ToolMarkupToken.DsAnalysis, > 0) => "<DSanalysis".Length,
-            (ToolMarkupToken.DsAnalysis, _) => "</DSanalysis>".Length,
-            (ToolMarkupToken.ToolStatus, > 0) => "<blockquote class=\"tool-status".Length,
-            _ => "</blockquote>".Length
-        };
-    }
-
-    private readonly record struct RoutedToolProgressDelta(string? Thinking, string? Visible);
-
-    private enum ToolMarkupToken
-    {
-        Steel,
-        DsAnalysis,
-        ToolStatus
     }
 
     private static string CreateWebCompatibleConversationId()

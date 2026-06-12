@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
@@ -73,7 +74,28 @@ public partial class MessageItemView : UserControl
     private void CopyButton_Click(object sender, RoutedEventArgs e)
     {
         if (DataContext is not MessageViewModel vm) return;
-        Clipboard.SetText(GetCleanMarkdownForCopy(vm.Content));
+        CopyText(GetCleanMarkdownForCopy(vm.Content));
+    }
+
+    private void CopyMessage_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: MessageViewModel vm })
+            CopyText(GetCleanMarkdownForCopy(vm.Content));
+        e.Handled = true;
+    }
+
+    private void CopyTool_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: MessageDisplayBlockViewModel { Tool: { } tool } })
+            CopyText(BuildToolCopy(tool));
+        e.Handled = true;
+    }
+
+    private void CopyTextMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem { CommandParameter: string text })
+            CopyText(text);
+        e.Handled = true;
     }
 
     private void StatsButton_Click(object sender, RoutedEventArgs e)
@@ -88,14 +110,40 @@ public partial class MessageItemView : UserControl
             MaxWidth = 280,
         };
 
-        panel.Children.Add(new TextBlock
+        var header = new DockPanel
+        {
+            Margin = new Thickness(0, 0, 0, 8)
+        };
+        var copyStats = new Button
+        {
+            Style = TryFindResource("InlineActionButton") as Style,
+            Width = 26,
+            Height = 24,
+            ToolTip = "复制统计",
+            Content = new TextBlock
+            {
+                Text = "\uE8C8",
+                FontFamily = TryFindResource("Font.Icon") as FontFamily
+                             ?? new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
+                FontSize = 12
+            }
+        };
+        copyStats.Click += (_, args) =>
+        {
+            CopyText(vm.ResponseStatsText);
+            args.Handled = true;
+        };
+        DockPanel.SetDock(copyStats, Dock.Right);
+        header.Children.Add(copyStats);
+        header.Children.Add(new TextBlock
         {
             Text = "响应统计",
             FontSize = 12,
             FontWeight = FontWeights.SemiBold,
             Foreground = FindBrush("Brush.Text.Secondary", Brushes.DimGray),
-            Margin = new Thickness(0, 0, 0, 8)
+            VerticalAlignment = VerticalAlignment.Center
         });
+        panel.Children.Add(header);
 
         var rows = (vm.ResponseStatsText ?? "暂无响应统计")
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -171,6 +219,41 @@ public partial class MessageItemView : UserControl
     {
         try { return TryFindResource(key) is CornerRadius radius ? radius : fallback; }
         catch { return fallback; }
+    }
+
+    private static void CopyText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+        Clipboard.SetText(text.Trim());
+    }
+
+    private static string BuildToolCopy(ToolCallViewModel tool)
+    {
+        var builder = new StringBuilder();
+        builder.Append("工具：").AppendLine(tool.Label);
+        if (!string.Equals(tool.Name, tool.Label, StringComparison.OrdinalIgnoreCase))
+            builder.Append("名称：").AppendLine(tool.Name);
+        builder.Append("状态：").AppendLine(tool.StatusText);
+        if (!string.IsNullOrWhiteSpace(tool.Detail))
+            builder.Append("详情：").AppendLine(tool.Detail);
+        if (!string.IsNullOrWhiteSpace(tool.Summary))
+            builder.Append("摘要：").AppendLine(tool.Summary);
+        if (!string.IsNullOrWhiteSpace(tool.Provider))
+            builder.Append("服务：").AppendLine(tool.Provider);
+        if (!string.IsNullOrWhiteSpace(tool.DisplayArgumentsJson))
+        {
+            builder.AppendLine();
+            builder.AppendLine("输入参数：");
+            builder.AppendLine(tool.DisplayArgumentsJson);
+        }
+        if (!string.IsNullOrWhiteSpace(tool.DisplayResultPreviewJson))
+        {
+            builder.AppendLine();
+            builder.AppendLine("结果预览：");
+            builder.AppendLine(tool.DisplayResultPreviewJson);
+        }
+
+        return builder.ToString().Trim();
     }
 
     private static string GetCleanMarkdownForCopy(string? raw)

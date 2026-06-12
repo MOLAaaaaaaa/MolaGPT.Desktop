@@ -979,18 +979,20 @@ internal static class MolaGptMarkupBlocks
             {
                 FontFamily = GetFont(host, "Font.Icon"),
                 FontSize = 11,
-                Width = 16,
+                Width = 18,
                 Height = 18,
                 LineHeight = 18,
                 LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
                 TextAlignment = TextAlignment.Center,
                 Opacity = 0.8,
-                VerticalAlignment = VerticalAlignment.Center
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center
             };
             _title = new TextBlock
             {
                 FontSize = 13,
                 FontWeight = FontWeights.Medium,
+                Height = 18,
                 LineHeight = 18,
                 LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
                 VerticalAlignment = VerticalAlignment.Center,
@@ -1001,6 +1003,11 @@ internal static class MolaGptMarkupBlocks
                 Text = "\uE70D",
                 FontFamily = GetFont(host, "Font.Icon"),
                 FontSize = 10,
+                Width = 18,
+                Height = 18,
+                LineHeight = 18,
+                LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
+                TextAlignment = TextAlignment.Center,
                 Opacity = 0.75,
                 Margin = new Thickness(8, 0, 0, 0),
                 VerticalAlignment = VerticalAlignment.Center,
@@ -1013,7 +1020,9 @@ internal static class MolaGptMarkupBlocks
                 MinHeight = 36,
                 Margin = new Thickness(0),
                 Cursor = System.Windows.Input.Cursors.Hand,
-                VerticalAlignment = VerticalAlignment.Center
+                VerticalAlignment = VerticalAlignment.Center,
+                UseLayoutRounding = true,
+                SnapsToDevicePixels = true
             };
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -1021,7 +1030,7 @@ internal static class MolaGptMarkupBlocks
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             header.Children.Add(_icon);
             Grid.SetColumn(_icon, 0);
-            var spacer = new Border { Width = 6 };
+            var spacer = new Border { Width = 6, Height = 18, VerticalAlignment = VerticalAlignment.Center };
             header.Children.Add(spacer);
             Grid.SetColumn(spacer, 1);
             header.Children.Add(_title);

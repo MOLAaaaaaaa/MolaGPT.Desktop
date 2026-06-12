@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using MolaGPT.Core.Auth;
@@ -10,6 +11,10 @@ public static partial class LocalToolRegistry
 {
     private const int MaxSearchQueries = 5;
     private const int MaxPageCharacters = 12000;
+    private static readonly JsonSerializerOptions ToolResultJsonOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
 
     public static IReadOnlyList<object> BuildOpenAiToolDefinitions(LocalToolOptions options)
     {
@@ -109,7 +114,7 @@ public static partial class LocalToolRegistry
             {
                 "search_web" => await SearchWebAsync(argumentsJson, options, http, ct).ConfigureAwait(false),
                 "web_fetch" => await ScrapeWebPageAsync(argumentsJson, options, http, ct).ConfigureAwait(false),
-                _ => JsonSerializer.Serialize(new
+                _ => SerializeToolResult(new
                 {
                     success = false,
                     error = $"Unknown local tool: {toolName}"
@@ -118,7 +123,7 @@ public static partial class LocalToolRegistry
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return JsonSerializer.Serialize(new
+            return SerializeToolResult(new
             {
                 success = false,
                 error = ex.Message
@@ -158,7 +163,7 @@ public static partial class LocalToolRegistry
         }
 
         var results = await Task.WhenAll(tasks).ConfigureAwait(false);
-        return JsonSerializer.Serialize(new
+        return SerializeToolResult(new
         {
             success = true,
             source = "local_search_web",
@@ -229,7 +234,7 @@ public static partial class LocalToolRegistry
         var action = ReadString(root, "action") ?? "scrape";
         if (!action.Equals("scrape", StringComparison.OrdinalIgnoreCase))
         {
-            return JsonSerializer.Serialize(new
+            return SerializeToolResult(new
             {
                 success = false,
                 error = "Local BYOK web_fetch currently supports only action=scrape."
@@ -241,7 +246,7 @@ public static partial class LocalToolRegistry
             || !Uri.TryCreate(rawUrl, UriKind.Absolute, out var url)
             || url.Scheme is not ("http" or "https"))
         {
-            return JsonSerializer.Serialize(new
+            return SerializeToolResult(new
             {
                 success = false,
                 error = "A valid http/https url is required."
@@ -270,7 +275,7 @@ public static partial class LocalToolRegistry
         if (text.Length > maxChars)
             text = text[..maxChars] + "\n[content truncated]";
 
-        return JsonSerializer.Serialize(new
+        return SerializeToolResult(new
         {
             success = true,
             source = "local_web_fetch",
@@ -507,17 +512,53 @@ public static partial class LocalToolRegistry
 
     private static string HtmlToText(string html)
     {
-        var text = ScriptStyleRegex.Replace(html, " ");
-        text = TagRegex.Replace(text, " ");
+        var text = ScriptStyleRegex().Replace(html, " ");
+        text = TagRegex().Replace(text, " ");
         text = WebUtility.HtmlDecode(text);
-        return WhitespaceRegex.Replace(text, " ").Trim();
+        return DecodeUnicodeEscapes(WhitespaceRegex().Replace(text, " ").Trim());
     }
 
     private static string CleanInlineText(string value)
     {
-        var text = TagRegex.Replace(value, " ");
+        var text = TagRegex().Replace(value, " ");
         text = WebUtility.HtmlDecode(text);
-        return WhitespaceRegex.Replace(text, " ").Trim();
+        return DecodeUnicodeEscapes(WhitespaceRegex().Replace(text, " ").Trim());
+    }
+
+    private static string SerializeToolResult<T>(T value) =>
+        JsonSerializer.Serialize(value, ToolResultJsonOptions);
+
+    private static string DecodeUnicodeEscapes(string text)
+    {
+        if (string.IsNullOrEmpty(text)
+            || (!text.Contains(@"\u", StringComparison.Ordinal)
+                && !text.Contains(@"\U", StringComparison.Ordinal)))
+        {
+            return text;
+        }
+
+        return UnicodeEscapeRegex().Replace(text, match =>
+        {
+            var isLong = match.Groups["long"].Success;
+            var hex = isLong ? match.Groups["long"].Value : match.Groups["short"].Value;
+            try
+            {
+                var value = Convert.ToInt32(hex, 16);
+                return isLong ? char.ConvertFromUtf32(value) : ((char)value).ToString();
+            }
+            catch (ArgumentException)
+            {
+                return match.Value;
+            }
+            catch (OverflowException)
+            {
+                return match.Value;
+            }
+            catch (FormatException)
+            {
+                return match.Value;
+            }
+        });
     }
 
     private static string? ReadString(JsonElement obj, string name) =>
@@ -527,17 +568,17 @@ public static partial class LocalToolRegistry
             ? value.GetString()
             : null;
 
-    private static readonly Regex ScriptStyleRegex = new(
-        @"<(script|style|noscript)\b[\s\S]*?</\1>",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    [GeneratedRegex(@"<(script|style|noscript)\b[\s\S]*?</\1>", RegexOptions.IgnoreCase)]
+    private static partial Regex ScriptStyleRegex();
 
-    private static readonly Regex TagRegex = new(
-        @"<[^>]+>",
-        RegexOptions.Compiled);
+    [GeneratedRegex(@"<[^>]+>")]
+    private static partial Regex TagRegex();
 
-    private static readonly Regex WhitespaceRegex = new(
-        @"\s+",
-        RegexOptions.Compiled);
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex WhitespaceRegex();
+
+    [GeneratedRegex(@"\\(?:u(?<short>[0-9a-fA-F]{4})|U(?<long>[0-9a-fA-F]{8}))", RegexOptions.CultureInvariant)]
+    private static partial Regex UnicodeEscapeRegex();
 
     [GeneratedRegex("<title[^>]*>(?<title>[\\s\\S]*?)</title>", RegexOptions.IgnoreCase)]
     private static partial Regex TitleRegex();

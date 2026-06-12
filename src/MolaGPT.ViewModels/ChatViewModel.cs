@@ -377,12 +377,6 @@ public sealed partial class ChatViewModel : ObservableObject
                      && row.Content.Contains("<ref", StringComparison.OrdinalIgnoreCase))
                 sources = lastKnownSources;
 
-            if (!string.IsNullOrWhiteSpace(thinkingText))
-            {
-                split = FoldLeadingThinkingToolMarkup(split.Visible, thinkingText);
-                thinkingText = split.Thinking;
-            }
-
             prepared.Add(new PreparedMessage(
                 row.Id,
                 row.Role,
@@ -995,7 +989,7 @@ public sealed partial class ChatViewModel : ObservableObject
         {
             if (item.ValueKind == JsonValueKind.String)
             {
-                attempts.Add(new MessageAttempt(item.GetString() ?? string.Empty, null, null, null));
+                attempts.Add(new MessageAttempt(NormalizeRetryAttemptContent(item.GetString()), null, null, null));
                 continue;
             }
             if (item.ValueKind != JsonValueKind.Object) continue;
@@ -1005,12 +999,18 @@ public sealed partial class ChatViewModel : ObservableObject
             var modelLabel = item.TryGetProperty("model_label", out var modelNode) && modelNode.ValueKind == JsonValueKind.String
                 ? modelNode.GetString()
                 : null;
-            attempts.Add(new MessageAttempt(content, modelLabel, ParseUsage(item, "response_stats"), ParseSources(item)));
+            attempts.Add(new MessageAttempt(NormalizeRetryAttemptContent(content), modelLabel, ParseUsage(item, "response_stats"), ParseSources(item)));
         }
 
         var current = ReadInt(retry, "current") ?? Math.Max(0, attempts.Count - 1);
         current = Math.Max(0, Math.Min(current, Math.Max(0, attempts.Count - 1)));
         return attempts.Count == 0 ? (null, 0) : (attempts, current);
+    }
+
+    private static string NormalizeRetryAttemptContent(string? content)
+    {
+        if (string.IsNullOrEmpty(content)) return string.Empty;
+        return SplitInlineThinking(content).Visible;
     }
 
     private static IReadOnlyList<ToolCallDelta>? ParseToolCalls(JsonElement root)
@@ -1204,171 +1204,58 @@ public sealed partial class ChatViewModel : ObservableObject
             return new InlineThinkingParts(string.Empty, null);
 
         if (IndexOfIgnoreCase(content, "<think") >= 0)
-            return SplitInlineThinkingPreservingToolOrder(content);
+            return SplitInlineThinkTags(content);
 
         var splitter = new InlineThinkSplitter();
         var fed = splitter.Feed(content);
         var flushed = splitter.Flush();
         var visible = fed.Visible + flushed.Visible;
         var thinking = fed.Thinking + flushed.Thinking;
-        if (!string.IsNullOrWhiteSpace(thinking))
-        {
-            return FoldLeadingThinkingToolMarkup(visible, thinking);
-        }
 
         return new InlineThinkingParts(visible, string.IsNullOrWhiteSpace(thinking) ? null : thinking.Trim());
     }
 
-    private static InlineThinkingParts SplitInlineThinkingPreservingToolOrder(string content)
+    private static InlineThinkingParts SplitInlineThinkTags(string content)
     {
         var visible = new StringBuilder();
         var thinking = new StringBuilder();
         var pos = 0;
-        var sawThink = false;
-        var finalAnswerStarted = false;
 
         while (pos < content.Length)
         {
             var nextThink = IndexOfIgnoreCase(content, "<think", pos);
-            var nextTool = sawThink && !finalAnswerStarted
-                ? IndexOfNextThinkingToolMarker(content, pos)
-                : -1;
-            var next = MinPositive(nextThink, nextTool);
-            if (next < 0)
+            if (nextThink < 0)
             {
                 visible.Append(content, pos, content.Length - pos);
                 break;
             }
 
-            if (next > pos)
+            if (nextThink > pos)
+                visible.Append(content, pos, nextThink - pos);
+
+            var openEnd = content.IndexOf('>', nextThink);
+            if (openEnd < 0)
             {
-                var outside = content[pos..next];
-                if (sawThink && !finalAnswerStarted && string.IsNullOrWhiteSpace(outside))
-                {
-                    // Spacing between think/tool/think segments belongs to
-                    // the thinking timeline, not the final answer body.
-                }
-                else
-                {
-                    visible.Append(outside);
-                    if (!string.IsNullOrWhiteSpace(outside))
-                        finalAnswerStarted = true;
-                }
+                AppendThinkingSegment(thinking, content[nextThink..]);
+                break;
             }
 
-            if (next == nextThink)
+            var bodyStart = openEnd + 1;
+            var close = IndexOfIgnoreCase(content, "</think>", bodyStart);
+            if (close < 0)
             {
-                var openEnd = content.IndexOf('>', next);
-                if (openEnd < 0)
-                {
-                    AppendThinkingSegment(thinking, content[next..]);
-                    sawThink = true;
-                    break;
-                }
-
-                var bodyStart = openEnd + 1;
-                var close = IndexOfIgnoreCase(content, "</think>", bodyStart);
-                if (close < 0)
-                {
-                    AppendThinkingSegment(thinking, content[bodyStart..]);
-                    sawThink = true;
-                    break;
-                }
-
-                AppendThinkingSegment(thinking, content[bodyStart..close]);
-                sawThink = true;
-                pos = close + "</think>".Length;
-                continue;
+                AppendThinkingSegment(thinking, content[bodyStart..]);
+                break;
             }
 
-            var toolEnd = FindLeadingThinkingToolEnd(content, next);
-            if (toolEnd < 0)
-            {
-                visible.Append(content[next]);
-                pos = next + 1;
-                continue;
-            }
-
-            AppendThinkingSegment(thinking, content[next..toolEnd]);
-            pos = toolEnd;
+            AppendThinkingSegment(thinking, content[bodyStart..close]);
+            pos = close + "</think>".Length;
         }
 
         var thinkingText = thinking.ToString().Trim();
         return new InlineThinkingParts(
             visible.ToString().TrimStart(),
             string.IsNullOrWhiteSpace(thinkingText) ? null : thinkingText);
-    }
-
-    public static InlineThinkingParts FoldLeadingThinkingToolMarkup(string visible, string? thinking)
-    {
-        if (string.IsNullOrWhiteSpace(thinking))
-            return new InlineThinkingParts(visible, null);
-
-        var leadingTools = PeelLeadingThinkingToolMarkup(visible);
-        var mergedThinking = string.IsNullOrWhiteSpace(leadingTools.ThinkingPrefix)
-            ? thinking
-            : MergeThinkingWithToolTimeline(thinking, leadingTools.ThinkingPrefix);
-
-        return new InlineThinkingParts(
-            leadingTools.Visible,
-            string.IsNullOrWhiteSpace(mergedThinking) ? null : mergedThinking.Trim());
-    }
-
-    private static string MergeThinkingWithToolTimeline(string thinking, string toolMarkup)
-    {
-        var toolUnits = ExtractThinkingToolUnits(toolMarkup).ToList();
-        if (toolUnits.Count == 0)
-            return MergeThinking(thinking, toolMarkup);
-
-        var builder = new StringBuilder();
-        var pos = 0;
-        var toolIndex = 0;
-        while (toolIndex < toolUnits.Count)
-        {
-            var dsStart = IndexOfIgnoreCase(thinking, "<DSanalysis", pos);
-            if (dsStart < 0) break;
-
-            builder.Append(thinking, pos, dsStart - pos);
-            AppendThinkingSegment(builder, toolUnits[toolIndex++]);
-
-            var dsEnd = FindTagEnd(thinking, dsStart, "</DSanalysis>");
-            builder.Append(thinking, dsStart, dsEnd - dsStart);
-            pos = dsEnd;
-        }
-
-        builder.Append(thinking, pos, thinking.Length - pos);
-        while (toolIndex < toolUnits.Count)
-            AppendThinkingSegment(builder, toolUnits[toolIndex++]);
-
-        return builder.ToString();
-    }
-
-    private static IEnumerable<string> ExtractThinkingToolUnits(string source)
-    {
-        var pos = 0;
-        while (pos < source.Length)
-        {
-            var next = IndexOfNextThinkingToolMarker(source, pos);
-            if (next < 0)
-            {
-                var tail = source[pos..].Trim();
-                if (!string.IsNullOrWhiteSpace(tail))
-                    yield return tail;
-                yield break;
-            }
-
-            var interstitial = source[pos..next].Trim();
-            if (!string.IsNullOrWhiteSpace(interstitial))
-                yield return interstitial;
-
-            var end = FindLeadingThinkingToolEnd(source, next);
-            if (end < 0) yield break;
-
-            var unit = source[next..end].Trim();
-            if (!string.IsNullOrWhiteSpace(unit))
-                yield return unit;
-            pos = end;
-        }
     }
 
     private static void AppendThinkingSegment(StringBuilder builder, string? segment)
@@ -1386,123 +1273,6 @@ public sealed partial class ChatViewModel : ObservableObject
         var last = builder[builder.Length - 1];
         var prev = builder[builder.Length - 2];
         return (last == '\n' && prev == '\n') || (last == '\n' && prev == '\r');
-    }
-
-    private static InlineThinkingToolPeel PeelLeadingThinkingToolMarkup(string visible)
-    {
-        if (string.IsNullOrWhiteSpace(visible))
-            return new InlineThinkingToolPeel(visible, string.Empty);
-
-        var pos = 0;
-        var movedAny = false;
-        while (pos < visible.Length)
-        {
-            pos = SkipWhitespace(visible, pos);
-            var end = FindLeadingThinkingToolEnd(visible, pos);
-            if (end < 0)
-                break;
-
-            pos = end;
-            movedAny = true;
-
-            var afterTool = SkipWhitespace(visible, pos);
-            var nextTool = IndexOfNextThinkingToolMarker(visible, afterTool);
-            if (nextTool == afterTool)
-            {
-                pos = afterTool;
-                continue;
-            }
-            if (nextTool < 0) break;
-
-            var interstitial = visible[afterTool..nextTool];
-            if (CountNonWhitespace(interstitial) > 800) break;
-            pos = nextTool;
-        }
-
-        if (!movedAny) return new InlineThinkingToolPeel(visible, string.Empty);
-
-        var thinkingPrefix = visible[..pos].Trim();
-        var remainder = visible[pos..].TrimStart();
-        return new InlineThinkingToolPeel(remainder, string.IsNullOrWhiteSpace(thinkingPrefix) ? string.Empty : "\n\n" + thinkingPrefix);
-    }
-
-    private static int FindLeadingThinkingToolEnd(string source, int start)
-    {
-        if (StartsWithIgnoreCase(source, start, "<steel-step"))
-            return FindTagEnd(source, start, "</steel-step>");
-        if (StartsWithIgnoreCase(source, start, "<DSanalysis"))
-            return FindTagEnd(source, start, "</DSanalysis>");
-        if (StartsWithToolStatusBlockquote(source, start))
-            return FindTagEnd(source, start, "</blockquote>");
-        return -1;
-    }
-
-    private static int FindTagEnd(string source, int start, string closeTag)
-    {
-        var close = IndexOfIgnoreCase(source, closeTag, start);
-        return close < 0 ? source.Length : close + closeTag.Length;
-    }
-
-    private static int IndexOfNextThinkingToolMarker(string source, int start)
-    {
-        var next = MinPositive(
-            IndexOfIgnoreCase(source, "<steel-step", start),
-            IndexOfIgnoreCase(source, "<DSanalysis", start),
-            IndexOfNextToolStatusBlockquote(source, start));
-        return next;
-    }
-
-    private static int IndexOfNextToolStatusBlockquote(string source, int start)
-    {
-        var pos = IndexOfIgnoreCase(source, "<blockquote", start);
-        while (pos >= 0)
-        {
-            if (StartsWithToolStatusBlockquote(source, pos)) return pos;
-            pos = IndexOfIgnoreCase(source, "<blockquote", pos + "<blockquote".Length);
-        }
-        return -1;
-    }
-
-    private static bool StartsWithToolStatusBlockquote(string source, int start)
-    {
-        if (!StartsWithIgnoreCase(source, start, "<blockquote")) return false;
-        var openEnd = source.IndexOf('>', start);
-        if (openEnd < 0) return false;
-        return source.Substring(start, openEnd - start + 1).Contains("tool-status", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static int MinPositive(params int[] values)
-    {
-        var min = -1;
-        foreach (var value in values)
-        {
-            if (value < 0) continue;
-            if (min < 0 || value < min) min = value;
-        }
-        return min;
-    }
-
-    private static int SkipWhitespace(string source, int start)
-    {
-        while (start < source.Length && char.IsWhiteSpace(source[start])) start++;
-        return start;
-    }
-
-    private static int CountNonWhitespace(string value)
-    {
-        var count = 0;
-        foreach (var ch in value)
-        {
-            if (!char.IsWhiteSpace(ch)) count++;
-        }
-        return count;
-    }
-
-    private static bool StartsWithIgnoreCase(string source, int start, string value)
-    {
-        return start >= 0
-            && start + value.Length <= source.Length
-            && source.AsSpan(start, value.Length).Equals(value.AsSpan(), StringComparison.OrdinalIgnoreCase);
     }
 
     private static int IndexOfIgnoreCase(string source, string value, int start = 0)
@@ -1535,7 +1305,6 @@ public sealed partial class ChatViewModel : ObservableObject
         OnPropertyChanged(nameof(ActiveModelLabel));
     }
 
-    private sealed record InlineThinkingToolPeel(string Visible, string ThinkingPrefix);
 }
 
 public sealed record InlineThinkingParts(string Visible, string? Thinking);

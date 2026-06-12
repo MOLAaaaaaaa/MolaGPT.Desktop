@@ -29,19 +29,20 @@
                 </Grid.RowDefinitions>
 
                 <Grid Grid.Row="0" Margin="0,0,0,8">
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
                         <TextBlock Text="&#xE777;"
-                                   FontFamily="{DynamicResource Font.Icon}"
+                                   Style="{StaticResource InlineIconTextBlock}"
                                    FontSize="18"
+                                   LineHeight="20"
                                    Margin="0,0,10,0"
-                                   VerticalAlignment="Center"
                                    Foreground="{DynamicResource Brush.Primary}" />
                         <TextBlock x:Name="TitleText"
                                    Text="发现新版本"
+                                   Style="{StaticResource InlineTextBlock}"
                                    FontSize="{DynamicResource Font.Size.Heading}"
+                                   LineHeight="20"
                                    FontWeight="SemiBold"
-                                   Foreground="{DynamicResource Brush.Text.Primary}"
-                                   VerticalAlignment="Center" />
+                                   Foreground="{DynamicResource Brush.Text.Primary}" />
                     </StackPanel>
                     <Button HorizontalAlignment="Right"
                             Style="{StaticResource HeaderIconButton}"

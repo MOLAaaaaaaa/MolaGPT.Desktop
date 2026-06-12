@@ -16,7 +16,7 @@ namespace MolaGPT.Desktop.Services;
 public static class DiagnosticLog
 {
     private const long MaxBytes = 256 * 1024;
-    private static readonly object Gate = new();
+    private static readonly System.Threading.Lock Gate = new();
     private static string? _path;
 
     private static string Path

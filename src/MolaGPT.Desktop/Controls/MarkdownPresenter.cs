@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -61,17 +62,20 @@ namespace MolaGPT.Desktop.Controls;
 ///   - Defensive parse: malformed partial markdown / partial &lt;DSanalysis&gt;
 ///     falls back to plain text without taking down the UI thread.
 /// </summary>
-public sealed class MarkdownPresenter : ContentControl
+public sealed partial class MarkdownPresenter : ContentControl
 {
     private const double MessageTextFontSize = 15;
     private const double MessageTextLineHeight = 24;
     private const double CodeBlockMaxWidth = 1440;
-    private const double MarkdownImageMaxWidth = 960;
+    private const double MarkdownImageMaxWidth = 720;
     private const double MarkdownImageMaxHeight = 640;
     private const double MarkdownImageCardMaxWidth = 640;
     private const double MarkdownImageCardMinWidth = 240;
     private const double MarkdownImageCardAspectRatio = 16d / 9d;
     private const double AiImageCardMaxSize = 480;
+    private const double SelectionAutoScrollEdge = 48;
+    private const double SelectionAutoScrollMinStep = 4;
+    private const double SelectionAutoScrollMaxStep = 22;
     private const string InlineMathPlaceholderPrefix = "\uE000MolaMath";
     private const string InlineMathPlaceholderSuffix = "\uE001";
 
@@ -139,45 +143,52 @@ public sealed class MarkdownPresenter : ContentControl
         .DisableHtml()
         .Build();
 
-    private static readonly Regex s_fencedCodeRegex = new(
-        @"^\s*```(?<lang>[^\r\n`]*)\r?\n(?<code>[\s\S]*?)(?:\r?\n)?[ \t]*```\s*$",
-        RegexOptions.Compiled);
+    [GeneratedRegex(@"^\s*```(?<lang>[^\r\n`]*)\r?\n(?<code>[\s\S]*?)(?:\r?\n)?[ \t]*```\s*$")]
+    private static partial Regex FencedCodeRegex();
 
-    private static readonly Regex s_streamingFencedCodeRegex = new(
-        @"^\s*```(?<lang>[^\r\n`]*)\r?\n(?<code>[\s\S]*)$",
-        RegexOptions.Compiled);
+    [GeneratedRegex(@"^\s*```(?<lang>[^\r\n`]*)\r?\n(?<code>[\s\S]*)$")]
+    private static partial Regex StreamingFencedCodeRegex();
 
-    private static readonly Regex s_embeddedFencedCodeRegex = new(
-        @"^(?<indent>[ \t]*)(?<fence>`{3,}|~{3,})(?<lang>[^\r\n]*)\r?\n(?<code>[\s\S]*?)^\k<indent>\k<fence>[ \t]*$",
-        RegexOptions.Compiled | RegexOptions.Multiline);
+    [GeneratedRegex(@"^(?<indent>[ \t]*)(?<fence>`{3,}|~{3,})(?<lang>[^\r\n]*)\r?\n(?<code>[\s\S]*?)^\k<indent>\k<fence>[ \t]*$", RegexOptions.Multiline)]
+    private static partial Regex EmbeddedFencedCodeRegex();
 
-    private static readonly Regex s_embeddedStreamingFencedCodeRegex = new(
-        @"^(?<indent>[ \t]*)(?<fence>`{3,}|~{3,})(?<lang>[^\r\n]*)\r?\n(?<code>[\s\S]*)\z",
-        RegexOptions.Compiled | RegexOptions.Multiline);
+    [GeneratedRegex(@"^(?<indent>[ \t]*)(?<fence>`{3,}|~{3,})(?<lang>[^\r\n]*)\r?\n(?<code>[\s\S]*)\z", RegexOptions.Multiline)]
+    private static partial Regex EmbeddedStreamingFencedCodeRegex();
 
-    private static readonly Regex s_mathBlockRegex = new(
-        @"^\s*(?:\$\$(?<math>[\s\S]*?)\$\$|```(?:math|latex|tex)\s*\r?\n(?<fenced>[\s\S]*?)(?:\r?\n)?```\s*)$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    [GeneratedRegex(@"^\s*(?:\$\$(?<math>[\s\S]*?)\$\$|```(?:math|latex|tex)\s*\r?\n(?<fenced>[\s\S]*?)(?:\r?\n)?```\s*)$", RegexOptions.IgnoreCase)]
+    private static partial Regex MathBlockRegex();
 
-    private static readonly Regex s_inlineMathRegex = new(
-        @"(?<!\\)\$(?<math>[^$\r\n]+?)(?<!\\)\$",
-        RegexOptions.Compiled);
+    [GeneratedRegex(@"(?<!\\)\$(?<dollar>[^$\r\n]+?)(?<!\\)\$|\\\((?<paren>[\s\S]+?)\\\)|\\\[(?<bracket>[\s\S]+?)\\\]")]
+    private static partial Regex LatexInlineMathRegex();
 
-    private static readonly Regex s_latexInlineMathRegex = new(
-        @"(?<!\\)\$(?<dollar>[^$\r\n]+?)(?<!\\)\$|\\\((?<paren>[\s\S]+?)\\\)|\\\[(?<bracket>[\s\S]+?)\\\]",
-        RegexOptions.Compiled);
+    [GeneratedRegex(@"<ref\b(?<attrs>[^>]*)>(?<inner>[\s\S]*?)</ref>|<ref\b(?<attrs2>[^>]*)/?>", RegexOptions.IgnoreCase)]
+    private static partial Regex RefTagRegex();
 
-    private static readonly Regex s_refTagRegex = new(
-        @"<ref\b(?<attrs>[^>]*)>(?<inner>[\s\S]*?)</ref>|<ref\b(?<attrs2>[^>]*)/?>",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    [GeneratedRegex(@"\bsource\s*=\s*(?:""(?<value>[^""]*)""|'(?<value>[^']*)'|(?<value>[^\s/>]+))", RegexOptions.IgnoreCase)]
+    private static partial Regex RefSourceRegex();
 
-    private static readonly Regex s_refSourceRegex = new(
-        @"\bsource\s*=\s*(?:""(?<value>[^""]*)""|'(?<value>[^']*)'|(?<value>[^\s/>]+))",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    [GeneratedRegex(@"\\begin\{(?<env>pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|matrix|smallmatrix|cases|alignedat|aligned|align\*?|gather\*?|split|array)\}(?<body>[\s\S]*?)\\end\{\k<env>\}")]
+    private static partial Regex MathEnvironmentRegex();
 
-    private static readonly Regex s_mathEnvironmentRegex = new(
-        @"\\begin\{(?<env>pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|matrix|smallmatrix|cases|alignedat|aligned|align\*?|gather\*?|split|array)\}(?<body>[\s\S]*?)\\end\{\k<env>\}",
-        RegexOptions.Compiled);
+    [GeneratedRegex(@"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+(?:[/:?#].*)?$")]
+    private static partial Regex BareDomainRegex();
+
+    [GeneratedRegex(@"^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?(?:[/?#].*)?$", RegexOptions.IgnoreCase)]
+    private static partial Regex LocalhostUrlRegex();
+
+    private static readonly DependencyProperty HyperlinkMouseDownPointProperty =
+        DependencyProperty.RegisterAttached(
+            "HyperlinkMouseDownPoint",
+            typeof(Point),
+            typeof(MarkdownPresenter),
+            new PropertyMetadata(new Point(double.NaN, double.NaN)));
+
+    private static readonly DependencyProperty HyperlinkLastOpenTickProperty =
+        DependencyProperty.RegisterAttached(
+            "HyperlinkLastOpenTick",
+            typeof(long),
+            typeof(MarkdownPresenter),
+            new PropertyMetadata(0L));
 
     private static readonly HashSet<string> s_cSharpKeywords = new(StringComparer.Ordinal)
     {
@@ -217,9 +228,19 @@ public sealed class MarkdownPresenter : ContentControl
         public List<string>? AstBlockSources;
     }
 
+    private sealed class MarkdownImageCardState
+    {
+        public MarkdownImageCardState(bool isAiGenerated)
+        {
+            IsAiGenerated = isAiGenerated;
+        }
+
+        public bool IsAiGenerated { get; }
+        public Image? Image { get; set; }
+    }
+
     private readonly List<CachedUnit> _mixedUnits = new();
     private readonly Dictionary<string, BitmapImage> _markdownImageCache = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, (double Width, double Height)> _markdownImageSizeCache = new(StringComparer.Ordinal);
     private bool _preserveMarkdownImagesDuringThemeRefresh;
 
     private string _lastRenderedSource = string.Empty;
@@ -230,6 +251,11 @@ public sealed class MarkdownPresenter : ContentControl
     private string _streamingOpenCodePrefix = string.Empty;
     private string _streamingOpenCodeLanguage = string.Empty;
     private TextBox? _streamingOpenCodeTextBox;
+    private bool _isDraggingSelection;
+    private double _selectionAutoScrollStep;
+    private ScrollViewer? _selectionAutoScrollViewer;
+    private Hyperlink? _pendingClickHyperlink;
+    private Point _pendingClickHyperlinkStart = new(double.NaN, double.NaN);
     private sealed class SmoothTextBoxScrollState
     {
         public TextBox? Owner;
@@ -246,6 +272,7 @@ public sealed class MarkdownPresenter : ContentControl
         {
             PagePadding = new Thickness(0),
             Background = Brushes.Transparent,
+            TextAlignment = TextAlignment.Left,
             LineHeight = MessageTextLineHeight,
             LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
             FontSize = MessageTextFontSize
@@ -261,7 +288,8 @@ public sealed class MarkdownPresenter : ContentControl
             Padding = new Thickness(0),
             Background = Brushes.Transparent,
             BorderThickness = new Thickness(0),
-            Focusable = true
+            Focusable = true,
+            Cursor = Cursors.IBeam
         };
 
         // FlowDocumentScrollViewer is a known WPF MouseWheel sink — even with
@@ -270,6 +298,14 @@ public sealed class MarkdownPresenter : ContentControl
         // event to whichever ancestor wants it (typically MainWindow's
         // MessagesScroll). This is the canonical fix; see e.g. SO #3727439.
         _viewer.PreviewMouseWheel += OnInnerPreviewMouseWheel;
+        _viewer.PreviewMouseLeftButtonDown += OnViewerPreviewMouseLeftButtonDown;
+        _viewer.PreviewMouseMove += OnViewerPreviewMouseMove;
+        _viewer.PreviewMouseLeftButtonUp += OnViewerPreviewMouseLeftButtonUp;
+        _viewer.LostKeyboardFocus += (_, _) =>
+        {
+            StopSelectionAutoScroll();
+            ClearPendingClickHyperlink();
+        };
 
         Content = _viewer;
         Background = Brushes.Transparent;
@@ -277,6 +313,7 @@ public sealed class MarkdownPresenter : ContentControl
         Padding = new Thickness(0);
         SizeChanged += (_, _) => RefreshMarkdownImageConstraints();
         Focusable = true;
+        Cursor = Cursors.IBeam;
 
         _throttleTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(ThrottleMs) };
         _throttleTimer.Tick += (_, _) => Flush();
@@ -288,6 +325,138 @@ public sealed class MarkdownPresenter : ContentControl
         // the DataContext changes but the FlowDocument keeps stale Blocks.
         // Reset our caches on unload so the new DataContext starts clean.
         Unloaded += (_, _) => ResetAll();
+    }
+
+    private void OnViewerPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (FindNavigableHyperlink(e.OriginalSource as DependencyObject) is { } hyperlink)
+        {
+            StopSelectionAutoScroll();
+            _pendingClickHyperlink = hyperlink;
+            _pendingClickHyperlinkStart = e.GetPosition(_viewer);
+            _viewer.Focus();
+            _viewer.CaptureMouse();
+            e.Handled = true;
+            return;
+        }
+
+        if (IsEmbeddedInteractiveSurface(e.OriginalSource as DependencyObject))
+            return;
+
+        _viewer.Focus();
+        _isDraggingSelection = true;
+        _selectionAutoScrollViewer = FindOuterScrollViewer();
+        UpdateSelectionAutoScroll(e.GetPosition(_viewer));
+    }
+
+    private void OnViewerPreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_isDraggingSelection)
+            return;
+
+        if (e.LeftButton != MouseButtonState.Pressed)
+        {
+            StopSelectionAutoScroll();
+            return;
+        }
+
+        UpdateSelectionAutoScroll(e.GetPosition(_viewer));
+    }
+
+    private void OnViewerPreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (_pendingClickHyperlink is { } hyperlink)
+        {
+            var start = _pendingClickHyperlinkStart;
+            ClearPendingClickHyperlink();
+            if (hyperlink.NavigateUri is not null
+                && IsClickGesture(start, e.GetPosition(_viewer))
+                && TryOpenHyperlinkOnce(hyperlink, hyperlink.NavigateUri))
+            {
+                e.Handled = true;
+            }
+            return;
+        }
+
+        StopSelectionAutoScroll();
+    }
+
+    private void ClearPendingClickHyperlink()
+    {
+        _pendingClickHyperlink = null;
+        _pendingClickHyperlinkStart = new Point(double.NaN, double.NaN);
+        if (_viewer.IsMouseCaptured)
+            _viewer.ReleaseMouseCapture();
+    }
+
+    private void UpdateSelectionAutoScroll(Point position)
+    {
+        var scrollViewer = _selectionAutoScrollViewer ??= FindOuterScrollViewer();
+        if (scrollViewer is null || scrollViewer.ScrollableHeight <= 0 || _viewer.ActualHeight <= 0)
+        {
+            SetSelectionAutoScrollStep(0);
+            return;
+        }
+
+        var height = _viewer.ActualHeight;
+        var step = 0d;
+        if (position.Y < SelectionAutoScrollEdge)
+        {
+            var pressure = Math.Clamp((SelectionAutoScrollEdge - position.Y) / SelectionAutoScrollEdge, 0, 1);
+            step = -CalculateSelectionAutoScrollStep(pressure);
+        }
+        else if (position.Y > height - SelectionAutoScrollEdge)
+        {
+            var pressure = Math.Clamp((position.Y - (height - SelectionAutoScrollEdge)) / SelectionAutoScrollEdge, 0, 1);
+            step = CalculateSelectionAutoScrollStep(pressure);
+        }
+
+        SetSelectionAutoScrollStep(step);
+    }
+
+    private static double CalculateSelectionAutoScrollStep(double pressure) =>
+        SelectionAutoScrollMinStep + ((SelectionAutoScrollMaxStep - SelectionAutoScrollMinStep) * pressure);
+
+    private void SetSelectionAutoScrollStep(double step)
+    {
+        if (Math.Abs(step) < 0.1)
+        {
+            _selectionAutoScrollStep = 0;
+            CompositionTarget.Rendering -= OnSelectionAutoScrollFrame;
+            return;
+        }
+
+        var wasIdle = Math.Abs(_selectionAutoScrollStep) < 0.1;
+        _selectionAutoScrollStep = step;
+        if (wasIdle)
+            CompositionTarget.Rendering += OnSelectionAutoScrollFrame;
+    }
+
+    private void OnSelectionAutoScrollFrame(object? sender, EventArgs e)
+    {
+        var scrollViewer = _selectionAutoScrollViewer;
+        if (!_isDraggingSelection
+            || Mouse.LeftButton != MouseButtonState.Pressed
+            || scrollViewer is null
+            || Math.Abs(_selectionAutoScrollStep) < 0.1)
+        {
+            StopSelectionAutoScroll();
+            return;
+        }
+
+        var next = Math.Clamp(
+            scrollViewer.VerticalOffset + _selectionAutoScrollStep,
+            0,
+            scrollViewer.ScrollableHeight);
+        scrollViewer.ScrollToVerticalOffset(next);
+    }
+
+    private void StopSelectionAutoScroll()
+    {
+        _isDraggingSelection = false;
+        _selectionAutoScrollStep = 0;
+        _selectionAutoScrollViewer = null;
+        CompositionTarget.Rendering -= OnSelectionAutoScrollFrame;
     }
 
     /// <summary>
@@ -403,8 +572,50 @@ public sealed class MarkdownPresenter : ContentControl
         return null;
     }
 
-    private static DependencyObject? GetTreeParent(DependencyObject node)
+    private ScrollViewer? FindOuterScrollViewer()
     {
+        DependencyObject? node = this;
+        while ((node = GetTreeParent(node)) is not null)
+        {
+            if (node is ScrollViewer scrollViewer)
+                return scrollViewer;
+        }
+
+        return null;
+    }
+
+    private static bool IsEmbeddedInteractiveSurface(DependencyObject? source) =>
+        FindTreeAncestor<ButtonBase>(source) is not null
+        || FindTreeAncestor<TextBoxBase>(source) is not null
+        || FindTreeAncestor<PasswordBox>(source) is not null
+        || FindTreeAncestor<ComboBox>(source) is not null
+        || FindTreeAncestor<ScrollBar>(source) is not null;
+
+    private static Hyperlink? FindNavigableHyperlink(DependencyObject? source)
+    {
+        var hyperlink = FindTreeAncestor<Hyperlink>(source);
+        return hyperlink?.NavigateUri is null ? null : hyperlink;
+    }
+
+    private static T? FindTreeAncestor<T>(DependencyObject? source)
+        where T : DependencyObject
+    {
+        var node = source;
+        while (node is not null)
+        {
+            if (node is T match)
+                return match;
+            node = GetTreeParent(node);
+        }
+
+        return null;
+    }
+
+    private static DependencyObject? GetTreeParent(DependencyObject? node)
+    {
+        if (node is null)
+            return null;
+
         if (node is Visual or Visual3D)
             return VisualTreeHelper.GetParent(node);
         if (node is FrameworkContentElement fce)
@@ -585,6 +796,8 @@ public sealed class MarkdownPresenter : ContentControl
 
     private void ResetAll(bool preserveMarkdownImages = false)
     {
+        StopSelectionAutoScroll();
+        ClearPendingClickHyperlink();
         preserveMarkdownImages |= _preserveMarkdownImagesDuringThemeRefresh;
 
         _doc.Blocks.Clear();
@@ -606,7 +819,6 @@ public sealed class MarkdownPresenter : ContentControl
         if (!preserveMarkdownImages)
         {
             _markdownImageCache.Clear();
-            _markdownImageSizeCache.Clear();
         }
     }
 
@@ -847,27 +1059,74 @@ public sealed class MarkdownPresenter : ContentControl
         return true;
     }
 
-    private static void OpenHyperlink(Uri uri)
+    private static bool OpenHyperlink(Uri uri)
     {
-        try
-        {
-            Process.Start(new ProcessStartInfo(uri.ToString()) { UseShellExecute = true });
-        }
-        catch { }
+        var target = string.IsNullOrWhiteSpace(uri.OriginalString)
+            ? uri.ToString()
+            : uri.OriginalString;
+        return TryOpenExternal(target);
     }
 
     private static void OnHyperlinkRequestNavigate(object sender, System.Windows.Navigation.RequestNavigateEventArgs e)
     {
         if (e.Uri is null) return;
-        OpenHyperlink(e.Uri);
-        e.Handled = true;
+        if (sender is Hyperlink hyperlink && TryOpenHyperlinkOnce(hyperlink, e.Uri))
+            e.Handled = true;
     }
 
     private static void WireHyperlink(Hyperlink hyperlink)
     {
         if (hyperlink.NavigateUri is null) return;
         hyperlink.Cursor = Cursors.Hand;
+        hyperlink.Command = null;
         hyperlink.RequestNavigate += OnHyperlinkRequestNavigate;
+        hyperlink.Click += OnHyperlinkClick;
+        hyperlink.PreviewMouseLeftButtonDown += OnHyperlinkPreviewMouseLeftButtonDown;
+        hyperlink.PreviewMouseLeftButtonUp += OnHyperlinkPreviewMouseLeftButtonUp;
+    }
+
+    private static void OnHyperlinkClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is Hyperlink { NavigateUri: { } uri } hyperlink
+            && TryOpenHyperlinkOnce(hyperlink, uri))
+        {
+            e.Handled = true;
+        }
+    }
+
+    private static void OnHyperlinkPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not Hyperlink hyperlink || hyperlink.NavigateUri is null) return;
+        hyperlink.SetValue(HyperlinkMouseDownPointProperty, e.GetPosition(hyperlink));
+        if (TryOpenHyperlinkOnce(hyperlink, hyperlink.NavigateUri))
+            e.Handled = true;
+    }
+
+    private static void OnHyperlinkPreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not Hyperlink hyperlink || hyperlink.NavigateUri is null) return;
+
+        var start = (Point)hyperlink.GetValue(HyperlinkMouseDownPointProperty);
+        hyperlink.SetValue(HyperlinkMouseDownPointProperty, new Point(double.NaN, double.NaN));
+        if (!IsClickGesture(start, e.GetPosition(hyperlink)))
+            return;
+
+        if (TryOpenHyperlinkOnce(hyperlink, hyperlink.NavigateUri))
+            e.Handled = true;
+    }
+
+    private static bool TryOpenHyperlinkOnce(Hyperlink hyperlink, Uri uri)
+    {
+        var now = Environment.TickCount64;
+        var last = (long)hyperlink.GetValue(HyperlinkLastOpenTickProperty);
+        if (last > 0 && now >= last && now - last < 750)
+            return true;
+
+        if (!OpenHyperlink(uri))
+            return false;
+
+        hyperlink.SetValue(HyperlinkLastOpenTickProperty, now);
+        return true;
     }
 
     private static void WireHyperlinks(InlineCollection inlines)
@@ -1273,10 +1532,10 @@ public sealed class MarkdownPresenter : ContentControl
         if (TryAppendSpecialBlock(slice, anchorAfter))
             return 1;
 
-        var matches = s_embeddedFencedCodeRegex.Matches(slice);
+        var matches = EmbeddedFencedCodeRegex().Matches(slice);
         if (matches.Count == 0)
         {
-            if (IsStreaming && s_embeddedStreamingFencedCodeRegex.Match(slice) is { Success: true } streamingMatch)
+            if (IsStreaming && EmbeddedStreamingFencedCodeRegex().Match(slice) is { Success: true } streamingMatch)
                 return AppendEmbeddedCodeMatch(slice, pipeline, anchorAfter, streamingMatch);
 
             return AppendRenderedMarkdown(slice, pipeline, anchorAfter);
@@ -1475,7 +1734,8 @@ public sealed class MarkdownPresenter : ContentControl
     private UIElement BuildMarkdownImageCard(string imageUrl, string? linkUrl)
     {
         var isAiGenerated = IsAiGeneratedImageUrl(imageUrl);
-        var (width, height) = GetMarkdownImageCardSize(imageUrl, isAiGenerated);
+        var (width, height) = CalculateMarkdownImageCardSize(isAiGenerated);
+        var state = new MarkdownImageCardState(isAiGenerated);
         var root = new Border
         {
             Width = width,
@@ -1487,8 +1747,10 @@ public sealed class MarkdownPresenter : ContentControl
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(12),
             ClipToBounds = true,
-            HorizontalAlignment = HorizontalAlignment.Left
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Tag = state
         };
+        root.Loaded += OnMarkdownImageCardLoaded;
 
         var grid = new Grid();
         root.Child = grid;
@@ -1508,8 +1770,10 @@ public sealed class MarkdownPresenter : ContentControl
                 StretchDirection = StretchDirection.Both,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
-                SnapsToDevicePixels = true
+                SnapsToDevicePixels = true,
+                Tag = state
             };
+            state.Image = image;
             RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
 
             image.Loaded += (_, _) => FadeOutAiImageOverlay(overlay);
@@ -1529,20 +1793,10 @@ public sealed class MarkdownPresenter : ContentControl
         {
             root.Cursor = Cursors.Hand;
             root.ToolTip = targetUrl;
-            root.MouseLeftButtonUp += (_, _) => OpenExternal(targetUrl);
+            WireExternalClick(root, targetUrl);
         }
 
         return root;
-    }
-
-    private (double Width, double Height) GetMarkdownImageCardSize(string imageUrl, bool isAiGenerated)
-    {
-        if (_markdownImageSizeCache.TryGetValue(imageUrl, out var cached))
-            return cached;
-
-        var size = CalculateMarkdownImageCardSize(isAiGenerated);
-        _markdownImageSizeCache[imageUrl] = size;
-        return size;
     }
 
     private (double Width, double Height) CalculateMarkdownImageCardSize(bool isAiGenerated)
@@ -1598,11 +1852,11 @@ public sealed class MarkdownPresenter : ContentControl
 
     private bool TryAppendCodeBlock(string slice, WpfBlock? anchorAfter)
     {
-        var match = s_fencedCodeRegex.Match(slice);
+        var match = FencedCodeRegex().Match(slice);
         if (!match.Success)
         {
             if (!IsStreaming) return false;
-            match = s_streamingFencedCodeRegex.Match(slice);
+            match = StreamingFencedCodeRegex().Match(slice);
             if (!match.Success) return false;
         }
 
@@ -1623,7 +1877,7 @@ public sealed class MarkdownPresenter : ContentControl
 
     private bool TryAppendMathBlock(string slice, WpfBlock? anchorAfter)
     {
-        var match = s_mathBlockRegex.Match(slice);
+        var match = MathBlockRegex().Match(slice);
         if (!match.Success) return false;
 
         var formula = match.Groups["math"].Success
@@ -1817,7 +2071,7 @@ public sealed class MarkdownPresenter : ContentControl
 
     private UIElement? TryBuildStructuredMathBlock(string formula)
     {
-        var match = s_mathEnvironmentRegex.Match(formula);
+        var match = MathEnvironmentRegex().Match(formula);
         if (!match.Success) return null;
 
         var env = match.Groups["env"].Value;
@@ -2164,7 +2418,7 @@ public sealed class MarkdownPresenter : ContentControl
         var original = run.Text;
         if (string.IsNullOrEmpty(original) || !MayContainLatexInlineMath(original)) return;
 
-        var matches = s_latexInlineMathRegex.Matches(original);
+        var matches = LatexInlineMathRegex().Matches(original);
         if (matches.Count == 0) return;
 
         var replacements = new List<Inline>();
@@ -2270,12 +2524,12 @@ public sealed class MarkdownPresenter : ContentControl
         var sources = Sources ?? Array.Empty<SourceReference>();
         var hasSources = sources.Count > 0;
 
-        return s_refTagRegex.Replace(source, match =>
+        return RefTagRegex().Replace(source, match =>
         {
             if (!hasSources) return string.Empty;
 
             var attrs = match.Groups["attrs"].Success ? match.Groups["attrs"].Value : match.Groups["attrs2"].Value;
-            var sourceMatch = s_refSourceRegex.Match(attrs);
+            var sourceMatch = RefSourceRegex().Match(attrs);
             if (!sourceMatch.Success)
                 return match.Groups["inner"].Success ? match.Groups["inner"].Value : string.Empty;
 
@@ -2341,6 +2595,7 @@ public sealed class MarkdownPresenter : ContentControl
         block.FontSize = MessageTextFontSize;
         block.LineHeight = MessageTextLineHeight;
         block.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+        block.TextAlignment = TextAlignment.Left;
         block.Foreground = _doc.Foreground;
         block.Margin = block switch
         {
@@ -2379,6 +2634,7 @@ public sealed class MarkdownPresenter : ContentControl
         paragraph.FontSize = MessageTextFontSize;
         paragraph.LineHeight = MessageTextLineHeight;
         paragraph.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+        paragraph.TextAlignment = TextAlignment.Left;
         ApplyMarkdownImageLayout(paragraph);
         RestoreInlineMathPlaceholders(paragraph.Inlines, inlineMath);
         ApplyInlineMath(paragraph);
@@ -2589,15 +2845,87 @@ public sealed class MarkdownPresenter : ContentControl
 
     private static void OpenExternal(string url)
     {
+        _ = TryOpenExternal(url);
+    }
+
+    private static bool TryOpenExternal(string? url)
+    {
+        if (!TryNormalizeExternalTarget(url, out var target))
+            return false;
+
         try
         {
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
-            // Best-effort preview/download affordance.
+            Debug.WriteLine($"Failed to open external link '{target}': {ex.Message}");
+            return false;
         }
     }
+
+    private static bool TryNormalizeExternalTarget(string? url, out string target)
+    {
+        target = string.Empty;
+        var trimmed = url?.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed) || trimmed == "#")
+            return false;
+
+        if (trimmed.StartsWith("//", StringComparison.Ordinal))
+        {
+            target = "https:" + trimmed;
+            return true;
+        }
+
+        if (trimmed.StartsWith("www.", StringComparison.OrdinalIgnoreCase)
+            || BareDomainRegex().IsMatch(trimmed))
+        {
+            target = "https://" + trimmed;
+            return true;
+        }
+
+        if (LocalhostUrlRegex().IsMatch(trimmed))
+        {
+            target = "http://" + trimmed;
+            return true;
+        }
+
+        if (Uri.TryCreate(trimmed, UriKind.Absolute, out var absolute)
+            && !string.IsNullOrWhiteSpace(absolute.Scheme))
+        {
+            target = trimmed;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static void WireExternalClick(FrameworkElement element, string target)
+    {
+        var start = new Point(double.NaN, double.NaN);
+        element.PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            start = e.GetPosition(element);
+        };
+        element.PreviewMouseLeftButtonUp += (_, e) =>
+        {
+            var end = e.GetPosition(element);
+            var shouldOpen = IsClickGesture(start, end);
+            start = new Point(double.NaN, double.NaN);
+            if (!shouldOpen)
+                return;
+
+            if (TryOpenExternal(target))
+                e.Handled = true;
+        };
+    }
+
+    private static bool IsClickGesture(Point start, Point end) =>
+        !double.IsNaN(start.X)
+        && !double.IsNaN(start.Y)
+        && Math.Abs(end.X - start.X) <= SystemParameters.MinimumHorizontalDragDistance
+        && Math.Abs(end.Y - start.Y) <= SystemParameters.MinimumVerticalDragDistance;
 
     private static string? ResolveImageSource(Image image)
     {
@@ -2630,14 +2958,48 @@ public sealed class MarkdownPresenter : ContentControl
 
     private void OnMarkdownImageLoaded(object sender, RoutedEventArgs e)
     {
-        if (sender is Image image)
+        if (sender is Image image && image.Tag is not MarkdownImageCardState)
             ApplyMarkdownImageConstraint(image);
+    }
+
+    private void OnMarkdownImageCardLoaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is Border root && root.Tag is MarkdownImageCardState state)
+            ApplyMarkdownImageCardConstraint(root, state);
     }
 
     private void RefreshMarkdownImageConstraints()
     {
+        foreach (var card in EnumerateVisualChildren<Border>(_viewer))
+        {
+            if (card.Tag is MarkdownImageCardState state)
+                ApplyMarkdownImageCardConstraint(card, state);
+        }
+
         foreach (var image in EnumerateVisualChildren<Image>(_viewer))
+        {
+            if (image.Tag is MarkdownImageCardState)
+                continue;
+
             ApplyMarkdownImageConstraint(image);
+        }
+    }
+
+    private void ApplyMarkdownImageCardConstraint(Border root, MarkdownImageCardState state)
+    {
+        var (width, height) = CalculateMarkdownImageCardSize(state.IsAiGenerated);
+        root.Width = width;
+        root.Height = height;
+        root.MaxWidth = width;
+        root.MaxHeight = height;
+
+        if (state.Image is not { } image)
+            return;
+
+        image.Width = width;
+        image.Height = height;
+        image.MaxWidth = width;
+        image.MaxHeight = height;
     }
 
     private void ApplyMarkdownImageConstraint(Image image)
@@ -2711,14 +3073,10 @@ public sealed class MarkdownPresenter : ContentControl
         var uri = hyperlink.NavigateUri;
         if (uri is not null && uri.ToString() != "#")
         {
-            border.MouseLeftButtonUp += (_, _) =>
-            {
-                try
-                {
-                    Process.Start(new ProcessStartInfo(uri.ToString()) { UseShellExecute = true });
-                }
-                catch { }
-            };
+            var target = string.IsNullOrWhiteSpace(uri.OriginalString)
+                ? uri.ToString()
+                : uri.OriginalString;
+            WireExternalClick(border, target);
         }
 
         return new InlineUIContainer(border)
@@ -2777,7 +3135,7 @@ public sealed class MarkdownPresenter : ContentControl
         // Markdig's advanced pipeline includes its own math parser, while
         // Markdig.Wpf 0.5 does not render those math nodes. Protect formulas
         // before parsing so we can restore them as WpfMath controls afterward.
-        var matches = s_latexInlineMathRegex.Matches(source);
+        var matches = LatexInlineMathRegex().Matches(source);
         if (matches.Count == 0)
             return source;
 
@@ -2895,6 +3253,7 @@ public sealed class MarkdownPresenter : ContentControl
         block.FontSize = MessageTextFontSize;
         block.LineHeight = MessageTextLineHeight;
         block.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+        block.TextAlignment = TextAlignment.Left;
         if (foreground is not null) block.Foreground = foreground;
 
         if (block is Paragraph paragraph)
@@ -2919,6 +3278,7 @@ public sealed class MarkdownPresenter : ContentControl
         list.FontSize = MessageTextFontSize;
         list.LineHeight = MessageTextLineHeight;
         list.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+        list.TextAlignment = TextAlignment.Left;
         if (foreground is not null) list.Foreground = foreground;
 
         foreach (var item in list.ListItems.Cast<ListItem>().ToList())
@@ -2933,6 +3293,7 @@ public sealed class MarkdownPresenter : ContentControl
     {
         item.FontFamily = _doc.FontFamily;
         item.FontSize = MessageTextFontSize;
+        item.TextAlignment = TextAlignment.Left;
         if (foreground is not null) item.Foreground = foreground;
     }
 

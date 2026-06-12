@@ -54,10 +54,11 @@
                                        FontSize="24"
                                        FontWeight="SemiBold"
                                        Foreground="{DynamicResource Brush.Text.Primary}" />
-                            <TextBlock x:Name="VersionText"
-                                       HorizontalAlignment="Center"
-                                       FontSize="{DynamicResource Font.Size.Small}"
-                                       Foreground="{DynamicResource Brush.Text.Muted}" />
+                            <TextBox x:Name="VersionText"
+                                     Style="{StaticResource SelectableBlockTextBox}"
+                                     HorizontalAlignment="Center"
+                                     FontSize="{DynamicResource Font.Size.Small}"
+                                     Foreground="{DynamicResource Brush.Text.Muted}" />
                             <TextBlock Text="自由、开放的 MolaGPT 及其他 LLM API 的 Windows 实现"
                                        TextAlignment="Center"
                                        TextWrapping="Wrap"
@@ -74,21 +75,24 @@
                                     Padding="18,9"
                                     Margin="0,0,12,0"
                                     Click="CheckUpdateClick">
-                                <StackPanel Orientation="Horizontal">
+                                <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                     <TextBlock Text="&#xE895;"
-                                               FontFamily="{DynamicResource Font.Icon}"
+                                               Style="{StaticResource InlineIconTextBlock}"
                                                Margin="0,0,8,0" />
-                                    <TextBlock x:Name="CheckUpdateText" Text="检查更新" />
+                                    <TextBlock x:Name="CheckUpdateText"
+                                               Text="检查更新"
+                                               Style="{StaticResource InlineTextBlock}" />
                                 </StackPanel>
                             </Button>
                             <Button Style="{StaticResource OutlineButton}"
                                     Padding="18,9"
                                     Click="OpenGitHubClick">
-                                <StackPanel Orientation="Horizontal">
+                                <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                     <TextBlock Text="&#xE774;"
-                                               FontFamily="{DynamicResource Font.Icon}"
+                                               Style="{StaticResource InlineIconTextBlock}"
                                                Margin="0,0,8,0" />
-                                    <TextBlock Text="GitHub 主页" />
+                                    <TextBlock Text="GitHub 主页"
+                                               Style="{StaticResource InlineTextBlock}" />
                                 </StackPanel>
                             </Button>
                         </StackPanel>
@@ -152,11 +156,12 @@
                                    Foreground="{DynamicResource Brush.Text.Muted}" />
                         <Expander>
                             <Expander.Header>
-                                <StackPanel Orientation="Horizontal">
+                                <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                     <TextBlock Text="&#xE8A5;"
-                                               FontFamily="{DynamicResource Font.Icon}"
+                                               Style="{StaticResource InlineIconTextBlock}"
                                                Margin="0,0,8,0" />
-                                    <TextBlock Text="查看完整开源许可证" />
+                                    <TextBlock Text="查看完整开源许可证"
+                                               Style="{StaticResource InlineTextBlock}" />
                                 </StackPanel>
                             </Expander.Header>
                             <Border Background="{DynamicResource Brush.Bg.Tertiary}"
@@ -167,12 +172,12 @@
                                     Margin="0,12,0,0"
                                     MaxHeight="330">
                                 <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                    <TextBlock x:Name="LicenseText"
-                                               TextWrapping="Wrap"
-                                               FontFamily="Consolas"
-                                               FontSize="12"
-                                               LineHeight="18"
-                                               Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                    <TextBox x:Name="LicenseText"
+                                             Style="{StaticResource SelectableBlockTextBox}"
+                                             FontFamily="Consolas"
+                                             FontSize="12"
+                                             Foreground="{DynamicResource Brush.Text.Secondary}"
+                                             VerticalScrollBarVisibility="Disabled" />
                                 </ScrollViewer>
                             </Border>
                         </Expander>

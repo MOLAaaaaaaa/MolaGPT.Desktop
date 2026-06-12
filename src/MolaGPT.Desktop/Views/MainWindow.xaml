@@ -62,9 +62,9 @@
                         Margin="20,4,16,8"
                         Style="{StaticResource PillPrimaryButton}"
                         Command="{Binding NewConversationCommand}">
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                        <TextBlock Text="&#xE710;" FontFamily="{DynamicResource Font.Icon}" FontSize="13" Margin="0,0,8,0" />
-                        <TextBlock Text="新建对话" />
+                    <StackPanel Style="{StaticResource InlineIconTextPanel}" HorizontalAlignment="Center">
+                        <TextBlock Text="&#xE710;" Style="{StaticResource InlineIconTextBlock}" FontSize="13" Margin="0,0,8,0" />
+                        <TextBlock Text="新建对话" Style="{StaticResource InlineTextBlock}" />
                     </StackPanel>
                 </Button>
 
@@ -229,17 +229,16 @@
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Grid.Column="0"
                                            Text="{Binding ConversationList.ByokGroupChevron}"
-                                           FontFamily="{DynamicResource Font.Icon}"
+                                           Style="{StaticResource InlineIconTextBlock.Small}"
                                            FontSize="9"
                                            Opacity="0.7"
-                                           VerticalAlignment="Center"
                                            Margin="0,0,8,0" />
                                 <TextBlock Grid.Column="1"
                                            Text="BYOK 模型"
+                                           Style="{StaticResource InlineTextBlock.Small}"
                                            FontSize="{DynamicResource Font.Size.XSmall}"
                                            FontWeight="SemiBold"
-                                           Foreground="{DynamicResource Brush.Text.Secondary}"
-                                           VerticalAlignment="Center" />
+                                           Foreground="{DynamicResource Brush.Text.Secondary}" />
                                 <Border Grid.Column="2"
                                         Background="{DynamicResource Brush.Bg.Primary}"
                                         BorderBrush="{DynamicResource Brush.Border.Subtle}"
@@ -248,6 +247,7 @@
                                         Padding="6,1"
                                         VerticalAlignment="Center">
                                     <TextBlock Text="{Binding ConversationList.ByokCount}"
+                                               Style="{StaticResource InlineTextBlock.Small}"
                                                FontSize="10"
                                                FontWeight="SemiBold"
                                                Foreground="{DynamicResource Brush.Text.Muted}" />
@@ -305,17 +305,16 @@
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Grid.Column="0"
                                            Text="{Binding ConversationList.MolaGptGroupChevron}"
-                                           FontFamily="{DynamicResource Font.Icon}"
+                                           Style="{StaticResource InlineIconTextBlock.Small}"
                                            FontSize="9"
                                            Opacity="0.7"
-                                           VerticalAlignment="Center"
                                            Margin="0,0,8,0" />
                                 <TextBlock Grid.Column="1"
                                            Text="MolaGPT 对话"
+                                           Style="{StaticResource InlineTextBlock.Small}"
                                            FontSize="{DynamicResource Font.Size.XSmall}"
                                            FontWeight="SemiBold"
-                                           Foreground="{DynamicResource Brush.Text.Secondary}"
-                                           VerticalAlignment="Center" />
+                                           Foreground="{DynamicResource Brush.Text.Secondary}" />
                                 <Border Grid.Column="2"
                                         Background="{DynamicResource Brush.Bg.Primary}"
                                         BorderBrush="{DynamicResource Brush.Border.Subtle}"
@@ -324,6 +323,7 @@
                                         Padding="6,1"
                                         VerticalAlignment="Center">
                                     <TextBlock Text="{Binding ConversationList.MolaGptCount}"
+                                               Style="{StaticResource InlineTextBlock.Small}"
                                                FontSize="10"
                                                FontWeight="SemiBold"
                                                Foreground="{DynamicResource Brush.Text.Muted}" />
@@ -485,14 +485,15 @@
                                 Click="OpenModelSelector_Click"
                                 ToolTip="选择模型"
                                 Visibility="{Binding IsImageWorkbenchVisible, Converter={x:Static views:BoolToVisibilityInverse.Instance}}">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="&#xE99A;" FontFamily="{DynamicResource Font.Icon}" FontSize="14" Margin="0,0,8,0" />
-                                <TextBlock Text="{Binding Chat.ActiveModelLabel}" FontWeight="SemiBold" />
+                            <StackPanel Style="{StaticResource InlineIconTextPanel}">
+                                <TextBlock Text="&#xE99A;" Style="{StaticResource InlineIconTextBlock}" FontSize="14" Margin="0,0,8,0" />
+                                <TextBlock Text="{Binding Chat.ActiveModelLabel}" Style="{StaticResource InlineTextBlock}" FontWeight="SemiBold" />
                                 <TextBlock Text="{Binding Chat.ActiveProviderLabel}"
+                                           Style="{StaticResource InlineTextBlock.Small}"
                                            Foreground="{DynamicResource Brush.Text.Muted}"
                                            FontSize="{DynamicResource Font.Size.XSmall}"
-                                           Margin="8,1,0,0" />
-                                <TextBlock Text="&#xE70D;" FontFamily="{DynamicResource Font.Icon}" FontSize="10" Margin="8,0,0,0" Opacity="0.6" />
+                                           Margin="8,0,0,0" />
+                                <TextBlock Text="&#xE70D;" Style="{StaticResource InlineIconTextBlock.Small}" FontSize="10" Margin="8,0,0,0" Opacity="0.6" />
                             </StackPanel>
                         </Button>
                         <Button Grid.Column="1"
@@ -503,15 +504,15 @@
                                 Margin="16,0,0,0"
                                 ToolTip="选择图像模型"
                                 Visibility="{Binding IsImageWorkbenchVisible, Converter={x:Static views:BoolToVisibility.Instance}}">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="&#xE91B;" FontFamily="{DynamicResource Font.Icon}" FontSize="14" Margin="0,0,8,0" VerticalAlignment="Center" />
+                            <StackPanel Style="{StaticResource InlineIconTextPanel}">
+                                <TextBlock Text="&#xE91B;" Style="{StaticResource InlineIconTextBlock}" FontSize="14" Margin="0,0,8,0" />
                                 <TextBlock x:Name="WorkbenchModelLabel"
                                            Text="图像模型"
+                                           Style="{StaticResource InlineTextBlock}"
                                            FontWeight="SemiBold"
                                            TextTrimming="CharacterEllipsis"
-                                           MaxWidth="260"
-                                           VerticalAlignment="Center" />
-                                <TextBlock Text="&#xE70D;" FontFamily="{DynamicResource Font.Icon}" FontSize="10" Margin="8,0,0,0" Opacity="0.6" VerticalAlignment="Center" />
+                                           MaxWidth="260" />
+                                <TextBlock Text="&#xE70D;" Style="{StaticResource InlineIconTextBlock.Small}" FontSize="10" Margin="8,0,0,0" Opacity="0.6" />
                             </StackPanel>
                         </Button>
 
@@ -529,24 +530,23 @@
                                         BorderBrush="{DynamicResource Brush.Primary.Border}"
                                         BorderThickness="1"
                                         CornerRadius="{DynamicResource Radius.Sm}">
-                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                         <TextBlock Text="&#xE777;"
-                                                   FontFamily="{DynamicResource Font.Icon}"
+                                                   Style="{StaticResource InlineIconTextBlock.Small}"
                                                    FontSize="12"
                                                    Margin="0,0,6,0"
-                                                   VerticalAlignment="Center"
                                                    Foreground="{DynamicResource Brush.Primary}" />
                                         <TextBlock Text="{Binding UpdateChipLabel}"
+                                                   Style="{StaticResource InlineTextBlock.Small}"
                                                    FontFamily="{DynamicResource Font.Cjk}"
                                                    FontSize="{DynamicResource Font.Size.XSmall}"
                                                    FontWeight="SemiBold"
-                                                   VerticalAlignment="Center"
                                                    Foreground="{DynamicResource Brush.Primary}" />
                                         <TextBlock Text="{Binding UpdateChipDetail}"
+                                                   Style="{StaticResource InlineTextBlock.Small}"
                                                    FontFamily="{DynamicResource Font.Cjk}"
                                                    FontSize="{DynamicResource Font.Size.XSmall}"
                                                    Margin="5,0,0,0"
-                                                   VerticalAlignment="Center"
                                                    Opacity="0.75"
                                                    Foreground="{DynamicResource Brush.Primary}" />
                                     </StackPanel>
@@ -584,7 +584,7 @@
                                             </Style.Triggers>
                                         </Style>
                                     </Border.Style>
-                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                         <Ellipse Width="7" Height="7" Margin="0,0,7,0">
                                             <Ellipse.Style>
                                                 <Style TargetType="Ellipse">
@@ -604,10 +604,11 @@
                                             </Ellipse.Style>
                                         </Ellipse>
                                         <TextBlock Text="&#xE753;"
-                                                   FontFamily="{DynamicResource Font.Icon}"
+                                                   Style="{StaticResource InlineIconTextBlock.Small}"
                                                    FontSize="12"
                                                    Margin="0,0,6,0" />
                                         <TextBlock Text="{Binding CloudSyncStatusText}"
+                                                   Style="{StaticResource InlineTextBlock.Small}"
                                                    MaxWidth="150"
                                                    TextTrimming="CharacterEllipsis"
                                                    FontFamily="{DynamicResource Font.Cjk}"
@@ -715,8 +716,20 @@
                                             <Setter Property="Padding" Value="0" />
                                             <Setter Property="Margin" Value="0" />
                                             <Setter Property="Focusable" Value="False" />
+                                            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
                                             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                                             <Setter Property="Background" Value="Transparent" />
+                                            <Setter Property="Template">
+                                                <Setter.Value>
+                                                    <ControlTemplate TargetType="ListBoxItem">
+                                                        <ContentPresenter
+                                                            Margin="{TemplateBinding Padding}"
+                                                            HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                            VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                                            SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}" />
+                                                    </ControlTemplate>
+                                                </Setter.Value>
+                                            </Setter>
                                         </Style>
                                     </ListBox.ItemContainerStyle>
                                     <ListBox.ItemTemplate>
@@ -820,8 +833,20 @@
                                             <Setter Property="Padding" Value="0" />
                                             <Setter Property="Margin" Value="0" />
                                             <Setter Property="Focusable" Value="False" />
+                                            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
                                             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                                             <Setter Property="Background" Value="Transparent" />
+                                            <Setter Property="Template">
+                                                <Setter.Value>
+                                                    <ControlTemplate TargetType="ListBoxItem">
+                                                        <ContentPresenter
+                                                            Margin="{TemplateBinding Padding}"
+                                                            HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                            VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                                            SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}" />
+                                                    </ControlTemplate>
+                                                </Setter.Value>
+                                            </Setter>
                                         </Style>
                                     </ListBox.ItemContainerStyle>
                                     <ListBox.ItemTemplate>

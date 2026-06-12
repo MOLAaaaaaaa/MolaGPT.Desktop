@@ -19,10 +19,10 @@ namespace MolaGPT.ViewModels.Services;
 /// Unknown placeholders are left as-is — users may write JSON-shaped text or
 /// templated markers we shouldn't silently eat.
 /// </summary>
-public static class SystemPromptInterpolator
+public static partial class SystemPromptInterpolator
 {
-    private static readonly Regex Placeholder = new(@"\{\{\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
-        RegexOptions.Compiled);
+    [GeneratedRegex(@"\{\{\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\}\}")]
+    private static partial Regex PlaceholderRegex();
 
     public static string Interpolate(string? template, in PromptVariables vars)
     {
@@ -30,7 +30,7 @@ public static class SystemPromptInterpolator
         if (template.IndexOf("{{", StringComparison.Ordinal) < 0) return template;
 
         var promptVars = vars;
-        return Placeholder.Replace(template, match =>
+        return PlaceholderRegex().Replace(template, match =>
         {
             var name = match.Groups["name"].Value.ToLowerInvariant();
             return name switch

@@ -35,6 +35,7 @@ public partial class SettingsWindow : Window
     private bool _editingPersonaIsDraft;
     private bool _syncInProgress;
     private bool _applyingPreset;
+    private bool _updatingProviderSelection;
     private bool _updatingWebSearchUi;
     private bool _updatingImageGenerationUi;
     private bool _loadingPersonaForm;
@@ -593,12 +594,22 @@ public partial class SettingsWindow : Window
 
     private void ProviderList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_updatingProviderSelection)
+            return;
+
         if (ProviderList.SelectedItem is not ProviderEntry entry)
         {
             ProviderEditor.IsEnabled = false;
             return;
         }
         BeginEdit(entry);
+    }
+
+    private void CopyTextMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem { CommandParameter: string text } && !string.IsNullOrWhiteSpace(text))
+            Clipboard.SetText(text.Trim());
+        e.Handled = true;
     }
 
     private void AddChatProviderClick(object sender, RoutedEventArgs e) => AddProvider("chat");
@@ -715,14 +726,11 @@ public partial class SettingsWindow : Window
 
     private void SaveProviderClick(object sender, RoutedEventArgs e)
     {
-        var entry = CollectFromForm();
+        var entry = NormalizeImageProviderEntry(CollectFromForm());
         if (!ValidateProviderBaseUrl(entry)) return;
 
         _vm.Save(entry);
-        var existing = _vm.Providers.FirstOrDefault(p => p.Id == entry.Id);
-        if (existing is not null) _vm.Providers.Remove(existing);
-        entry = NormalizeImageProviderEntry(entry);
-        _vm.Providers.Add(entry);
+        UpsertProviderEntryInPlace(entry);
         _vm.RefreshVisionProviderModels();
         _vm.RefreshImageGenerationProviderModels();
         PopulateVisionCombo();
@@ -736,6 +744,34 @@ public partial class SettingsWindow : Window
         if (prov is not null && !SettingsViewModel.IsImagePurpose(entry.Purpose))
             _registry.Register(prov);
         EditorMessage.Text = "设置已保存";
+    }
+
+    private void UpsertProviderEntryInPlace(ProviderEntry entry)
+    {
+        _updatingProviderSelection = true;
+        try
+        {
+            var index = -1;
+            for (var i = 0; i < _vm.Providers.Count; i++)
+            {
+                if (string.Equals(_vm.Providers[i].Id, entry.Id, StringComparison.Ordinal))
+                {
+                    index = i;
+                    break;
+                }
+            }
+
+            if (index >= 0)
+                _vm.Providers[index] = entry;
+            else
+                _vm.Providers.Add(entry);
+
+            ProviderList.SelectedItem = entry;
+        }
+        finally
+        {
+            _updatingProviderSelection = false;
+        }
     }
 
     private void DeleteProviderClick(object sender, RoutedEventArgs e)
@@ -1034,7 +1070,7 @@ public partial class SettingsWindow : Window
 
         return new(
             entry.Id,
-            entry.DisplayName,
+            NormalizeAutoModelDisplayName(entry.Id, entry.DisplayName),
             SupportsVision: entry.Vision,
             SupportsThinking: entry.Thinking,
             SupportsReasoningEffort: entry.ReasoningEffort,
@@ -1210,6 +1246,23 @@ public partial class SettingsWindow : Window
     }
 
     private static string BeautifyModelName(string id)
+    {
+        var name = id.Contains('/') ? id[(id.LastIndexOf('/') + 1)..] : id;
+        return name.Replace('_', ' ');
+    }
+
+    private static string NormalizeAutoModelDisplayName(string id, string displayName)
+    {
+        var trimmed = (displayName ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(trimmed))
+            return BeautifyModelName(id);
+
+        return string.Equals(trimmed, LegacyBeautifyModelName(id), StringComparison.Ordinal)
+            ? BeautifyModelName(id)
+            : trimmed;
+    }
+
+    private static string LegacyBeautifyModelName(string id)
     {
         var name = id.Contains('/') ? id[(id.LastIndexOf('/') + 1)..] : id;
         return name.Replace('-', ' ').Replace('_', ' ');
@@ -1670,7 +1723,7 @@ public sealed class EditableModelEntry : System.ComponentModel.INotifyPropertyCh
 
     public static EditableModelEntry From(ProviderModelEntry e) => new()
     {
-        Id = e.Id, DisplayName = e.DisplayName, Vision = e.Vision, Tools = e.Tools,
+        Id = e.Id, DisplayName = NormalizeAutoModelDisplayName(e.Id, e.DisplayName), Vision = e.Vision, Tools = e.Tools,
         Thinking = e.Thinking, ReasoningEffort = e.ReasoningEffort, ContextWindow = e.ContextWindow,
         ThinkingParamKind = e.ThinkingParamKind, ThinkingBudgetMin = e.ThinkingBudgetMin,
         ThinkingBudgetMax = e.ThinkingBudgetMax, ThinkingBudgetDefault = e.ThinkingBudgetDefault,
@@ -1680,5 +1733,28 @@ public sealed class EditableModelEntry : System.ComponentModel.INotifyPropertyCh
     public ProviderModelEntry ToRecord() => new(
         Id, DisplayName, Vision, ContextWindow, Thinking, ReasoningEffort, Tools,
         ThinkingParamKind, ThinkingBudgetMin, ThinkingBudgetMax, ThinkingBudgetDefault, DefaultEffort, SystemPrompt, ImageEdit);
+
+    private static string NormalizeAutoModelDisplayName(string id, string displayName)
+    {
+        var trimmed = (displayName ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(trimmed))
+            return BeautifyModelName(id);
+
+        return string.Equals(trimmed, LegacyBeautifyModelName(id), StringComparison.Ordinal)
+            ? BeautifyModelName(id)
+            : trimmed;
+    }
+
+    private static string BeautifyModelName(string id)
+    {
+        var name = id.Contains('/') ? id[(id.LastIndexOf('/') + 1)..] : id;
+        return name.Replace('_', ' ');
+    }
+
+    private static string LegacyBeautifyModelName(string id)
+    {
+        var name = id.Contains('/') ? id[(id.LastIndexOf('/') + 1)..] : id;
+        return name.Replace('-', ' ').Replace('_', ' ');
+    }
 }
 public sealed record CapabilityBadge(string Label, string ColorKey);

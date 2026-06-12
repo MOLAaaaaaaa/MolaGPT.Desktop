@@ -36,7 +36,7 @@ namespace MolaGPT.Desktop.Controls;
 ///   - Anything before / between / after markers is plain markdown and is
 ///     packaged into <see cref="MarkupUnitKind.Markdown"/> units.
 /// </summary>
-public static class MolaGptMarkupSplitter
+public static partial class MolaGptMarkupSplitter
 {
     private const string PyOutputBegin = "<!--PY_OUTPUT_BEGIN-->";
     private const string PyOutputEnd = "<!--PY_OUTPUT_END-->";
@@ -72,65 +72,59 @@ public static class MolaGptMarkupSplitter
     public sealed record ToolSearchChip(string Text, IReadOnlyList<string> Badges);
     public sealed record SteelMetaItem(string Text, string? IconClass);
 
-    private static readonly Regex s_toolStatusOpenRegex = new(
-        @"<blockquote\b(?<attrs>[^>]*\bclass\s*=\s*(?:""(?<class>[^""]*\btool-status\b[^""]*)""|'(?<class>[^']*\btool-status\b[^']*)')[^>]*)>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<blockquote\b(?<attrs>[^>]*\bclass\s*=\s*(?:"(?<class>[^"]*\btool-status\b[^"]*)"|'(?<class>[^']*\btool-status\b[^']*)')[^>]*)>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex ToolStatusOpenRegex();
 
-    private static readonly Regex s_dsOpenRegex = new(
-        @"<DSanalysis\b(?<attrs>[^>]*)>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<DSanalysis\b(?<attrs>[^>]*)>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex DsOpenRegex();
 
-    private static readonly Regex s_steelOpenRegex = new(
-        @"<steel-step\b(?<attrs>[^>]*)>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<steel-step\b(?<attrs>[^>]*)>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex SteelOpenRegex();
 
-    private static readonly Regex s_imagePendingSkeletonRegex = new(
-        @"<div\b(?<attrs>[^>]*\bclass\s*=\s*(?:""(?<class>[^""]*\bai-image-pending-skeleton\b[^""]*)""|'(?<class>[^']*\bai-image-pending-skeleton\b[^']*)')[^>]*)>\s*</div>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<div\b(?<attrs>[^>]*\bclass\s*=\s*(?:"(?<class>[^"]*\bai-image-pending-skeleton\b[^"]*)"|'(?<class>[^']*\bai-image-pending-skeleton\b[^']*)')[^>]*)>\s*</div>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex ImagePendingSkeletonRegex();
 
-    private static readonly Regex s_imageErrorCardRegex = new(
-        @"<div\b[^>]*\bclass\s*=\s*(?:""[^""]*\bai-image-error-card\b[^""]*""|'[^']*\bai-image-error-card\b[^']*')[^>]*>\s*<div\b[^>]*\bclass\s*=\s*(?:""[^""]*\bai-image-error-title\b[^""]*""|'[^']*\bai-image-error-title\b[^']*')[^>]*>(?<title>.*?)</div>\s*<div\b[^>]*\bclass\s*=\s*(?:""[^""]*\bai-image-error-message\b[^""]*""|'[^']*\bai-image-error-message\b[^']*')[^>]*>(?<message>.*?)</div>\s*</div>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<div\b[^>]*\bclass\s*=\s*(?:"[^"]*\bai-image-error-card\b[^"]*"|'[^']*\bai-image-error-card\b[^']*')[^>]*>\s*<div\b[^>]*\bclass\s*=\s*(?:"[^"]*\bai-image-error-title\b[^"]*"|'[^']*\bai-image-error-title\b[^']*')[^>]*>(?<title>.*?)</div>\s*<div\b[^>]*\bclass\s*=\s*(?:"[^"]*\bai-image-error-message\b[^"]*"|'[^']*\bai-image-error-message\b[^']*')[^>]*>(?<message>.*?)</div>\s*</div>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex ImageErrorCardRegex();
 
-    private static readonly Regex s_steelRootOpenRegex = new(
-        @"<div\b(?<attrs>[^>]*\bclass\s*=\s*(?:""(?<class>[^""]*\btool-steel-step\b[^""]*)""|'(?<class>[^']*\btool-steel-step\b[^']*)')[^>]*)>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<div\b(?<attrs>[^>]*\bclass\s*=\s*(?:"(?<class>[^"]*\btool-steel-step\b[^"]*)"|'(?<class>[^']*\btool-steel-step\b[^']*)')[^>]*)>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex SteelRootOpenRegex();
 
-    private static readonly Regex s_steelDotIconRegex = new(
-        @"<span\b[^>]*\bclass\s*=\s*(?:""[^""]*\btool-steel-step-dot\b[^""]*""|'[^']*\btool-steel-step-dot\b[^']*')[^>]*>[\s\S]*?<i\b[^>]*\bclass\s*=\s*(?:""(?<class>[^""]*)""|'(?<class>[^']*)')",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<span\b[^>]*\bclass\s*=\s*(?:"[^"]*\btool-steel-step-dot\b[^"]*"|'[^']*\btool-steel-step-dot\b[^']*')[^>]*>[\s\S]*?<i\b[^>]*\bclass\s*=\s*(?:"(?<class>[^"]*)"|'(?<class>[^']*)')""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex SteelDotIconRegex();
 
-    private static readonly Regex s_steelTitleRegex = new(
-        @"<p\b[^>]*\bclass\s*=\s*(?:""[^""]*\btool-steel-step-title\b[^""]*""|'[^']*\btool-steel-step-title\b[^']*')[^>]*>(?<inner>.*?)</p>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<p\b[^>]*\bclass\s*=\s*(?:"[^"]*\btool-steel-step-title\b[^"]*"|'[^']*\btool-steel-step-title\b[^']*')[^>]*>(?<inner>.*?)</p>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex SteelTitleRegex();
 
-    private static readonly Regex s_steelMetaOpenRegex = new(
-        @"<span\b[^>]*\bclass\s*=\s*(?:""[^""]*\btool-steel-meta-item\b[^""]*""|'[^']*\btool-steel-meta-item\b[^']*')[^>]*>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<span\b[^>]*\bclass\s*=\s*(?:"[^"]*\btool-steel-meta-item\b[^"]*"|'[^']*\btool-steel-meta-item\b[^']*')[^>]*>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex SteelMetaOpenRegex();
 
-    private static readonly Regex s_orphanSteelMetaFragmentRegex = new(
-        @"<?span\b(?=[^>]*\bclass\s*=\s*(?:""[^""]*\btool-steel-meta-item\b[^""]*""|'[^']*\btool-steel-meta-item\b[^']*'))[^>]*>[\s\S]*?</span>\s*</span>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<?span\b(?=[^>]*\bclass\s*=\s*(?:"[^"]*\btool-steel-meta-item\b[^"]*"|'[^']*\btool-steel-meta-item\b[^']*'))[^>]*>[\s\S]*?</span>\s*</span>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex OrphanSteelMetaFragmentRegex();
 
-    private static readonly Regex s_innerIconClassRegex = new(
-        @"<i\b[^>]*\bclass\s*=\s*(?:""(?<class>[^""]*)""|'(?<class>[^']*)')",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<i\b[^>]*\bclass\s*=\s*(?:"(?<class>[^"]*)"|'(?<class>[^']*)')""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex InnerIconClassRegex();
 
-    private static readonly Regex s_attrRegex = new(
-        @"(?<name>[A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:""(?<value>[^""]*)""|'(?<value>[^']*)')",
-        RegexOptions.Compiled | RegexOptions.Singleline);
+    [GeneratedRegex("""(?<name>[A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:"(?<value>[^"]*)"|'(?<value>[^']*)')""", RegexOptions.Singleline)]
+    private static partial Regex AttrRegex();
 
-    private static readonly Regex s_searchTitleRegex = new(
-        @"<p\b[^>]*\bclass\s*=\s*(?:""[^""]*\btool-search-title\b[^""]*""|'[^']*\btool-search-title\b[^']*')[^>]*>(?<inner>.*?)</p>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<p\b[^>]*\bclass\s*=\s*(?:"[^"]*\btool-search-title\b[^"]*"|'[^']*\btool-search-title\b[^']*')[^>]*>(?<inner>.*?)</p>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex SearchTitleRegex();
 
-    private static readonly Regex s_searchChipTextRegex = new(
-        @"<span\b[^>]*\bclass\s*=\s*(?:""[^""]*(?<![\w-])tool-search-chip-text(?![\w-])[^""]*""|'[^']*(?<![\w-])tool-search-chip-text(?![\w-])[^']*')[^>]*>(?<inner>.*?)</span>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<span\b[^>]*\bclass\s*=\s*(?:"[^"]*(?<![\w-])tool-search-chip-text(?![\w-])[^"]*"|'[^']*(?<![\w-])tool-search-chip-text(?![\w-])[^']*')[^>]*>(?<inner>.*?)</span>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex SearchChipTextRegex();
 
-    private static readonly Regex s_searchBadgeOpenRegex = new(
-        @"<span\b[^>]*\bclass\s*=\s*(?:""[^""]*(?<![\w-])tool-search-chip-badge(?![\w-])[^""]*""|'[^']*(?<![\w-])tool-search-chip-badge(?![\w-])[^']*')[^>]*>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    [GeneratedRegex("""<span\b[^>]*\bclass\s*=\s*(?:"[^"]*(?<![\w-])tool-search-chip-badge(?![\w-])[^"]*"|'[^']*(?<![\w-])tool-search-chip-badge(?![\w-])[^']*')[^>]*>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex SearchBadgeOpenRegex();
+
+    [GeneratedRegex("""<span\b[^>]*\bclass\s*=\s*(?:"[^"]*(?<![\w-])tool-search-chip(?![\w-])[^"]*"|'[^']*(?<![\w-])tool-search-chip(?![\w-])[^']*')[^>]*>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex SearchChipOpenRegex();
+
+    [GeneratedRegex("<[^>]+>", RegexOptions.Singleline)]
+    private static partial Regex HtmlTagRegex();
+
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex WhitespaceRegex();
 
     private const string DsCloseTag = "</DSanalysis>";
     private const string BlockquoteCloseTag = "</blockquote>";
@@ -149,11 +143,11 @@ public static class MolaGptMarkupSplitter
         while (pos < len)
         {
             // Find next marker — earliest of tool-status, DSanalysis, or steel step.
-            var dsMatch = s_dsOpenRegex.Match(source, pos);
-            var bqMatch = s_toolStatusOpenRegex.Match(source, pos);
-            var steelMatch = s_steelOpenRegex.Match(source, pos);
-            var imageSkeletonMatch = s_imagePendingSkeletonRegex.Match(source, pos);
-            var imageErrorMatch = s_imageErrorCardRegex.Match(source, pos);
+            var dsMatch = DsOpenRegex().Match(source, pos);
+            var bqMatch = ToolStatusOpenRegex().Match(source, pos);
+            var steelMatch = SteelOpenRegex().Match(source, pos);
+            var imageSkeletonMatch = ImagePendingSkeletonRegex().Match(source, pos);
+            var imageErrorMatch = ImageErrorCardRegex().Match(source, pos);
 
             int dsStart = dsMatch.Success ? dsMatch.Index : -1;
             int bqStart = bqMatch.Success ? bqMatch.Index : -1;
@@ -374,7 +368,7 @@ public static class MolaGptMarkupSplitter
     private static string StripOrphanSteelMetaFragments(string source)
     {
         return source.Contains("tool-steel-meta-item", StringComparison.OrdinalIgnoreCase)
-            ? s_orphanSteelMetaFragmentRegex.Replace(source, string.Empty)
+            ? OrphanSteelMetaFragmentRegex().Replace(source, string.Empty)
             : source;
     }
 
@@ -498,7 +492,7 @@ public static class MolaGptMarkupSplitter
     {
         if (classes.Contains("tool-search-blockquote", StringComparison.OrdinalIgnoreCase))
         {
-            var title = s_searchTitleRegex.Match(innerHtml);
+            var title = SearchTitleRegex().Match(innerHtml);
             if (title.Success) return ExtractInnerText(title.Groups["inner"].Value);
         }
 
@@ -510,17 +504,14 @@ public static class MolaGptMarkupSplitter
         var chips = new List<ToolSearchChip>();
         if (string.IsNullOrWhiteSpace(innerHtml)) return chips;
 
-        var starts = Regex.Matches(
-            innerHtml,
-            @"<span\b[^>]*\bclass\s*=\s*(?:""[^""]*(?<![\w-])tool-search-chip(?![\w-])[^""]*""|'[^']*(?<![\w-])tool-search-chip(?![\w-])[^']*')[^>]*>",
-            RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        var starts = SearchChipOpenRegex().Matches(innerHtml);
 
         for (int i = 0; i < starts.Count; i++)
         {
             int start = starts[i].Index;
             int end = (i + 1 < starts.Count) ? starts[i + 1].Index : innerHtml.Length;
             var chipHtml = innerHtml.Substring(start, Math.Max(0, end - start));
-            var textMatch = s_searchChipTextRegex.Match(chipHtml);
+            var textMatch = SearchChipTextRegex().Match(chipHtml);
             if (!textMatch.Success) continue;
 
             var text = ExtractInnerText(textMatch.Groups["inner"].Value);
@@ -537,7 +528,7 @@ public static class MolaGptMarkupSplitter
     private static IReadOnlyList<string> ExtractSearchBadges(string chipHtml)
     {
         var badges = new List<string>();
-        var starts = s_searchBadgeOpenRegex.Matches(chipHtml);
+        var starts = SearchBadgeOpenRegex().Matches(chipHtml);
         for (int i = 0; i < starts.Count; i++)
         {
             int start = starts[i].Index + starts[i].Length;
@@ -558,18 +549,18 @@ public static class MolaGptMarkupSplitter
 
     private static SteelStepParts ParseSteelStep(string innerHtml)
     {
-        var root = s_steelRootOpenRegex.Match(innerHtml);
+        var root = SteelRootOpenRegex().Match(innerHtml);
         var classes = root.Success ? root.Groups["class"].Value.Trim() : string.Empty;
         var attrs = root.Success ? ParseAttributes(root.Groups["attrs"].Value) : new Dictionary<string, string>();
         attrs.TryGetValue("data-steel-action", out var action);
         var phase = ParseVariant(classes);
         if (phase == Variant.None) phase = Variant.Analyzing;
 
-        var titleMatch = s_steelTitleRegex.Match(innerHtml);
+        var titleMatch = SteelTitleRegex().Match(innerHtml);
         var title = titleMatch.Success ? ExtractInnerText(titleMatch.Groups["inner"].Value) : ExtractInnerText(innerHtml);
         if (string.IsNullOrWhiteSpace(title)) title = "正在查看网页";
 
-        var iconMatch = s_steelDotIconRegex.Match(innerHtml);
+        var iconMatch = SteelDotIconRegex().Match(innerHtml);
         var iconClass = iconMatch.Success ? iconMatch.Groups["class"].Value : null;
         return new SteelStepParts(action, title, phase, iconClass, ExtractSteelMetaItems(innerHtml));
     }
@@ -577,13 +568,13 @@ public static class MolaGptMarkupSplitter
     private static IReadOnlyList<SteelMetaItem> ExtractSteelMetaItems(string innerHtml)
     {
         var items = new List<SteelMetaItem>();
-        var starts = s_steelMetaOpenRegex.Matches(innerHtml);
+        var starts = SteelMetaOpenRegex().Matches(innerHtml);
         for (int i = 0; i < starts.Count; i++)
         {
             int start = starts[i].Index + starts[i].Length;
             int end = (i + 1 < starts.Count) ? starts[i + 1].Index : innerHtml.Length;
             var itemHtml = innerHtml.Substring(start, Math.Max(0, end - start));
-            var iconMatch = s_innerIconClassRegex.Match(itemHtml);
+            var iconMatch = InnerIconClassRegex().Match(itemHtml);
             var iconClass = iconMatch.Success ? iconMatch.Groups["class"].Value : null;
             var text = ExtractInnerText(itemHtml);
             if (!string.IsNullOrWhiteSpace(text))
@@ -598,14 +589,14 @@ public static class MolaGptMarkupSplitter
         if (string.IsNullOrWhiteSpace(innerHtml)) return string.Empty;
         // Strip HTML tags (rough — sufficient for tool-status which is just
         // `<p>label</p>` plus an optional decoration).
-        var noTags = Regex.Replace(innerHtml, "<[^>]+>", " ", RegexOptions.Singleline);
-        return WebUtility.HtmlDecode(Regex.Replace(noTags, @"\s+", " ").Trim());
+        var noTags = HtmlTagRegex().Replace(innerHtml, " ");
+        return WebUtility.HtmlDecode(WhitespaceRegex().Replace(noTags, " ").Trim());
     }
 
     private static Dictionary<string, string> ParseAttributes(string attrs)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match match in s_attrRegex.Matches(attrs))
+        foreach (Match match in AttrRegex().Matches(attrs))
         {
             result[match.Groups["name"].Value] = WebUtility.HtmlDecode(match.Groups["value"].Value);
         }

@@ -55,16 +55,15 @@
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
-                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <StackPanel Style="{StaticResource InlineIconTextPanel}">
                             <TextBlock Text="&#xE723;"
-                                       FontFamily="{DynamicResource Font.Icon}"
+                                       Style="{StaticResource InlineIconTextBlock.Small}"
                                        FontSize="11"
                                        Margin="0,0,4,0"
-                                       Foreground="{DynamicResource Brush.Primary}"
-                                       VerticalAlignment="Center" />
+                                       Foreground="{DynamicResource Brush.Primary}" />
                             <TextBlock FontSize="11"
                                        Foreground="{DynamicResource Brush.Text.Secondary}"
-                                       VerticalAlignment="Center">
+                                       Style="{StaticResource InlineTextBlock.Small}">
                                 <Run Text="已上传 " />
                                 <Run Text="{Binding Attachments.Count, Mode=OneWay}"
                                      Foreground="{DynamicResource Brush.Primary}"
@@ -81,13 +80,12 @@
                                 Foreground="{DynamicResource Brush.Text.Secondary}"
                                 Command="{Binding ClearAttachmentsCommand}"
                                 ToolTip="清空所有文件">
-                            <StackPanel Orientation="Horizontal">
+                            <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                 <TextBlock Text="&#xE74D;"
-                                           FontFamily="{DynamicResource Font.Icon}"
+                                           Style="{StaticResource InlineIconTextBlock.Small}"
                                            FontSize="10"
-                                           Margin="0,0,3,0"
-                                           VerticalAlignment="Center" />
-                                <TextBlock Text="清空" VerticalAlignment="Center" />
+                                           Margin="0,0,3,0" />
+                                <TextBlock Text="清空" Style="{StaticResource InlineTextBlock.Small}" />
                             </StackPanel>
                         </Button>
                     </Grid>
@@ -186,13 +184,13 @@
                               Style="{StaticResource ToolToggleButton}"
                               Visibility="{Binding IsPersonaPickerVisible, Converter={x:Static views:BoolToVisibility.Instance}}"
                               ToolTip="选择对话角色 / 系统提示词">
-                    <StackPanel Orientation="Horizontal">
+                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
                         <TextBlock Text="{Binding Chat.ActivePersonaAvatar}"
-                                   FontFamily="{DynamicResource Font.Icon}"
+                                   Style="{StaticResource InlineIconTextBlock.Small}"
                                    FontSize="13"
-                                   Margin="0,0,6,0"
-                                   VerticalAlignment="Center" />
-                        <TextBlock Text="{Binding Chat.ActivePersonaName}" />
+                                   Margin="0,0,6,0" />
+                        <TextBlock Text="{Binding Chat.ActivePersonaName}"
+                                   Style="{StaticResource InlineTextBlock.Small}" />
                     </StackPanel>
                 </ToggleButton>
                 <Popup x:Name="PersonaPopup"
@@ -399,13 +397,13 @@
                                             Click="OnNewPersonaClick"
                                             Style="{StaticResource ToolPlainButton}"
                                             HorizontalAlignment="Left">
-                                        <StackPanel Orientation="Horizontal">
+                                        <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                             <TextBlock Text="&#xE710;"
-                                                       FontFamily="{DynamicResource Font.Icon}"
+                                                       Style="{StaticResource InlineIconTextBlock.Small}"
                                                        FontSize="12"
-                                                       Margin="0,0,6,0"
-                                                       VerticalAlignment="Center" />
-                                            <TextBlock Text="新建角色" />
+                                                       Margin="0,0,6,0" />
+                                            <TextBlock Text="新建角色"
+                                                       Style="{StaticResource InlineTextBlock.Small}" />
                                         </StackPanel>
                                     </Button>
                                     <Button Grid.Column="1"
@@ -425,9 +423,9 @@
                         Click="OnAttachClick"
                         ToolTip="上传文件 / 图片"
                         Visibility="{Binding IsAttachVisible, Converter={x:Static views:BoolToVisibility.Instance}}">
-                    <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="&#xE723;" FontFamily="{DynamicResource Font.Icon}" FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center" />
-                        <TextBlock Text="附件" />
+                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
+                        <TextBlock Text="&#xE723;" Style="{StaticResource InlineIconTextBlock.Small}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="附件" Style="{StaticResource InlineTextBlock.Small}" />
                     </StackPanel>
                 </Button>
 
@@ -436,10 +434,10 @@
                               IsChecked="{Binding EnableThinking}"
                               ToolTip="开启推理：复杂问题先推理后回答"
                               Visibility="{Binding IsThinkingVisible, Converter={x:Static views:BoolToVisibility.Instance}}">
-                    <StackPanel Orientation="Horizontal">
+                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
                         <!-- Lightbulb icon -->
-                        <TextBlock Text="&#xE82F;" FontFamily="{DynamicResource Font.Icon}" FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center" />
-                        <TextBlock Text="推理" />
+                        <TextBlock Text="&#xE82F;" Style="{StaticResource InlineIconTextBlock.Small}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="推理" Style="{StaticResource InlineTextBlock.Small}" />
                     </StackPanel>
                 </ToggleButton>
 
@@ -448,9 +446,9 @@
                               Style="{StaticResource ToolToggleButton}"
                               ToolTip="调整推理强度"
                               Visibility="{Binding IsReasoningEffortVisible, Converter={x:Static views:BoolToVisibility.Instance}}">
-                    <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="&#xF8B0;" FontFamily="{DynamicResource Font.Icon}" FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center" />
-                        <TextBlock>
+                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
+                        <TextBlock Text="&#xF8B0;" Style="{StaticResource InlineIconTextBlock.Small}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Style="{StaticResource InlineTextBlock.Small}">
                             <Run Text="强度: " />
                             <Run Text="{Binding ReasoningEffortLabel, Mode=OneWay}" />
                         </TextBlock>
@@ -566,10 +564,10 @@
                               IsChecked="{Binding EnableNetwork}"
                               IsEnabled="{Binding AreNetworkToolsEnabled}"
                               ToolTip="联网搜索">
-                    <StackPanel Orientation="Horizontal">
+                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
                         <!-- Search glyph -->
-                        <TextBlock Text="&#xE721;" FontFamily="{DynamicResource Font.Icon}" FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center" />
-                        <TextBlock Text="联网搜索" />
+                        <TextBlock Text="&#xE721;" Style="{StaticResource InlineIconTextBlock.Small}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="联网搜索" Style="{StaticResource InlineTextBlock.Small}" />
                     </StackPanel>
                 </ToggleButton>
 
@@ -578,9 +576,9 @@
                               IsChecked="{Binding EnableWebFetch}"
                               IsEnabled="{Binding AreNetworkToolsEnabled}"
                               ToolTip="网页阅读">
-                    <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="&#xE774;" FontFamily="{DynamicResource Font.Icon}" FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center" />
-                        <TextBlock Text="网页阅读" />
+                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
+                        <TextBlock Text="&#xE774;" Style="{StaticResource InlineIconTextBlock.Small}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="网页阅读" Style="{StaticResource InlineTextBlock.Small}" />
                     </StackPanel>
                 </ToggleButton>
 

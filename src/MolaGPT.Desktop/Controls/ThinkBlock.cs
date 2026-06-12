@@ -95,6 +95,7 @@ public sealed class ThinkBlock : Control
         base.OnApplyTemplate();
         _bodyHost = GetTemplateChild("PART_Body") as FrameworkElement;
         _arrow = GetTemplateChild("PART_Arrow") as FrameworkElement;
+        EnsureCopyContextMenu();
         UpdateExpandedVisualState(animate: false);
 
         if (GetTemplateChild("PART_HeaderToggle") is ButtonBase toggle)
@@ -105,6 +106,24 @@ public sealed class ThinkBlock : Control
     }
 
     private void OnHeaderToggleClick(object sender, RoutedEventArgs e) => IsExpanded = !IsExpanded;
+
+    private void EnsureCopyContextMenu()
+    {
+        if (ContextMenu is not null) return;
+
+        var copyItem = new MenuItem { Header = "复制思考内容" };
+        copyItem.Click += (_, e) =>
+        {
+            if (!string.IsNullOrWhiteSpace(Source))
+                Clipboard.SetText(Source.Trim());
+            e.Handled = true;
+        };
+
+        var menu = new ContextMenu();
+        menu.Opened += (_, _) => copyItem.IsEnabled = !string.IsNullOrWhiteSpace(Source);
+        menu.Items.Add(copyItem);
+        ContextMenu = menu;
+    }
 
     private static void OnIsThinkingChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {

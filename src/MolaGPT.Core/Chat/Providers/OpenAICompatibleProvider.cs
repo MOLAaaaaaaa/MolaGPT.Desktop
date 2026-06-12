@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
@@ -28,6 +29,12 @@ namespace MolaGPT.Core.Chat.Providers;
 /// </summary>
 public sealed class OpenAICompatibleProvider : IChatProvider
 {
+    private static readonly JsonSerializerOptions DisplayJsonOptions = new()
+    {
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
     public string Id { get; }
     public string DisplayName { get; }
     public ProviderKind Kind { get; init; } = ProviderKind.OpenAICompatible;
@@ -574,7 +581,7 @@ public sealed class OpenAICompatibleProvider : IChatProvider
         try
         {
             using var doc = JsonDocument.Parse(json);
-            return JsonSerializer.Serialize(doc.RootElement, new JsonSerializerOptions { WriteIndented = true });
+            return JsonSerializer.Serialize(doc.RootElement, DisplayJsonOptions);
         }
         catch (JsonException)
         {

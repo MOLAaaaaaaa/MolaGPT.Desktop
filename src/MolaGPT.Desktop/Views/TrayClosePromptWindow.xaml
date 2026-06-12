@@ -51,18 +51,18 @@
                                 Style="{StaticResource PillPrimaryButton}"
                                 Padding="14,10"
                                 Click="MinimizeClick">
-                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                <TextBlock Text="&#xE921;" FontFamily="{DynamicResource Font.Icon}" Margin="0,0,8,0" />
-                                <TextBlock Text="最小化到托盘" />
+                            <StackPanel Style="{StaticResource InlineIconTextPanel}" HorizontalAlignment="Center">
+                                <TextBlock Text="&#xE921;" Style="{StaticResource InlineIconTextBlock}" Margin="0,0,8,0" />
+                                <TextBlock Text="最小化到托盘" Style="{StaticResource InlineTextBlock}" />
                             </StackPanel>
                         </Button>
                         <Button Grid.Column="2"
                                 Style="{StaticResource OutlineButton}"
                                 Padding="14,10"
                                 Click="ExitClick">
-                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                <TextBlock Text="&#xE8BB;" FontFamily="{DynamicResource Font.Icon}" Margin="0,0,8,0" />
-                                <TextBlock Text="关闭软件" />
+                            <StackPanel Style="{StaticResource InlineIconTextPanel}" HorizontalAlignment="Center">
+                                <TextBlock Text="&#xE8BB;" Style="{StaticResource InlineIconTextBlock}" Margin="0,0,8,0" />
+                                <TextBlock Text="关闭软件" Style="{StaticResource InlineTextBlock}" />
                             </StackPanel>
                         </Button>
                     </Grid>

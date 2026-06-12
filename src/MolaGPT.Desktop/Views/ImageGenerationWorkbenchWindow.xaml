@@ -538,18 +538,16 @@
                                             ToolTip="在设置中管理图像服务">
                                         <TextBlock Text="模型服务设置" FontSize="12" />
                                     </Button>
-                                    <StackPanel Orientation="Horizontal"
-                                                VerticalAlignment="Center">
+                                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                         <TextBlock Text="&#xE713;"
-                                                   FontFamily="{DynamicResource Font.Icon}"
+                                                   Style="{StaticResource InlineIconTextBlock.Small}"
                                                    Foreground="{DynamicResource Brush.Primary}"
                                                    FontSize="13"
-                                                   Margin="0,0,7,0"
-                                                   VerticalAlignment="Center" />
+                                                   Margin="0,0,7,0" />
                                         <TextBlock Text="生成参数"
+                                                   Style="{StaticResource InlineTextBlock}"
                                                    FontWeight="SemiBold"
-                                                   Foreground="{DynamicResource Brush.Text.Primary}"
-                                                   VerticalAlignment="Center" />
+                                                   Foreground="{DynamicResource Brush.Text.Primary}" />
                                     </StackPanel>
                                 </DockPanel>
 
@@ -640,17 +638,17 @@
                                             Padding="9,5"
                                             Margin="0,0,8,0"
                                             Click="NewTaskClick">
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="&#xE72C;" FontFamily="{DynamicResource Font.Icon}" FontSize="11" Margin="0,0,5,0" />
-                                            <TextBlock Text="新任务" FontSize="12" />
+                                        <StackPanel Style="{StaticResource InlineIconTextPanel}">
+                                            <TextBlock Text="&#xE72C;" Style="{StaticResource InlineIconTextBlock.Small}" FontSize="11" Margin="0,0,5,0" />
+                                            <TextBlock Text="新任务" Style="{StaticResource InlineTextBlock.Small}" FontSize="12" />
                                         </StackPanel>
                                     </Button>
                                     <Button Style="{StaticResource OutlineButton}"
                                             Padding="9,5"
                                             Click="ClearResultsClick">
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource Font.Icon}" FontSize="11" Margin="0,0,5,0" />
-                                            <TextBlock Text="清空当前" FontSize="12" />
+                                        <StackPanel Style="{StaticResource InlineIconTextPanel}">
+                                            <TextBlock Text="&#xE74D;" Style="{StaticResource InlineIconTextBlock.Small}" FontSize="11" Margin="0,0,5,0" />
+                                            <TextBlock Text="清空当前" Style="{StaticResource InlineTextBlock.Small}" FontSize="12" />
                                         </StackPanel>
                                     </Button>
                                 </StackPanel>
@@ -761,19 +759,18 @@
                                                     BorderThickness="1"
                                                     CornerRadius="{DynamicResource Radius.Sm}"
                                                     Padding="9,4">
-                                                <StackPanel Orientation="Horizontal">
+                                                <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                                     <TextBlock Text="&#xE91B;"
-                                                               FontFamily="{DynamicResource Font.Icon}"
+                                                               Style="{StaticResource InlineIconTextBlock.Small}"
                                                                FontSize="12"
                                                                Margin="0,0,6,0"
-                                                               Foreground="{DynamicResource Brush.Primary}"
-                                                               VerticalAlignment="Center" />
+                                                               Foreground="{DynamicResource Brush.Primary}" />
                                                     <TextBlock x:Name="ModeBadgeText"
                                                                Text="图像生成"
+                                                               Style="{StaticResource InlineTextBlock.Small}"
                                                                FontSize="{DynamicResource Font.Size.Small}"
                                                                FontWeight="SemiBold"
-                                                               Foreground="{DynamicResource Brush.Primary}"
-                                                               VerticalAlignment="Center" />
+                                                               Foreground="{DynamicResource Brush.Primary}" />
                                                 </StackPanel>
                                             </Border>
 

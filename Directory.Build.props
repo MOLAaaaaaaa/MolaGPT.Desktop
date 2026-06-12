@@ -1,11 +1,11 @@
 <Project>
   <PropertyGroup>
-    <LangVersion>12</LangVersion>
+    <LangVersion>14</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <WarningsAsErrors>nullable</WarningsAsErrors>
-    <Version>0.6.6</Version>
+    <Version>0.7.0</Version>
     <Authors>MolaGPT</Authors>
     <Company>MolaGPT</Company>
     <Product>MolaGPT Desktop</Product>

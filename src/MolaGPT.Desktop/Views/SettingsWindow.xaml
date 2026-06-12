@@ -292,6 +292,13 @@
                                     <ListBox.ItemTemplate>
                                         <DataTemplate DataType="{x:Type vm:ProviderEntry}">
                                             <StackPanel>
+                                                <StackPanel.ContextMenu>
+                                                    <ContextMenu>
+                                                        <MenuItem Header="复制服务名称"
+                                                                  CommandParameter="{Binding PlacementTarget.DataContext.Name, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                                  Click="CopyTextMenuItem_Click" />
+                                                    </ContextMenu>
+                                                </StackPanel.ContextMenu>
                                                 <TextBlock Text="{Binding Name}" FontWeight="SemiBold"
                                                            Foreground="{DynamicResource Brush.Text.Primary}" />
                                                 <TextBlock Text="{Binding Type, Converter={x:Static views:ProviderTypeToLabelConverter.Instance}}"
@@ -409,7 +416,15 @@
                                     <TextBlock x:Name="EndpointPreview" Margin="0,0,0,12"
                                                TextWrapping="Wrap"
                                                FontSize="{DynamicResource Font.Size.Small}"
-                                               Foreground="{DynamicResource Brush.Text.Muted}" />
+                                               Foreground="{DynamicResource Brush.Text.Muted}">
+                                        <TextBlock.ContextMenu>
+                                            <ContextMenu>
+                                                <MenuItem Header="复制请求地址"
+                                                          CommandParameter="{Binding PlacementTarget.Text, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          Click="CopyTextMenuItem_Click" />
+                                            </ContextMenu>
+                                        </TextBlock.ContextMenu>
+                                    </TextBlock>
 
                                     <TextBlock Text="API Key" Margin="0,0,0,4"
                                                Foreground="{DynamicResource Brush.Text.Secondary}" />
@@ -464,6 +479,16 @@
                                                 <Border Style="{StaticResource ModelCardBorder}"
                                                         Margin="0,0,0,6"
                                                         MouseLeftButtonDown="ModelCard_Click">
+                                                    <Border.ContextMenu>
+                                                        <ContextMenu>
+                                                            <MenuItem Header="复制模型 ID"
+                                                                      CommandParameter="{Binding PlacementTarget.DataContext.Id, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                                      Click="CopyTextMenuItem_Click" />
+                                                            <MenuItem Header="复制显示名称"
+                                                                      CommandParameter="{Binding PlacementTarget.DataContext.DisplayName, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                                      Click="CopyTextMenuItem_Click" />
+                                                        </ContextMenu>
+                                                    </Border.ContextMenu>
                                                     <Grid>
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="*" />
@@ -576,13 +601,13 @@
                                             HorizontalAlignment="Stretch"
                                             HorizontalContentAlignment="Center"
                                             Padding="0,8">
-                                        <StackPanel Orientation="Horizontal">
+                                        <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                             <TextBlock Text="&#xE710;"
-                                                       FontFamily="{DynamicResource Font.Icon}"
+                                                       Style="{StaticResource InlineIconTextBlock.Small}"
                                                        FontSize="12"
-                                                       Margin="0,0,6,0"
-                                                       VerticalAlignment="Center" />
-                                            <TextBlock Text="新建角色" VerticalAlignment="Center" />
+                                                       Margin="0,0,6,0" />
+                                            <TextBlock Text="新建角色"
+                                                       Style="{StaticResource InlineTextBlock.Small}" />
                                         </StackPanel>
                                     </Button>
 
@@ -1024,6 +1049,16 @@
                                                                     CornerRadius="{DynamicResource Radius.Sm}"
                                                                     Padding="12,9"
                                                                     Margin="0,0,0,4">
+                                                                <Border.ContextMenu>
+                                                                    <ContextMenu>
+                                                                        <MenuItem Header="复制服务器名称"
+                                                                                  CommandParameter="{Binding PlacementTarget.DataContext.Name, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                                                  Click="CopyTextMenuItem_Click" />
+                                                                        <MenuItem Header="复制服务器地址"
+                                                                                  CommandParameter="{Binding PlacementTarget.DataContext.Url, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                                                  Click="CopyTextMenuItem_Click" />
+                                                                    </ContextMenu>
+                                                                </Border.ContextMenu>
                                                                 <Grid>
                                                                     <Grid.ColumnDefinitions>
                                                                         <ColumnDefinition Width="Auto" />

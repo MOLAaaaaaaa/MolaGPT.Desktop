@@ -25,7 +25,7 @@ public sealed class CloudSyncService
     private const string BoundAccountKey = "cloud_sync.bound_account";
     private const string DetailRefreshPrefix = "cloud_sync.detail_refresh.";
     private const string DetailParserVersionPrefix = "cloud_sync.detail_parser_version.";
-    private const string DetailParserVersion = "2026-06-09.visible-python-dsanalysis-v1";
+    private const string DetailParserVersion = "2026-06-12.local-timeline-offsets-v2";
     private const string ConversationSyncPrefix = "cloud_sync.conversation_timestamp.";
     private const string ConversationMetadataPrefix = "cloud_sync.metadata.";
     private const string TitleGeneratedPrefix = "cloud_sync.ai_title_generated.";
@@ -1009,16 +1009,7 @@ public sealed class CloudSyncService
             }
             else if (!string.IsNullOrWhiteSpace(thinkingText))
             {
-                var folded = ChatViewModel.FoldLeadingThinkingToolMarkup(content, thinkingText);
-                content = folded.Visible;
-                if (!string.IsNullOrWhiteSpace(folded.Thinking))
-                {
-                    message["content"] = BuildWebCompatibleThinkingContent(content, folded.Thinking);
-                }
-                else
-                {
-                    message["content"] = content;
-                }
+                message["content"] = BuildWebCompatibleThinkingContent(content, thinkingText);
             }
 
             array.Add(message);
@@ -1357,6 +1348,16 @@ public sealed class CloudSyncService
         foreach (var name in names)
         {
             if (obj[name] is JsonValue value && value.TryGetValue<int>(out var number))
+                return number;
+        }
+        return null;
+    }
+
+    private static double? ReadDouble(JsonObject obj, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (obj[name] is JsonValue value && value.TryGetValue<double>(out var number))
                 return number;
         }
         return null;
@@ -1986,9 +1987,10 @@ public sealed class CloudSyncService
                 createdAt = lastCreatedAt + 1;
             lastCreatedAt = createdAt;
             var meta = new JsonObject();
+            var messageMeta = msg["meta"] as JsonObject;
             if (msg["model_label"] is JsonNode modelLabel) meta["model"] = modelLabel.DeepClone();
             if (msg["model"] is JsonNode model) meta["model"] = model.DeepClone();
-            if (msg["meta"] is JsonObject messageMeta)
+            if (messageMeta is not null)
             {
                 foreach (var kv in messageMeta)
                     if (kv.Value is JsonNode metaNode)
@@ -1998,10 +2000,10 @@ public sealed class CloudSyncService
                 meta["content_parts"] = rawContent.DeepClone();
             if (!meta.ContainsKey("sources") && msg["sources"] is JsonNode directSources)
                 meta["sources"] = directSources.DeepClone();
-            if (timeline.ToolCalls.Count > 0 && !meta.ContainsKey("tool_calls"))
+            if (timeline.ToolCalls.Count > 0)
                 meta["tool_calls"] = timeline.ToolCalls.DeepClone();
-            if (timeline.ThinkingSegments.Count > 0 && !meta.ContainsKey("thinking_segments"))
-                meta["thinking_segments"] = timeline.ThinkingSegments.DeepClone();
+            if (timeline.ThinkingSegments.Count > 0)
+                meta["thinking_segments"] = CloneLocalThinkingSegmentsWithExistingTiming(timeline.ThinkingSegments, messageMeta);
             string? thinkingText = null;
             if (msg["reasoning_content"] is JsonNode thinking)
             {
@@ -2012,10 +2014,7 @@ public sealed class CloudSyncService
                 thinkingText = MergeThinking(thinkingText, splitThinking.Thinking);
             if (!string.IsNullOrWhiteSpace(thinkingText))
             {
-                var folded = ChatViewModel.FoldLeadingThinkingToolMarkup(content, thinkingText);
-                content = folded.Visible;
-                if (!string.IsNullOrWhiteSpace(folded.Thinking))
-                    meta["thinking"] = folded.Thinking;
+                meta["thinking"] = thinkingText.Trim();
             }
 
             yield return new MessageRow(
@@ -2026,6 +2025,33 @@ public sealed class CloudSyncService
                 Meta: meta.Count == 0 ? null : meta.ToJsonString(JsonOptions),
                 CreatedAt: createdAt);
         }
+    }
+
+    private static JsonArray CloneLocalThinkingSegmentsWithExistingTiming(JsonArray parsedSegments, JsonObject? messageMeta)
+    {
+        var clone = parsedSegments.DeepClone() as JsonArray ?? new JsonArray();
+        if (messageMeta?["thinking_segments"] is not JsonArray existingSegments)
+            return clone;
+
+        var elapsedBySource = new Dictionary<string, double>(StringComparer.Ordinal);
+        foreach (var node in existingSegments)
+        {
+            if (node is not JsonObject item) continue;
+            var source = ReadString(item, "source");
+            var elapsed = ReadDouble(item, "elapsed_seconds", "elapsedSeconds");
+            if (!string.IsNullOrWhiteSpace(source) && elapsed is > 0)
+                elapsedBySource[source] = elapsed.Value;
+        }
+
+        foreach (var node in clone)
+        {
+            if (node is not JsonObject item) continue;
+            var source = ReadString(item, "source");
+            if (!string.IsNullOrWhiteSpace(source) && elapsedBySource.TryGetValue(source, out var elapsed))
+                item["elapsed_seconds"] = elapsed;
+        }
+
+        return clone;
     }
 
     private static string? MergeThinking(string? first, string? second)
