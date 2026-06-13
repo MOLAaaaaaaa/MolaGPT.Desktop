@@ -168,13 +168,20 @@ public static partial class PythonExecutionRiskAnalyzer
         var literalPaths = ExtractLiteralPaths(code).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         foreach (var literalPath in literalPaths)
         {
+            // Denylist wins.
             if (PathMatchesAnyPrefix(literalPath, deniedPathPrefixes))
             {
                 Add("denied_path", "critical", $"规则禁止访问路径 {literalPath}", block: true);
                 continue;
             }
 
-            if (allowedPathPrefixes.Length > 0 && !PathMatchesAnyPrefix(literalPath, allowedPathPrefixes))
+            // A path under an explicitly allowed prefix is trusted: no flag at
+            // all (this is what makes "allow this path" actually stop asking).
+            if (PathMatchesAnyPrefix(literalPath, allowedPathPrefixes))
+                continue;
+
+            // Outside an active allowlist is higher risk than a bare absolute path.
+            if (allowedPathPrefixes.Length > 0)
                 Add("outside_allowed_path", "high", $"代码引用了未在允许列表中的路径 {literalPath}");
             else
                 Add("absolute_path", "medium", $"代码引用了本机绝对路径 {literalPath}");

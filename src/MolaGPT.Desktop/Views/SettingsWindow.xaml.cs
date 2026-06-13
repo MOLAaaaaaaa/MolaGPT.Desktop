@@ -32,6 +32,7 @@ public partial class SettingsWindow : Window
     private readonly IChatToolHost _toolHost;
     private readonly PythonRuntimeManager _pythonRuntime;
     private readonly AppStatusService _appStatus;
+    private readonly SkillsViewModel _skills;
     private readonly CloudSyncService _cloudSync;
     private readonly ConversationListViewModel _conversationList;
     private ProviderEntry? _editing;
@@ -144,7 +145,8 @@ public partial class SettingsWindow : Window
         Func<HttpClient> byokHttpFactory,
         IChatToolHost toolHost,
         PythonRuntimeManager pythonRuntime,
-        AppStatusService appStatus)
+        AppStatusService appStatus,
+        SkillsViewModel skills)
     {
         InitializeComponent();
         _vm = vm;
@@ -157,6 +159,7 @@ public partial class SettingsWindow : Window
         _toolHost = toolHost;
         _pythonRuntime = pythonRuntime;
         _appStatus = appStatus;
+        _skills = skills;
         DataContext = vm;
         SetPresetItemsForPurpose("chat");
         // The persona tab uses _personas as its DataContext so bindings inside
@@ -165,6 +168,7 @@ public partial class SettingsWindow : Window
         PersonaTabRoot.DataContext = _personas;
         PersonaIconPicker.ItemsSource = PersonaIconCatalog.All;
         PersonaList.SelectedItem = _personas.Personas.FirstOrDefault();
+        SkillsTabRoot.DataContext = _skills;
         _vm.Reload();
         UpdateAccountUi();
         InitializeWebSearchUi();
@@ -686,6 +690,93 @@ public partial class SettingsWindow : Window
             "done" => "Python 环境已可用",
             _ => "正在配置 Python 环境"
         };
+
+    // ---- Skills tab ----
+
+    private void SkillSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // Built-in skills are read-only: hide the delete button for them.
+        DeleteSkillButton.Visibility = SkillsList.SelectedItem is SkillItemViewModel { IsBuiltin: false }
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private void ImportSkillClick(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "选择技能压缩包（.zip，内含 SKILL.md）",
+            Filter = "技能压缩包 (*.zip)|*.zip|所有文件 (*.*)|*.*",
+            CheckFileExists = true
+        };
+        if (dialog.ShowDialog(this) != true)
+            return;
+
+        try
+        {
+            var name = _skills.ImportFromPath(dialog.FileName);
+            SkillsList.SelectedItem = _skills.Skills.FirstOrDefault(s => s.Name == name);
+            MessageBox.Show(this, $"已导入技能：{name}", "导入成功", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "导入失败：" + ex.Message, "导入技能", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void OpenSkillsDirectoryClick(object sender, RoutedEventArgs e)
+    {
+        _skills.EnsureUserDirectoryForImport();
+        var dir = _skills.UserSkillsDirectory;
+        try
+        {
+            var startInfo = new ProcessStartInfo { FileName = "explorer.exe", UseShellExecute = true };
+            startInfo.ArgumentList.Add(dir);
+            Process.Start(startInfo);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "打开目录失败：" + ex.Message, "技能", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void RefreshSkillsClick(object sender, RoutedEventArgs e) => _skills.Reload();
+
+    private void ViewSkillMdClick(object sender, RoutedEventArgs e)
+    {
+        if (SkillsList.SelectedItem is not SkillItemViewModel skill)
+            return;
+        if (!File.Exists(skill.SkillMdPath))
+        {
+            MessageBox.Show(this, "找不到 SKILL.md 文件。", "技能", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        RevealInExplorer(skill.SkillMdPath);
+    }
+
+    private void DeleteSkillClick(object sender, RoutedEventArgs e)
+    {
+        if (SkillsList.SelectedItem is not SkillItemViewModel skill || skill.IsBuiltin)
+            return;
+
+        var result = MessageBox.Show(
+            this,
+            $"将删除自定义技能「{skill.Name}」及其文件夹。此操作不可恢复。",
+            "删除技能",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+        if (result != MessageBoxResult.Yes)
+            return;
+
+        try
+        {
+            _skills.DeleteUserSkill(skill);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "删除失败：" + ex.Message, "删除技能", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
 
     private static bool IsPathInside(string? path, string root)
     {

@@ -37,6 +37,13 @@
     <None Include="Assets\app.ico" />
   </ItemGroup>
 
+  <!-- Built-in Agent Skills shipped next to the app; SkillManager scans <AppDir>/skills. -->
+  <ItemGroup>
+    <Content Include="skills\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
   <ItemGroup>
     <Page Update="Themes\Tokens.Light.xaml">
       <Generator>MSBuild:Compile</Generator>

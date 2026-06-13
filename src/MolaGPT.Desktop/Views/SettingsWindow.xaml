@@ -876,6 +876,225 @@
                         </Grid>
                     </TabItem>
 
+                    <TabItem Header="技能"
+                             Visibility="{Binding PythonToolEnabled, Converter={StaticResource BoolVis}}">
+                        <Grid x:Name="SkillsTabRoot">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="320" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Left: skill list + action bar -->
+                            <Border Grid.Column="0"
+                                    BorderBrush="{DynamicResource Brush.Divider}"
+                                    BorderThickness="0,0,1,0">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <TextBlock Grid.Row="0"
+                                               Text="技能让模型用本地 Python 完成结构化任务（需开启 Python 工具）。"
+                                               TextWrapping="Wrap"
+                                               FontSize="{DynamicResource Font.Size.Small}"
+                                               Foreground="{DynamicResource Brush.Text.Muted}"
+                                               Margin="16,16,16,8" />
+
+                                    <ListBox Grid.Row="1"
+                                             x:Name="SkillsList"
+                                             ItemsSource="{Binding Skills}"
+                                             SelectionChanged="SkillSelectionChanged"
+                                             Background="Transparent"
+                                             BorderThickness="0"
+                                             Padding="8,4"
+                                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                        <ListBox.ItemContainerStyle>
+                                            <Style TargetType="ListBoxItem">
+                                                <Setter Property="Padding" Value="0" />
+                                                <Setter Property="Margin" Value="0,2" />
+                                                <Setter Property="Cursor" Value="Hand" />
+                                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                                <Setter Property="Template">
+                                                    <Setter.Value>
+                                                        <ControlTemplate TargetType="ListBoxItem">
+                                                            <Border x:Name="row"
+                                                                    Background="Transparent"
+                                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                                    Padding="10,8">
+                                                                <ContentPresenter />
+                                                            </Border>
+                                                            <ControlTemplate.Triggers>
+                                                                <Trigger Property="IsMouseOver" Value="True">
+                                                                    <Setter TargetName="row" Property="Background"
+                                                                            Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+                                                                </Trigger>
+                                                                <Trigger Property="IsSelected" Value="True">
+                                                                    <Setter TargetName="row" Property="Background"
+                                                                            Value="{DynamicResource Brush.Primary.Soft}" />
+                                                                </Trigger>
+                                                            </ControlTemplate.Triggers>
+                                                        </ControlTemplate>
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </Style>
+                                        </ListBox.ItemContainerStyle>
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <CheckBox Grid.Column="0"
+                                                              IsChecked="{Binding Enabled, Mode=TwoWay}"
+                                                              VerticalAlignment="Center"
+                                                              Margin="0,0,10,0" />
+                                                    <StackPanel Grid.Column="1">
+                                                        <StackPanel Orientation="Horizontal">
+                                                            <TextBlock Text="{Binding Name}"
+                                                                       FontWeight="SemiBold"
+                                                                       Foreground="{DynamicResource Brush.Text.Primary}" />
+                                                            <Border Background="{DynamicResource Brush.Bg.Elevated}"
+                                                                    BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                                                    BorderThickness="1"
+                                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                                    Padding="6,1"
+                                                                    Margin="8,0,0,0"
+                                                                    VerticalAlignment="Center">
+                                                                <TextBlock Text="{Binding SourceLabel}"
+                                                                           FontSize="10"
+                                                                           Foreground="{DynamicResource Brush.Text.Muted}" />
+                                                            </Border>
+                                                        </StackPanel>
+                                                        <TextBlock Text="{Binding Description}"
+                                                                   TextWrapping="Wrap"
+                                                                   MaxHeight="48"
+                                                                   FontSize="{DynamicResource Font.Size.Small}"
+                                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                                   Margin="0,2,0,0" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
+
+                                    <StackPanel Grid.Row="2" Margin="12,8,12,12">
+                                        <Button Click="ImportSkillClick"
+                                                Style="{StaticResource OutlineButton}"
+                                                HorizontalAlignment="Stretch"
+                                                HorizontalContentAlignment="Center"
+                                                Padding="0,8"
+                                                Margin="0,0,0,6"
+                                                Content="导入技能…" />
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Button Click="OpenSkillsDirectoryClick"
+                                                    Style="{StaticResource OutlineButton}"
+                                                    Padding="12,6"
+                                                    Margin="0,0,6,0"
+                                                    FontSize="{DynamicResource Font.Size.Small}"
+                                                    Content="打开技能目录" />
+                                            <Button Click="RefreshSkillsClick"
+                                                    Style="{StaticResource OutlineButton}"
+                                                    Padding="12,6"
+                                                    FontSize="{DynamicResource Font.Size.Small}"
+                                                    Content="刷新" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+
+                            <!-- Right: selected skill detail -->
+                            <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto"
+                                          DataContext="{Binding SelectedItem, ElementName=SkillsList}">
+                                <Grid Margin="24">
+                                    <TextBlock Text="从左侧选择一个技能查看详情。"
+                                               Foreground="{DynamicResource Brush.Text.Muted}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding}" Value="{x:Null}">
+                                                        <Setter Property="Visibility" Value="Visible" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <StackPanel>
+                                        <StackPanel.Style>
+                                            <Style TargetType="StackPanel">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding}" Value="{x:Null}">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </StackPanel.Style>
+
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding Name}"
+                                                       FontSize="20"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource Brush.Text.Primary}" />
+                                            <Border Background="{DynamicResource Brush.Bg.Elevated}"
+                                                    BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                                    BorderThickness="1"
+                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                    Padding="8,2"
+                                                    Margin="10,0,0,0"
+                                                    VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding SourceLabel}"
+                                                           FontSize="11"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}" />
+                                            </Border>
+                                        </StackPanel>
+
+                                        <CheckBox Content="在对话中启用此技能"
+                                                  IsChecked="{Binding Enabled, Mode=TwoWay}"
+                                                  Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                  Margin="0,12,0,0" />
+
+                                        <TextBlock Text="描述" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                   Margin="0,16,0,4" />
+                                        <TextBlock Text="{Binding Description}"
+                                                   TextWrapping="Wrap"
+                                                   Foreground="{DynamicResource Brush.Text.Primary}" />
+
+                                        <TextBlock Text="技能目录" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                   Margin="0,16,0,4" />
+                                        <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                                                CornerRadius="{DynamicResource Radius.Sm}"
+                                                Padding="12,8">
+                                            <TextBox Text="{Binding DirectoryPath, Mode=OneWay}"
+                                                     IsReadOnly="True"
+                                                     Style="{StaticResource InlineTextBox}"
+                                                     TextWrapping="Wrap" />
+                                        </Border>
+
+                                        <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                                            <Button Click="ViewSkillMdClick"
+                                                    Style="{StaticResource OutlineButton}"
+                                                    Padding="12,6"
+                                                    Margin="0,0,8,0"
+                                                    Content="查看 SKILL.md" />
+                                            <Button x:Name="DeleteSkillButton"
+                                                    Click="DeleteSkillClick"
+                                                    Style="{StaticResource OutlineButton}"
+                                                    Padding="12,6"
+                                                    Content="删除"
+                                                    Visibility="Collapsed" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Grid>
+                            </ScrollViewer>
+                        </Grid>
+                    </TabItem>
+
                     <TabItem Header="工具与能力">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="32,24" MaxWidth="680" HorizontalAlignment="Left">

@@ -436,6 +436,55 @@
 
                 </Grid>
 
+                <!-- Scroll-to-bottom affordance. Fades in when the user
+                     scrolls away from the bottom (e.g. reading back while a
+                     reply streams) and jumps back to the latest content on
+                     click. Collapsed by default; OnMessagesScrollFollowChanged
+                     toggles Opacity/HitTest in code-behind. Anchored just
+                     above the floating composer. -->
+                <Button x:Name="ScrollToBottomButton"
+                        VerticalAlignment="Bottom"
+                        HorizontalAlignment="Center"
+                        Margin="0,0,0,196"
+                        Width="32"
+                        Height="32"
+                        Opacity="0"
+                        IsHitTestVisible="False"
+                        Cursor="Hand"
+                        ToolTip="滚动到底部"
+                        Click="ScrollToBottomButton_Click"
+                        Visibility="{Binding Chat.IsEmpty, Converter={x:Static views:BoolToVisibilityInverse.Instance}}">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="Bg"
+                                    Background="{DynamicResource Brush.Bg.Elevated}"
+                                    BorderBrush="{DynamicResource Brush.Border}"
+                                    BorderThickness="1"
+                                    CornerRadius="16">
+                                <Border.Effect>
+                                    <DropShadowEffect BlurRadius="12"
+                                                      ShadowDepth="2"
+                                                      Direction="270"
+                                                      Opacity="0.20"
+                                                      Color="#000000" />
+                                </Border.Effect>
+                                <TextBlock Text="&#xE74B;"
+                                           FontFamily="{DynamicResource Font.Icon}"
+                                           FontSize="12"
+                                           Foreground="{DynamicResource Brush.Text.Secondary}"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bg" Property="Background" Value="{DynamicResource Brush.Bg.Primary}" />
+                                    <Setter TargetName="Bg" Property="BorderBrush" Value="{DynamicResource Brush.Text.Secondary}" />
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
+
                 <!-- Floating top header centered above the active page. -->
                 <Border VerticalAlignment="Top"
                         Margin="16,16,16,0"

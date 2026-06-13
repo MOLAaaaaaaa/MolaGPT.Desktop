@@ -178,6 +178,21 @@ public sealed partial class MarkdownPresenter : ContentControl
     [GeneratedRegex(@"^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?(?:[/?#].*)?$", RegexOptions.IgnoreCase)]
     private static partial Regex LocalhostUrlRegex();
 
+    // A line whose ENTIRE content is a single markdown image (optionally a
+    // linked image), with <4 leading spaces so 4-space indented code is left
+    // alone. Used to force a blank line around such lines so Markdig parses
+    // them as standalone image blocks (the block-card render path) instead of
+    // fusing them into the following caption paragraph (the inline path, which
+    // overflows the image over the caption text).
+    [GeneratedRegex(@"^ {0,3}!\[[^\]]*\]\([^)\r\n]+\)\s*$")]
+    private static partial Regex StandaloneImageLineRegex();
+
+    [GeneratedRegex(@"^ {0,3}\[!\[[^\]]*\]\([^)\r\n]+\)\]\([^)\r\n]+\)\s*$")]
+    private static partial Regex StandaloneLinkedImageLineRegex();
+
+    [GeneratedRegex(@"^\s*(?:`{3,}|~{3,})")]
+    private static partial Regex CodeFenceLineRegex();
+
     private static readonly DependencyProperty HyperlinkMouseDownPointProperty =
         DependencyProperty.RegisterAttached(
             "HyperlinkMouseDownPoint",
@@ -735,8 +750,9 @@ public sealed partial class MarkdownPresenter : ContentControl
         // downstream path marker-safe. Idempotent: Split() re-strips harmlessly,
         // and _lastRenderedSource is stored post-strip so the append-only
         // prefix check stays consistent frame to frame.
-        var src = MolaGptMarkupSplitter.NormalizeOutputSegmentMarkers(
-            ProcessCitationRefs(_pendingSource ?? string.Empty));
+        var src = EnsureBlankLinesAroundStandaloneImages(
+            MolaGptMarkupSplitter.NormalizeOutputSegmentMarkers(
+                ProcessCitationRefs(_pendingSource ?? string.Empty)));
         var pipeline = (useFinalPipeline || !IsStreaming) ? s_finalPipeline : s_streamingPipeline;
         bool pipelineChanged = pipeline != _lastUsedPipeline;
 
@@ -2782,18 +2798,97 @@ public sealed partial class MarkdownPresenter : ContentControl
         StyleInlineCode(paragraph);
     }
 
+    /// <summary>
+    /// Ensures a blank line before and after any line that is solely a markdown
+    /// image. Without the blank line, CommonMark fuses "![img]\ncaption" into a
+    /// single paragraph, so the image renders as an inline <c>InlineUIContainer</c>
+    /// that overflows downward and paints over the caption text. Promoting it to
+    /// its own block routes it through the fixed-size image-card path instead.
+    /// Lines inside fenced code blocks and 4-space indented code are left alone.
+    /// Partial images still streaming (no closing "](url)") don't match and are
+    /// untouched until complete.
+    /// </summary>
+    private static string EnsureBlankLinesAroundStandaloneImages(string src)
+    {
+        if (string.IsNullOrEmpty(src) || src.IndexOf("![", StringComparison.Ordinal) < 0)
+            return src;
+
+        var lines = src.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        var outLines = new List<string>(lines.Length + 8);
+        bool inFence = false;
+        bool changed = false;
+
+        foreach (var line in lines)
+        {
+            if (CodeFenceLineRegex().IsMatch(line))
+                inFence = !inFence;
+
+            bool isImageLine = !inFence
+                && (StandaloneImageLineRegex().IsMatch(line)
+                    || StandaloneLinkedImageLineRegex().IsMatch(line));
+
+            if (isImageLine)
+            {
+                if (outLines.Count > 0 && outLines[^1].Length != 0)
+                {
+                    outLines.Add(string.Empty);
+                    changed = true;
+                }
+                outLines.Add(line);
+                outLines.Add(string.Empty);
+            }
+            else
+            {
+                // Collapse the speculative blank we appended after an image when
+                // a blank already follows in the source, so spacing stays stable.
+                if (outLines.Count > 0 && outLines[^1].Length == 0 && line.Length == 0)
+                    continue;
+                outLines.Add(line);
+            }
+        }
+
+        // Trim a trailing speculative blank so we don't grow the source forever
+        // across streaming frames (which would defeat the append-only prefix check).
+        if (outLines.Count > 0 && outLines[^1].Length == 0
+            && (lines.Length == 0 || lines[^1].Length != 0))
+        {
+            outLines.RemoveAt(outLines.Count - 1);
+        }
+
+        if (!changed && outLines.Count == lines.Length)
+            return src;
+
+        return string.Join("\n", outLines);
+    }
+
     private void ApplyMarkdownImageLayout(Paragraph paragraph)
     {
         var snapshot = paragraph.Inlines.Cast<Inline>().ToList();
+        var hasImage = false;
         foreach (var inline in snapshot)
         {
             if (!TryStyleMarkdownImageInline(inline))
                 continue;
 
+            hasImage = true;
             if (inline.PreviousInline is not null and not LineBreak)
                 paragraph.Inlines.InsertBefore(inline, new LineBreak());
             if (inline.NextInline is not null and not LineBreak)
                 paragraph.Inlines.InsertAfter(inline, new LineBreak());
+        }
+
+        // When an image shares a paragraph with text (markdown image directly
+        // followed by a caption line, no blank line between them), the whole
+        // paragraph would otherwise inherit LineStackingStrategy.BlockLineHeight
+        // with a fixed 24px LineHeight — which clamps the image's line box to
+        // 24px and lets the image overflow downward, painting on top of the
+        // following caption lines. Switch such paragraphs to MaxHeight so each
+        // line grows to its tallest inline (the image), and clear the fixed
+        // LineHeight so text lines still size naturally.
+        if (hasImage)
+        {
+            paragraph.LineStackingStrategy = LineStackingStrategy.MaxHeight;
+            paragraph.LineHeight = double.NaN;
         }
     }
 

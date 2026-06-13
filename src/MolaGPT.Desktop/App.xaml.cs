@@ -556,10 +556,15 @@ public partial class App : Application
             sp.GetRequiredService<BackgroundStreamService>(),
             sp.GetRequiredService<SettingsViewModel>(),
             sp.GetRequiredService<PersonaListViewModel>(),
-            sp.GetRequiredService<AttachmentStore>()));
+            sp.GetRequiredService<AttachmentStore>(),
+            sp.GetRequiredService<SkillsViewModel>()));
         services.AddSingleton(sp => new SettingsViewModel(
             sp.GetRequiredService<ProviderRepository>(),
             sp.GetRequiredService<CredentialStore>(),
+            sp.GetRequiredService<SettingsRepository>()));
+        services.AddSingleton<SkillManager>();
+        services.AddSingleton(sp => new SkillsViewModel(
+            sp.GetRequiredService<SkillManager>(),
             sp.GetRequiredService<SettingsRepository>()));
         services.AddSingleton(sp => new MainViewModel(
             sp.GetRequiredService<ConversationListViewModel>(),
@@ -624,7 +629,8 @@ public partial class App : Application
                 factory,
                 sp.GetRequiredService<IChatToolHost>(),
                 sp.GetRequiredService<PythonRuntimeManager>(),
-                sp.GetRequiredService<AppStatusService>());
+                sp.GetRequiredService<AppStatusService>(),
+                sp.GetRequiredService<SkillsViewModel>());
         });
         services.AddTransient(sp =>
             new AboutWindow(

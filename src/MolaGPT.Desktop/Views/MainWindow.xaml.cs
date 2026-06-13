@@ -36,6 +36,20 @@ public partial class MainWindow : Window
     private double _messagesScrollTargetOffset;
     private DateTime _messagesScrollAnimationStart;
     private bool _messagesScrollAnimating;
+    private bool _scrollToBottomVisible;
+
+    // Stream-follow uses an explicit gesture-driven stick state instead of a
+    // per-frame geometry test. During a streaming re-render the ScrollViewer's
+    // extent briefly shrinks then grows and WPF clamps the offset toward the
+    // bottom; a geometry test ("are we near the bottom right now?") then
+    // misreads that clamp as "user is at the bottom" and yanks them down even
+    // after they scrolled up. Instead: we follow only while _followStreamBottom
+    // is true, the user's own upward scroll detaches it, and scrolling back to
+    // the bottom (or sending a new message) re-attaches it.
+    private bool _followStreamBottom = true;
+    // Set around our own ScrollToVerticalOffset calls so the resulting
+    // ScrollChanged isn't mistaken for a user gesture.
+    private bool _programmaticScroll;
     private bool _conversationGroupLayoutFocused;
     private bool _clearingOtherConversationGroupSelection;
     private readonly DispatcherTimer _conversationGroupLayoutRestoreTimer = new()
@@ -595,6 +609,60 @@ public partial class MainWindow : Window
     {
         if (e.ViewportHeightChange != 0 || e.ExtentHeightChange != 0)
             QueueMessagesViewportUpdate();
+
+        // A vertical offset change with NO extent/viewport change is a real
+        // scroll movement. If it wasn't us (programmatic) and wasn't our wheel
+        // animation, it's the user dragging the scrollbar / keyboard — treat it
+        // as a gesture and re-evaluate the stick state from where they landed.
+        bool offsetMovedOnly = e.VerticalChange != 0
+            && e.ExtentHeightChange == 0
+            && e.ViewportHeightChange == 0;
+        if (offsetMovedOnly && !_programmaticScroll && !_messagesScrollAnimating)
+            _followStreamBottom = IsMessagesNearBottom();
+
+        // Content grew (streaming reply lengthening, or viewport shrinking).
+        // Follow ONLY if we're still attached — never re-derive "attached" from
+        // current geometry here, because the streaming re-render transiently
+        // clamps the offset toward the bottom and a geometry test would falsely
+        // read "at bottom" and yank a scrolled-up user back down.
+        var grew = e.ExtentHeightChange > 0 || e.ViewportHeightChange < 0;
+        if (grew && _followStreamBottom && !_messagesScrollAnimating)
+            QueueMessagesScrollToEnd();
+
+        UpdateScrollToBottomButton();
+    }
+
+    private void UpdateScrollToBottomButton()
+    {
+        if (ScrollToBottomButton is null || MessagesScroll is null)
+            return;
+
+        // Only meaningful once there's something to scroll. Near the bottom the
+        // button is redundant (stream-follow keeps us pinned), so hide it.
+        var show = MessagesScroll.ScrollableHeight > MessagesBottomStickTolerance
+                   && !IsMessagesNearBottom();
+        if (show == _scrollToBottomVisible)
+            return;
+
+        _scrollToBottomVisible = show;
+        ScrollToBottomButton.IsHitTestVisible = show;
+        ScrollToBottomButton.BeginAnimation(
+            OpacityProperty,
+            new DoubleAnimation(show ? 1.0 : 0.0, TimeSpan.FromMilliseconds(show ? 160 : 120))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            });
+    }
+
+    private void ScrollToBottomButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (MessagesScroll is null)
+            return;
+
+        // Explicit "go to latest" — re-attach stream-follow so a still-running
+        // reply keeps us pinned afterwards.
+        _followStreamBottom = true;
+        AnimateMessagesScrollTo(MessagesScroll.ScrollableHeight);
     }
 
     private void QueueMessagesViewportUpdate()
@@ -602,6 +670,7 @@ public partial class MainWindow : Window
         Dispatcher.InvokeAsync(() =>
         {
             UpdateMessagesBottomInset();
+            UpdateScrollToBottomButton();
         }, DispatcherPriority.Render);
     }
 
@@ -626,7 +695,15 @@ public partial class MainWindow : Window
                 _messagesScrollAnimating = false;
             }
 
-            MessagesScroll.ScrollToVerticalOffset(MessagesScroll.ScrollableHeight);
+            _programmaticScroll = true;
+            try
+            {
+                MessagesScroll.ScrollToVerticalOffset(MessagesScroll.ScrollableHeight);
+            }
+            finally
+            {
+                _programmaticScroll = false;
+            }
         }, DispatcherPriority.ContextIdle);
     }
 
@@ -764,6 +841,13 @@ public partial class MainWindow : Window
             origin - (e.Delta * MessagesWheelDistanceScale),
             0,
             MessagesScroll.ScrollableHeight);
+
+        // The wheel is an explicit user gesture: scrolling up detaches
+        // stream-follow; landing at (or within tolerance of) the bottom
+        // re-attaches it. This is what lets the user read back during a stream
+        // without being dragged down, then resume following by scrolling down.
+        _followStreamBottom =
+            MessagesScroll.ScrollableHeight - next <= MessagesBottomStickTolerance;
 
         AnimateMessagesScrollTo(next);
         e.Handled = true;

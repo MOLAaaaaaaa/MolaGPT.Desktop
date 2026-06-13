@@ -60,10 +60,6 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// 与代理后端通信（向前兼容）。</summary>
     [ObservableProperty] private bool _enableWebFetch;
 
-    /// <summary>True when the current BYOK turn may expose the local Python
-    /// execution tool to the model.</summary>
-    [ObservableProperty] private bool _enablePythonTool;
-
     /// <summary>Image generation mode. MolaGPT account mode uses the proxy
     /// image flow; BYOK image work is handled by the separate workbench.</summary>
     [ObservableProperty] private bool _isImageGenerationMode;
@@ -79,6 +75,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     private readonly BackgroundStreamService? _backgroundStreams;
     private readonly SettingsViewModel? _settings;
     private readonly PersonaListViewModel? _personas;
+    private readonly SkillsViewModel? _skills;
     private readonly MolaGPT.Storage.AttachmentStore? _attachmentStore;
     private readonly Dictionary<MessageViewModel, List<PythonArtifactMarkdownRewriter.ArtifactContext>> _pythonArtifactContexts = new();
     private CancellationTokenSource? _cts;
@@ -116,13 +113,15 @@ public sealed partial class ComposerViewModel : ObservableObject
         BackgroundStreamService? backgroundStreams,
         SettingsViewModel? settings,
         PersonaListViewModel? personas,
-        MolaGPT.Storage.AttachmentStore? attachmentStore)
+        MolaGPT.Storage.AttachmentStore? attachmentStore,
+        SkillsViewModel? skills = null)
     {
         _chat = chat;
         _backgroundStreams = backgroundStreams;
         _settings = settings;
         _personas = personas;
         _attachmentStore = attachmentStore;
+        _skills = skills;
         _chat.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(ChatViewModel.ActiveProvider) or nameof(ChatViewModel.ActiveModel))
@@ -146,8 +145,6 @@ public sealed partial class ComposerViewModel : ObservableObject
                     EnableNetwork = false;
                     EnableWebFetch = false;
                 }
-                if (!IsPythonToolVisible && EnablePythonTool)
-                    EnablePythonTool = false;
                 if (!IsImageGenerationAvailable && IsImageGenerationMode)
                     IsImageGenerationMode = false;
 
@@ -206,8 +203,6 @@ public sealed partial class ComposerViewModel : ObservableObject
                     or nameof(SettingsViewModel.PythonToolDeniedPathPrefixes))
                 {
                     OnPropertyChanged(nameof(IsPythonToolVisible));
-                    if (!IsPythonToolVisible && EnablePythonTool)
-                        EnablePythonTool = false;
                 }
             };
         }
@@ -768,8 +763,25 @@ public sealed partial class ComposerViewModel : ObservableObject
             enabledTools["vision"] = _settings?.BuildVisionProxyOptions();
             if (CanUseByokImageGenerationTool)
                 enabledTools["image_generation"] = _settings!.BuildImageGenerationOptions();
-            if (CanUseByokPythonTool && EnablePythonTool)
-                enabledTools["python"] = _settings!.BuildPythonExecutionOptions() with { Enabled = true };
+            if (CanUseByokPythonTool)
+            {
+                var pythonOptions = _settings!.BuildPythonExecutionOptions() with { Enabled = true };
+                // Let the Python tool read enabled skills' SKILL.md / scripts
+                // without tripping path approval.
+                if (_skills is not null && _skills.HasEnabledSkills)
+                {
+                    var roots = _skills.AllowedReadRoots();
+                    if (roots.Count > 0)
+                    {
+                        var merged = string.Join(",",
+                            new[] { pythonOptions.AllowedPathPrefixes }
+                                .Concat(roots)
+                                .Where(s => !string.IsNullOrWhiteSpace(s)));
+                        pythonOptions = pythonOptions with { AllowedPathPrefixes = merged };
+                    }
+                }
+                enabledTools["python"] = pythonOptions;
+            }
         }
 
         var extras = new Dictionary<string, object>
@@ -956,7 +968,13 @@ public sealed partial class ComposerViewModel : ObservableObject
             merged = string.IsNullOrWhiteSpace(modelPrompt) ? null : modelPrompt;
         }
 
-        if (string.IsNullOrWhiteSpace(merged)) return null;
+        var skillCatalog = BuildSkillCatalogHint();
+
+        // The skill catalog must reach the model even when there is no persona /
+        // conversation / model prompt, so it is appended after interpolation
+        // rather than gated behind the merged-prompt early return.
+        if (string.IsNullOrWhiteSpace(merged))
+            return skillCatalog; // null when there are no skills to inject either
 
         var vars = new PromptVariables
         {
@@ -966,7 +984,21 @@ public sealed partial class ComposerViewModel : ObservableObject
             ProviderDisplayName = _chat.ActiveProvider?.DisplayName,
             Username = _settings?.MolaGptUsername
         };
-        return SystemPromptInterpolator.Interpolate(merged, vars);
+        var interpolated = SystemPromptInterpolator.Interpolate(merged, vars);
+        return string.IsNullOrWhiteSpace(skillCatalog)
+            ? interpolated
+            : AppendHiddenSystemHint(interpolated, skillCatalog!);
+    }
+
+    /// <summary>
+    /// Tier-1 skill catalog injected into the system prompt. Only meaningful for
+    /// BYOK chats with the Python tool enabled, since skills execute through it.
+    /// </summary>
+    private string? BuildSkillCatalogHint()
+    {
+        if (_skills is null) return null;
+        if (!CanUseByokPythonTool) return null;
+        return _skills.BuildCatalogForPrompt();
     }
 
     [RelayCommand(CanExecute = nameof(CanStop))]
