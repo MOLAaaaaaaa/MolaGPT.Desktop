@@ -2,6 +2,7 @@ using System.Text.Json;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
+using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Tools.Vision;
 
 namespace MolaGPT.Core.Chat.Tools;
@@ -11,12 +12,18 @@ public sealed class ChatToolHost : IChatToolHost
     private readonly McpClientManager _mcp;
     private readonly VisionProxyTool _vision;
     private readonly ImageGenerationTool _imageGeneration;
+    private readonly PythonExecutionTool _python;
 
-    public ChatToolHost(McpClientManager mcp, VisionProxyTool vision, ImageGenerationTool imageGeneration)
+    public ChatToolHost(
+        McpClientManager mcp,
+        VisionProxyTool vision,
+        ImageGenerationTool imageGeneration,
+        PythonExecutionTool python)
     {
         _mcp = mcp;
         _vision = vision;
         _imageGeneration = imageGeneration;
+        _python = python;
     }
 
     public async Task<IReadOnlyList<object>> BuildToolDefinitionsAsync(
@@ -31,6 +38,9 @@ public sealed class ChatToolHost : IChatToolHost
 
         if (options.ImageGeneration?.Enabled == true && options.ImageGeneration.AsTool)
             tools.Add(ImageGenerationTool.BuildOpenAiToolDefinition());
+
+        if (options.Python?.Enabled == true)
+            tools.Add(PythonExecutionTool.BuildOpenAiToolDefinition(options.Python));
 
         foreach (var server in options.McpServers?.Where(s => s.Enabled) ?? Enumerable.Empty<McpServerOptions>())
         {
@@ -59,6 +69,9 @@ public sealed class ChatToolHost : IChatToolHost
 
         if (string.Equals(toolName, ImageGenerationTool.ToolName, StringComparison.Ordinal))
             return _imageGeneration.ExecuteToolAsync(argumentsJson, options.ImageGeneration, ct);
+
+        if (string.Equals(toolName, PythonExecutionTool.ToolName, StringComparison.Ordinal))
+            return _python.ExecuteAsync(argumentsJson, options.Python, ct);
 
         if (McpToolName.TryDecode(toolName, out var serverSlug, out var toolSlug))
             return ExecuteMcpAsync(serverSlug, toolSlug, argumentsJson, options, ct);

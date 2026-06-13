@@ -8,6 +8,7 @@ using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
+using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Tools.Vision;
 using MolaGPT.Core.Models;
 using MolaGPT.Core.Net;
@@ -29,6 +30,9 @@ namespace MolaGPT.Core.Chat.Providers;
 /// </summary>
 public sealed class OpenAICompatibleProvider : IChatProvider
 {
+    private const long ToolPreviewMinIntervalMs = 120;
+    private const int ToolPreviewMinArgumentDelta = 360;
+
     private static readonly JsonSerializerOptions DisplayJsonOptions = new()
     {
         WriteIndented = true,
@@ -185,7 +189,7 @@ public sealed class OpenAICompatibleProvider : IChatProvider
 
                         if (choice.TryGetProperty("delta", out var delta))
                         {
-                            if (useLocalTools && TryCollectLocalToolCalls(delta, localToolCalls, out var pending))
+                            if (useLocalTools && TryCollectLocalToolCalls(delta, localToolCalls, localToolOptions, out var pending))
                             {
                                 chunk = pending;
                                 handledEvent = true;
@@ -411,12 +415,14 @@ public sealed class OpenAICompatibleProvider : IChatProvider
     private static bool TryCollectLocalToolCalls(
         JsonElement delta,
         SortedDictionary<int, PendingOpenAiToolCall> calls,
+        LocalToolOptions? options,
         out ChatChunk? pending)
     {
         pending = null;
         if (!delta.TryGetProperty("tool_calls", out var toolCalls) || toolCalls.ValueKind != JsonValueKind.Array)
             return false;
 
+        PendingOpenAiToolCall? updated = null;
         foreach (var toolCall in toolCalls.EnumerateArray())
         {
             var idx = ReadInt(toolCall, "index") ?? 0;
@@ -427,7 +433,11 @@ public sealed class OpenAICompatibleProvider : IChatProvider
             }
 
             var id = ReadString(toolCall, "id");
-            if (!string.IsNullOrWhiteSpace(id)) state.Id = id!;
+            if (!string.IsNullOrWhiteSpace(id))
+            {
+                state.Id = id!;
+                updated = state;
+            }
 
             if (toolCall.TryGetProperty("function", out var fn) && fn.ValueKind == JsonValueKind.Object)
             {
@@ -435,12 +445,53 @@ public sealed class OpenAICompatibleProvider : IChatProvider
                 if (!string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(state.Name))
                 {
                     state.Name = name!;
+                    updated = state;
                 }
                 var args = ReadString(fn, "arguments");
-                if (!string.IsNullOrEmpty(args)) state.Arguments.Append(args);
+                if (!string.IsNullOrEmpty(args))
+                {
+                    state.Arguments.Append(args);
+                    updated = state;
+                }
             }
         }
 
+        if (updated is not null && ShouldEmitToolPreview(updated))
+        {
+            pending = new ChatChunk(Tool: BuildToolDelta(updated, options, "preparing"));
+        }
+
+        return true;
+    }
+
+    private static bool ShouldEmitToolPreview(PendingOpenAiToolCall toolCall)
+    {
+        if (string.IsNullOrWhiteSpace(toolCall.Name) && toolCall.Arguments.Length == 0)
+            return false;
+
+        var now = Environment.TickCount64;
+        if (!toolCall.PreviewEmitted)
+        {
+            // For Python, avoid showing an empty "(no args)" card before the
+            // model has started streaming code into the arguments payload.
+            if (string.Equals(toolCall.Name, PythonExecutionTool.ToolName, StringComparison.Ordinal)
+                && toolCall.Arguments.Length == 0)
+            {
+                return false;
+            }
+
+            toolCall.MarkPreviewEmitted(now);
+            return true;
+        }
+
+        var argumentDelta = toolCall.Arguments.Length - toolCall.LastPreviewArgumentLength;
+        if (argumentDelta < ToolPreviewMinArgumentDelta
+            && now - toolCall.LastPreviewTick < ToolPreviewMinIntervalMs)
+        {
+            return false;
+        }
+
+        toolCall.MarkPreviewEmitted(now);
         return true;
     }
 
@@ -510,10 +561,18 @@ public sealed class OpenAICompatibleProvider : IChatProvider
                 return ReadString(root, "query") ?? "查看图片";
             if (name == ImageGenerationTool.ToolName)
                 return ReadString(root, "prompt") ?? "生成图片";
+            if (name == PythonExecutionTool.ToolName)
+                return ReadString(root, "description")
+                       ?? FirstNonEmptyLine(ReadString(root, "code"))
+                       ?? "执行 Python";
             if (McpToolName.TryDecode(name, out var server, out var tool))
                 return $"{server} / {tool}";
         }
-        catch (JsonException) { }
+        catch (JsonException)
+        {
+            if (name == PythonExecutionTool.ToolName)
+                return "正在生成 Python 代码";
+        }
 
         return string.IsNullOrWhiteSpace(args) ? null : args;
     }
@@ -541,9 +600,79 @@ public sealed class OpenAICompatibleProvider : IChatProvider
             return "通过视觉模型读取图片";
         if (name == ImageGenerationTool.ToolName)
             return "通过图像生成 API 创建图片";
+        if (name == PythonExecutionTool.ToolName)
+        {
+            if (string.Equals(status, "preparing", StringComparison.OrdinalIgnoreCase))
+                return "正在生成 Python 代码";
+            if (string.Equals(status, "running", StringComparison.OrdinalIgnoreCase))
+                return "本地 Python 执行环境";
+
+            var pythonResult = ReadPythonResultMeta(resultJson);
+            if (pythonResult is not null)
+                return pythonResult;
+
+            return "本地 Python 执行环境";
+        }
         if (McpToolName.TryDecode(name, out var server, out _))
             return $"MCP: {server}";
         return null;
+    }
+
+    private static string? FirstNonEmptyLine(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var line = value
+            .Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None)
+            .Select(l => l.Trim())
+            .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+        if (string.IsNullOrWhiteSpace(line)) return null;
+        return line!.Length <= 96 ? line : line[..96] + "...";
+    }
+
+    private static string? ReadPythonResultMeta(string? resultJson)
+    {
+        if (string.IsNullOrWhiteSpace(resultJson)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(resultJson);
+            var root = doc.RootElement;
+            var parts = new List<string>();
+            if (root.TryGetProperty("permission", out var permission)
+                && permission.ValueKind == JsonValueKind.Object
+                && ReadString(permission, "mode") is { Length: > 0 } mode)
+            {
+                parts.Add(mode switch
+                {
+                    "Approval" => "审批权限",
+                    "FullAccess" => "完全权限",
+                    "Rules" => "规则模式",
+                    _ => mode
+                });
+            }
+            if (root.TryGetProperty("duration_ms", out var duration)
+                && duration.ValueKind == JsonValueKind.Number
+                && duration.TryGetInt64(out var durationMs))
+            {
+                parts.Add($"{durationMs} ms");
+            }
+            if (root.TryGetProperty("exit_code", out var exitCode)
+                && exitCode.ValueKind == JsonValueKind.Number
+                && exitCode.TryGetInt32(out var code))
+            {
+                parts.Add($"退出码 {code}");
+            }
+            if (root.TryGetProperty("artifacts", out var artifacts)
+                && artifacts.ValueKind == JsonValueKind.Array)
+            {
+                var count = artifacts.GetArrayLength();
+                if (count > 0) parts.Add($"{count} 个文件");
+            }
+            return parts.Count == 0 ? null : string.Join(" · ", parts);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static int CountSearchQueries(string args)
@@ -609,6 +738,7 @@ public sealed class OpenAICompatibleProvider : IChatProvider
     {
         "search_web" => "联网搜索",
         "web_fetch" => "网页阅读",
+        PythonExecutionTool.ToolName => "执行 Python",
         _ => "调用工具"
     };
 
@@ -617,6 +747,16 @@ public sealed class OpenAICompatibleProvider : IChatProvider
         public string Id { get; set; } = "call_" + Guid.NewGuid().ToString("N");
         public string Name { get; set; } = string.Empty;
         public StringBuilder Arguments { get; } = new();
+        public bool PreviewEmitted { get; private set; }
+        public long LastPreviewTick { get; private set; }
+        public int LastPreviewArgumentLength { get; private set; }
+
+        public void MarkPreviewEmitted(long tick)
+        {
+            PreviewEmitted = true;
+            LastPreviewTick = tick;
+            LastPreviewArgumentLength = Arguments.Length;
+        }
     }
 
     private static int? ReadInt(JsonElement obj, string name)

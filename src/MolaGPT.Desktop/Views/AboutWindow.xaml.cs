@@ -36,7 +36,9 @@ public partial class AboutWindow : Window
         new("Microsoft.Toolkit.Uwp.Notifications", "Windows 桌面通知", "MIT"),
         new("Microsoft.Win32.SystemEvents", "系统主题变更监听", "MIT"),
         new("System.Security.Cryptography.ProtectedData", "DPAPI 凭据加密", "MIT"),
-        new("System.Text.Json", "JSON 序列化", "MIT")
+        new("System.Text.Json", "JSON 序列化", "MIT"),
+        new("CPython", "可选下载的 MolaGPT 专用 Python 运行时", "PSF-2.0"),
+        new("NumPy / pandas / SciPy / Matplotlib / SymPy / openpyxl / Pillow / seaborn", "可选 Python 科学计算与绘图库", "BSD / PSF / MIT / HPND")
     };
 
     private async void CheckUpdateClick(object sender, RoutedEventArgs e)
@@ -146,6 +148,21 @@ public partial class AboutWindow : Window
 
     private const string LicenseNotice = """
 MolaGPT Desktop 使用了以下开源组件，并依据其许可证要求保留相应的版权与许可声明。
+
+可选下载的 Python 运行时由 CPython Windows 便携环境与第三方 Python 包组成，
+仅用于 MolaGPT 本地 Python Tool。它们保留各自的上游版权与许可证：
+  - CPython: https://www.python.org/  (PSF License)
+  - NumPy: https://numpy.org/  (BSD-3-Clause)
+  - pandas: https://pandas.pydata.org/  (BSD-3-Clause)
+  - SciPy: https://scipy.org/  (BSD-3-Clause)
+  - Matplotlib: https://matplotlib.org/  (PSF-based)
+  - SymPy: https://www.sympy.org/  (BSD)
+  - openpyxl: https://openpyxl.readthedocs.io/  (MIT)
+  - Pillow: https://python-pillow.org/  (HPND)
+  - seaborn: https://seaborn.pydata.org/  (BSD-3-Clause)
+
+如果随安装包或服务器下载包再分发该 Python 运行时，应同时保留这些上游
+组件自带的 LICENSE / NOTICE 文件或等效的许可证说明与来源链接。
 
 ================================================================
 MIT License

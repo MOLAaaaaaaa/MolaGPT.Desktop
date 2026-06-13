@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -28,6 +30,8 @@ public partial class SettingsWindow : Window
     private readonly Func<HttpClient> _byokHttpFactory;
     private readonly ProviderRegistry _registry;
     private readonly IChatToolHost _toolHost;
+    private readonly PythonRuntimeManager _pythonRuntime;
+    private readonly AppStatusService _appStatus;
     private readonly CloudSyncService _cloudSync;
     private readonly ConversationListViewModel _conversationList;
     private ProviderEntry? _editing;
@@ -138,7 +142,9 @@ public partial class SettingsWindow : Window
         ConversationListViewModel conversationList,
         PersonaListViewModel personas,
         Func<HttpClient> byokHttpFactory,
-        IChatToolHost toolHost)
+        IChatToolHost toolHost,
+        PythonRuntimeManager pythonRuntime,
+        AppStatusService appStatus)
     {
         InitializeComponent();
         _vm = vm;
@@ -149,6 +155,8 @@ public partial class SettingsWindow : Window
         _conversationList = conversationList;
         _byokHttpFactory = byokHttpFactory;
         _toolHost = toolHost;
+        _pythonRuntime = pythonRuntime;
+        _appStatus = appStatus;
         DataContext = vm;
         SetPresetItemsForPurpose("chat");
         // The persona tab uses _personas as its DataContext so bindings inside
@@ -160,6 +168,36 @@ public partial class SettingsWindow : Window
         _vm.Reload();
         UpdateAccountUi();
         InitializeWebSearchUi();
+        UpdatePythonRuntimeStatusHint();
+        // Open the advanced rules section up front when persistent allow/deny
+        // rules already exist, so they are visible rather than hidden behind a
+        // collapsed expander.
+        RefreshPythonAdvancedRulesExpander();
+        // Keep the browse/open button label in sync when the path is edited by
+        // hand (typed, pasted, or cleared) in addition to picker-driven changes;
+        // and reveal the advanced rules when a permanent allow rule is written
+        // (e.g. from the execution approval dialog) while settings is open.
+        _vm.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(SettingsViewModel.PythonToolExecutablePath))
+                RefreshPythonBrowseButton();
+            else if (args.PropertyName is nameof(SettingsViewModel.PythonToolAllowedImports)
+                     or nameof(SettingsViewModel.PythonToolAllowedPathPrefixes)
+                     or nameof(SettingsViewModel.PythonToolDeniedImports)
+                     or nameof(SettingsViewModel.PythonToolDeniedPathPrefixes))
+                RefreshPythonAdvancedRulesExpander();
+        };
+    }
+
+    private void RefreshPythonAdvancedRulesExpander()
+    {
+        var hasRules =
+            !string.IsNullOrWhiteSpace(_vm.PythonToolAllowedImports)
+            || !string.IsNullOrWhiteSpace(_vm.PythonToolDeniedImports)
+            || !string.IsNullOrWhiteSpace(_vm.PythonToolAllowedPathPrefixes)
+            || !string.IsNullOrWhiteSpace(_vm.PythonToolDeniedPathPrefixes);
+        if (hasRules)
+            PythonAdvancedRulesExpander.IsExpanded = true;
     }
 
     public void OpenPersonasTab(bool startNewPersona)
@@ -399,6 +437,272 @@ public partial class SettingsWindow : Window
         ImageGenerationStatusText.Text = _vm.IsImageGenerationConfigured
             ? "已启用，BYOK 对话可调用该图像服务。"
             : "选择图像服务与模型后，即可在 BYOK 对话中创建图片。";
+    }
+
+    private void UpdatePythonRuntimeStatusHint()
+    {
+        var runtime = _pythonRuntime.GetInstalledRuntime();
+        if (runtime is null)
+        {
+            PythonRuntimeStatusText.Text = "尚未安装内置运行时；可填写已有 python.exe，或一键下载 MolaGPT 专用便携环境。";
+            RefreshPythonRuntimeButtons();
+            return;
+        }
+
+        var packages = runtime.Packages.Count == 0
+            ? string.Empty
+            : $"；内置库：{string.Join(", ", runtime.Packages.Take(8))}";
+        PythonRuntimeStatusText.Text = $"已配置 MolaGPT 专用 Python {runtime.Version}（{runtime.Runtime}）{packages}";
+        RefreshPythonRuntimeButtons();
+    }
+
+    private async void ConfigurePythonRuntimeClick(object sender, RoutedEventArgs e)
+    {
+        ConfigurePythonRuntimeButton.IsEnabled = false;
+        ClearPythonRuntimeButton.IsEnabled = false;
+        ConfigurePythonRuntimeButton.Content = "配置中…";
+        PythonRuntimeStatusText.Text = "正在准备 MolaGPT 专用 Python 环境…";
+        _appStatus.Publish("Syncing", "正在后台下载 Python 环境");
+        try
+        {
+            var progress = new Progress<PythonRuntimeProgress>(p =>
+            {
+                PythonRuntimeStatusText.Text = string.IsNullOrWhiteSpace(p.Message)
+                    ? $"正在配置 Python 运行时 {p.Progress:P0}"
+                    : p.Message;
+                _appStatus.Publish("Syncing", FormatPythonRuntimeProgress(p));
+            });
+            var runtime = await _pythonRuntime.DownloadAndInstallAsync(progress, CancellationToken.None);
+            _vm.PythonToolEnabled = true;
+            _vm.PythonToolExecutablePath = runtime.PythonExecutablePath;
+            PythonRuntimeStatusText.Text = $"配置完成：{runtime.PythonExecutablePath}";
+            _appStatus.Publish("Success", "Python 环境已可用");
+        }
+        catch (Exception ex)
+        {
+            PythonRuntimeStatusText.Text = "配置失败：" + ex.Message;
+            _appStatus.Publish("Error", "Python 环境配置失败");
+        }
+        finally
+        {
+            ConfigurePythonRuntimeButton.Content = "一键配置";
+            ConfigurePythonRuntimeButton.IsEnabled = true;
+            RefreshPythonRuntimeButtons();
+        }
+    }
+
+    private void OpenPythonRuntimeDirectoryClick(object sender, RoutedEventArgs e)
+    {
+        // When a valid interpreter is configured, offer both opening its folder
+        // and switching to a different one. Otherwise go straight to the picker.
+        var configured = _vm.PythonToolExecutablePath?.Trim().Trim('"');
+        if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured))
+        {
+            var menu = new ContextMenu();
+            var openItem = new MenuItem { Header = "打开所在目录" };
+            openItem.Click += (_, _) => RevealInExplorer(configured!);
+            var changeItem = new MenuItem { Header = "重新选择…" };
+            changeItem.Click += async (_, _) => await PickAndValidatePythonAsync();
+            menu.Items.Add(openItem);
+            menu.Items.Add(changeItem);
+            menu.PlacementTarget = OpenPythonRuntimeDirectoryButton;
+            menu.IsOpen = true;
+            return;
+        }
+
+        _ = PickAndValidatePythonAsync();
+    }
+
+    private async Task PickAndValidatePythonAsync()
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "选择 Python 解释器",
+            Filter = "Python 解释器 (python.exe)|python.exe;python*.exe|可执行文件 (*.exe)|*.exe|所有文件 (*.*)|*.*",
+            CheckFileExists = true
+        };
+        var runtimeDir = _pythonRuntime.RuntimeDirectory;
+        if (Directory.Exists(runtimeDir))
+            dialog.InitialDirectory = runtimeDir;
+
+        if (dialog.ShowDialog(this) != true)
+            return;
+
+        var picked = dialog.FileName;
+        PythonRuntimeStatusText.Text = "正在校验所选 Python…";
+        OpenPythonRuntimeDirectoryButton.IsEnabled = false;
+        try
+        {
+            var version = await ProbePythonVersionAsync(picked, CancellationToken.None);
+            if (version is null)
+            {
+                PythonRuntimeStatusText.Text = "无法运行所选文件，请确认它是有效的 python.exe。";
+                return;
+            }
+
+            _vm.PythonToolExecutablePath = picked;
+            _vm.PythonToolEnabled = true;
+            PythonRuntimeStatusText.Text = $"已选择 {version}：{picked}";
+            _appStatus.Publish("Success", "Python 解释器已就绪");
+        }
+        catch (Exception ex)
+        {
+            PythonRuntimeStatusText.Text = "校验失败：" + ex.Message;
+        }
+        finally
+        {
+            OpenPythonRuntimeDirectoryButton.IsEnabled = true;
+            RefreshPythonRuntimeButtons();
+        }
+    }
+
+    private void RevealInExplorer(string filePath)
+    {
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                UseShellExecute = true
+            };
+            startInfo.ArgumentList.Add("/select,");
+            startInfo.ArgumentList.Add(filePath);
+            Process.Start(startInfo);
+        }
+        catch (Exception ex)
+        {
+            PythonRuntimeStatusText.Text = "打开目录失败：" + ex.Message;
+        }
+    }
+
+    private static async Task<string?> ProbePythonVersionAsync(string pythonPath, CancellationToken ct)
+    {
+        using var process = new Process
+        {
+            StartInfo =
+            {
+                FileName = pythonPath,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            }
+        };
+        process.StartInfo.ArgumentList.Add("--version");
+        if (!process.Start())
+            return null;
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        try
+        {
+            await process.WaitForExitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+            return null;
+        }
+
+        var stdout = await process.StandardOutput.ReadToEndAsync(ct);
+        var stderr = await process.StandardError.ReadToEndAsync(ct);
+        var output = (stdout + stderr).Trim();
+        return process.ExitCode == 0 && output.StartsWith("Python", StringComparison.OrdinalIgnoreCase)
+            ? output
+            : null;
+    }
+
+    private void ClearPythonRuntimeClick(object sender, RoutedEventArgs e)
+    {
+        if (!Directory.Exists(_pythonRuntime.RuntimeDirectory))
+        {
+            PythonRuntimeStatusText.Text = "Python 环境目录尚不存在。";
+            RefreshPythonRuntimeButtons();
+            return;
+        }
+
+        var result = MessageBox.Show(
+            this,
+            "仅删除通过一键配置部署的 MolaGPT 专用 Python 环境。",
+            "清除环境",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+        if (result != MessageBoxResult.Yes)
+            return;
+
+        try
+        {
+            var runtimeDir = _pythonRuntime.RuntimeDirectory;
+            _pythonRuntime.DeleteRuntime();
+            if (IsPathInside(_vm.PythonToolExecutablePath, runtimeDir))
+            {
+                _vm.PythonToolExecutablePath = string.Empty;
+                _vm.PythonToolEnabled = false;
+            }
+
+            PythonRuntimeStatusText.Text = "已清除 MolaGPT 专用 Python 环境。";
+            _appStatus.Publish("Success", "Python 环境已清除");
+        }
+        catch (Exception ex)
+        {
+            PythonRuntimeStatusText.Text = "清除失败：" + ex.Message;
+            _appStatus.Publish("Error", "Python 环境清除失败");
+        }
+        finally
+        {
+            RefreshPythonRuntimeButtons();
+        }
+    }
+
+    private void RefreshPythonRuntimeButtons()
+    {
+        // The clear action only makes sense for a one-click downloaded runtime,
+        // so it stays hidden until that runtime exists on disk.
+        ClearPythonRuntimeButton.Visibility = Directory.Exists(_pythonRuntime.RuntimeDirectory)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        RefreshPythonBrowseButton();
+    }
+
+    private void RefreshPythonBrowseButton()
+    {
+        // Dual purpose: when a valid interpreter is configured the button opens
+        // its folder (and the user can still pick a different one); otherwise it
+        // is a plain "browse" action that opens the file picker.
+        var configured = _vm.PythonToolExecutablePath?.Trim().Trim('"');
+        var hasValid = !string.IsNullOrWhiteSpace(configured) && File.Exists(configured);
+        OpenPythonRuntimeDirectoryButton.Content = hasValid ? "配置目录" : "浏览…";
+        OpenPythonRuntimeDirectoryButton.ToolTip = hasValid
+            ? "打开解释器所在目录；如需更换可重新选择"
+            : "选择 python.exe";
+    }
+
+    private static string FormatPythonRuntimeProgress(PythonRuntimeProgress progress) =>
+        progress.Stage switch
+        {
+            "download" => $"正在后台下载 Python 环境 {progress.Progress:P0}",
+            "verify" => "正在校验 Python 环境",
+            "extract" => "正在解压 Python 环境",
+            "done" => "Python 环境已可用",
+            _ => "正在配置 Python 环境"
+        };
+
+    private static bool IsPathInside(string? path, string root)
+    {
+        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(root))
+            return false;
+
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return fullPath.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(fullPath, fullRoot, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private async void CheckWebSearchClick(object sender, RoutedEventArgs e)

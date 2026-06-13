@@ -21,6 +21,7 @@ using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
+using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Tools.Vision;
 using MolaGPT.Core.Models;
 using MolaGPT.Desktop.Services;
@@ -127,6 +128,7 @@ public partial class App : Application
         var window = Services.GetRequiredService<MainWindow>();
         var mainVm = Services.GetRequiredService<MainViewModel>();
         var cloudSync = Services.GetRequiredService<CloudSyncService>();
+        var appStatus = Services.GetRequiredService<AppStatusService>();
         var composerVm = Services.GetRequiredService<ComposerViewModel>();
         var conversationListVm = Services.GetRequiredService<ConversationListViewModel>();
         var settingsVm = Services.GetRequiredService<SettingsViewModel>();
@@ -159,6 +161,17 @@ public partial class App : Application
             if (status.State is CloudSyncState.Success or CloudSyncState.Error)
                 ScheduleCloudStatusHide(mainVm);
             else if (status.State is CloudSyncState.Idle or CloudSyncState.Disabled)
+                Dispatcher.InvokeAsync(mainVm.HideCloudSyncStatus, DispatcherPriority.Background);
+        };
+        appStatus.StatusChanged += (_, status) =>
+        {
+            Dispatcher.InvokeAsync(() => mainVm.UpdateCloudSyncStatus(
+                status.Kind,
+                status.Message,
+                status.Timestamp), DispatcherPriority.Background);
+            if (status.Kind is "Success" or "Error")
+                ScheduleCloudStatusHide(mainVm);
+            else if (status.Kind is "Idle" or "Disabled")
                 Dispatcher.InvokeAsync(mainVm.HideCloudSyncStatus, DispatcherPriority.Background);
         };
         mainVm.CloudSyncRequested = async () =>
@@ -522,6 +535,9 @@ public partial class App : Application
         services.AddSingleton(sp => new ImageGenerationTool(
             () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient),
             sp.GetRequiredService<AttachmentStore>().Save));
+        services.AddSingleton<IPythonSessionAllowList, PythonSessionAllowList>();
+        services.AddSingleton<IPythonExecutionApprovalService, PythonExecutionApprovalService>();
+        services.AddSingleton<PythonExecutionTool>();
         services.AddSingleton<IChatToolHost, ChatToolHost>();
 
         services.AddSingleton(sp => new ConversationListViewModel(
@@ -581,6 +597,10 @@ public partial class App : Application
         });
         services.AddSingleton(sp =>
             new AutoUpdateService(sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient)));
+        services.AddSingleton(sp => new PythonRuntimeManager(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient),
+            Environment.GetEnvironmentVariable("MOLAGPT_PYTHON_RUNTIME_MANIFEST_URL")));
+        services.AddSingleton<AppStatusService>();
 
         services.AddSingleton<MainWindow>();
         services.AddTransient(sp => new LoginDialog(
@@ -602,7 +622,9 @@ public partial class App : Application
                 sp.GetRequiredService<ConversationListViewModel>(),
                 sp.GetRequiredService<PersonaListViewModel>(),
                 factory,
-                sp.GetRequiredService<IChatToolHost>());
+                sp.GetRequiredService<IChatToolHost>(),
+                sp.GetRequiredService<PythonRuntimeManager>(),
+                sp.GetRequiredService<AppStatusService>());
         });
         services.AddTransient(sp =>
             new AboutWindow(

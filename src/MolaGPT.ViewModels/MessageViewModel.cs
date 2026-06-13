@@ -780,6 +780,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
     {
         "search_web" or "web_search" => "\uE721",
         "web_fetch" or "steel_browser" => "\uE774",
+        "execute_python_code" => "\uE943",
         _ => "\uE90F"
     };
     public string StatusText => Status switch
@@ -832,6 +833,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
     {
         "search_web" or "web_search" => "联网搜索",
         "web_fetch" or "steel_browser" => "网页阅读",
+        "execute_python_code" => "Python",
         _ => string.IsNullOrWhiteSpace(name) ? "工具调用" : name
     };
 

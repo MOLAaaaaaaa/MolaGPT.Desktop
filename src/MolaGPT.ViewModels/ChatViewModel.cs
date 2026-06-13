@@ -377,10 +377,16 @@ public sealed partial class ChatViewModel : ObservableObject
                      && row.Content.Contains("<ref", StringComparison.OrdinalIgnoreCase))
                 sources = lastKnownSources;
 
+            var visibleContent = split.Visible;
+            if (row.Role == ChatMessage.RoleAssistant)
+                visibleContent = PythonArtifactMarkdownRewriter.Rewrite(
+                    visibleContent,
+                    PythonArtifactMarkdownRewriter.CreateContexts(toolCalls));
+
             prepared.Add(new PreparedMessage(
                 row.Id,
                 row.Role,
-                split.Visible,
+                visibleContent,
                 thinkingText,
                 row.CreatedAt,
                 modelLabel,

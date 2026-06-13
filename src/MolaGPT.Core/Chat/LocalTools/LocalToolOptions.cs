@@ -13,14 +13,16 @@ public sealed record LocalToolOptions(
     int WebPageMaxCharacters = 12000,
     IReadOnlyList<McpServerOptions>? McpServers = null,
     VisionProxyOptions? Vision = null,
-    ImageGenerationOptions? ImageGeneration = null)
+    ImageGenerationOptions? ImageGeneration = null,
+    PythonExecutionOptions? Python = null)
 {
     public bool HasAny =>
         Network
         || WebPage
         || McpServers?.Any(server => server.Enabled) == true
         || Vision?.Enabled == true
-        || ImageGeneration?.Enabled == true;
+        || ImageGeneration?.Enabled == true
+        || Python?.Enabled == true;
 
     public static LocalToolOptions FromExtraBody(IReadOnlyDictionary<string, object>? extraBody)
     {
@@ -37,7 +39,8 @@ public sealed record LocalToolOptions(
             ReadInt(raw, "webPageMaxCharacters") is { } maxChars ? Math.Clamp(maxChars, 1000, 30000) : 12000,
             ReadMcpServers(raw),
             ReadVision(raw),
-            ReadImageGeneration(raw));
+            ReadImageGeneration(raw),
+            ReadPythonExecution(raw));
     }
 
     private static IReadOnlyList<McpServerOptions> ReadMcpServers(object raw)
@@ -112,6 +115,33 @@ public sealed record LocalToolOptions(
             ReadString(node, "format"),
             ReadString(node, "generationPath"),
             ReadString(node, "editPath"));
+    }
+
+    private static PythonExecutionOptions? ReadPythonExecution(object raw)
+    {
+        var node = ReadValue(raw, "python") ?? ReadValue(raw, "python_execution");
+        if (node is null) return null;
+
+        if (node is bool enabled)
+            return new PythonExecutionOptions(Enabled: enabled);
+
+        if (node is JsonElement element
+            && element.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            return new PythonExecutionOptions(Enabled: element.ValueKind == JsonValueKind.True);
+        }
+
+        return new PythonExecutionOptions(
+            ReadBool(node, "enabled"),
+            ReadString(node, "executablePath"),
+            ReadInt(node, "timeoutSeconds") is { } timeout ? Math.Clamp(timeout, 5, 300) : 60,
+            ReadInt(node, "maxOutputCharacters") is { } maxOutput ? Math.Clamp(maxOutput, 2000, 100000) : 20000,
+            ReadNullableBool(node, "allowNetwork") ?? false,
+            ReadEnum(node, "permissionMode", PythonPermissionMode.Approval),
+            ReadString(node, "allowedImports"),
+            ReadString(node, "deniedImports"),
+            ReadString(node, "allowedPathPrefixes"),
+            ReadString(node, "deniedPathPrefixes"));
     }
 
     private static bool ReadBool(object raw, string name)
@@ -222,6 +252,48 @@ public sealed record LocalToolOptions(
         return rawValue is int value ? value : null;
     }
 
+    private static TEnum ReadEnum<TEnum>(object raw, string name, TEnum fallback)
+        where TEnum : struct, Enum
+    {
+        if (TryReadDictionaryValue(raw, name, out var dictionaryValue))
+            return dictionaryValue switch
+            {
+                TEnum enumValue => enumValue,
+                string text when Enum.TryParse<TEnum>(text, true, out var parsed) => parsed,
+                JsonElement json when json.ValueKind == JsonValueKind.String
+                                      && Enum.TryParse<TEnum>(json.GetString(), true, out var parsed) => parsed,
+                JsonElement json when json.ValueKind == JsonValueKind.Number
+                                      && json.TryGetInt32(out var rawInt)
+                                      && Enum.IsDefined(typeof(TEnum), rawInt) => (TEnum)Enum.ToObject(typeof(TEnum), rawInt),
+                _ => fallback
+            };
+
+        if (raw is JsonElement element)
+        {
+            if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(name, out var prop))
+                return fallback;
+            if (prop.ValueKind == JsonValueKind.String
+                && Enum.TryParse<TEnum>(prop.GetString(), true, out var parsed))
+                return parsed;
+            if (prop.ValueKind == JsonValueKind.Number
+                && prop.TryGetInt32(out var rawInt)
+                && Enum.IsDefined(typeof(TEnum), rawInt))
+                return (TEnum)Enum.ToObject(typeof(TEnum), rawInt);
+            return fallback;
+        }
+
+        var propInfo = raw.GetType().GetProperty(
+            name,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase);
+        var rawValue = propInfo?.GetValue(raw);
+        return rawValue switch
+        {
+            TEnum enumValue => enumValue,
+            string text when Enum.TryParse<TEnum>(text, true, out var parsed) => parsed,
+            _ => fallback
+        };
+    }
+
     private static bool TryReadDictionaryValue(object raw, string name, out object? value)
     {
         if (raw is IReadOnlyDictionary<string, object?> readOnly)
@@ -292,4 +364,22 @@ public static class ImageApiFormat
 
     public static bool IsChatImage(string? format) =>
         string.Equals(format, OpenAiChatImage, StringComparison.OrdinalIgnoreCase);
+}
+
+public sealed record PythonExecutionOptions(
+    bool Enabled = false,
+    string? ExecutablePath = null,
+    int TimeoutSeconds = 60,
+    int MaxOutputCharacters = 20000,
+    bool AllowNetwork = false,
+    PythonPermissionMode PermissionMode = PythonPermissionMode.Approval,
+    string? AllowedImports = null,
+    string? DeniedImports = null,
+    string? AllowedPathPrefixes = null,
+    string? DeniedPathPrefixes = null);
+
+public enum PythonPermissionMode
+{
+    Approval,
+    FullAccess
 }

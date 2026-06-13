@@ -19,13 +19,15 @@ public sealed record ToolArgsView(
     IReadOnlyList<ToolSearchQueryView>? SearchQueries,
     ToolPrimaryArgView? PrimaryArg,
     IReadOnlyList<ToolKeyValueView>? KeyValueArgs,
-    int KeyValueOverflow)
+    int KeyValueOverflow,
+    ToolCodeArgView? CodeArg = null)
 {
     public bool HasSearchQueries => SearchQueries is { Count: > 0 };
     public bool HasPrimaryArg    => PrimaryArg is not null;
     public bool HasKeyValueArgs  => KeyValueArgs is { Count: > 0 };
+    public bool HasCodeArg       => CodeArg is not null && !string.IsNullOrWhiteSpace(CodeArg.Code);
     public bool HasOverflow      => KeyValueOverflow > 0;
-    public bool IsEmpty => !HasSearchQueries && !HasPrimaryArg && !HasKeyValueArgs;
+    public bool IsEmpty => !HasSearchQueries && !HasPrimaryArg && !HasKeyValueArgs && !HasCodeArg;
 
     public bool IsUrlPrimary  => PrimaryArg?.Kind == ToolPrimaryArgKind.Url;
     public bool IsPathPrimary => PrimaryArg?.Kind == ToolPrimaryArgKind.Path;
@@ -52,3 +54,9 @@ public sealed record ToolPrimaryArgView(ToolPrimaryArgKind Kind, string Value, s
 }
 
 public sealed record ToolKeyValueView(string Key, string Value, bool IsMono);
+
+public sealed record ToolCodeArgView(string Code, string Language)
+{
+    public int LineCount => string.IsNullOrEmpty(Code) ? 0 : Code.Count(ch => ch == '\n') + 1;
+    public bool HasOverflow => Code.Length > 900 || LineCount > 14;
+}

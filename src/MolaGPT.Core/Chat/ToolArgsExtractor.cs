@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace MolaGPT.Core.Chat;
 
@@ -18,7 +19,7 @@ namespace MolaGPT.Core.Chat;
 ///
 /// Non-scalar values are kept compact: short JSON snippet, no nested rendering.
 /// </summary>
-public static class ToolArgsExtractor
+public static partial class ToolArgsExtractor
 {
     private const int KeyValueDisplayCount = 3;
     private const int KeyValueMaxLength = 200;
@@ -26,12 +27,14 @@ public static class ToolArgsExtractor
 
     private static readonly string[] UrlKeys = { "url", "href", "link" };
     private static readonly string[] PathKeys = { "path", "file", "filename", "file_path", "filepath" };
-    private static readonly string[] TextKeys = { "query", "text", "prompt", "keyword", "keywords", "search" };
+    private static readonly string[] TextKeys = { "code", "query", "text", "prompt", "keyword", "keywords", "search" };
 
     public static ToolArgsView Extract(string? toolName, string? argumentsJson)
     {
         if (string.IsNullOrWhiteSpace(argumentsJson))
             return ToolArgsView.Empty;
+
+        var isPython = string.Equals(toolName, "execute_python_code", System.StringComparison.OrdinalIgnoreCase);
 
         JsonDocument? doc = null;
         try
@@ -40,7 +43,10 @@ public static class ToolArgsExtractor
         }
         catch (JsonException)
         {
-            return ToolArgsView.Empty;
+            if (!isPython || !TryExtractPartialPythonCode(argumentsJson, out var partialCode))
+                return ToolArgsView.Empty;
+
+            return new ToolArgsView(null, null, null, 0, new ToolCodeArgView(partialCode!, "python"));
         }
 
         using (doc)
@@ -48,6 +54,13 @@ public static class ToolArgsExtractor
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
                 return ToolArgsView.Empty;
+
+            if (isPython)
+            {
+                var code = ReadString(root, "code") ?? ReadString(root, "python") ?? ReadString(root, "script");
+                if (!string.IsNullOrWhiteSpace(code))
+                    return new ToolArgsView(null, null, null, 0, new ToolCodeArgView(code!, "python"));
+            }
 
             if (string.Equals(toolName, "search_web", System.StringComparison.OrdinalIgnoreCase)
                 || string.Equals(toolName, "web_search", System.StringComparison.OrdinalIgnoreCase))
@@ -214,4 +227,77 @@ public static class ToolArgsExtractor
             ? value.GetString()
             : null;
     }
+
+    private static bool TryExtractPartialPythonCode(string argumentsJson, out string? code)
+    {
+        code = null;
+        var match = PartialCodeRegex().Match(argumentsJson);
+        if (!match.Success)
+            return false;
+
+        code = DecodeJsonStringFragment(match.Groups["value"].Value);
+        return !string.IsNullOrWhiteSpace(code);
+    }
+
+    private static string DecodeJsonStringFragment(string value)
+    {
+        var builder = new System.Text.StringBuilder(value.Length);
+        for (var i = 0; i < value.Length; i++)
+        {
+            var ch = value[i];
+            if (ch != '\\')
+            {
+                builder.Append(ch);
+                continue;
+            }
+
+            if (i + 1 >= value.Length)
+                break;
+
+            var escaped = value[++i];
+            switch (escaped)
+            {
+                case '"':
+                case '\\':
+                case '/':
+                    builder.Append(escaped);
+                    break;
+                case 'b':
+                    builder.Append('\b');
+                    break;
+                case 'f':
+                    builder.Append('\f');
+                    break;
+                case 'n':
+                    builder.Append('\n');
+                    break;
+                case 'r':
+                    builder.Append('\r');
+                    break;
+                case 't':
+                    builder.Append('\t');
+                    break;
+                case 'u':
+                    if (i + 4 < value.Length
+                        && int.TryParse(value.Substring(i + 1, 4), System.Globalization.NumberStyles.HexNumber, null, out var scalar))
+                    {
+                        builder.Append((char)scalar);
+                        i += 4;
+                    }
+                    else
+                    {
+                        i = value.Length;
+                    }
+                    break;
+                default:
+                    builder.Append(escaped);
+                    break;
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    [GeneratedRegex("\"code\"\\s*:\\s*\"(?<value>(?:\\\\.|[^\"\\\\])*)", RegexOptions.CultureInvariant)]
+    private static partial Regex PartialCodeRegex();
 }

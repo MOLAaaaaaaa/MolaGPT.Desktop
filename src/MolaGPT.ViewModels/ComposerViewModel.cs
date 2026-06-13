@@ -9,6 +9,7 @@ using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
+using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Models;
 using MolaGPT.ViewModels.Services;
@@ -59,6 +60,10 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// 与代理后端通信（向前兼容）。</summary>
     [ObservableProperty] private bool _enableWebFetch;
 
+    /// <summary>True when the current BYOK turn may expose the local Python
+    /// execution tool to the model.</summary>
+    [ObservableProperty] private bool _enablePythonTool;
+
     /// <summary>Image generation mode. MolaGPT account mode uses the proxy
     /// image flow; BYOK image work is handled by the separate workbench.</summary>
     [ObservableProperty] private bool _isImageGenerationMode;
@@ -75,6 +80,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     private readonly SettingsViewModel? _settings;
     private readonly PersonaListViewModel? _personas;
     private readonly MolaGPT.Storage.AttachmentStore? _attachmentStore;
+    private readonly Dictionary<MessageViewModel, List<PythonArtifactMarkdownRewriter.ArtifactContext>> _pythonArtifactContexts = new();
     private CancellationTokenSource? _cts;
     private Task? _activeStreamTask;
     private MessageViewModel? _activeAssistantMsg;
@@ -129,6 +135,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 OnPropertyChanged(nameof(CanAcceptImageAttachments));
                 OnPropertyChanged(nameof(CanAcceptFileAttachments));
                 OnPropertyChanged(nameof(AreNetworkToolsEnabled));
+                OnPropertyChanged(nameof(IsPythonToolVisible));
                 OnPropertyChanged(nameof(IsPersonaPickerVisible));
                 OnPropertyChanged(nameof(IsImageGenerationAvailable));
                 OnPropertyChanged(nameof(IsImageOptionsVisible));
@@ -139,6 +146,8 @@ public sealed partial class ComposerViewModel : ObservableObject
                     EnableNetwork = false;
                     EnableWebFetch = false;
                 }
+                if (!IsPythonToolVisible && EnablePythonTool)
+                    EnablePythonTool = false;
                 if (!IsImageGenerationAvailable && IsImageGenerationMode)
                     IsImageGenerationMode = false;
 
@@ -185,6 +194,21 @@ public sealed partial class ComposerViewModel : ObservableObject
                     if (!IsImageGenerationAvailable && IsImageGenerationMode)
                         IsImageGenerationMode = false;
                 }
+                if (e.PropertyName is nameof(SettingsViewModel.PythonToolEnabled)
+                    or nameof(SettingsViewModel.PythonToolExecutablePath)
+                    or nameof(SettingsViewModel.PythonToolTimeoutSeconds)
+                    or nameof(SettingsViewModel.PythonToolMaxOutputCharacters)
+                    or nameof(SettingsViewModel.PythonToolAllowNetwork)
+                    or nameof(SettingsViewModel.PythonToolPermissionMode)
+                    or nameof(SettingsViewModel.PythonToolAllowedImports)
+                    or nameof(SettingsViewModel.PythonToolDeniedImports)
+                    or nameof(SettingsViewModel.PythonToolAllowedPathPrefixes)
+                    or nameof(SettingsViewModel.PythonToolDeniedPathPrefixes))
+                {
+                    OnPropertyChanged(nameof(IsPythonToolVisible));
+                    if (!IsPythonToolVisible && EnablePythonTool)
+                        EnablePythonTool = false;
+                }
             };
         }
         Attachments.CollectionChanged += (_, _) =>
@@ -217,6 +241,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy;
     public bool AreNetworkToolsEnabled =>
         _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy || _chat.ActiveModel?.SupportsToolCalling == true;
+    public bool IsPythonToolVisible => CanUseByokPythonTool;
     // The in-composer image button / aspect-ratio / style options exist only for
     // MolaGPT-account mode. BYOK chats can still call the configured image
     // generation service as a model tool when enabled in settings.
@@ -236,6 +261,11 @@ public sealed partial class ComposerViewModel : ObservableObject
         _chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy
         && _chat.ActiveModel?.SupportsToolCalling == true
         && _settings?.IsImageGenerationConfigured == true;
+
+    private bool CanUseByokPythonTool =>
+        _chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy
+        && _chat.ActiveModel?.SupportsToolCalling == true
+        && _settings?.PythonToolEnabled == true;
 
     public IReadOnlyList<ImageGenerationOption> ImageAspectRatioOptions { get; } =
     [
@@ -738,6 +768,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             enabledTools["vision"] = _settings?.BuildVisionProxyOptions();
             if (CanUseByokImageGenerationTool)
                 enabledTools["image_generation"] = _settings!.BuildImageGenerationOptions();
+            if (CanUseByokPythonTool && EnablePythonTool)
+                enabledTools["python"] = _settings!.BuildPythonExecutionOptions() with { Enabled = true };
         }
 
         var extras = new Dictionary<string, object>
@@ -1017,6 +1049,8 @@ public sealed partial class ComposerViewModel : ObservableObject
         {
             assistantMsg.StopPending();
             assistantMsg.FlushPendingDelta();
+            RewritePythonArtifactMarkdownLinks(assistantMsg);
+            _pythonArtifactContexts.Remove(assistantMsg);
             assistantMsg.IsStreaming = false;
             assistantMsg.StopThinking();
             assistantMsg.CommitRetryAttempt();
@@ -1077,13 +1111,22 @@ public sealed partial class ComposerViewModel : ObservableObject
             {
                 AttachGeneratedImages(assistantMsg, tool.ResultPreviewJson);
             }
+            if (string.Equals(tool.Status, "completed", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(tool.Name, PythonExecutionTool.ToolName, StringComparison.Ordinal))
+            {
+                RememberPythonArtifactContext(assistantMsg, tool.ResultPreviewJson);
+                RewritePythonArtifactMarkdownLinks(assistantMsg);
+            }
         }
         if (chunk.Sources is { Count: > 0 })
             assistantMsg.Sources = chunk.Sources;
         if (chunk.Usage is not null)
             assistantMsg.Usage = chunk.Usage;
         if (chunk.DeltaText is { Length: > 0 } t)
+        {
+            t = RewritePythonArtifactMarkdownLinks(t, assistantMsg);
             assistantMsg.AppendDelta(t);
+        }
         if (chunk.DeltaThinking is { Length: > 0 } th)
             assistantMsg.AppendThinking(th);
     }
@@ -1147,6 +1190,35 @@ public sealed partial class ComposerViewModel : ObservableObject
         assistantMsg.Attachments = merged;
     }
 
+    private void RememberPythonArtifactContext(MessageViewModel assistantMsg, string? resultJson)
+    {
+        var context = PythonArtifactMarkdownRewriter.CreateContext(resultJson);
+        if (context is null)
+            return;
+
+        if (!_pythonArtifactContexts.TryGetValue(assistantMsg, out var contexts))
+        {
+            contexts = new List<PythonArtifactMarkdownRewriter.ArtifactContext>();
+            _pythonArtifactContexts[assistantMsg] = contexts;
+        }
+        contexts.Add(context);
+    }
+
+    private string RewritePythonArtifactMarkdownLinks(string text, MessageViewModel assistantMsg) =>
+        _pythonArtifactContexts.TryGetValue(assistantMsg, out var contexts)
+            ? PythonArtifactMarkdownRewriter.Rewrite(text, contexts)
+            : text;
+
+    private void RewritePythonArtifactMarkdownLinks(MessageViewModel assistantMsg)
+    {
+        if (!_pythonArtifactContexts.TryGetValue(assistantMsg, out var contexts))
+            return;
+
+        var rewritten = PythonArtifactMarkdownRewriter.Rewrite(assistantMsg.Content, contexts);
+        if (!string.Equals(rewritten, assistantMsg.Content, StringComparison.Ordinal))
+            assistantMsg.ReplaceContent(rewritten);
+    }
+
     private static string? ReadJsonString(JsonElement obj, string name) =>
         obj.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
@@ -1154,6 +1226,8 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     private void CompleteStreamContext(BackgroundStreamTask streamContext, bool publishNotification)
     {
+        RewritePythonArtifactMarkdownLinks(streamContext.AssistantMessage);
+        _pythonArtifactContexts.Remove(streamContext.AssistantMessage);
         _chat.FinalizeAssistantMessage(streamContext.ConversationId, streamContext.AssistantMessage);
 
         if (publishNotification)

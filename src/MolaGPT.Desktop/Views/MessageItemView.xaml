@@ -530,6 +530,107 @@
                                         </Button>
                                     </Grid>
 
+                                    <!-- ┌─ Body: Python code block ─┐ -->
+                                    <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                            BorderBrush="{DynamicResource Brush.Border}"
+                                            BorderThickness="1"
+                                            CornerRadius="{DynamicResource Radius.Sm}"
+                                            Margin="0,12,0,0"
+                                            ClipToBounds="True"
+                                            Visibility="{Binding Tool.ArgsView.HasCodeArg, Converter={x:Static views:BoolToVisibility.Instance}}">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+
+                                            <Border Grid.Row="0"
+                                                    Background="{DynamicResource Brush.Bg.Tertiary}"
+                                                    Padding="10,6">
+                                                <DockPanel LastChildFill="True">
+                                                    <Button DockPanel.Dock="Right"
+                                                            Style="{StaticResource InlineActionButton}"
+                                                            Width="26"
+                                                            Height="24"
+                                                            ToolTip="复制代码"
+                                                            Tag="{Binding Tool.ArgsView.CodeArg.Code}"
+                                                            Click="CopyPythonCode_Click">
+                                                        <TextBlock Text="&#xE8C8;"
+                                                                   FontFamily="{DynamicResource Font.Icon}"
+                                                                   FontSize="12" />
+                                                    </Button>
+                                                    <TextBlock Text="{Binding Tool.ArgsView.CodeArg.Language}"
+                                                               FontFamily="{DynamicResource Font.Mono}"
+                                                               FontSize="11"
+                                                               Foreground="{DynamicResource Brush.Text.Muted}"
+                                                               VerticalAlignment="Center" />
+                                                </DockPanel>
+                                            </Border>
+
+                                            <Border x:Name="PythonCodeViewport"
+                                                    Grid.Row="1"
+                                                    ClipToBounds="True">
+                                                <Border.Style>
+                                                    <Style TargetType="Border">
+                                                        <Setter Property="MaxHeight" Value="240" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsChecked, ElementName=PythonCodeExpandToggle}" Value="True">
+                                                                <Setter Property="MaxHeight" Value="680" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                                <ScrollViewer x:Name="PythonCodeScroll"
+                                                              HorizontalScrollBarVisibility="Auto"
+                                                              PreviewMouseWheel="ToolCardPreviewMouseWheel">
+                                                    <ScrollViewer.Style>
+                                                        <Style TargetType="ScrollViewer">
+                                                            <Setter Property="VerticalScrollBarVisibility" Value="Disabled" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsChecked, ElementName=PythonCodeExpandToggle}" Value="True">
+                                                                    <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </ScrollViewer.Style>
+                                                    <TextBox Text="{Binding Tool.ArgsView.CodeArg.Code, Mode=OneWay}"
+                                                             Style="{StaticResource SelectableBlockTextBox}"
+                                                             FontFamily="{DynamicResource Font.Mono}"
+                                                             FontSize="12"
+                                                             Padding="10,8"
+                                                             BorderThickness="0"
+                                                             Background="Transparent"
+                                                             Foreground="{DynamicResource Brush.Text.Primary}" />
+                                                </ScrollViewer>
+                                            </Border>
+
+                                            <ToggleButton x:Name="PythonCodeExpandToggle"
+                                                          Grid.Row="2"
+                                                          Visibility="{Binding Tool.ArgsView.CodeArg.HasOverflow, Converter={x:Static views:BoolToVisibility.Instance}}"
+                                                          HorizontalAlignment="Left"
+                                                          Background="Transparent"
+                                                          BorderThickness="0"
+                                                          Padding="10,6"
+                                                          Cursor="Hand"
+                                                          Foreground="{DynamicResource Brush.Text.Secondary}">
+                                                <ToggleButton.Style>
+                                                    <Style TargetType="ToggleButton">
+                                                        <Setter Property="Content" Value="展开代码" />
+                                                        <Style.Triggers>
+                                                            <Trigger Property="IsChecked" Value="True">
+                                                                <Setter Property="Content" Value="收起代码" />
+                                                            </Trigger>
+                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+                                                            </Trigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </ToggleButton.Style>
+                                            </ToggleButton>
+                                        </Grid>
+                                    </Border>
+
                                     <!-- ┌─ Body: search chips (search_web) ─┐ -->
                                     <ItemsControl ItemsSource="{Binding Tool.ArgsView.SearchQueries}"
                                                   Visibility="{Binding Tool.ArgsView.HasSearchQueries, Converter={x:Static views:BoolToVisibility.Instance}}"
@@ -827,7 +928,8 @@
                                                 MaxHeight="220"
                                                 Visibility="{Binding IsChecked, ElementName=ArgsToggle, Converter={x:Static views:BoolToVisibility.Instance}}">
                                             <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                                          HorizontalScrollBarVisibility="Auto">
+                                                          HorizontalScrollBarVisibility="Auto"
+                                                          PreviewMouseWheel="ToolCardPreviewMouseWheel">
                                                 <TextBox Text="{Binding Tool.DisplayArgumentsJson, Mode=OneWay}"
                                                          Style="{StaticResource SelectableBlockTextBox}"
                                                          FontFamily="{DynamicResource Font.Mono}"
@@ -884,7 +986,8 @@
                                                 MaxHeight="220"
                                                 Visibility="{Binding IsChecked, ElementName=ResultToggle, Converter={x:Static views:BoolToVisibility.Instance}}">
                                             <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                                          HorizontalScrollBarVisibility="Auto">
+                                                          HorizontalScrollBarVisibility="Auto"
+                                                          PreviewMouseWheel="ToolCardPreviewMouseWheel">
                                                 <TextBox Text="{Binding Tool.DisplayResultPreviewJson, Mode=OneWay}"
                                                          Style="{StaticResource SelectableBlockTextBox}"
                                                          FontFamily="{DynamicResource Font.Mono}"

@@ -46,7 +46,24 @@ public partial class ImagePreviewWindow : Window
     public static void Show(Window? owner, string url, string? caption)
     {
         if (string.IsNullOrWhiteSpace(url)) return;
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return;
+        var source = url.Trim().Trim('"', '\'');
+        if (File.Exists(source))
+        {
+            try
+            {
+                using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var output = new MemoryStream();
+                input.CopyTo(output);
+                Show(owner, output.ToArray(), caption);
+            }
+            catch
+            {
+                return;
+            }
+            return;
+        }
+
+        if (!Uri.TryCreate(source, UriKind.Absolute, out var uri)) return;
 
         BitmapImage image;
         try

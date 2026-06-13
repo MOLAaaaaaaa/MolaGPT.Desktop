@@ -582,6 +582,17 @@
                     </StackPanel>
                 </ToggleButton>
 
+                <!-- BYOK 本地 Python Tool -->
+                <ToggleButton Style="{StaticResource ToolToggleButton}"
+                              IsChecked="{Binding EnablePythonTool}"
+                              ToolTip="Python"
+                              Visibility="{Binding IsPythonToolVisible, Converter={x:Static views:BoolToVisibility.Instance}}">
+                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
+                        <TextBlock Text="&#xE943;" Style="{StaticResource InlineIconTextBlock.Small}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="Python" Style="{StaticResource InlineTextBlock.Small}" />
+                    </StackPanel>
+                </ToggleButton>
+
             </StackPanel>
 
             <!-- Row 2: image generation options -->

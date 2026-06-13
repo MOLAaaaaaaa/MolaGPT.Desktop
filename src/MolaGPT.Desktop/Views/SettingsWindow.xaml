@@ -1274,6 +1274,211 @@
                                     </StackPanel>
                                 </Border>
 
+                                <TextBlock Text="Python 执行"
+                                           FontWeight="SemiBold"
+                                           Margin="0,8,0,8"
+                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+
+                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                        BorderThickness="1"
+                                        CornerRadius="{DynamicResource Radius.Md}"
+                                        Padding="18,16"
+                                        Margin="0,0,0,16">
+                                    <StackPanel>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                                <TextBlock Text="本地 Python Tool"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+                                                <TextBlock Text="BYOK 对话中按需运行 Python 代码"
+                                                           FontSize="{DynamicResource Font.Size.Small}"
+                                                           TextWrapping="Wrap"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                                           Margin="0,3,0,0" />
+                                            </StackPanel>
+                                            <CheckBox Grid.Column="1"
+                                                      x:Name="PythonToolEnabledToggle"
+                                                      IsChecked="{Binding PythonToolEnabled, Mode=TwoWay}"
+                                                      VerticalAlignment="Center"
+                                                      Margin="12,0,0,0" />
+                                        </Grid>
+
+                                        <StackPanel Margin="0,16,0,0">
+                                            <DockPanel LastChildFill="True">
+                                                <StackPanel DockPanel.Dock="Right"
+                                                            Orientation="Horizontal"
+                                                            VerticalAlignment="Center"
+                                                            Margin="12,0,0,0">
+                                                    <Button x:Name="ConfigurePythonRuntimeButton"
+                                                            Style="{StaticResource OutlineButton}"
+                                                            Content="一键配置"
+                                                            Height="32"
+                                                            Padding="16,0"
+                                                            Margin="0,0,6,0"
+                                                            Click="ConfigurePythonRuntimeClick" />
+                                                    <Button x:Name="ClearPythonRuntimeButton"
+                                                            Style="{StaticResource OutlineButton}"
+                                                            Content="清除环境"
+                                                            Height="32"
+                                                            Padding="14,0"
+                                                            Visibility="Collapsed"
+                                                            ToolTip="清除一键配置下载的 Python 环境"
+                                                            Click="ClearPythonRuntimeClick" />
+                                                </StackPanel>
+                                                <TextBlock x:Name="PythonRuntimeStatusText"
+                                                           VerticalAlignment="Center"
+                                                           TextWrapping="Wrap"
+                                                           FontSize="{DynamicResource Font.Size.Small}"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}" />
+                                            </DockPanel>
+                                            <TextBlock Text="一键配置 MolaGPT 专用 Python 环境，或填写已有 python.exe；来源与许可见「关于」。"
+                                                       TextWrapping="Wrap"
+                                                       FontSize="{DynamicResource Font.Size.Small}"
+                                                       Foreground="{DynamicResource Brush.Text.Muted}"
+                                                       Margin="0,8,0,12" />
+
+                                            <TextBlock Text="解释器路径" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                            <DockPanel LastChildFill="True" Margin="0,0,0,12">
+                                                <Button x:Name="OpenPythonRuntimeDirectoryButton"
+                                                        DockPanel.Dock="Right"
+                                                        Style="{StaticResource OutlineButton}"
+                                                        Content="浏览…"
+                                                        Height="34"
+                                                        Padding="14,0"
+                                                        Margin="8,0,0,0"
+                                                        ToolTip="选择 python.exe 位置"
+                                                        Click="OpenPythonRuntimeDirectoryClick" />
+                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8" VerticalAlignment="Center">
+                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                             Text="{Binding PythonToolExecutablePath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                </Border>
+                                            </DockPanel>
+
+                                            <StackPanel IsEnabled="{Binding IsChecked, ElementName=PythonToolEnabledToggle}">
+                                                <TextBlock Text="执行权限" Margin="0,0,0,6" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                <WrapPanel Margin="0,0,0,6">
+                                                    <RadioButton Content="审批权限（默认）"
+                                                                 GroupName="PythonPermissionMode"
+                                                                 Margin="0,0,16,6"
+                                                                 Foreground="{DynamicResource Brush.Text.Primary}"
+                                                                 IsChecked="{Binding PythonToolPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=Approval}" />
+                                                    <RadioButton Content="完全权限"
+                                                                 GroupName="PythonPermissionMode"
+                                                                 Margin="0,0,16,6"
+                                                                 Foreground="{DynamicResource Brush.Text.Primary}"
+                                                                 IsChecked="{Binding PythonToolPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=FullAccess}" />
+                                                </WrapPanel>
+                                                <TextBlock Text="审批：低风险代码自动放行，危险操作自动拦截，其余弹窗确认 · 完全权限：直接以当前用户身份运行（黑名单与网络限制仍会拦截）"
+                                                           TextWrapping="Wrap"
+                                                           FontSize="{DynamicResource Font.Size.Small}"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                                           Margin="0,0,0,12" />
+
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="16" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Grid.Column="0">
+                                                        <TextBlock Text="超时（秒）" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                        <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                            <TextBox Style="{StaticResource InlineTextBox}"
+                                                                     Text="{Binding PythonToolTimeoutSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                        </Border>
+                                                    </StackPanel>
+                                                    <StackPanel Grid.Column="2">
+                                                        <TextBlock Text="输出上限（字符）" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                        <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                            <TextBox Style="{StaticResource InlineTextBox}"
+                                                                     Text="{Binding PythonToolMaxOutputCharacters, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                        </Border>
+                                                    </StackPanel>
+                                                </Grid>
+
+                                                <CheckBox Content="允许模型在 Python 代码中使用网络"
+                                                          IsChecked="{Binding PythonToolAllowNetwork, Mode=TwoWay}"
+                                                          Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                          FontSize="{DynamicResource Font.Size.Small}"
+                                                          Margin="0,12,0,0" />
+
+                                                <Expander x:Name="PythonAdvancedRulesExpander"
+                                                          Header="高级：自动放行与拦截规则"
+                                                          Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                          FontSize="{DynamicResource Font.Size.Small}"
+                                                          Margin="0,12,0,0">
+                                                    <StackPanel Margin="0,8,0,0">
+                                                        <TextBlock Text="这些规则叠加在审批之上：仅用「额外允许导入」内的模块且无风险时自动放行；命中「禁止导入」或「禁止路径前缀」时直接拦截（完全权限模式下也拦截）。每行或逗号分隔一项。"
+                                                                   TextWrapping="Wrap"
+                                                                   FontSize="{DynamicResource Font.Size.Small}"
+                                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                                   Margin="0,0,0,12" />
+                                                        <Grid Margin="0,0,0,12">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="*" />
+                                                                <ColumnDefinition Width="16" />
+                                                                <ColumnDefinition Width="*" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <StackPanel Grid.Column="0">
+                                                                <TextBlock Text="额外允许导入" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                                             MinHeight="54"
+                                                                             TextWrapping="Wrap"
+                                                                             AcceptsReturn="True"
+                                                                             Text="{Binding PythonToolAllowedImports, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                                </Border>
+                                                            </StackPanel>
+                                                            <StackPanel Grid.Column="2">
+                                                                <TextBlock Text="禁止导入" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                                             MinHeight="54"
+                                                                             TextWrapping="Wrap"
+                                                                             AcceptsReturn="True"
+                                                                             Text="{Binding PythonToolDeniedImports, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                                </Border>
+                                                            </StackPanel>
+                                                        </Grid>
+                                                        <Grid>
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="*" />
+                                                                <ColumnDefinition Width="16" />
+                                                                <ColumnDefinition Width="*" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <StackPanel Grid.Column="0">
+                                                                <TextBlock Text="允许路径前缀" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                                             MinHeight="54"
+                                                                             TextWrapping="Wrap"
+                                                                             AcceptsReturn="True"
+                                                                             Text="{Binding PythonToolAllowedPathPrefixes, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                                </Border>
+                                                            </StackPanel>
+                                                            <StackPanel Grid.Column="2">
+                                                                <TextBlock Text="禁止路径前缀" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                                             MinHeight="54"
+                                                                             TextWrapping="Wrap"
+                                                                             AcceptsReturn="True"
+                                                                             Text="{Binding PythonToolDeniedPathPrefixes, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                                </Border>
+                                                            </StackPanel>
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </Expander>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+
                                 <Border Background="{DynamicResource Brush.Primary.Blockquote}"
                                         BorderBrush="{DynamicResource Brush.Primary.Border}"
                                         BorderThickness="1"
@@ -1296,6 +1501,9 @@
                                             </Border>
                                             <Border Background="{DynamicResource Brush.Bg.Elevated}" BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="10,5" Margin="0,0,8,8">
                                                 <TextBlock Text="图像生成" FontSize="{DynamicResource Font.Size.Small}" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                            </Border>
+                                            <Border Background="{DynamicResource Brush.Bg.Elevated}" BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="10,5" Margin="0,0,8,8">
+                                                <TextBlock Text="Python 执行" FontSize="{DynamicResource Font.Size.Small}" Foreground="{DynamicResource Brush.Text.Secondary}" />
                                             </Border>
                                         </WrapPanel>
                                     </StackPanel>

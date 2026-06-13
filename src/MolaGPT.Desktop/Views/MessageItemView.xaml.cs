@@ -18,6 +18,8 @@ public partial class MessageItemView : UserControl
     private const double UserAvatarWidth = 32;
     private const double UserAvatarLeftMargin = 12;
     private const double UserBubbleMinWidth = 96;
+    private const double ToolCardWheelDistanceScale = 0.92;
+    private const double ToolCardWheelAnimationMs = 170;
     private Popup? _statsPopup;
 
     public MessageItemView()
@@ -96,6 +98,96 @@ public partial class MessageItemView : UserControl
         if (sender is MenuItem { CommandParameter: string text })
             CopyText(text);
         e.Handled = true;
+    }
+
+    private void CopyPythonCode_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string code })
+            CopyText(code);
+        e.Handled = true;
+    }
+
+    private void ToolCardPreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (e.Handled) return;
+        if (sender is ScrollViewer viewer && TrySmoothScrollToolCardViewer(viewer, e.Delta))
+        {
+            e.Handled = true;
+            return;
+        }
+
+        e.Handled = true;
+        var forwarded = new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
+        {
+            RoutedEvent = MouseWheelEvent,
+            Source = this
+        };
+
+        if (VisualTreeHelper.GetParent(this) is UIElement parent)
+            parent.RaiseEvent(forwarded);
+        else
+            RaiseEvent(forwarded);
+    }
+
+    private static bool TrySmoothScrollToolCardViewer(ScrollViewer viewer, int delta)
+    {
+        if (viewer.VerticalScrollBarVisibility == ScrollBarVisibility.Disabled)
+            return false;
+        if (viewer.ScrollableHeight <= 0)
+            return false;
+
+        var state = GetToolCardScrollState(viewer);
+        var origin = state.Animating ? state.TargetOffset : viewer.VerticalOffset;
+        var target = Math.Clamp(
+            origin - (delta * ToolCardWheelDistanceScale),
+            0,
+            viewer.ScrollableHeight);
+
+        if (Math.Abs(target - origin) < 0.25)
+            return false;
+
+        state.StartOffset = viewer.VerticalOffset;
+        state.TargetOffset = target;
+        state.AnimationStart = DateTime.UtcNow;
+
+        if (!state.Animating)
+        {
+            state.Animating = true;
+            state.Owner = viewer;
+            state.FrameHandler ??= (_, _) => AnimateToolCardScrollFrame(state);
+            CompositionTarget.Rendering += state.FrameHandler;
+        }
+
+        return true;
+    }
+
+    private static SmoothScrollViewerState GetToolCardScrollState(ScrollViewer viewer)
+    {
+        if (viewer.Tag is SmoothScrollViewerState state) return state;
+        state = new SmoothScrollViewerState();
+        viewer.Tag = state;
+        return state;
+    }
+
+    private static void AnimateToolCardScrollFrame(SmoothScrollViewerState state)
+    {
+        var viewer = state.Owner;
+        if (viewer is null)
+            return;
+
+        var elapsed = (DateTime.UtcNow - state.AnimationStart).TotalMilliseconds;
+        var t = Math.Clamp(elapsed / ToolCardWheelAnimationMs, 0, 1);
+        var eased = 1 - Math.Pow(1 - t, 3);
+        var offset = state.StartOffset + ((state.TargetOffset - state.StartOffset) * eased);
+
+        viewer.ScrollToVerticalOffset(Math.Clamp(offset, 0, viewer.ScrollableHeight));
+
+        if (t < 1 && Math.Abs(viewer.VerticalOffset - state.TargetOffset) > 0.25) return;
+
+        viewer.ScrollToVerticalOffset(Math.Clamp(state.TargetOffset, 0, viewer.ScrollableHeight));
+        if (state.FrameHandler is not null)
+            CompositionTarget.Rendering -= state.FrameHandler;
+        state.Animating = false;
     }
 
     private void StatsButton_Click(object sender, RoutedEventArgs e)
@@ -299,5 +391,15 @@ public partial class MessageItemView : UserControl
         }
 
         e.Handled = true;
+    }
+
+    private sealed class SmoothScrollViewerState
+    {
+        public ScrollViewer? Owner { get; set; }
+        public EventHandler? FrameHandler { get; set; }
+        public double StartOffset { get; set; }
+        public double TargetOffset { get; set; }
+        public DateTime AnimationStart { get; set; }
+        public bool Animating { get; set; }
     }
 }

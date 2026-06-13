@@ -41,6 +41,16 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string WorkbenchImageGenerationModelIdKey = "image_workbench_model_id";
     private const string WorkbenchImageGenerationSizeKey = "image_workbench_size";
     private const string WorkbenchImageGenerationStyleKey = "image_workbench_style";
+    private const string PythonToolEnabledKey = "python_tool_enabled";
+    private const string PythonToolExecutablePathKey = "python_tool_executable_path";
+    private const string PythonToolTimeoutSecondsKey = "python_tool_timeout_seconds";
+    private const string PythonToolMaxOutputCharactersKey = "python_tool_max_output_characters";
+    private const string PythonToolAllowNetworkKey = "python_tool_allow_network";
+    private const string PythonToolPermissionModeKey = "python_tool_permission_mode";
+    private const string PythonToolAllowedImportsKey = "python_tool_allowed_imports";
+    private const string PythonToolDeniedImportsKey = "python_tool_denied_imports";
+    private const string PythonToolAllowedPathPrefixesKey = "python_tool_allowed_path_prefixes";
+    private const string PythonToolDeniedPathPrefixesKey = "python_tool_denied_path_prefixes";
 
     /// <summary>
     /// Raised whenever the user changes the theme mode in settings (or when
@@ -76,6 +86,16 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string? _workbenchImageGenerationModelId;
     [ObservableProperty] private string _workbenchImageGenerationSize = "1024x1024";
     [ObservableProperty] private string? _workbenchImageGenerationStyle;
+    [ObservableProperty] private bool _pythonToolEnabled;
+    [ObservableProperty] private string? _pythonToolExecutablePath;
+    [ObservableProperty] private int _pythonToolTimeoutSeconds = 60;
+    [ObservableProperty] private int _pythonToolMaxOutputCharacters = 20000;
+    [ObservableProperty] private bool _pythonToolAllowNetwork;
+    [ObservableProperty] private PythonPermissionMode _pythonToolPermissionMode = PythonPermissionMode.Approval;
+    [ObservableProperty] private string? _pythonToolAllowedImports;
+    [ObservableProperty] private string? _pythonToolDeniedImports;
+    [ObservableProperty] private string? _pythonToolAllowedPathPrefixes;
+    [ObservableProperty] private string? _pythonToolDeniedPathPrefixes;
 
     public ObservableCollection<ProviderEntry> Providers { get; } = new();
     public ObservableCollection<McpServerEntry> McpServers { get; } = new();
@@ -157,6 +177,27 @@ public sealed partial class SettingsViewModel : ObservableObject
             WorkbenchImageGenerationModelId = _settingsRepo.Get(WorkbenchImageGenerationModelIdKey) ?? ImageGenerationModelId;
             WorkbenchImageGenerationSize = _settingsRepo.Get(WorkbenchImageGenerationSizeKey) ?? ImageGenerationSize;
             WorkbenchImageGenerationStyle = _settingsRepo.Get(WorkbenchImageGenerationStyleKey) ?? ImageGenerationStyle;
+            PythonToolEnabled = bool.TryParse(_settingsRepo.Get(PythonToolEnabledKey), out var pythonEnabled) && pythonEnabled;
+            PythonToolExecutablePath = _settingsRepo.Get(PythonToolExecutablePathKey);
+            if (int.TryParse(_settingsRepo.Get(PythonToolTimeoutSecondsKey), out var pythonTimeout))
+                PythonToolTimeoutSeconds = Math.Clamp(pythonTimeout, 5, 300);
+            if (int.TryParse(_settingsRepo.Get(PythonToolMaxOutputCharactersKey), out var pythonMaxOutput))
+                PythonToolMaxOutputCharacters = Math.Clamp(pythonMaxOutput, 2000, 100000);
+            PythonToolAllowNetwork = bool.TryParse(_settingsRepo.Get(PythonToolAllowNetworkKey), out var pythonAllowNetwork) && pythonAllowNetwork;
+            var permissionModeRaw = _settingsRepo.Get(PythonToolPermissionModeKey);
+            if (!string.IsNullOrWhiteSpace(permissionModeRaw)
+                && Enum.TryParse<PythonPermissionMode>(permissionModeRaw, true, out var permissionMode))
+            {
+                // The rules mode is no longer exposed in the UI; fold any stored
+                // value back to the approval default so the radio group stays valid.
+                PythonToolPermissionMode = permissionMode == PythonPermissionMode.FullAccess
+                    ? PythonPermissionMode.FullAccess
+                    : PythonPermissionMode.Approval;
+            }
+            PythonToolAllowedImports = _settingsRepo.Get(PythonToolAllowedImportsKey);
+            PythonToolDeniedImports = _settingsRepo.Get(PythonToolDeniedImportsKey);
+            PythonToolAllowedPathPrefixes = _settingsRepo.Get(PythonToolAllowedPathPrefixesKey);
+            PythonToolDeniedPathPrefixes = _settingsRepo.Get(PythonToolDeniedPathPrefixesKey);
         }
         finally
         {
@@ -354,6 +395,78 @@ public sealed partial class SettingsViewModel : ObservableObject
         SetOrRemove(WorkbenchImageGenerationStyleKey, value);
     }
 
+    partial void OnPythonToolEnabledChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(PythonToolEnabledKey, value.ToString());
+    }
+
+    partial void OnPythonToolExecutablePathChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(PythonToolExecutablePathKey, value);
+    }
+
+    partial void OnPythonToolTimeoutSecondsChanged(int value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        var clamped = Math.Clamp(value, 5, 300);
+        if (clamped != value)
+        {
+            PythonToolTimeoutSeconds = clamped;
+            return;
+        }
+        _settingsRepo.Set(PythonToolTimeoutSecondsKey, clamped.ToString());
+    }
+
+    partial void OnPythonToolMaxOutputCharactersChanged(int value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        var clamped = Math.Clamp(value, 2000, 100000);
+        if (clamped != value)
+        {
+            PythonToolMaxOutputCharacters = clamped;
+            return;
+        }
+        _settingsRepo.Set(PythonToolMaxOutputCharactersKey, clamped.ToString());
+    }
+
+    partial void OnPythonToolAllowNetworkChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(PythonToolAllowNetworkKey, value.ToString());
+    }
+
+    partial void OnPythonToolPermissionModeChanged(PythonPermissionMode value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(PythonToolPermissionModeKey, value.ToString());
+    }
+
+    partial void OnPythonToolAllowedImportsChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(PythonToolAllowedImportsKey, value);
+    }
+
+    partial void OnPythonToolDeniedImportsChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(PythonToolDeniedImportsKey, value);
+    }
+
+    partial void OnPythonToolAllowedPathPrefixesChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(PythonToolAllowedPathPrefixesKey, value);
+    }
+
+    partial void OnPythonToolDeniedPathPrefixesChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(PythonToolDeniedPathPrefixesKey, value);
+    }
+
     public static string NormalizeWebSearchProvider(string? provider) =>
         string.IsNullOrWhiteSpace(provider)
             ? "duckduckgo"
@@ -470,6 +583,18 @@ public sealed partial class SettingsViewModel : ObservableObject
             provider?.ApiPath,
             provider?.ImageEditPath);
     }
+
+    public PythonExecutionOptions BuildPythonExecutionOptions() => new(
+        PythonToolEnabled,
+        PythonToolExecutablePath,
+        Math.Clamp(PythonToolTimeoutSeconds, 5, 300),
+        Math.Clamp(PythonToolMaxOutputCharacters, 2000, 100000),
+        PythonToolAllowNetwork,
+        PythonToolPermissionMode,
+        PythonToolAllowedImports,
+        PythonToolDeniedImports,
+        PythonToolAllowedPathPrefixes,
+        PythonToolDeniedPathPrefixes);
 
     public ImageGenerationProviderModelOption? SelectedImageGenerationModel =>
         ImageGenerationProviderModels.FirstOrDefault(m =>

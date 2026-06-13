@@ -8,10 +8,12 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Media.Media3D;
 using System.Windows.Threading;
+using System.IO;
 using System.Text.RegularExpressions;
 using System.Text;
 using System.Diagnostics;
 using MolaGPT.Core.Models;
+using MolaGPT.Desktop.Views;
 using Markdig;
 using Markdig.Syntax;
 using WpfMath.Controls;
@@ -252,10 +254,12 @@ public sealed partial class MarkdownPresenter : ContentControl
     private string _streamingOpenCodeLanguage = string.Empty;
     private TextBox? _streamingOpenCodeTextBox;
     private bool _isDraggingSelection;
+    private Point _selectionDragStart = new(double.NaN, double.NaN);
     private double _selectionAutoScrollStep;
     private ScrollViewer? _selectionAutoScrollViewer;
     private Hyperlink? _pendingClickHyperlink;
     private Point _pendingClickHyperlinkStart = new(double.NaN, double.NaN);
+    private Point _markdownImagePreviewStart = new(double.NaN, double.NaN);
     private sealed class SmoothTextBoxScrollState
     {
         public TextBox? Owner;
@@ -345,8 +349,9 @@ public sealed partial class MarkdownPresenter : ContentControl
 
         _viewer.Focus();
         _isDraggingSelection = true;
+        _selectionDragStart = e.GetPosition(_viewer);
         _selectionAutoScrollViewer = FindOuterScrollViewer();
-        UpdateSelectionAutoScroll(e.GetPosition(_viewer));
+        SetSelectionAutoScrollStep(0);
     }
 
     private void OnViewerPreviewMouseMove(object sender, MouseEventArgs e)
@@ -360,7 +365,14 @@ public sealed partial class MarkdownPresenter : ContentControl
             return;
         }
 
-        UpdateSelectionAutoScroll(e.GetPosition(_viewer));
+        var position = e.GetPosition(_viewer);
+        if (!HasSelectionDragMovedEnough(_selectionDragStart, position))
+        {
+            SetSelectionAutoScrollStep(0);
+            return;
+        }
+
+        UpdateSelectionAutoScroll(position);
     }
 
     private void OnViewerPreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -398,21 +410,46 @@ public sealed partial class MarkdownPresenter : ContentControl
             return;
         }
 
-        var height = _viewer.ActualHeight;
-        var step = 0d;
-        if (position.Y < SelectionAutoScrollEdge)
+        Point positionInScrollViewer;
+        try
         {
-            var pressure = Math.Clamp((SelectionAutoScrollEdge - position.Y) / SelectionAutoScrollEdge, 0, 1);
+            positionInScrollViewer = _viewer.TranslatePoint(position, scrollViewer);
+        }
+        catch (InvalidOperationException)
+        {
+            SetSelectionAutoScrollStep(0);
+            return;
+        }
+
+        var height = scrollViewer.ActualHeight;
+        if (height <= 0)
+            height = scrollViewer.ViewportHeight;
+        if (height <= 0)
+        {
+            SetSelectionAutoScrollStep(0);
+            return;
+        }
+
+        var step = 0d;
+        if (positionInScrollViewer.Y < SelectionAutoScrollEdge)
+        {
+            var pressure = Math.Clamp((SelectionAutoScrollEdge - positionInScrollViewer.Y) / SelectionAutoScrollEdge, 0, 1);
             step = -CalculateSelectionAutoScrollStep(pressure);
         }
-        else if (position.Y > height - SelectionAutoScrollEdge)
+        else if (positionInScrollViewer.Y > height - SelectionAutoScrollEdge)
         {
-            var pressure = Math.Clamp((position.Y - (height - SelectionAutoScrollEdge)) / SelectionAutoScrollEdge, 0, 1);
+            var pressure = Math.Clamp((positionInScrollViewer.Y - (height - SelectionAutoScrollEdge)) / SelectionAutoScrollEdge, 0, 1);
             step = CalculateSelectionAutoScrollStep(pressure);
         }
 
         SetSelectionAutoScrollStep(step);
     }
+
+    private static bool HasSelectionDragMovedEnough(Point start, Point current) =>
+        !double.IsNaN(start.X)
+        && !double.IsNaN(start.Y)
+        && (Math.Abs(current.X - start.X) > SystemParameters.MinimumHorizontalDragDistance
+            || Math.Abs(current.Y - start.Y) > SystemParameters.MinimumVerticalDragDistance);
 
     private static double CalculateSelectionAutoScrollStep(double pressure) =>
         SelectionAutoScrollMinStep + ((SelectionAutoScrollMaxStep - SelectionAutoScrollMinStep) * pressure);
@@ -454,6 +491,7 @@ public sealed partial class MarkdownPresenter : ContentControl
     private void StopSelectionAutoScroll()
     {
         _isDraggingSelection = false;
+        _selectionDragStart = new Point(double.NaN, double.NaN);
         _selectionAutoScrollStep = 0;
         _selectionAutoScrollViewer = null;
         CompositionTarget.Rendering -= OnSelectionAutoScrollFrame;
@@ -1777,23 +1815,25 @@ public sealed partial class MarkdownPresenter : ContentControl
             RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
 
             image.Loaded += (_, _) => FadeOutAiImageOverlay(overlay);
-            bitmap.DownloadCompleted += (_, _) => Dispatcher.BeginInvoke(
-                new Action(() => FadeOutAiImageOverlay(overlay)),
-                DispatcherPriority.Loaded);
-            bitmap.DownloadFailed += (_, _) => Dispatcher.BeginInvoke(
-                new Action(() => FadeOutAiImageOverlay(overlay)),
-                DispatcherPriority.Loaded);
+            if (!bitmap.IsFrozen)
+            {
+                bitmap.DownloadCompleted += (_, _) => Dispatcher.BeginInvoke(
+                    new Action(() => FadeOutAiImageOverlay(overlay)),
+                    DispatcherPriority.Loaded);
+                bitmap.DownloadFailed += (_, _) => Dispatcher.BeginInvoke(
+                    new Action(() => FadeOutAiImageOverlay(overlay)),
+                    DispatcherPriority.Loaded);
+            }
 
             grid.Children.Add(image);
         }
         grid.Children.Add(overlay);
 
-        var targetUrl = string.IsNullOrWhiteSpace(linkUrl) ? imageUrl : linkUrl;
-        if (!string.IsNullOrWhiteSpace(targetUrl))
+        if (!string.IsNullOrWhiteSpace(imageUrl))
         {
             root.Cursor = Cursors.Hand;
-            root.ToolTip = targetUrl;
-            WireExternalClick(root, targetUrl);
+            root.ToolTip = imageUrl;
+            WireMarkdownImagePreview(root, imageUrl);
         }
 
         return root;
@@ -1830,18 +1870,115 @@ public sealed partial class MarkdownPresenter : ContentControl
 
     private static BitmapImage? CreateBitmapImage(string imageUrl, double decodeWidth)
     {
-        if (!Uri.TryCreate(imageUrl, UriKind.RelativeOrAbsolute, out var uri))
-            return null;
+        var decodePixelWidth = Math.Max(1, (int)Math.Ceiling(decodeWidth * 1.5));
+        if (TryResolveLocalImagePath(imageUrl, out var localPath))
+            return LoadLocalBitmap(localPath, decodePixelWidth);
 
         try
         {
+            if (!Uri.TryCreate(imageUrl, UriKind.RelativeOrAbsolute, out var uri))
+                return null;
+
             var bitmap = new BitmapImage();
             bitmap.BeginInit();
             bitmap.UriSource = uri;
-            bitmap.DecodePixelWidth = Math.Max(1, (int)Math.Ceiling(decodeWidth * 1.5));
+            bitmap.DecodePixelWidth = decodePixelWidth;
             bitmap.CacheOption = BitmapCacheOption.OnDemand;
             bitmap.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
             bitmap.EndInit();
+            return bitmap;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool TryResolveLocalImagePath(string imageUrl, out string path)
+    {
+        path = string.Empty;
+        if (string.IsNullOrWhiteSpace(imageUrl))
+            return false;
+
+        var raw = imageUrl.Trim().Trim('"', '\'');
+        if (raw.Length == 0)
+            return false;
+
+        if (Uri.TryCreate(raw, UriKind.Absolute, out var absoluteUri))
+        {
+            if (absoluteUri.IsFile)
+            {
+                path = absoluteUri.LocalPath;
+                return File.Exists(path);
+            }
+        }
+
+        var unescaped = SafeUnescape(raw).Trim().Trim('"', '\'');
+        if (LooksLikeWindowsPath(unescaped))
+        {
+            path = unescaped.Replace('/', Path.DirectorySeparatorChar);
+            return File.Exists(path);
+        }
+
+        if (File.Exists(raw))
+        {
+            path = Path.GetFullPath(raw);
+            return true;
+        }
+
+        if (!string.Equals(raw, unescaped, StringComparison.Ordinal) && File.Exists(unescaped))
+        {
+            path = Path.GetFullPath(unescaped);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string SafeUnescape(string value)
+    {
+        try
+        {
+            return Uri.UnescapeDataString(value);
+        }
+        catch (UriFormatException)
+        {
+            return value;
+        }
+    }
+
+    private static bool LooksLikeWindowsPath(string value)
+    {
+        if (value.Length >= 3
+            && char.IsLetter(value[0])
+            && value[1] == ':'
+            && (value[2] == '\\' || value[2] == '/'))
+        {
+            return true;
+        }
+
+        return value.StartsWith(@"\\", StringComparison.Ordinal)
+            || value.StartsWith("//", StringComparison.Ordinal);
+    }
+
+    private static BitmapImage? LoadLocalBitmap(string path, int decodePixelWidth)
+    {
+        try
+        {
+            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var memory = new MemoryStream();
+            file.CopyTo(memory);
+            memory.Position = 0;
+
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.StreamSource = memory;
+            bitmap.DecodePixelWidth = decodePixelWidth;
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+            bitmap.EndInit();
+            if (bitmap.CanFreeze)
+                bitmap.Freeze();
             return bitmap;
         }
         catch
@@ -2921,6 +3058,26 @@ public sealed partial class MarkdownPresenter : ContentControl
         };
     }
 
+    private void WireMarkdownImagePreview(FrameworkElement element, string imageUrl)
+    {
+        var start = new Point(double.NaN, double.NaN);
+        element.PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            start = e.GetPosition(element);
+        };
+        element.PreviewMouseLeftButtonUp += (_, e) =>
+        {
+            var end = e.GetPosition(element);
+            var shouldOpen = IsClickGesture(start, end);
+            start = new Point(double.NaN, double.NaN);
+            if (!shouldOpen)
+                return;
+
+            ImagePreviewWindow.Show(Window.GetWindow(this), imageUrl, Path.GetFileName(SafeUnescape(imageUrl)));
+            e.Handled = true;
+        };
+    }
+
     private static bool IsClickGesture(Point start, Point end) =>
         !double.IsNaN(start.X)
         && !double.IsNaN(start.Y)
@@ -2954,6 +3111,36 @@ public sealed partial class MarkdownPresenter : ContentControl
         ApplyMarkdownImageConstraint(image);
         image.Loaded -= OnMarkdownImageLoaded;
         image.Loaded += OnMarkdownImageLoaded;
+        image.Cursor = Cursors.Hand;
+        image.PreviewMouseLeftButtonDown -= OnMarkdownInlineImagePreviewMouseLeftButtonDown;
+        image.PreviewMouseLeftButtonUp -= OnMarkdownInlineImagePreviewMouseLeftButtonUp;
+        image.PreviewMouseLeftButtonDown += OnMarkdownInlineImagePreviewMouseLeftButtonDown;
+        image.PreviewMouseLeftButtonUp += OnMarkdownInlineImagePreviewMouseLeftButtonUp;
+    }
+
+    private void OnMarkdownInlineImagePreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement element)
+            _markdownImagePreviewStart = e.GetPosition(element);
+    }
+
+    private void OnMarkdownInlineImagePreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not Image image)
+            return;
+
+        var end = e.GetPosition(image);
+        var shouldOpen = IsClickGesture(_markdownImagePreviewStart, end);
+        _markdownImagePreviewStart = new Point(double.NaN, double.NaN);
+        if (!shouldOpen)
+            return;
+
+        var source = ResolveImageSource(image);
+        if (string.IsNullOrWhiteSpace(source))
+            return;
+
+        ImagePreviewWindow.Show(Window.GetWindow(this), source, Path.GetFileName(SafeUnescape(source)));
+        e.Handled = true;
     }
 
     private void OnMarkdownImageLoaded(object sender, RoutedEventArgs e)
