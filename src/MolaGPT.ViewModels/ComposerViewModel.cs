@@ -262,6 +262,11 @@ public sealed partial class ComposerViewModel : ObservableObject
         && _chat.ActiveModel?.SupportsToolCalling == true
         && _settings?.PythonToolEnabled == true;
 
+    private bool CanUseByokFileTools =>
+        _chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy
+        && _chat.ActiveModel?.SupportsToolCalling == true
+        && _settings?.FileToolsEnabled == true;
+
     public IReadOnlyList<ImageGenerationOption> ImageAspectRatioOptions { get; } =
     [
         new("1:1", "1:1"),
@@ -782,6 +787,16 @@ public sealed partial class ComposerViewModel : ObservableObject
                 }
                 enabledTools["python"] = pythonOptions;
             }
+            if (CanUseByokFileTools)
+            {
+                // Read-only file tools (read_file / glob_files / grep_files),
+                // default-allowed. They honor the same deny-list as the Python
+                // tool so blocked paths stay blocked across tools.
+                enabledTools["fileTools"] = true;
+                var denied = _settings?.PythonToolDeniedPathPrefixes;
+                if (!string.IsNullOrWhiteSpace(denied))
+                    enabledTools["fileToolsDeniedPaths"] = denied;
+            }
         }
 
         var extras = new Dictionary<string, object>
@@ -998,7 +1013,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     {
         if (_skills is null) return null;
         if (!CanUseByokPythonTool) return null;
-        return _skills.BuildCatalogForPrompt();
+        return _skills.BuildCatalogForPrompt(canUseReadTool: CanUseByokFileTools);
     }
 
     [RelayCommand(CanExecute = nameof(CanStop))]

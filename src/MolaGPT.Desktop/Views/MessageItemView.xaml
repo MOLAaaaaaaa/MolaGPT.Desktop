@@ -408,6 +408,7 @@
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
 
                                         <Border Grid.Column="0"
@@ -443,11 +444,26 @@
                                         </Border>
 
                                         <StackPanel Grid.Column="2" VerticalAlignment="Center">
-                                            <TextBlock Text="{Binding Tool.Label}"
-                                                       FontFamily="{DynamicResource Font.Cjk}"
-                                                       FontSize="14"
-                                                       FontWeight="SemiBold"
-                                                       Foreground="{DynamicResource Brush.Text.Primary}" />
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,0">
+                                                <TextBlock Text="{Binding Tool.Label}"
+                                                           FontFamily="{DynamicResource Font.Cjk}"
+                                                           FontSize="14"
+                                                           FontWeight="SemiBold"
+                                                           VerticalAlignment="Center"
+                                                           Foreground="{DynamicResource Brush.Text.Primary}" />
+                                                <!-- One-line arg preview shown in the collapsed header
+                                                     (first search query +N, code head, url/path, or kv).
+                                                     From ArgsView (full args), reliable while collapsed. -->
+                                                <TextBlock Text="{Binding Tool.HeaderArgPreview}"
+                                                           Visibility="{Binding Tool.HasHeaderArgPreview, Converter={x:Static views:BoolToVisibility.Instance}}"
+                                                           FontFamily="{DynamicResource Font.Mono}"
+                                                           FontSize="11.5"
+                                                           Margin="8,0,0,0"
+                                                           MaxWidth="260"
+                                                           VerticalAlignment="Center"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                            </StackPanel>
                                             <TextBlock Text="{Binding Tool.Detail}"
                                                        Visibility="{Binding Tool.HasDetail, Converter={x:Static views:BoolToVisibility.Instance}}"
                                                        FontSize="11"
@@ -522,13 +538,67 @@
                                                 Style="{StaticResource InlineActionButton}"
                                                 Width="28"
                                                 Height="28"
-                                                Margin="6,0,-4,0"
-                                                VerticalAlignment="Top"
+                                                Margin="6,0,0,0"
+                                                VerticalAlignment="Center"
                                                 ToolTip="复制工具信息"
                                                 Click="CopyTool_Click">
                                             <TextBlock Text="&#xE8C8;" FontFamily="{DynamicResource Font.Icon}" FontSize="13" />
                                         </Button>
+
+                                        <!-- Chevron = the body collapse toggle. Rotates when open.
+                                             The whole header row also toggles it (transparent overlay
+                                             below). Default unchecked → card starts collapsed. -->
+                                        <ToggleButton x:Name="ToolBodyToggle"
+                                                      Grid.Column="5"
+                                                      Tag="bodyToggle"
+                                                      IsChecked="False"
+                                                      Width="28" Height="28"
+                                                      Margin="2,0,-4,0"
+                                                      VerticalAlignment="Center"
+                                                      Background="Transparent"
+                                                      BorderThickness="0"
+                                                      Cursor="Hand"
+                                                      ToolTip="展开 / 收起">
+                                            <ToggleButton.Template>
+                                                <ControlTemplate TargetType="ToggleButton">
+                                                    <Border Background="Transparent">
+                                                        <TextBlock x:Name="Chev"
+                                                                   Text="&#xE76C;"
+                                                                   FontFamily="{DynamicResource Font.Icon}"
+                                                                   FontSize="11"
+                                                                   HorizontalAlignment="Center"
+                                                                   VerticalAlignment="Center"
+                                                                   RenderTransformOrigin="0.5,0.5"
+                                                                   Foreground="{DynamicResource Brush.Text.Muted}">
+                                                            <TextBlock.RenderTransform>
+                                                                <RotateTransform Angle="0" />
+                                                            </TextBlock.RenderTransform>
+                                                        </TextBlock>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsChecked" Value="True">
+                                                            <Setter TargetName="Chev" Property="RenderTransform">
+                                                                <Setter.Value>
+                                                                    <RotateTransform Angle="90" />
+                                                                </Setter.Value>
+                                                            </Setter>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </ToggleButton.Template>
+                                        </ToggleButton>
+
+                                        <!-- Transparent click strip over icon+label+status so the
+                                             whole header row toggles the body, like clicking the
+                                             chevron. Spans cols 0–3; the copy button (col 4) and
+                                             chevron (col 5) stay independently clickable on top. -->
+                                        <Border Grid.Column="0" Grid.ColumnSpan="4"
+                                                Background="Transparent"
+                                                Cursor="Hand"
+                                                MouseLeftButtonUp="ToolHeader_Click" />
                                     </Grid>
+
+                                    <StackPanel Visibility="{Binding IsChecked, ElementName=ToolBodyToggle, Converter={x:Static views:BoolToVisibility.Instance}}">
 
                                     <!-- ┌─ Body: Python code block ─┐ -->
                                     <Border Background="{DynamicResource Brush.Bg.Secondary}"
@@ -882,7 +952,7 @@
                                     <!-- ┌─ Folds: args + result preview ─┐ -->
                                     <StackPanel Margin="0,12,0,0">
                                         <ToggleButton x:Name="ArgsToggle"
-                                                      Visibility="{Binding Tool.HasArguments, Converter={x:Static views:BoolToVisibility.Instance}}"
+                                                      Visibility="{Binding Tool.ShowArgumentsFold, Converter={x:Static views:BoolToVisibility.Instance}}"
                                                       HorizontalAlignment="Left"
                                                       Background="Transparent"
                                                       BorderThickness="0"
@@ -996,6 +1066,200 @@
                                             </ScrollViewer>
                                         </Border>
                                     </StackPanel>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- ┌─ Tool GROUP card: a run of consecutive same-type
+                                 file operations (read/glob/grep). Header = op label +
+                                 count + aggregate status; body = one row per call. ─┐ -->
+                            <Border Background="{DynamicResource Brush.Bg.Primary}"
+                                    BorderBrush="{DynamicResource Brush.Border}"
+                                    BorderThickness="1"
+                                    CornerRadius="{DynamicResource Radius.Md}"
+                                    Padding="16,12"
+                                    Margin="0,8,0,8"
+                                    MaxWidth="720"
+                                    HorizontalAlignment="Left"
+                                    Visibility="{Binding IsToolGroup, Converter={x:Static views:BoolToVisibility.Instance}}">
+                                <StackPanel>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="32" />
+                                            <ColumnDefinition Width="10" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <Border Grid.Column="0" Width="32" Height="32"
+                                                CornerRadius="{DynamicResource Radius.Sm}"
+                                                VerticalAlignment="Center">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding ToolGroup.IsError}" Value="True">
+                                                            <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <TextBlock Text="{Binding ToolGroup.IconGlyph}"
+                                                       FontFamily="{DynamicResource Font.Icon}"
+                                                       FontSize="14"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding ToolGroup.IsError}" Value="True">
+                                                                <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </Border>
+
+                                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                                            <TextBlock Text="{Binding ToolGroup.Label}"
+                                                       FontFamily="{DynamicResource Font.Cjk}"
+                                                       FontSize="14"
+                                                       FontWeight="SemiBold"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="{DynamicResource Brush.Text.Primary}" />
+                                            <TextBlock Text="{Binding ToolGroup.CountText}"
+                                                       FontSize="11.5"
+                                                       Margin="8,0,0,0"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="{DynamicResource Brush.Text.Muted}" />
+                                        </StackPanel>
+
+                                        <Border Grid.Column="3"
+                                                CornerRadius="{DynamicResource Radius.Sm}"
+                                                Padding="8,2"
+                                                VerticalAlignment="Center"
+                                                Background="{DynamicResource Brush.Bg.Tertiary}">
+                                            <StackPanel Style="{StaticResource InlineIconTextPanel}">
+                                                <Ellipse Width="6" Height="6" Margin="0,0,5,0" VerticalAlignment="Center">
+                                                    <Ellipse.Style>
+                                                        <Style TargetType="Ellipse">
+                                                            <Setter Property="Fill" Value="{DynamicResource Brush.Primary}" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding ToolGroup.IsCompleted}" Value="True">
+                                                                    <Setter Property="Fill" Value="{DynamicResource Brush.Success}" />
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding ToolGroup.IsError}" Value="True">
+                                                                    <Setter Property="Fill" Value="{DynamicResource Brush.Error}" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Ellipse.Style>
+                                                </Ellipse>
+                                                <TextBlock Text="{Binding ToolGroup.StatusText}"
+                                                           FontFamily="{DynamicResource Font.Cjk}"
+                                                           FontSize="11"
+                                                           Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                            </StackPanel>
+                                        </Border>
+
+                                        <ToggleButton x:Name="ToolGroupBodyToggle"
+                                                      Grid.Column="4"
+                                                      Tag="bodyToggle"
+                                                      IsChecked="False"
+                                                      Width="28" Height="28"
+                                                      Margin="2,0,-4,0"
+                                                      VerticalAlignment="Center"
+                                                      Background="Transparent"
+                                                      BorderThickness="0"
+                                                      Cursor="Hand"
+                                                      ToolTip="展开 / 收起">
+                                            <ToggleButton.Template>
+                                                <ControlTemplate TargetType="ToggleButton">
+                                                    <Border Background="Transparent">
+                                                        <TextBlock x:Name="Chev"
+                                                                   Text="&#xE76C;"
+                                                                   FontFamily="{DynamicResource Font.Icon}"
+                                                                   FontSize="11"
+                                                                   HorizontalAlignment="Center"
+                                                                   VerticalAlignment="Center"
+                                                                   RenderTransformOrigin="0.5,0.5"
+                                                                   Foreground="{DynamicResource Brush.Text.Muted}">
+                                                            <TextBlock.RenderTransform>
+                                                                <RotateTransform Angle="0" />
+                                                            </TextBlock.RenderTransform>
+                                                        </TextBlock>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsChecked" Value="True">
+                                                            <Setter TargetName="Chev" Property="RenderTransform">
+                                                                <Setter.Value>
+                                                                    <RotateTransform Angle="90" />
+                                                                </Setter.Value>
+                                                            </Setter>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </ToggleButton.Template>
+                                        </ToggleButton>
+
+                                        <Border Grid.Column="0" Grid.ColumnSpan="4"
+                                                Background="Transparent"
+                                                Cursor="Hand"
+                                                MouseLeftButtonUp="ToolHeader_Click" />
+                                    </Grid>
+
+                                    <ItemsControl ItemsSource="{Binding ToolGroup.Items}"
+                                                  Margin="0,8,0,0"
+                                                  Visibility="{Binding IsChecked, ElementName=ToolGroupBodyToggle, Converter={x:Static views:BoolToVisibility.Instance}}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate DataType="{x:Type vm:ToolCallViewModel}">
+                                                <Border Padding="4,5" Background="Transparent">
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="*" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <Ellipse Grid.Column="0" Width="6" Height="6"
+                                                                 Margin="2,0,9,0" VerticalAlignment="Center">
+                                                            <Ellipse.Style>
+                                                                <Style TargetType="Ellipse">
+                                                                    <Setter Property="Fill" Value="{DynamicResource Brush.Primary}" />
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding IsCompleted}" Value="True">
+                                                                            <Setter Property="Fill" Value="{DynamicResource Brush.Success}" />
+                                                                        </DataTrigger>
+                                                                        <DataTrigger Binding="{Binding IsError}" Value="True">
+                                                                            <Setter Property="Fill" Value="{DynamicResource Brush.Error}" />
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </Ellipse.Style>
+                                                        </Ellipse>
+                                                        <TextBlock Grid.Column="1"
+                                                                   Text="{Binding HeaderArgPreview}"
+                                                                   FontFamily="{DynamicResource Font.Mono}"
+                                                                   FontSize="12"
+                                                                   TextTrimming="CharacterEllipsis"
+                                                                   VerticalAlignment="Center">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding IsError}" Value="True">
+                                                                            <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
+                                                    </Grid>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
                                 </StackPanel>
                             </Border>
                             </StackPanel>

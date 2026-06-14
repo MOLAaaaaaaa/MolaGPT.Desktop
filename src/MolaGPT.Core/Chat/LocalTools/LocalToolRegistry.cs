@@ -98,6 +98,72 @@ public static partial class LocalToolRegistry
             });
         }
 
+        if (options.FileTools)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "read_file",
+                    description = "读取本地文件的文本内容。优先用本工具读取文件，而不是写 Python 代码去 open()。可选按行范围读取大文件。",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            path = new { type = "string", description = "文件的绝对路径或相对路径" },
+                            offset = new { type = "integer", description = "起始行号（1 基，可选）" },
+                            limit = new { type = "integer", description = "读取行数（可选，默认整文件，最多 2000 行）" }
+                        },
+                        required = new[] { "path" }
+                    }
+                }
+            });
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "glob_files",
+                    description = "按通配模式查找文件（支持 ** 和 *，如 **/*.cs）。优先用本工具找文件，而不是写 Python 遍历目录。结果按修改时间倒序。",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            pattern = new { type = "string", description = "通配模式，如 **/*.md 或 src/**/*.cs" },
+                            path = new { type = "string", description = "搜索根目录（可选，默认当前工作目录）" },
+                            limit = new { type = "integer", description = "最多返回多少条（可选，默认 200）" }
+                        },
+                        required = new[] { "pattern" }
+                    }
+                }
+            });
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "grep_files",
+                    description = "在文件内容中按正则搜索（类似 grep/ripgrep）。优先用本工具搜内容，而不是写 Python。返回命中的文件、行号、行文本。",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            pattern = new { type = "string", description = "正则表达式" },
+                            path = new { type = "string", description = "搜索根目录（可选，默认当前工作目录）" },
+                            glob = new { type = "string", description = "限定文件名/路径的通配，如 *.cs（可选）" },
+                            ignore_case = new { type = "boolean", description = "是否忽略大小写（可选）" },
+                            max_matches = new { type = "integer", description = "最多命中条数（可选，默认 100）" }
+                        },
+                        required = new[] { "pattern" }
+                    }
+                }
+            });
+        }
+
         return tools;
     }
 
@@ -114,6 +180,9 @@ public static partial class LocalToolRegistry
             {
                 "search_web" => await SearchWebAsync(argumentsJson, options, http, ct).ConfigureAwait(false),
                 "web_fetch" => await ScrapeWebPageAsync(argumentsJson, options, http, ct).ConfigureAwait(false),
+                "read_file" => await Task.Run(() => ExecuteReadFile(argumentsJson, options, ct), ct).ConfigureAwait(false),
+                "glob_files" => await Task.Run(() => ExecuteGlob(argumentsJson, options, ct), ct).ConfigureAwait(false),
+                "grep_files" => await Task.Run(() => ExecuteGrep(argumentsJson, options, ct), ct).ConfigureAwait(false),
                 _ => SerializeToolResult(new
                 {
                     success = false,
@@ -130,6 +199,62 @@ public static partial class LocalToolRegistry
             });
         }
     }
+
+    private static string ExecuteReadFile(string argumentsJson, LocalToolOptions options, CancellationToken ct)
+    {
+        using var doc = ParseArgs(argumentsJson);
+        var root = doc?.RootElement;
+        var path = ReadArgString(root, "path");
+        var offset = ReadArgInt(root, "offset");
+        var limit = ReadArgInt(root, "limit");
+        return SerializeToolResult(FileToolset.ReadFile(path, offset, limit, options.DeniedPathPrefixList, ct));
+    }
+
+    private static string ExecuteGlob(string argumentsJson, LocalToolOptions options, CancellationToken ct)
+    {
+        using var doc = ParseArgs(argumentsJson);
+        var root = doc?.RootElement;
+        var pattern = ReadArgString(root, "pattern");
+        var path = ReadArgString(root, "path");
+        var limit = ReadArgInt(root, "limit");
+        return SerializeToolResult(FileToolset.Glob(pattern, path, limit, options.DeniedPathPrefixList, ct));
+    }
+
+    private static string ExecuteGrep(string argumentsJson, LocalToolOptions options, CancellationToken ct)
+    {
+        using var doc = ParseArgs(argumentsJson);
+        var root = doc?.RootElement;
+        var pattern = ReadArgString(root, "pattern");
+        var path = ReadArgString(root, "path");
+        var glob = ReadArgString(root, "glob");
+        var ignoreCase = ReadArgBool(root, "ignore_case");
+        var max = ReadArgInt(root, "max_matches");
+        return SerializeToolResult(FileToolset.Grep(pattern, path, glob, ignoreCase, max, options.DeniedPathPrefixList, ct));
+    }
+
+    private static JsonDocument? ParseArgs(string argumentsJson)
+    {
+        if (string.IsNullOrWhiteSpace(argumentsJson)) return null;
+        try { return JsonDocument.Parse(argumentsJson); }
+        catch (JsonException) { return null; }
+    }
+
+    private static string? ReadArgString(JsonElement? root, string name) =>
+        root is { ValueKind: JsonValueKind.Object } e
+        && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString()
+            : null;
+
+    private static int? ReadArgInt(JsonElement? root, string name) =>
+        root is { ValueKind: JsonValueKind.Object } e
+        && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number
+        && v.TryGetInt32(out var i)
+            ? i
+            : null;
+
+    private static bool ReadArgBool(JsonElement? root, string name) =>
+        root is { ValueKind: JsonValueKind.Object } e
+        && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
 
     private static async Task<string> SearchWebAsync(
         string argumentsJson,

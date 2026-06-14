@@ -71,7 +71,7 @@ public sealed class ChatToolHost : IChatToolHost
             return _imageGeneration.ExecuteToolAsync(argumentsJson, options.ImageGeneration, ct);
 
         if (string.Equals(toolName, PythonExecutionTool.ToolName, StringComparison.Ordinal))
-            return _python.ExecuteAsync(argumentsJson, options.Python, ct);
+            return _python.ExecuteAsync(argumentsJson, options.Python, context.Request.ConversationId, ct);
 
         if (McpToolName.TryDecode(toolName, out var serverSlug, out var toolSlug))
             return ExecuteMcpAsync(serverSlug, toolSlug, argumentsJson, options, ct);

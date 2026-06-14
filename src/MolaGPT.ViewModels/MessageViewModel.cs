@@ -516,6 +516,21 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         var next = new List<MessageDisplayBlockViewModel>();
         var content = Content ?? string.Empty;
         var cursor = 0;
+
+        // Accumulator for a run of consecutive same-type file-operation tools.
+        var run = new List<ToolCallViewModel>();
+        string? runName = null;
+        void FlushRun()
+        {
+            if (run.Count == 0) return;
+            // A lone file-op renders as a normal single card; ≥2 merge into a group.
+            next.Add(run.Count == 1
+                ? MessageDisplayBlockViewModel.ForTool(run[0])
+                : MessageDisplayBlockViewModel.ForToolGroup(new ToolGroupViewModel(runName!, run.ToList())));
+            run.Clear();
+            runName = null;
+        }
+
         foreach (var tool in ToolCalls
                      .Cast<object>()
                      .Concat(ThinkingSegments)
@@ -524,14 +539,34 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         {
             var offset = Math.Clamp(GetBlockContentOffset(tool), cursor, content.Length);
             if (offset > cursor)
+            {
+                FlushRun(); // visible text between calls breaks a run
                 next.Add(MessageDisplayBlockViewModel.ForText(content[cursor..offset]));
+            }
             if (tool is ToolCallViewModel toolCall)
-                next.Add(MessageDisplayBlockViewModel.ForTool(toolCall));
+            {
+                if (toolCall.IsFileOperation)
+                {
+                    if (runName is not null && !string.Equals(runName, toolCall.Name, StringComparison.Ordinal))
+                        FlushRun(); // different file-op type breaks the run
+                    runName = toolCall.Name;
+                    run.Add(toolCall);
+                }
+                else
+                {
+                    FlushRun();
+                    next.Add(MessageDisplayBlockViewModel.ForTool(toolCall));
+                }
+            }
             else if (tool is ThinkingSegmentViewModel thinking && IsThinkingSegmentVisible(thinking))
+            {
+                FlushRun();
                 next.Add(MessageDisplayBlockViewModel.ForThinking(thinking));
+            }
             cursor = offset;
         }
 
+        FlushRun();
         if (cursor < content.Length)
             next.Add(MessageDisplayBlockViewModel.ForText(content[cursor..]));
 
@@ -690,9 +725,11 @@ public sealed partial class MessageDisplayBlockViewModel : ObservableObject
 
     [ObservableProperty] private string? _text;
     public ToolCallViewModel? Tool { get; }
+    public ToolGroupViewModel? ToolGroup { get; }
     public ThinkingSegmentViewModel? Thinking { get; }
     public bool IsText => Text is { Length: > 0 };
     public bool IsTool => Tool is not null;
+    public bool IsToolGroup => ToolGroup is not null;
     public bool IsThinking => Thinking is not null;
 
     partial void OnTextChanged(string? value) => OnPropertyChanged(nameof(IsText));
@@ -708,6 +745,16 @@ public sealed partial class MessageDisplayBlockViewModel : ObservableObject
         if (Tool is not null && ReferenceEquals(Tool, next.Tool))
             return true;
 
+        // Same-identity tool group: reconcile its rows in place (keep the group
+        // VM instance, only refresh items/header) so the streaming group card
+        // doesn't flicker on every delta.
+        if (ToolGroup is not null && next.ToolGroup is not null
+            && string.Equals(ToolGroup.Name, next.ToolGroup.Name, StringComparison.Ordinal))
+        {
+            ToolGroup.SyncFrom(next.ToolGroup);
+            return true;
+        }
+
         if (Thinking is not null && ReferenceEquals(Thinking, next.Thinking))
             return true;
 
@@ -717,6 +764,90 @@ public sealed partial class MessageDisplayBlockViewModel : ObservableObject
     public static MessageDisplayBlockViewModel ForText(string text) => new(text, null, null);
     public static MessageDisplayBlockViewModel ForTool(ToolCallViewModel tool) => new(null, tool, null);
     public static MessageDisplayBlockViewModel ForThinking(ThinkingSegmentViewModel thinking) => new(null, null, thinking);
+    public static MessageDisplayBlockViewModel ForToolGroup(ToolGroupViewModel group) => new(group);
+
+    private MessageDisplayBlockViewModel(ToolGroupViewModel group)
+    {
+        ToolGroup = group;
+    }
+}
+
+/// <summary>
+/// A run of consecutive same-type file-operation tool calls (read_file /
+/// glob_files / grep_files) rendered as one collapsible group card: header with
+/// op label + count + aggregate status, one row per call. Header props recompute
+/// via <see cref="Refresh"/> on every rebuild (RebuildDisplayBlocks runs on each
+/// tool delta), so no per-item subscription is needed — rows bind directly to
+/// the reference-stable ToolCallViewModels.
+/// </summary>
+public sealed partial class ToolGroupViewModel : ObservableObject
+{
+    public ToolGroupViewModel(string name, IReadOnlyList<ToolCallViewModel> items)
+    {
+        Name = name;
+        foreach (var item in items)
+            Items.Add(item);
+    }
+
+    public string Name { get; }
+    public ObservableCollection<ToolCallViewModel> Items { get; } = new();
+
+    public string IconGlyph => ToolCallViewModel.IconGlyphFor(Name);
+    public string Label => ToolCallViewModel.LabelFor(Name);
+    public int Count => Items.Count;
+
+    public string CountText => Name switch
+    {
+        "read_file" => $"{Count} 个文件",
+        "glob_files" => $"{Count} 次查找",
+        "grep_files" => $"{Count} 次搜索",
+        _ => $"{Count} 次"
+    };
+
+    private int DoneCount => Items.Count(i => i.IsCompleted);
+    private int ErrorCount => Items.Count(i => i.IsError);
+    private int PendingCount => Items.Count(i => !i.IsCompleted && !i.IsError);
+
+    public bool IsRunning => PendingCount > 0;
+    public bool IsError => PendingCount == 0 && ErrorCount > 0;
+    public bool IsCompleted => PendingCount == 0 && ErrorCount == 0;
+
+    public string StatusText =>
+        IsRunning ? $"{DoneCount}/{Count}"
+        : ErrorCount > 0 ? $"{ErrorCount} 失败"
+        : $"{Count} 步完成";
+
+    /// <summary>Reconcile this (kept) group's rows to match a freshly built one,
+    /// touching only what changed, then refresh the header.</summary>
+    public void SyncFrom(ToolGroupViewModel next)
+    {
+        for (var i = 0; i < next.Items.Count; i++)
+        {
+            if (i < Items.Count)
+            {
+                if (!ReferenceEquals(Items[i], next.Items[i]))
+                    Items[i] = next.Items[i];
+            }
+            else
+            {
+                Items.Add(next.Items[i]);
+            }
+        }
+        while (Items.Count > next.Items.Count)
+            Items.RemoveAt(Items.Count - 1);
+
+        Refresh();
+    }
+
+    public void Refresh()
+    {
+        OnPropertyChanged(nameof(Count));
+        OnPropertyChanged(nameof(CountText));
+        OnPropertyChanged(nameof(IsRunning));
+        OnPropertyChanged(nameof(IsError));
+        OnPropertyChanged(nameof(IsCompleted));
+        OnPropertyChanged(nameof(StatusText));
+    }
 }
 
 public sealed partial class ThinkingSegmentViewModel : ObservableObject
@@ -769,6 +900,14 @@ public sealed partial class ToolCallViewModel : ObservableObject
     public bool HasProvider => !string.IsNullOrWhiteSpace(Provider);
     public bool HasArguments => !string.IsNullOrWhiteSpace(ArgumentsJson);
     public bool HasResultPreview => !string.IsNullOrWhiteSpace(ResultPreviewJson);
+
+    /// <summary>
+    /// Whether to show the raw-JSON "输入参数" fold. Built-in tools already render
+    /// their arguments as a tailored body (Python code, search chips, url/path/kv),
+    /// so the JSON fold would be redundant — only generic / third-party (MCP) tools
+    /// fall back to it.
+    /// </summary>
+    public bool ShowArgumentsFold => HasArguments && !IsKnownBuiltInTool;
     public string? DisplayArgumentsJson => FormatDisplayJson(ArgumentsJson);
     public string? DisplayResultPreviewJson => FormatDisplayJson(ResultPreviewJson);
     public bool IsCompleted => Status.Equals("completed", StringComparison.OrdinalIgnoreCase);
@@ -776,11 +915,95 @@ public sealed partial class ToolCallViewModel : ObservableObject
     public bool IsSearch => Name.Equals("search_web", StringComparison.OrdinalIgnoreCase)
                             || Name.Equals("web_search", StringComparison.OrdinalIgnoreCase);
     public bool IsGenericTool => !IsSearch;
-    public string IconGlyph => Name switch
+
+    /// <summary>
+    /// True for tools we render with a tailored compact body (Python code,
+    /// search chips, url/path/text/kv chips). Generic / third-party (MCP) tools
+    /// fall back to the JSON folds. Drives which body the card shows.
+    /// </summary>
+    public bool IsKnownBuiltInTool => Name switch
+    {
+        "search_web" or "web_search" => true,
+        "web_fetch" or "steel_browser" => true,
+        "execute_python_code" => true,
+        "view_image" => true,
+        "generate_image" => true,
+        "read_file" => true,
+        "glob_files" => true,
+        "grep_files" => true,
+        _ => false
+    };
+
+    /// <summary>The read-only file tools, which we group when called back to back.</summary>
+    public static bool IsFileOperationTool(string name) =>
+        name is "read_file" or "glob_files" or "grep_files";
+
+    public bool IsFileOperation => IsFileOperationTool(Name);
+
+    /// <summary>
+    /// One-line argument preview shown in the collapsed header, right after the
+    /// label (e.g. <c>"勒古恩 生平" +2</c> for search, a url/path/code head, or
+    /// the first key-value). Empty when there is nothing terse to show.
+    /// Derived from <see cref="ArgsView"/> (built from the FULL arguments JSON),
+    /// so it is reliable even though the result preview is truncated upstream.
+    /// </summary>
+    public string HeaderArgPreview => BuildHeaderArgPreview();
+    public bool HasHeaderArgPreview => !string.IsNullOrEmpty(HeaderArgPreview);
+
+    private const int HeaderArgMaxLength = 48;
+
+    private string BuildHeaderArgPreview()
+    {
+        var view = ArgsView;
+
+        if (view.HasSearchQueries)
+        {
+            var queries = view.SearchQueries!;
+            var first = queries[0].Text;
+            var preview = Quote(Clip(first, HeaderArgMaxLength));
+            return queries.Count > 1 ? $"{preview} +{queries.Count - 1}" : preview;
+        }
+
+        if (view.HasCodeArg)
+        {
+            var firstLine = (view.CodeArg!.Code ?? string.Empty)
+                .Replace("\r", string.Empty)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
+            return firstLine is null ? string.Empty : Clip(firstLine.Trim(), HeaderArgMaxLength);
+        }
+
+        if (view.HasPrimaryArg)
+            return Clip(view.PrimaryArg!.Value, HeaderArgMaxLength);
+
+        if (view.HasKeyValueArgs)
+        {
+            var kv = view.KeyValueArgs![0];
+            return $"{kv.Key}: {Clip(kv.Value, HeaderArgMaxLength - kv.Key.Length - 2)}";
+        }
+
+        return string.Empty;
+    }
+
+    private static string Clip(string value, int max)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        var single = value.Replace('\n', ' ').Replace('\r', ' ').Trim();
+        if (max < 1) max = 1;
+        return single.Length <= max ? single : single[..max].TrimEnd() + "…";
+    }
+
+    private static string Quote(string value) => $"\"{value}\"";
+
+    public string IconGlyph => IconGlyphFor(Name);
+    public static string IconGlyphFor(string name) => name switch
     {
         "search_web" or "web_search" => "\uE721",
         "web_fetch" or "steel_browser" => "\uE774",
         "execute_python_code" => "\uE943",
+        "read_file" => "\uE8A5",
+        "glob_files" => "\uE8B7",
+        "grep_files" => "\uE773",
         _ => "\uE90F"
     };
     public string StatusText => Status switch
@@ -814,6 +1037,8 @@ public sealed partial class ToolCallViewModel : ObservableObject
         OnPropertyChanged(nameof(HasArguments));
         OnPropertyChanged(nameof(DisplayArgumentsJson));
         ArgsView = ToolArgsExtractor.Extract(Name, value);
+        OnPropertyChanged(nameof(HeaderArgPreview));
+        OnPropertyChanged(nameof(HasHeaderArgPreview));
     }
     partial void OnResultPreviewJsonChanged(string? value)
     {
@@ -829,11 +1054,15 @@ public sealed partial class ToolCallViewModel : ObservableObject
         OnPropertyChanged(nameof(IsError));
     }
 
-    private static string ToolLabelFor(string name) => name switch
+    private static string ToolLabelFor(string name) => LabelFor(name);
+    public static string LabelFor(string name) => name switch
     {
         "search_web" or "web_search" => "联网搜索",
         "web_fetch" or "steel_browser" => "网页阅读",
         "execute_python_code" => "Python",
+        "read_file" => "读取文件",
+        "glob_files" => "查找文件",
+        "grep_files" => "搜索内容",
         _ => string.IsNullOrWhiteSpace(name) ? "工具调用" : name
     };
 

@@ -1504,6 +1504,35 @@
                                         CornerRadius="{DynamicResource Radius.Md}"
                                         Padding="18,16"
                                         Margin="0,0,0,16">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                            <TextBlock Text="文件工具（只读）"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource Brush.Text.Primary}" />
+                                            <TextBlock Text="允许模型用 Read / Glob / Grep 读取、查找、搜索本地文件（只读，默认放行；受 Python 的拒绝路径限制）"
+                                                       FontSize="{DynamicResource Font.Size.Small}"
+                                                       TextWrapping="Wrap"
+                                                       Foreground="{DynamicResource Brush.Text.Muted}"
+                                                       Margin="0,3,0,0" />
+                                        </StackPanel>
+                                        <CheckBox Grid.Column="1"
+                                                  IsChecked="{Binding FileToolsEnabled, Mode=TwoWay}"
+                                                  VerticalAlignment="Center"
+                                                  Margin="12,0,0,0" />
+                                    </Grid>
+                                </Border>
+
+
+                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                        BorderThickness="1"
+                                        CornerRadius="{DynamicResource Radius.Md}"
+                                        Padding="18,16"
+                                        Margin="0,0,0,16">
                                     <StackPanel>
                                         <Grid>
                                             <Grid.ColumnDefinitions>

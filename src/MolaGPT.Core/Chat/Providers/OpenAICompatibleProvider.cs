@@ -356,7 +356,7 @@ public sealed class OpenAICompatibleProvider : IChatProvider
         LocalToolOptions options,
         CancellationToken ct)
     {
-        if (name is "search_web" or "web_fetch")
+        if (name is "search_web" or "web_fetch" or "read_file" or "glob_files" or "grep_files")
             return LocalToolRegistry.ExecuteAsync(name, argumentsJson, options, _http, ct);
 
         return _toolHost is null
@@ -738,6 +738,9 @@ public sealed class OpenAICompatibleProvider : IChatProvider
     {
         "search_web" => "联网搜索",
         "web_fetch" => "网页阅读",
+        "read_file" => "读取文件",
+        "glob_files" => "查找文件",
+        "grep_files" => "搜索内容",
         PythonExecutionTool.ToolName => "执行 Python",
         _ => "调用工具"
     };

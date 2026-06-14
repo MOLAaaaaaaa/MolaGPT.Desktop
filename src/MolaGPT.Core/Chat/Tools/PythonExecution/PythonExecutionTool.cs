@@ -13,6 +13,11 @@ public sealed class PythonExecutionTool
     private const string RunnerScriptFileName = "runner.py";
     private const long MaxArtifactBytes = 50L * 1024L * 1024L;
 
+    // Timestamp skew applied when deciding which files a run produced. Absorbs
+    // filesystem mtime granularity (FAT/exFAT is 2s) plus minor clock jitter so
+    // a freshly written artifact is never excluded as "too old".
+    private static readonly TimeSpan ArtifactFreshnessSkew = TimeSpan.FromSeconds(2);
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = false
@@ -48,7 +53,7 @@ public sealed class PythonExecutionTool
                 description = "Run Python code locally on the user's computer. This is a general-purpose local execution tool, similar to a bash/shell: prefer it whenever a task is better done by running code than by answering from memory. "
                     + "Use it for, but not limited to: math and data analysis; reading, writing, creating, moving and inspecting local files and folders; converting or generating documents, spreadsheets, images and plots; inspecting the system and environment; automating multi-step local tasks; and calling operating-system facilities via the standard library (e.g. os, pathlib, shutil, subprocess) when the task needs them. "
                     + "It runs real Python on the local machine with the user's privileges and a persistent filesystem, not a throwaway image-analysis sandbox. "
-                    + "The process starts in a fresh per-run working directory; read and write files using normal paths, and place any files you generate in the current working directory. "
+                    + "Within one conversation, every call shares the SAME working directory: files you create in one call (downloaded images, generated charts, data files) are still there in later calls under the same name. Read and write using normal relative paths in the current working directory, and reuse files from earlier steps directly — do NOT copy them from other directories or hard-code full filesystem locations from previous runs. "
                     + "Print results and short progress to stdout so the user and you can see them. "
                     + "When you produce plots or images, save them as PNG/JPG files in the current working directory; matplotlib is set up for headless rendering with common Chinese fonts when available. "
                     + "After execution, follow the returned display_instructions: show images with the exact artifact relative_path in Markdown, and never invent external image URLs or local file-system locations. "
@@ -84,6 +89,7 @@ public sealed class PythonExecutionTool
     public async Task<string> ExecuteAsync(
         string argumentsJson,
         PythonExecutionOptions? options,
+        string? conversationId,
         CancellationToken ct)
     {
         if (options?.Enabled != true)
@@ -109,13 +115,7 @@ public sealed class PythonExecutionTool
 
         var timeout = TimeSpan.FromSeconds(Math.Clamp(options.TimeoutSeconds, 5, 300));
         var maxOutput = Math.Clamp(options.MaxOutputCharacters, 2000, 100000);
-        var sessionId = DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmssfff") + "-" + Guid.NewGuid().ToString("N")[..8];
-        var sessionDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "MolaGPT",
-            "python-tool",
-            "sessions",
-            sessionId);
+        var sessionDir = ResolveSessionDirectory(conversationId);
 
         try
         {
@@ -126,6 +126,13 @@ public sealed class PythonExecutionTool
             await File.WriteAllTextAsync(runnerScriptPath, BuildRunnerScript(), new UTF8Encoding(false), ct).ConfigureAwait(false);
 
             var python = await ResolvePythonAsync(options, ct).ConfigureAwait(false);
+
+            // Capture the run-start instant AFTER writing the scripts but BEFORE
+            // running, so ScanArtifacts can report only files this run created or
+            // modified. The small skew absorbs filesystem timestamp granularity
+            // and clock jitter. This is what keeps a reused (per-conversation)
+            // working directory from re-reporting every earlier turn's images.
+            var runStartUtc = DateTime.UtcNow - ArtifactFreshnessSkew;
             var startedAt = Stopwatch.StartNew();
             var run = await RunPythonAsync(
                 python,
@@ -137,7 +144,7 @@ public sealed class PythonExecutionTool
                 ct).ConfigureAwait(false);
             startedAt.Stop();
 
-            var scannedArtifacts = ScanArtifacts(sessionDir);
+            var scannedArtifacts = ScanArtifacts(sessionDir, runStartUtc);
             var artifacts = scannedArtifacts
                 .Select(artifact => new
                 {
@@ -426,7 +433,66 @@ public sealed class PythonExecutionTool
             : dir!;
     }
 
-    private static IReadOnlyList<PythonArtifact> ScanArtifacts(string sessionDir)
+    /// <summary>
+    /// Resolves the working directory for a run. When a conversation id is
+    /// available, all Python runs in that conversation share one directory so
+    /// files produced by an earlier step (downloaded images, generated charts)
+    /// are still present for later steps — this is what removes the model's need
+    /// to <c>shutil.copy</c> artifacts between per-run sandboxes. Falls back to a
+    /// fresh timestamped directory when there is no conversation id.
+    /// </summary>
+    private static string ResolveSessionDirectory(string? conversationId)
+    {
+        var root = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "MolaGPT",
+            "python-tool",
+            "sessions");
+
+        var slug = SanitizeConversationId(conversationId);
+        var leaf = slug is null
+            ? DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmssfff") + "-" + Guid.NewGuid().ToString("N")[..8]
+            : "conv-" + slug;
+
+        return Path.Combine(root, leaf);
+    }
+
+    /// <summary>
+    /// Maps a conversation id to a safe directory-name fragment. Keeps only
+    /// filename-safe characters; ids that are empty, become empty after
+    /// filtering, or exceed a length bound fall back to a SHA-256 prefix (or
+    /// null for empty, which triggers the timestamped path).
+    /// </summary>
+    private static string? SanitizeConversationId(string? conversationId)
+    {
+        if (string.IsNullOrWhiteSpace(conversationId))
+            return null;
+
+        var trimmed = conversationId.Trim();
+        var safe = new StringBuilder(trimmed.Length);
+        foreach (var ch in trimmed)
+        {
+            if (char.IsAsciiLetterOrDigit(ch) || ch is '_' or '-')
+                safe.Append(ch);
+            else
+                safe.Append('_');
+        }
+
+        var result = safe.ToString().Trim('_');
+        if (result.Length == 0)
+            return HashConversationId(trimmed);
+
+        // Bound the length to keep total paths well under MAX_PATH; hash long ids.
+        return result.Length <= 64 ? result : HashConversationId(trimmed);
+    }
+
+    private static string HashConversationId(string value)
+    {
+        var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(value));
+        return Convert.ToHexString(bytes, 0, 8).ToLowerInvariant();
+    }
+
+    private static IReadOnlyList<PythonArtifact> ScanArtifacts(string sessionDir, DateTime runStartUtc)
     {
         if (!Directory.Exists(sessionDir))
             return Array.Empty<PythonArtifact>();
@@ -447,6 +513,13 @@ public sealed class PythonExecutionTool
 
             var info = new FileInfo(file);
             if (!IsArtifactExtension(info.Extension))
+                continue;
+
+            // Only report files this run produced or touched. In a reused
+            // per-conversation directory this excludes earlier turns' artifacts
+            // (so they don't re-surface in display_instructions every call); in a
+            // fresh directory every file passes, preserving the old behavior.
+            if (info.LastWriteTimeUtc < runStartUtc)
                 continue;
 
             artifacts.Add(new PythonArtifact(

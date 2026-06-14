@@ -93,6 +93,38 @@ public partial class MessageItemView : UserControl
         e.Handled = true;
     }
 
+    // Clicking anywhere on the tool-card header row toggles the body open/closed,
+    // mirroring the chevron. The chevron ToggleButton (x:Name="ToolBodyToggle")
+    // lives in the same header Grid as the click strip that raised this event.
+    private void ToolHeader_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement element
+            && FindHeaderToggle(element) is { } toggle)
+        {
+            toggle.IsChecked = !(toggle.IsChecked ?? false);
+            e.Handled = true;
+        }
+    }
+
+    private static ToggleButton? FindHeaderToggle(DependencyObject start)
+    {
+        // Walk up to the enclosing header Grid, then find the body toggle among
+        // its direct children. Marked by Tag="bodyToggle" so one handler serves
+        // both the single tool card and the grouped card (their toggles need
+        // distinct x:Names within a single DataTemplate namescope).
+        for (DependencyObject? node = start; node is not null; node = VisualTreeHelper.GetParent(node))
+        {
+            if (node is not Grid grid) continue;
+            var count = VisualTreeHelper.GetChildrenCount(grid);
+            for (var i = 0; i < count; i++)
+            {
+                if (VisualTreeHelper.GetChild(grid, i) is ToggleButton { Tag: "bodyToggle" } toggle)
+                    return toggle;
+            }
+        }
+        return null;
+    }
+
     private void CopyTextMenuItem_Click(object sender, RoutedEventArgs e)
     {
         if (sender is MenuItem { CommandParameter: string text })

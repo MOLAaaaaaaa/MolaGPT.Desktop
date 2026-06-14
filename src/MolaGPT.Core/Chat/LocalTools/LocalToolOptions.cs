@@ -14,15 +14,24 @@ public sealed record LocalToolOptions(
     IReadOnlyList<McpServerOptions>? McpServers = null,
     VisionProxyOptions? Vision = null,
     ImageGenerationOptions? ImageGeneration = null,
-    PythonExecutionOptions? Python = null)
+    PythonExecutionOptions? Python = null,
+    bool FileTools = false,
+    string? DeniedPathPrefixes = null)
 {
     public bool HasAny =>
         Network
         || WebPage
+        || FileTools
         || McpServers?.Any(server => server.Enabled) == true
         || Vision?.Enabled == true
         || ImageGeneration?.Enabled == true
         || Python?.Enabled == true;
+
+    /// <summary>Denied path prefixes as a list (split from the comma string).</summary>
+    public IReadOnlyList<string> DeniedPathPrefixList =>
+        string.IsNullOrWhiteSpace(DeniedPathPrefixes)
+            ? Array.Empty<string>()
+            : DeniedPathPrefixes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     public static LocalToolOptions FromExtraBody(IReadOnlyDictionary<string, object>? extraBody)
     {
@@ -40,7 +49,9 @@ public sealed record LocalToolOptions(
             ReadMcpServers(raw),
             ReadVision(raw),
             ReadImageGeneration(raw),
-            ReadPythonExecution(raw));
+            ReadPythonExecution(raw),
+            ReadBool(raw, "fileTools"),
+            ReadString(raw, "fileToolsDeniedPaths"));
     }
 
     private static IReadOnlyList<McpServerOptions> ReadMcpServers(object raw)

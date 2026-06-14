@@ -85,7 +85,7 @@ public sealed partial class SkillsViewModel : ObservableObject
     /// plus instructions telling the model to read the file on demand and run it
     /// via the Python tool. Returns null when there is nothing to inject.
     /// </summary>
-    public string? BuildCatalogForPrompt()
+    public string? BuildCatalogForPrompt(bool canUseReadTool = false)
     {
         var enabled = Skills.Where(s => s.Enabled).ToArray();
         if (enabled.Length == 0)
@@ -93,10 +93,20 @@ public sealed partial class SkillsViewModel : ObservableObject
 
         var sb = new StringBuilder();
         sb.AppendLine("## 可用技能（Skills）");
-        sb.AppendLine(
-            "下面是已启用的技能。当用户的任务匹配某个技能时，先用 execute_python_code 工具读取该技能的 SKILL.md "
-            + "（用其绝对路径，如 open(path, encoding='utf-8').read() 并打印），按其中的完整步骤操作；"
-            + "技能文件夹内可能还有 scripts/ 等资源，按 SKILL.md 指引按需读取。不要凭空臆造步骤。");
+        if (canUseReadTool)
+        {
+            sb.AppendLine(
+                "下面是已启用的技能。当用户的任务匹配某个技能时，先用 read_file 工具读取该技能的 SKILL.md "
+                + "（用其绝对路径），按其中的完整步骤操作；技能文件夹内可能还有 scripts/ 等资源，"
+                + "用 read_file 查看、用 execute_python_code 运行。不要凭空臆造步骤。");
+        }
+        else
+        {
+            sb.AppendLine(
+                "下面是已启用的技能。当用户的任务匹配某个技能时，先用 execute_python_code 工具读取该技能的 SKILL.md "
+                + "（用其绝对路径，如 open(path, encoding='utf-8').read() 并打印），按其中的完整步骤操作；"
+                + "技能文件夹内可能还有 scripts/ 等资源，按 SKILL.md 指引按需读取。不要凭空臆造步骤。");
+        }
         foreach (var s in enabled)
         {
             var desc = string.IsNullOrWhiteSpace(s.Description) ? "(无描述)" : s.Description.Trim();

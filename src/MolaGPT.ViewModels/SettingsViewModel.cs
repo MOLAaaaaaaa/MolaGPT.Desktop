@@ -42,6 +42,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string WorkbenchImageGenerationSizeKey = "image_workbench_size";
     private const string WorkbenchImageGenerationStyleKey = "image_workbench_style";
     private const string PythonToolEnabledKey = "python_tool_enabled";
+    private const string FileToolsEnabledKey = "file_tools_enabled";
     private const string PythonToolExecutablePathKey = "python_tool_executable_path";
     private const string PythonToolTimeoutSecondsKey = "python_tool_timeout_seconds";
     private const string PythonToolMaxOutputCharactersKey = "python_tool_max_output_characters";
@@ -87,6 +88,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string _workbenchImageGenerationSize = "1024x1024";
     [ObservableProperty] private string? _workbenchImageGenerationStyle;
     [ObservableProperty] private bool _pythonToolEnabled;
+    [ObservableProperty] private bool _fileToolsEnabled;
     [ObservableProperty] private string? _pythonToolExecutablePath;
     [ObservableProperty] private int _pythonToolTimeoutSeconds = 60;
     [ObservableProperty] private int _pythonToolMaxOutputCharacters = 20000;
@@ -178,6 +180,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             WorkbenchImageGenerationSize = _settingsRepo.Get(WorkbenchImageGenerationSizeKey) ?? ImageGenerationSize;
             WorkbenchImageGenerationStyle = _settingsRepo.Get(WorkbenchImageGenerationStyleKey) ?? ImageGenerationStyle;
             PythonToolEnabled = bool.TryParse(_settingsRepo.Get(PythonToolEnabledKey), out var pythonEnabled) && pythonEnabled;
+            FileToolsEnabled = bool.TryParse(_settingsRepo.Get(FileToolsEnabledKey), out var fileToolsEnabled) && fileToolsEnabled;
             PythonToolExecutablePath = _settingsRepo.Get(PythonToolExecutablePathKey);
             if (int.TryParse(_settingsRepo.Get(PythonToolTimeoutSecondsKey), out var pythonTimeout))
                 PythonToolTimeoutSeconds = Math.Clamp(pythonTimeout, 5, 300);
@@ -399,6 +402,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(PythonToolEnabledKey, value.ToString());
+    }
+
+    partial void OnFileToolsEnabledChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(FileToolsEnabledKey, value.ToString());
     }
 
     partial void OnPythonToolExecutablePathChanged(string? value)

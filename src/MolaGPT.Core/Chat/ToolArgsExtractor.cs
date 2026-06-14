@@ -27,7 +27,7 @@ public static partial class ToolArgsExtractor
 
     private static readonly string[] UrlKeys = { "url", "href", "link" };
     private static readonly string[] PathKeys = { "path", "file", "filename", "file_path", "filepath" };
-    private static readonly string[] TextKeys = { "code", "query", "text", "prompt", "keyword", "keywords", "search" };
+    private static readonly string[] TextKeys = { "code", "query", "text", "prompt", "keyword", "keywords", "search", "pattern" };
 
     public static ToolArgsView Extract(string? toolName, string? argumentsJson)
     {
