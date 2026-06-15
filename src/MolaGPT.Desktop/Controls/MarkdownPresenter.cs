@@ -2796,6 +2796,33 @@ public sealed partial class MarkdownPresenter : ContentControl
         WireHyperlinks(paragraph.Inlines);
         ApplyCitationControls(paragraph.Inlines);
         StyleInlineCode(paragraph);
+
+        // Inline math is an InlineUIContainer wrapping a WpfMath FormulaControl,
+        // which is frequently taller than a text line (a fraction with a radical
+        // is roughly twice MessageTextLineHeight). Under the fixed BlockLineHeight
+        // strategy the line stays at MessageTextLineHeight and the formula bleeds
+        // into the lines above/below, painting over their text. Switch only the
+        // affected paragraphs to MaxHeight so the line grows to contain the
+        // formula, while MessageTextLineHeight still acts as the floor for the
+        // plain text lines.
+        if (ContainsInlineMath(paragraph.Inlines))
+            paragraph.LineStackingStrategy = LineStackingStrategy.MaxHeight;
+    }
+
+    private static bool ContainsInlineMath(InlineCollection inlines)
+    {
+        foreach (var inline in inlines)
+        {
+            switch (inline)
+            {
+                case InlineUIContainer { Child: FormulaControl }:
+                    return true;
+                case Span span when ContainsInlineMath(span.Inlines):
+                    return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

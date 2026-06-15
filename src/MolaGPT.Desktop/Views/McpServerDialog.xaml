@@ -1,6 +1,7 @@
 <Window x:Class="MolaGPT.Desktop.Views.McpServerDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ctl="clr-namespace:MolaGPT.Desktop.Controls"
         Title="MCP 服务器"
         Width="520" Height="500"
         WindowStartupLocation="CenterOwner"
@@ -94,12 +95,7 @@
                             <StackPanel Grid.Column="2">
                                 <TextBlock Text="Token" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
                                 <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                    <PasswordBox x:Name="TokenBox"
-                                                 Background="Transparent"
-                                                 BorderThickness="0"
-                                                 Foreground="{DynamicResource Brush.Text.Primary}"
-                                                 FontFamily="{DynamicResource Font.UI}"
-                                                 FontSize="{DynamicResource Font.Size.Body}" />
+                                    <ctl:RevealableSecretBox x:Name="TokenBox" />
                                 </Border>
                             </StackPanel>
                         </Grid>

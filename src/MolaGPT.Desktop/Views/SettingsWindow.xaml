@@ -5,10 +5,11 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
         xmlns:views="clr-namespace:MolaGPT.Desktop.Views"
+        xmlns:ctl="clr-namespace:MolaGPT.Desktop.Controls"
         xmlns:scm="clr-namespace:System.ComponentModel;assembly=WindowsBase"
         Title="设置 — MolaGPT"
         Icon="/Assets/app-logo.png"
-        Width="820" Height="640"
+        Width="1040" Height="700"
         WindowStartupLocation="CenterOwner"
         WindowStyle="None"
         AllowsTransparency="True"
@@ -18,6 +19,151 @@
         FontSize="{DynamicResource Font.Size.Body}"
         Foreground="{DynamicResource Brush.Text.Primary}"
         mc:Ignorable="d">
+
+    <Window.Resources>
+        <!-- ===== Settings design system (mirrors docs/settings-redesign-demo) ===== -->
+        <Style x:Key="SettingsPageTitle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="{DynamicResource Font.Size.Title}" />
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+        </Style>
+        <Style x:Key="SettingsPageSubtitle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+            <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Margin" Value="0,6,0,18" />
+        </Style>
+        <Style x:Key="SettingsSectionLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+            <Setter Property="Margin" Value="2,22,2,8" />
+        </Style>
+        <Style x:Key="SettingsRowTitle" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+        </Style>
+        <Style x:Key="SettingsRowHint" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+            <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Margin" Value="0,4,0,0" />
+        </Style>
+        <Style x:Key="SettingsFieldLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+            <Setter Property="Margin" Value="0,0,0,6" />
+        </Style>
+        <Style x:Key="SettingsCard" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+            <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+            <Setter Property="Margin" Value="0,0,0,12" />
+        </Style>
+        <Style x:Key="SettingsRowDivider" TargetType="Border">
+            <Setter Property="Height" Value="1" />
+            <Setter Property="Background" Value="{DynamicResource Brush.Divider}" />
+            <Setter Property="Margin" Value="16,0" />
+        </Style>
+
+        <!-- Toggle switch (extracted from the account sync toggle) -->
+        <Style x:Key="SettingsToggle" TargetType="ToggleButton">
+            <Setter Property="Width" Value="46" />
+            <Setter Property="Height" Value="26" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Track" Width="46" Height="26" CornerRadius="13"
+                                BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1"
+                                Background="{DynamicResource Brush.Bg.Secondary}">
+                            <Border x:Name="Thumb" Width="20" Height="18" Margin="3"
+                                    HorizontalAlignment="Left" VerticalAlignment="Center"
+                                    CornerRadius="7" Background="{DynamicResource Brush.Bg.Elevated}">
+                                <Border.Effect>
+                                    <DropShadowEffect Color="#66000000" BlurRadius="3" ShadowDepth="1" Opacity="0.35" />
+                                </Border.Effect>
+                            </Border>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Track" Property="Background" Value="{DynamicResource Brush.Primary}" />
+                                <Setter TargetName="Track" Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+                                <Setter TargetName="Thumb" Property="HorizontalAlignment" Value="Right" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Segmented control: RadioButtons rendered as a pill group -->
+        <Style x:Key="SettingsSegment" TargetType="RadioButton">
+            <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+            <Setter Property="FontWeight" Value="Medium" />
+            <Setter Property="Padding" Value="15,6" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="b" Background="Transparent" CornerRadius="{DynamicResource Radius.Sm}" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="b" Property="Background" Value="{DynamicResource Brush.Primary}" />
+                                <Setter Property="Foreground" Value="{DynamicResource Brush.Text.OnPrimary}" />
+                                <Setter Property="FontWeight" Value="SemiBold" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="SettingsSegmentTrack" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+            <Setter Property="Padding" Value="3" />
+            <Setter Property="HorizontalAlignment" Value="Left" />
+        </Style>
+
+        <!-- Quick-insert variable chip (persona prompt editor) -->
+        <Style x:Key="SettingsVarChip" TargetType="Button">
+            <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+            <Setter Property="FontFamily" Value="{DynamicResource Font.Mono}" />
+            <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Margin" Value="0,0,6,6" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="b"
+                                Background="{DynamicResource Brush.Bg.Secondary}"
+                                BorderBrush="{DynamicResource Brush.Primary.Border}"
+                                BorderThickness="1"
+                                CornerRadius="{DynamicResource Radius.Sm}"
+                                Padding="9,4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="b" Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
 
     <Grid Margin="32">
         <Border CornerRadius="{DynamicResource Radius.Xl}"
@@ -65,30 +211,63 @@
                 </Border>
 
                 <TabControl x:Name="SettingsTabs"
+                            TabStripPlacement="Left"
                             Background="Transparent"
                             BorderThickness="0"
                             Padding="0"
                             Margin="0">
                     <TabControl.Resources>
-                        <Style TargetType="TabItem">
-                            <Setter Property="Background" Value="Transparent" />
-                            <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
-                            <Setter Property="Padding" Value="20,12" />
-                            <Setter Property="FontWeight" Value="SemiBold" />
+                        <!-- Sidebar group header: a non-interactive label that
+                             separates the nav items into sections. It is itself a
+                             (disabled) TabItem so TabControl.Items stays homogeneous;
+                             code-behind iterates with .OfType<TabItem>() and matches
+                             by Header, so these never get selected or navigated to. -->
+                        <Style x:Key="NavGroupHeader" TargetType="TabItem">
+                            <Setter Property="IsEnabled" Value="False" />
+                            <Setter Property="Focusable" Value="False" />
                             <Setter Property="Template">
                                 <Setter.Value>
                                     <ControlTemplate TargetType="TabItem">
-                                        <Border x:Name="b" Background="Transparent" Padding="{TemplateBinding Padding}">
-                                            <ContentPresenter ContentSource="Header" HorizontalAlignment="Center" />
+                                        <TextBlock Text="{TemplateBinding Header}"
+                                                   Margin="12,16,12,6"
+                                                   FontSize="{DynamicResource Font.Size.XSmall}"
+                                                   FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource Brush.Text.Muted}" />
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+
+                        <!-- Sidebar nav item -->
+                        <Style TargetType="TabItem">
+                            <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+                            <Setter Property="FontWeight" Value="Normal" />
+                            <Setter Property="HorizontalContentAlignment" Value="Left" />
+                            <Setter Property="Margin" Value="0,1" />
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="TabItem">
+                                        <Border x:Name="b"
+                                                Background="Transparent"
+                                                BorderBrush="Transparent"
+                                                BorderThickness="1"
+                                                CornerRadius="{DynamicResource Radius.Md}"
+                                                Padding="12,9"
+                                                SnapsToDevicePixels="True">
+                                            <ContentPresenter ContentSource="Header"
+                                                              VerticalAlignment="Center"
+                                                              HorizontalAlignment="Left" />
                                         </Border>
                                         <ControlTemplate.Triggers>
                                             <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="b" Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
                                                 <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
                                             </Trigger>
                                             <Trigger Property="IsSelected" Value="True">
+                                                <Setter TargetName="b" Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+                                                <Setter TargetName="b" Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
                                                 <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
-                                                <Setter TargetName="b" Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
-                                                <Setter TargetName="b" Property="BorderThickness" Value="0,0,0,2" />
+                                                <Setter Property="FontWeight" Value="SemiBold" />
                                             </Trigger>
                                         </ControlTemplate.Triggers>
                                     </ControlTemplate>
@@ -97,149 +276,219 @@
                         </Style>
                     </TabControl.Resources>
 
-                    <!-- ===== Tab: 账号与同步 ===== -->
-                    <TabItem Header="账号与同步">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
-                            <StackPanel Margin="32,24" MaxWidth="640" HorizontalAlignment="Left">
-                                <TextBlock Text="MolaGPT 账号"
-                                           FontSize="{DynamicResource Font.Size.Heading}"
-                                           FontWeight="SemiBold"
-                                           Margin="0,0,0,8"
-                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-                                <TextBlock Foreground="{DynamicResource Brush.Text.Secondary}"
-                                           Margin="0,0,0,16"
-                                           TextWrapping="Wrap">
-                                    登录后可在桌面端使用网页端同款模型、对话同步与个性化能力。
-                                </TextBlock>
+                    <!-- Shell: left sidebar (vertical items host) + content area -->
+                    <TabControl.Template>
+                        <ControlTemplate TargetType="TabControl">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="208" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Border Grid.Column="0"
+                                        Background="{DynamicResource Brush.Bg.Secondary}"
+                                        BorderBrush="{DynamicResource Brush.Divider}"
+                                        BorderThickness="0,0,1,0"
+                                        CornerRadius="0,0,0,18">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled"
+                                                  Padding="10,8,10,16">
+                                        <StackPanel IsItemsHost="True" />
+                                    </ScrollViewer>
+                                </Border>
+                                <Border Grid.Column="1" Background="Transparent">
+                                    <ContentPresenter ContentSource="SelectedContent" />
+                                </Border>
+                            </Grid>
+                        </ControlTemplate>
+                    </TabControl.Template>
 
-                                <Border Background="{DynamicResource Brush.Bg.Tertiary}"
-                                        CornerRadius="{DynamicResource Radius.Md}"
-                                        Padding="16,14"
-                                        Margin="0,0,0,12">
-                                    <Grid>
+                    <!-- ===== 通用 ===== -->
+                    <TabItem Header="通用" Style="{StaticResource NavGroupHeader}" />
+                    <TabItem Header="账号与同步" IsSelected="True">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="32,26" MaxWidth="640" HorizontalAlignment="Left">
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="账号与同步" />
+                                <TextBlock Style="{StaticResource SettingsPageSubtitle}"
+                                           Text="登录后可在桌面端使用网页端同款模型、对话同步与个性化能力。" />
+
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <Grid Margin="16,14">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
-                                        <StackPanel Grid.Column="0">
-                                            <TextBlock x:Name="StatusLine"
-                                                       FontWeight="SemiBold"
-                                                       Foreground="{DynamicResource Brush.Text.Primary}" />
-                                            <TextBlock x:Name="StatusDetail"
-                                                       Foreground="{DynamicResource Brush.Text.Secondary}"
-                                                       FontSize="{DynamicResource Font.Size.Small}"
-                                                       Margin="0,3,0,0" />
+                                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+                                            <TextBlock x:Name="StatusLine" Style="{StaticResource SettingsRowTitle}" />
+                                            <TextBlock x:Name="StatusDetail" Style="{StaticResource SettingsRowHint}" Margin="0,3,0,0" />
                                         </StackPanel>
-                                        <Button x:Name="LoginLogoutButton"
-                                                Grid.Column="1"
+                                        <Button x:Name="LoginLogoutButton" Grid.Column="1"
+                                                VerticalAlignment="Center"
                                                 Style="{StaticResource OutlineButton}"
                                                 Padding="14,7"
                                                 Click="LoginLogoutClick" />
                                     </Grid>
                                 </Border>
 
-                                <Border Background="{DynamicResource Brush.Bg.Tertiary}"
-                                        CornerRadius="{DynamicResource Radius.Md}"
-                                        Padding="16,14"
-                                        Margin="0,0,0,12">
-                                    <Grid>
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="数据同步" />
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <StackPanel>
+                                        <Grid Margin="16,13">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                                <TextBlock Style="{StaticResource SettingsRowTitle}" Text="对话云同步" />
+                                                <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                           Text="开启后，本机的对话会与 MolaGPT 网页端双向同步，自定义 API 的对话不会被上传。" />
+                                            </StackPanel>
+                                            <ToggleButton Grid.Column="1"
+                                                          Style="{StaticResource SettingsToggle}"
+                                                          IsEnabled="{Binding IsLoggedIn}"
+                                                          IsChecked="{Binding SyncConversations, Mode=TwoWay}"
+                                                          Checked="SyncToggleChanged"
+                                                          Unchecked="SyncToggleChanged" />
+                                        </Grid>
+                                        <Border Style="{StaticResource SettingsRowDivider}" />
+                                        <Grid Margin="16,13">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock x:Name="CloudSyncStatusText" Grid.Column="0"
+                                                       VerticalAlignment="Center" Margin="0,0,16,0"
+                                                       Style="{StaticResource SettingsRowHint}" />
+                                            <Button x:Name="SyncNowButton" Grid.Column="1"
+                                                    Style="{StaticResource OutlineButton}"
+                                                    Content="立即同步"
+                                                    Padding="12,6"
+                                                    IsEnabled="{Binding IsLoggedIn}"
+                                                    Click="SyncNowClick" />
+                                        </Grid>
+                                    </StackPanel>
+                                </Border>
+
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="个性化 · MolaGPT Tracks" />
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <Grid Margin="16,13">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
-                                        <StackPanel Grid.Column="0" Margin="0,0,16,0">
-                                            <TextBlock Text="对话云同步"
-                                                       FontWeight="SemiBold"
-                                                       Foreground="{DynamicResource Brush.Text.Primary}" />
-                                            <TextBlock Foreground="{DynamicResource Brush.Text.Secondary}"
-                                                       FontSize="{DynamicResource Font.Size.Small}"
-                                                       TextWrapping="Wrap"
-                                                       Margin="0,4,0,0"
-                                                       Text="开启后，本机的对话会与 MolaGPT 网页端双向同步，自定义 API 的对话不会被上传。" />
+                                        <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Text="启用个性化记忆" />
+                                            <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                       Text="MolaGPT 会从对话中学习你的偏好，让后续回复更贴合你的需求。关闭后不会记录任何个性化数据，仅在登录 MolaGPT 账号时生效。" />
                                         </StackPanel>
-                                        <StackPanel Grid.Column="1" HorizontalAlignment="Right">
-                                            <ToggleButton Width="48"
-                                                          Height="28"
-                                                          Cursor="Hand"
-                                                          HorizontalAlignment="Right"
-                                                          IsEnabled="{Binding IsLoggedIn}"
-                                                          IsChecked="{Binding SyncConversations, Mode=TwoWay}"
-                                                          Checked="SyncToggleChanged"
-                                                          Unchecked="SyncToggleChanged">
-                                                <ToggleButton.Template>
-                                                    <ControlTemplate TargetType="ToggleButton">
-                                                        <Border x:Name="Track"
-                                                                Width="48"
-                                                                Height="28"
-                                                                CornerRadius="9"
-                                                                BorderBrush="{DynamicResource Brush.Border}"
-                                                                BorderThickness="1"
-                                                                Background="{DynamicResource Brush.Bg.Secondary}">
-                                                            <Border x:Name="Thumb"
-                                                                    Width="22"
-                                                                    Height="20"
-                                                                    Margin="3"
-                                                                    HorizontalAlignment="Left"
-                                                                    VerticalAlignment="Center"
-                                                                    CornerRadius="7"
-                                                                    Background="{DynamicResource Brush.Bg.Elevated}">
-                                                                <Border.Effect>
-                                                                    <DropShadowEffect Color="#66000000"
-                                                                                      BlurRadius="3"
-                                                                                      ShadowDepth="1"
-                                                                                      Opacity="0.35" />
-                                                                </Border.Effect>
-                                                            </Border>
-                                                        </Border>
-                                                        <ControlTemplate.Triggers>
-                                                            <Trigger Property="IsChecked" Value="True">
-                                                                <Setter TargetName="Track" Property="Background" Value="{DynamicResource Brush.Primary}" />
-                                                                <Setter TargetName="Track" Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
-                                                                <Setter TargetName="Thumb" Property="HorizontalAlignment" Value="Right" />
-                                                            </Trigger>
-                                                            <Trigger Property="IsEnabled" Value="False">
-                                                                <Setter Property="Opacity" Value="0.45" />
-                                                            </Trigger>
-                                                        </ControlTemplate.Triggers>
-                                                    </ControlTemplate>
-                                                </ToggleButton.Template>
-                                            </ToggleButton>
-                                            <Button x:Name="SyncNowButton"
-                                                    Style="{StaticResource OutlineButton}"
-                                                    Content="立即同步"
-                                                    Padding="12,6"
-                                                    Margin="0,10,0,0"
-                                                    IsEnabled="{Binding IsLoggedIn}"
-                                                    Click="SyncNowClick" />
-                                        </StackPanel>
+                                        <ToggleButton Grid.Column="1"
+                                                      Style="{StaticResource SettingsToggle}"
+                                                      IsChecked="{Binding TracksEnabled}" />
                                     </Grid>
                                 </Border>
-                                <TextBlock x:Name="CloudSyncStatusText"
-                                           Margin="4,-4,4,12"
-                                           TextWrapping="Wrap"
-                                           FontSize="{DynamicResource Font.Size.Small}"
-                                           Foreground="{DynamicResource Brush.Text.Muted}" />
-
-                                <TextBlock Text="MolaGPT Tracks"
-                                           FontSize="{DynamicResource Font.Size.Heading}"
-                                           FontWeight="SemiBold"
-                                           Margin="0,12,0,12"
-                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-                                <CheckBox Content="启用个性化记忆"
-                                          Foreground="{DynamicResource Brush.Text.Primary}"
-                                          IsChecked="{Binding TracksEnabled}" />
-                                <TextBlock Text="MolaGPT 会从对话中学习你的偏好，让后续回复更贴合你的需求。关闭后不会记录任何个性化数据，仅在登录 MolaGPT 账号时生效。"
-                                           Foreground="{DynamicResource Brush.Text.Muted}"
-                                           TextWrapping="Wrap"
-                                           Margin="0,4,0,0"
-                                           FontSize="{DynamicResource Font.Size.Small}" />
                             </StackPanel>
                         </ScrollViewer>
                     </TabItem>
+                    <TabItem Header="界面与偏好">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="32,26" MaxWidth="640" HorizontalAlignment="Left">
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="界面与偏好" />
+                                <TextBlock Style="{StaticResource SettingsPageSubtitle}"
+                                           Text="调整外观、输入习惯与系统集成方式。" />
 
-                    <!-- ===== Tab: 模型服务（自定义模型） ===== -->
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Margin="2,4,2,8" Text="外观" />
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <Grid Margin="16,13">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Text="主题" />
+                                            <TextBlock Style="{StaticResource SettingsRowHint}" Text="跟随系统会随 Windows 的明暗设置自动切换。" />
+                                        </StackPanel>
+                                        <Border Grid.Column="1" Style="{StaticResource SettingsSegmentTrack}" VerticalAlignment="Center">
+                                            <StackPanel Orientation="Horizontal">
+                                                <RadioButton x:Name="ThemeSystem" Content="跟随系统" GroupName="theme"
+                                                             Style="{StaticResource SettingsSegment}"
+                                                             IsChecked="{Binding ThemeMode, Converter={StaticResource EnumEq}, ConverterParameter=System}" />
+                                                <RadioButton x:Name="ThemeLight" Content="浅色" GroupName="theme"
+                                                             Style="{StaticResource SettingsSegment}"
+                                                             IsChecked="{Binding ThemeMode, Converter={StaticResource EnumEq}, ConverterParameter=Light}" />
+                                                <RadioButton x:Name="ThemeDark" Content="深色" GroupName="theme"
+                                                             Style="{StaticResource SettingsSegment}"
+                                                             IsChecked="{Binding ThemeMode, Converter={StaticResource EnumEq}, ConverterParameter=Dark}" />
+                                            </StackPanel>
+                                        </Border>
+                                    </Grid>
+                                </Border>
+
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="输入" />
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <Grid Margin="16,13">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Text="按 Enter 直接发送消息" />
+                                            <TextBlock Style="{StaticResource SettingsRowHint}" Text="关闭时 Enter 换行，Ctrl+Enter 发送；开启时 Shift+Enter 仍可换行。" />
+                                        </StackPanel>
+                                        <ToggleButton Grid.Column="1" Style="{StaticResource SettingsToggle}" IsChecked="{Binding EnterToSend}" />
+                                    </Grid>
+                                </Border>
+
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="通知与系统集成" />
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <StackPanel>
+                                        <Grid Margin="16,13">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                                <TextBlock Style="{StaticResource SettingsRowTitle}" Text="后台回答完成时通知" />
+                                                <TextBlock Style="{StaticResource SettingsRowHint}" Text="窗口最小化或切换到其它对话时，回答完成会弹出系统通知。" />
+                                            </StackPanel>
+                                            <ToggleButton Grid.Column="1" Style="{StaticResource SettingsToggle}" IsChecked="{Binding EnableCompletionNotification}" />
+                                        </Grid>
+                                        <Border Style="{StaticResource SettingsRowDivider}" />
+                                        <Grid Margin="16,13">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                                <TextBlock Style="{StaticResource SettingsRowTitle}" Text="启用系统托盘" />
+                                                <TextBlock Style="{StaticResource SettingsRowHint}" Text="关闭窗口时可最小化到托盘而非退出。" />
+                                            </StackPanel>
+                                            <ToggleButton Grid.Column="1" Style="{StaticResource SettingsToggle}" IsChecked="{Binding EnableTrayIcon}" />
+                                        </Grid>
+                                        <StackPanel Visibility="{Binding EnableTrayIcon, Converter={StaticResource BoolVis}}">
+                                            <Border Style="{StaticResource SettingsRowDivider}" />
+                                            <StackPanel Margin="16,13">
+                                                <TextBlock Style="{StaticResource SettingsRowTitle}" Text="关闭按钮行为" Margin="0,0,0,6" />
+                                                <RadioButton Content="最小化到托盘" GroupName="trayClose" Margin="0,4"
+                                                             Foreground="{DynamicResource Brush.Text.Primary}"
+                                                             IsChecked="{Binding TrayCloseBehavior, Converter={StaticResource EnumEq}, ConverterParameter=MinimizeToTray}" />
+                                                <RadioButton Content="关闭软件" GroupName="trayClose" Margin="0,4"
+                                                             Foreground="{DynamicResource Brush.Text.Primary}"
+                                                             IsChecked="{Binding TrayCloseBehavior, Converter={StaticResource EnumEq}, ConverterParameter=Exit}" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+                    <!-- ===== 模型 ===== -->
+                    <TabItem Header="模型" Style="{StaticResource NavGroupHeader}" />
                     <TabItem Header="模型服务">
-                        <Grid Margin="24,16">
+                        <DockPanel Margin="24,20">
+                            <StackPanel DockPanel.Dock="Top" Margin="0,0,0,14">
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="模型服务" />
+                                <TextBlock Style="{StaticResource SettingsPageSubtitle}" Text="添加自定义 API（OpenAI 兼容 / Anthropic / Gemini），密钥经 DPAPI 加密保存在本机。" />
+                            </StackPanel>
+                            <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="280" />
                                 <ColumnDefinition Width="16" />
@@ -431,12 +680,7 @@
                                     <Border Background="{DynamicResource Brush.Bg.Tertiary}"
                                             CornerRadius="{DynamicResource Radius.Sm}"
                                             Padding="12,8" Margin="0,0,0,0">
-                                        <PasswordBox x:Name="EditApiKey"
-                                                     Background="Transparent"
-                                                     BorderThickness="0"
-                                                     Foreground="{DynamicResource Brush.Text.Primary}"
-                                                     FontFamily="{DynamicResource Font.UI}"
-                                                     FontSize="{DynamicResource Font.Size.Body}" />
+                                        <ctl:RevealableSecretBox x:Name="EditApiKey" />
                                     </Border>
 
                                         </StackPanel>
@@ -571,12 +815,16 @@
                                                FontSize="{DynamicResource Font.Size.Small}" />
                                 </StackPanel>
                             </ScrollViewer>
-                        </Grid>
+                            </Grid>
+                        </DockPanel>
                     </TabItem>
-
-                    <!-- ===== Tab: 角色 ===== -->
                     <TabItem x:Name="PersonaTab" Header="角色">
-                        <Grid x:Name="PersonaTabRoot">
+                        <DockPanel Margin="24,20">
+                            <StackPanel DockPanel.Dock="Top" Margin="0,0,0,14">
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="角色" />
+                                <TextBlock Style="{StaticResource SettingsPageSubtitle}" Text="为不同场景定义系统提示与默认行为，发起对话时一键切换。" />
+                            </StackPanel>
+                            <Grid x:Name="PersonaTabRoot">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="280" />
                                 <ColumnDefinition Width="*" />
@@ -834,11 +1082,25 @@
                                                      FontSize="13"
                                                      LostFocus="PersonaFormChanged" />
                                         </Border>
+                                        <WrapPanel Margin="0,2,0,2"
+                                                   Visibility="{Binding IsEnabled, ElementName=PersonaPromptBox, Converter={StaticResource BoolVis}}">
+                                            <TextBlock Text="插入变量"
+                                                       VerticalAlignment="Center"
+                                                       FontSize="11"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                       Margin="0,0,8,6" />
+                                            <Button Style="{StaticResource SettingsVarChip}" Content="{}{{date}}" Tag="{}{{date}}" Click="InsertPromptVariableClick" />
+                                            <Button Style="{StaticResource SettingsVarChip}" Content="{}{{time}}" Tag="{}{{time}}" Click="InsertPromptVariableClick" />
+                                            <Button Style="{StaticResource SettingsVarChip}" Content="{}{{model}}" Tag="{}{{model}}" Click="InsertPromptVariableClick" />
+                                            <Button Style="{StaticResource SettingsVarChip}" Content="{}{{provider}}" Tag="{}{{provider}}" Click="InsertPromptVariableClick" />
+                                            <Button Style="{StaticResource SettingsVarChip}" Content="{}{{username}}" Tag="{}{{username}}" Click="InsertPromptVariableClick" />
+                                        </WrapPanel>
                                         <TextBlock Text="支持变量 {{date}} {{time}} {{model}} {{provider}} {{username}} —— 在每次对话发送前会替换为实时值。"
                                                    FontSize="11"
                                                    Foreground="{DynamicResource Brush.Text.Muted}"
                                                    TextWrapping="Wrap"
-                                                   Margin="0,0,0,14" />
+                                                   Margin="0,4,0,14" />
 
                                         <Expander Header="默认行为开关" Margin="0,8,0,0">
                                             <StackPanel x:Name="PersonaDefaultsPanel" Margin="0,8,0,0">
@@ -873,12 +1135,632 @@
                                     </StackPanel>
                                 </ScrollViewer>
                             </Grid>
-                        </Grid>
+                            </Grid>
+                        </DockPanel>
                     </TabItem>
+                    <!-- ===== 工具与能力 ===== -->
+                    <TabItem Header="工具与能力" Style="{StaticResource NavGroupHeader}" />
+                    <TabItem Header="联网搜索">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="32,26" MaxWidth="640" HorizontalAlignment="Left">
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="联网搜索" />
+                                <TextBlock Style="{StaticResource SettingsPageSubtitle}"
+                                           Text="用于自定义模型的联网搜索能力，仅对支持工具调用的 BYOK 模型生效。" />
 
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Margin="2,4,2,8" Text="搜索服务" />
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <Grid Margin="16,13">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Text="提供方" />
+                                            <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                       Text="DuckDuckGo 免费无需密钥；Tavily / Exa 检索质量更高，需 API Key。" />
+                                        </StackPanel>
+                                        <ComboBox x:Name="WebSearchProviderCombo"
+                                                  Grid.Column="1"
+                                                  Width="200"
+                                                  VerticalAlignment="Center"
+                                                  Style="{StaticResource SettingsComboBox}"
+                                                  SelectedValuePath="Tag"
+                                                  SelectionChanged="WebSearchProviderCombo_SelectionChanged">
+                                            <ComboBoxItem Content="DuckDuckGo（免配置）" Tag="duckduckgo" />
+                                            <ComboBoxItem Content="Tavily" Tag="tavily" />
+                                            <ComboBoxItem Content="Exa" Tag="exa" />
+                                        </ComboBox>
+                                    </Grid>
+                                </Border>
+
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="连接" />
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <StackPanel Margin="16,14">
+                                        <Grid Margin="0,0,0,14">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="16" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="接入地址" />
+                                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                                        BorderBrush="{DynamicResource Brush.Border}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                                        Padding="12,8">
+                                                    <TextBox x:Name="WebSearchBaseUrlBox"
+                                                             Style="{StaticResource InlineTextBox}"
+                                                             Text="{Binding WebSearchBaseUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                </Border>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2">
+                                                <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="API Key" />
+                                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                                        BorderBrush="{DynamicResource Brush.Border}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                                        Padding="12,8">
+                                                    <ctl:RevealableSecretBox x:Name="WebSearchApiKeyBox"
+                                                                             PasswordChanged="WebSearchApiKeyBox_PasswordChanged" />
+                                                </Border>
+                                            </StackPanel>
+                                        </Grid>
+                                        <Grid Margin="0,0,0,16">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="16" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="每次返回结果数" />
+                                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                                        BorderBrush="{DynamicResource Brush.Border}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                                        Padding="12,8">
+                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                             Text="{Binding WebSearchMaxResults, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                </Border>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2">
+                                                <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="网页正文截取上限（字符）" />
+                                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                                        BorderBrush="{DynamicResource Brush.Border}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                                        Padding="12,8">
+                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                             Text="{Binding WebPageMaxCharacters, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                </Border>
+                                            </StackPanel>
+                                        </Grid>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock x:Name="WebSearchStatusText"
+                                                       Grid.Column="0"
+                                                       VerticalAlignment="Center"
+                                                       Margin="0,0,16,0"
+                                                       TextWrapping="Wrap"
+                                                       Style="{StaticResource SettingsRowHint}" />
+                                            <Button x:Name="CheckWebSearchButton"
+                                                    Grid.Column="1"
+                                                    Style="{StaticResource OutlineButton}"
+                                                    Content="测试连接"
+                                                    Width="110"
+                                                    Click="CheckWebSearchClick" />
+                                        </Grid>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+                    <TabItem Header="图像生成">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="32,26" MaxWidth="640" HorizontalAlignment="Left">
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="图像生成" />
+                                <TextBlock Style="{StaticResource SettingsPageSubtitle}"
+                                           Text="为 BYOK 文本对话配置可调用的图像生成服务。" />
+
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <Grid Margin="16,13">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Text="在对话中启用图像生成" />
+                                            <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                       Text="开启后，支持工具调用的 BYOK 模型可调用此图像服务。" />
+                                        </StackPanel>
+                                        <ToggleButton Grid.Column="1"
+                                                      x:Name="ImageGenerationEnabledToggle"
+                                                      Style="{StaticResource SettingsToggle}"
+                                                      IsChecked="{Binding ImageGenerationEnabled, Mode=TwoWay}" />
+                                    </Grid>
+                                </Border>
+
+                                <StackPanel IsEnabled="{Binding IsChecked, ElementName=ImageGenerationEnabledToggle}">
+                                    <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="生成参数" />
+                                    <Border Style="{StaticResource SettingsCard}">
+                                        <StackPanel Margin="16,14">
+                                            <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="图像服务 / 模型" />
+                                            <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                                    BorderBrush="{DynamicResource Brush.Border}"
+                                                    BorderThickness="1"
+                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                    Padding="12,2"
+                                                    Margin="0,0,0,14">
+                                                <ComboBox x:Name="ImageGenerationModelCombo"
+                                                          Style="{StaticResource SettingsComboBox}"
+                                                          Background="Transparent"
+                                                          BorderThickness="0"
+                                                          Padding="0,6"
+                                                          DisplayMemberPath="Label"
+                                                          SelectionChanged="ImageGenerationModelCombo_SelectionChanged" />
+                                            </Border>
+
+                                            <Grid Margin="0,0,0,16">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="16" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="尺寸" />
+                                                    <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                                            BorderBrush="{DynamicResource Brush.Border}"
+                                                            BorderThickness="1"
+                                                            CornerRadius="{DynamicResource Radius.Sm}"
+                                                            Padding="12,8">
+                                                        <TextBox Style="{StaticResource InlineTextBox}"
+                                                                 Text="{Binding ImageGenerationSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                    </Border>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2">
+                                                    <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="风格（可选）" />
+                                                    <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                                            BorderBrush="{DynamicResource Brush.Border}"
+                                                            BorderThickness="1"
+                                                            CornerRadius="{DynamicResource Radius.Sm}"
+                                                            Padding="12,8">
+                                                        <TextBox Style="{StaticResource InlineTextBox}"
+                                                                 Text="{Binding ImageGenerationStyle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                    </Border>
+                                                </StackPanel>
+                                            </Grid>
+
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock x:Name="ImageGenerationStatusText"
+                                                           Grid.Column="0"
+                                                           VerticalAlignment="Center"
+                                                           Margin="0,0,16,0"
+                                                           TextWrapping="Wrap"
+                                                           Style="{StaticResource SettingsRowHint}" />
+                                                <Button x:Name="CheckImageGenerationButton"
+                                                        Grid.Column="1"
+                                                        Style="{StaticResource OutlineButton}"
+                                                        Content="测试连接"
+                                                        Width="110"
+                                                        Click="CheckImageGenerationClick" />
+                                            </Grid>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+                    <TabItem Header="视觉理解">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="32,26" MaxWidth="640" HorizontalAlignment="Left">
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="视觉理解" />
+                                <TextBlock Style="{StaticResource SettingsPageSubtitle}"
+                                           Text="为不支持图片输入、但支持工具调用的模型，外挂一个视觉模型来识别图片。" />
+
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <Grid Margin="16,13">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Text="启用外挂视觉" />
+                                            <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                       Text="当前模型不支持视觉时，自动用下方视觉模型解析图片，再把描述回传给主模型。" />
+                                        </StackPanel>
+                                        <ToggleButton Grid.Column="1"
+                                                      x:Name="VisionEnabledToggle"
+                                                      Style="{StaticResource SettingsToggle}"
+                                                      IsChecked="{Binding VisionProxyEnabled, Mode=TwoWay}" />
+                                    </Grid>
+                                </Border>
+
+                                <StackPanel x:Name="VisionConfigPanel"
+                                            IsEnabled="{Binding IsChecked, ElementName=VisionEnabledToggle}">
+                                    <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="视觉模型" />
+                                    <Border Style="{StaticResource SettingsCard}">
+                                        <StackPanel Margin="16,14">
+                                            <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="选择模型" />
+                                            <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                                    BorderBrush="{DynamicResource Brush.Border}"
+                                                    BorderThickness="1"
+                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                    Padding="12,2">
+                                                <ComboBox x:Name="VisionExistingModelCombo"
+                                                          Style="{StaticResource SettingsComboBox}"
+                                                          Background="Transparent"
+                                                          BorderThickness="0"
+                                                          Padding="0,6"
+                                                          DisplayMemberPath="Label"
+                                                          SelectionChanged="VisionExistingModelCombo_SelectionChanged" />
+                                            </Border>
+                                            <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                       Text="仅列出已启用、且具备视觉能力的服务与模型。可在「模型服务」中为模型勾选视觉能力。" />
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+                    <TabItem Header="代码与文件">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="32,26" MaxWidth="640" HorizontalAlignment="Left">
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="代码与文件" />
+                                <TextBlock Style="{StaticResource SettingsPageSubtitle}"
+                                           Text="让 BYOK 模型在对话中按需运行 Python 代码、读取本地文件。" />
+
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Margin="2,4,2,8" Text="本地 Python 执行" />
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <Grid Margin="16,13">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Text="启用 Python 执行" />
+                                            <TextBlock Style="{StaticResource SettingsRowHint}" Text="BYOK 对话中按需运行 Python 代码并返回结果。" />
+                                        </StackPanel>
+                                        <ToggleButton Grid.Column="1"
+                                                      x:Name="PythonToolEnabledToggle"
+                                                      Style="{StaticResource SettingsToggle}"
+                                                      IsChecked="{Binding PythonToolEnabled, Mode=TwoWay}" />
+                                    </Grid>
+                                </Border>
+
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <StackPanel Margin="16,14">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock x:Name="PythonRuntimeStatusText"
+                                                       Grid.Column="0"
+                                                       VerticalAlignment="Center"
+                                                       Margin="0,0,16,0"
+                                                       TextWrapping="Wrap"
+                                                       Style="{StaticResource SettingsRowTitle}" />
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                                <Button x:Name="ConfigurePythonRuntimeButton"
+                                                        Style="{StaticResource OutlineButton}"
+                                                        Content="一键配置"
+                                                        Height="32"
+                                                        Padding="16,0"
+                                                        Margin="0,0,6,0"
+                                                        Click="ConfigurePythonRuntimeClick" />
+                                                <Button x:Name="ClearPythonRuntimeButton"
+                                                        Style="{StaticResource OutlineButton}"
+                                                        Content="清除环境"
+                                                        Height="32"
+                                                        Padding="14,0"
+                                                        Visibility="Collapsed"
+                                                        ToolTip="清除一键配置下载的 Python 环境"
+                                                        Click="ClearPythonRuntimeClick" />
+                                            </StackPanel>
+                                        </Grid>
+                                        <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                   Margin="0,8,0,14"
+                                                   Text="一键配置 MolaGPT 专用 Python 环境，或填写已有 python.exe；来源与许可见「关于」。" />
+
+                                        <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="解释器路径" />
+                                        <DockPanel LastChildFill="True">
+                                            <Button x:Name="OpenPythonRuntimeDirectoryButton"
+                                                    DockPanel.Dock="Right"
+                                                    Style="{StaticResource OutlineButton}"
+                                                    Content="浏览…"
+                                                    Height="36"
+                                                    Padding="14,0"
+                                                    Margin="8,0,0,0"
+                                                    ToolTip="选择 python.exe 位置"
+                                                    Click="OpenPythonRuntimeDirectoryClick" />
+                                            <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                                    BorderBrush="{DynamicResource Brush.Border}"
+                                                    BorderThickness="1"
+                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                    Padding="12,8"
+                                                    VerticalAlignment="Center">
+                                                <TextBox Style="{StaticResource InlineTextBox}"
+                                                         Text="{Binding PythonToolExecutablePath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            </Border>
+                                        </DockPanel>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <StackPanel Margin="16,14" IsEnabled="{Binding IsChecked, ElementName=PythonToolEnabledToggle}">
+                                        <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="执行权限" />
+                                        <Border Style="{StaticResource SettingsSegmentTrack}" Margin="0,0,0,8">
+                                            <StackPanel Orientation="Horizontal">
+                                                <RadioButton Content="审批权限（默认）"
+                                                             GroupName="PythonPermissionMode"
+                                                             Style="{StaticResource SettingsSegment}"
+                                                             IsChecked="{Binding PythonToolPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=Approval}" />
+                                                <RadioButton Content="完全权限"
+                                                             GroupName="PythonPermissionMode"
+                                                             Style="{StaticResource SettingsSegment}"
+                                                             IsChecked="{Binding PythonToolPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=FullAccess}" />
+                                            </StackPanel>
+                                        </Border>
+                                        <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                   Margin="0,0,0,16"
+                                                   Text="审批：低风险代码自动放行，危险操作自动拦截，其余弹窗确认 · 完全权限：直接以当前用户身份运行（黑名单与网络限制仍会拦截）" />
+
+                                        <Grid Margin="0,0,0,16">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="16" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="超时（秒）" />
+                                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                                        BorderBrush="{DynamicResource Brush.Border}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                                        Padding="12,8">
+                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                             Text="{Binding PythonToolTimeoutSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                </Border>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2">
+                                                <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="输出上限（字符）" />
+                                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
+                                                        BorderBrush="{DynamicResource Brush.Border}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                                        Padding="12,8">
+                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                             Text="{Binding PythonToolMaxOutputCharacters, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                </Border>
+                                            </StackPanel>
+                                        </Grid>
+
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                                <TextBlock Style="{StaticResource SettingsRowTitle}" Text="允许访问网络" />
+                                                <TextBlock Style="{StaticResource SettingsRowHint}" Text="关闭时脚本无法发起网络请求。" />
+                                            </StackPanel>
+                                            <ToggleButton Grid.Column="1"
+                                                          Style="{StaticResource SettingsToggle}"
+                                                          IsChecked="{Binding PythonToolAllowNetwork, Mode=TwoWay}" />
+                                        </Grid>
+
+                                        <Expander x:Name="PythonAdvancedRulesExpander"
+                                                  Header="高级：自动放行与拦截规则"
+                                                  Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                  FontSize="{DynamicResource Font.Size.Small}"
+                                                  Margin="0,16,0,0">
+                                            <StackPanel Margin="0,10,0,0">
+                                                <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                           Margin="0,0,0,12"
+                                                           Text="这些规则叠加在审批之上：仅用「额外允许导入」内的模块且无风险时自动放行；命中「禁止导入」或「禁止路径前缀」时直接拦截（完全权限模式下也拦截）。每行或逗号分隔一项。" />
+                                                <Grid Margin="0,0,0,12">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="16" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Grid.Column="0">
+                                                        <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="额外允许导入" />
+                                                        <Border Background="{DynamicResource Brush.Bg.Secondary}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                            <TextBox Style="{StaticResource InlineTextBox}"
+                                                                     MinHeight="54" TextWrapping="Wrap" AcceptsReturn="True"
+                                                                     Text="{Binding PythonToolAllowedImports, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                        </Border>
+                                                    </StackPanel>
+                                                    <StackPanel Grid.Column="2">
+                                                        <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="禁止导入" />
+                                                        <Border Background="{DynamicResource Brush.Bg.Secondary}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                            <TextBox Style="{StaticResource InlineTextBox}"
+                                                                     MinHeight="54" TextWrapping="Wrap" AcceptsReturn="True"
+                                                                     Text="{Binding PythonToolDeniedImports, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                        </Border>
+                                                    </StackPanel>
+                                                </Grid>
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="16" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Grid.Column="0">
+                                                        <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="允许路径前缀" />
+                                                        <Border Background="{DynamicResource Brush.Bg.Secondary}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                            <TextBox Style="{StaticResource InlineTextBox}"
+                                                                     MinHeight="54" TextWrapping="Wrap" AcceptsReturn="True"
+                                                                     Text="{Binding PythonToolAllowedPathPrefixes, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                        </Border>
+                                                    </StackPanel>
+                                                    <StackPanel Grid.Column="2">
+                                                        <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="禁止路径前缀" />
+                                                        <Border Background="{DynamicResource Brush.Bg.Secondary}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                            <TextBox Style="{StaticResource InlineTextBox}"
+                                                                     MinHeight="54" TextWrapping="Wrap" AcceptsReturn="True"
+                                                                     Text="{Binding PythonToolDeniedPathPrefixes, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                        </Border>
+                                                    </StackPanel>
+                                                </Grid>
+                                            </StackPanel>
+                                        </Expander>
+                                    </StackPanel>
+                                </Border>
+
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="文件工具（只读）" />
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <Grid Margin="16,13">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Text="启用只读文件工具" />
+                                            <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                       Text="允许模型用 Read / Glob / Grep 读取、查找、搜索本地文件（只读，受 Python 的拒绝路径限制）。" />
+                                        </StackPanel>
+                                        <ToggleButton Grid.Column="1"
+                                                      Style="{StaticResource SettingsToggle}"
+                                                      IsChecked="{Binding FileToolsEnabled, Mode=TwoWay}" />
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+                    <TabItem Header="MCP 服务器">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="32,26" MaxWidth="640" HorizontalAlignment="Left">
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="MCP 服务器" />
+                                <TextBlock Style="{StaticResource SettingsPageSubtitle}"
+                                           Text="接入 Model Context Protocol 服务器，为对话扩展外部工具。仅支持 HTTP (Streamable HTTP) 类型。" />
+
+                                <Grid Margin="2,4,0,10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" VerticalAlignment="Center" Margin="0"
+                                               Style="{StaticResource SettingsSectionLabel}" Text="已连接的服务器" />
+                                    <Button Grid.Column="1"
+                                            Style="{StaticResource OutlineButton}"
+                                            Content="添加服务器"
+                                            Padding="14,7"
+                                            VerticalAlignment="Center"
+                                            Click="AddMcpServerClick" />
+                                </Grid>
+
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <Grid Margin="8">
+                                                <TextBlock x:Name="McpEmptyHint"
+                                                           Text="尚未添加任何 MCP 服务器"
+                                                           Margin="10,18"
+                                                           HorizontalAlignment="Center"
+                                                           FontSize="{DynamicResource Font.Size.Small}"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}" />
+                                                <ItemsControl x:Name="McpServersList">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Border Background="{DynamicResource Brush.Bg.Elevated}"
+                                                                    BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                                                    BorderThickness="1"
+                                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                                    Padding="12,9"
+                                                                    Margin="0,0,0,4">
+                                                                <Border.ContextMenu>
+                                                                    <ContextMenu>
+                                                                        <MenuItem Header="复制服务器名称"
+                                                                                  CommandParameter="{Binding PlacementTarget.DataContext.Name, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                                                  Click="CopyTextMenuItem_Click" />
+                                                                        <MenuItem Header="复制服务器地址"
+                                                                                  CommandParameter="{Binding PlacementTarget.DataContext.Url, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                                                  Click="CopyTextMenuItem_Click" />
+                                                                    </ContextMenu>
+                                                                </Border.ContextMenu>
+                                                                <Grid>
+                                                                    <Grid.ColumnDefinitions>
+                                                                        <ColumnDefinition Width="Auto" />
+                                                                        <ColumnDefinition Width="*" />
+                                                                        <ColumnDefinition Width="Auto" />
+                                                                        <ColumnDefinition Width="Auto" />
+                                                                    </Grid.ColumnDefinitions>
+                                                                    <Ellipse Grid.Column="0"
+                                                                             Width="8" Height="8"
+                                                                             Margin="0,0,10,0"
+                                                                             VerticalAlignment="Center">
+                                                                        <Ellipse.Style>
+                                                                            <Style TargetType="Ellipse">
+                                                                                <Setter Property="Fill" Value="{DynamicResource Brush.Text.Muted}" />
+                                                                                <Style.Triggers>
+                                                                                    <DataTrigger Binding="{Binding Enabled}" Value="True">
+                                                                                        <Setter Property="Fill" Value="{DynamicResource Brush.Success}" />
+                                                                                    </DataTrigger>
+                                                                                </Style.Triggers>
+                                                                            </Style>
+                                                                        </Ellipse.Style>
+                                                                    </Ellipse>
+                                                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                                                        <TextBlock Text="{Binding Name}"
+                                                                                   FontWeight="SemiBold"
+                                                                                   FontSize="{DynamicResource Font.Size.Small}"
+                                                                                   Foreground="{DynamicResource Brush.Text.Primary}" />
+                                                                        <TextBlock Text="{Binding Url}"
+                                                                                   FontSize="{DynamicResource Font.Size.XSmall}"
+                                                                                   TextTrimming="CharacterEllipsis"
+                                                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                                                   Margin="0,2,0,0" />
+                                                                    </StackPanel>
+                                                                    <Button Grid.Column="2"
+                                                                            Style="{StaticResource InlineActionButton}"
+                                                                            Margin="4,0,0,0"
+                                                                            ToolTip="编辑"
+                                                                            Tag="{Binding}"
+                                                                            Click="EditMcpServerClick">
+                                                                        <TextBlock Text="&#xE70F;" FontFamily="{DynamicResource Font.Icon}" FontSize="13" />
+                                                                    </Button>
+                                                                    <Button Grid.Column="3"
+                                                                            Style="{StaticResource InlineActionButton}"
+                                                                            Margin="2,0,0,0"
+                                                                            ToolTip="删除"
+                                                                            Tag="{Binding}"
+                                                                            Click="DeleteMcpServerClick">
+                                                                        <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource Font.Icon}" FontSize="13" />
+                                                                    </Button>
+                                                                </Grid>
+                                                            </Border>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                    </Grid>
+                                </Border>
+
+                                <Border Background="{DynamicResource Brush.Primary.Tint}"
+                                        BorderBrush="{DynamicResource Brush.Primary.Border}"
+                                        BorderThickness="1"
+                                        CornerRadius="{DynamicResource Radius.Md}"
+                                        Padding="12,10">
+                                    <TextBlock Style="{StaticResource SettingsRowHint}" Margin="0"
+                                               Text="MCP 服务器对支持工具调用的自定义模型可用。" />
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
                     <TabItem Header="技能"
                              Visibility="{Binding PythonToolEnabled, Converter={StaticResource BoolVis}}">
-                        <Grid x:Name="SkillsTabRoot">
+                        <DockPanel Margin="24,20">
+                            <StackPanel DockPanel.Dock="Top" Margin="0,0,0,14">
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="技能" />
+                                <TextBlock Style="{StaticResource SettingsPageSubtitle}" Text="管理内置与自定义技能，对话中按需使用。" />
+                            </StackPanel>
+                            <Grid x:Name="SkillsTabRoot">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="320" />
                                 <ColumnDefinition Width="*" />
@@ -1092,754 +1974,8 @@
                                     </StackPanel>
                                 </Grid>
                             </ScrollViewer>
-                        </Grid>
-                    </TabItem>
-
-                    <TabItem Header="工具与能力">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
-                            <StackPanel Margin="32,24" MaxWidth="680" HorizontalAlignment="Left">
-                                <TextBlock Text="工具与能力"
-                                           FontSize="{DynamicResource Font.Size.Heading}"
-                                           FontWeight="SemiBold"
-                                           Margin="0,0,0,6"
-                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-                                <TextBlock Text="为自定义模型扩展联网、外部工具与视觉能力。以下能力仅对支持工具调用的自定义（BYOK）模型生效，与 MolaGPT 账号模式互不影响。"
-                                           TextWrapping="Wrap"
-                                           Margin="0,0,0,20"
-                                           FontSize="{DynamicResource Font.Size.Small}"
-                                           Foreground="{DynamicResource Brush.Text.Muted}" />
-
-                                <TextBlock Text="联网搜索"
-                                           FontWeight="SemiBold"
-                                           Margin="0,0,0,8"
-                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-
-                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
-                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
-                                        BorderThickness="1"
-                                        CornerRadius="{DynamicResource Radius.Md}"
-                                        Padding="18,16"
-                                        Margin="0,0,0,16">
-                                    <StackPanel>
-                                        <Grid Margin="0,0,0,14">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0">
-                                                <TextBlock Text="搜索服务"
-                                                           FontWeight="SemiBold"
-                                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-                                                <TextBlock Text="会用于自定义模型的联网搜索"
-                                                           FontSize="{DynamicResource Font.Size.Small}"
-                                                           Foreground="{DynamicResource Brush.Text.Muted}"
-                                                           Margin="0,3,0,0" />
-                                            </StackPanel>
-                                            <ComboBox x:Name="WebSearchProviderCombo"
-                                                      Grid.Column="1"
-                                                      Width="210"
-                                                      Style="{StaticResource SettingsComboBox}"
-                                                      SelectedValuePath="Tag"
-                                                      SelectionChanged="WebSearchProviderCombo_SelectionChanged">
-                                                <ComboBoxItem Content="DuckDuckGo（免配置）" Tag="duckduckgo" />
-                                                <ComboBoxItem Content="Tavily" Tag="tavily" />
-                                                <ComboBoxItem Content="Exa" Tag="exa" />
-                                            </ComboBox>
-                                        </Grid>
-
-                                        <Grid Margin="0,0,0,12">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="16" />
-                                                <ColumnDefinition Width="*" />
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0">
-                                                <TextBlock Text="接入地址" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                    <TextBox x:Name="WebSearchBaseUrlBox"
-                                                             Style="{StaticResource InlineTextBox}"
-                                                             Text="{Binding WebSearchBaseUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                                                </Border>
-                                            </StackPanel>
-                                            <StackPanel Grid.Column="2">
-                                                <TextBlock Text="API Key" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                    <PasswordBox x:Name="WebSearchApiKeyBox"
-                                                                 Background="Transparent"
-                                                                 BorderThickness="0"
-                                                                 Foreground="{DynamicResource Brush.Text.Primary}"
-                                                                 FontFamily="{DynamicResource Font.UI}"
-                                                                 FontSize="{DynamicResource Font.Size.Body}"
-                                                                 PasswordChanged="WebSearchApiKeyBox_PasswordChanged" />
-                                                </Border>
-                                            </StackPanel>
-                                        </Grid>
-
-                                        <Grid Margin="0,4,0,12">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="16" />
-                                                <ColumnDefinition Width="*" />
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0">
-                                                <TextBlock Text="每次返回结果数" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                    <TextBox Style="{StaticResource InlineTextBox}"
-                                                             Text="{Binding WebSearchMaxResults, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                                </Border>
-                                            </StackPanel>
-                                            <StackPanel Grid.Column="2">
-                                                <TextBlock Text="网页正文截取上限（字符）" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                    <TextBox Style="{StaticResource InlineTextBox}"
-                                                             Text="{Binding WebPageMaxCharacters, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                                </Border>
-                                            </StackPanel>
-                                        </Grid>
-
-                                        <DockPanel LastChildFill="True">
-                                            <Button DockPanel.Dock="Right"
-                                                    x:Name="CheckWebSearchButton"
-                                                    Style="{StaticResource OutlineButton}"
-                                                    Content="测试连接"
-                                                    Width="110"
-                                                    Click="CheckWebSearchClick" />
-                                            <TextBlock x:Name="WebSearchStatusText"
-                                                       VerticalAlignment="Center"
-                                                       TextWrapping="Wrap"
-                                                       FontSize="{DynamicResource Font.Size.Small}"
-                                                       Foreground="{DynamicResource Brush.Text.Muted}" />
-                                        </DockPanel>
-                                    </StackPanel>
-                                </Border>
-
-                                <TextBlock Text="MCP 服务器"
-                                           FontWeight="SemiBold"
-                                           Margin="0,8,0,8"
-                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-
-                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
-                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
-                                        BorderThickness="1"
-                                        CornerRadius="{DynamicResource Radius.Md}"
-                                        Padding="18,16"
-                                        Margin="0,0,0,16">
-                                    <StackPanel>
-                                        <Grid Margin="0,0,0,12">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                                <TextBlock Text="已连接的服务器"
-                                                           FontWeight="SemiBold"
-                                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-                                                <TextBlock Text="通过 Model Context Protocol 接入外部工具"
-                                                           FontSize="{DynamicResource Font.Size.Small}"
-                                                           Foreground="{DynamicResource Brush.Text.Muted}"
-                                                           Margin="0,3,0,0" />
-                                            </StackPanel>
-                                            <Button Grid.Column="1"
-                                                    Style="{StaticResource OutlineButton}"
-                                                    Content="添加服务器"
-                                                    Width="120"
-                                                    VerticalAlignment="Center"
-                                                    Click="AddMcpServerClick" />
-                                        </Grid>
-
-                                        <Border Background="{DynamicResource Brush.Bg.Tertiary}"
-                                                BorderBrush="{DynamicResource Brush.Border.Subtle}"
-                                                BorderThickness="1"
-                                                CornerRadius="{DynamicResource Radius.Sm}"
-                                                Padding="6">
-                                            <Grid>
-                                                <TextBlock x:Name="McpEmptyHint"
-                                                           Text="尚未添加任何 MCP 服务器"
-                                                           Margin="10,18"
-                                                           HorizontalAlignment="Center"
-                                                           FontSize="{DynamicResource Font.Size.Small}"
-                                                           Foreground="{DynamicResource Brush.Text.Muted}" />
-                                                <ItemsControl x:Name="McpServersList">
-                                                    <ItemsControl.ItemTemplate>
-                                                        <DataTemplate>
-                                                            <Border Background="{DynamicResource Brush.Bg.Elevated}"
-                                                                    BorderBrush="{DynamicResource Brush.Border.Subtle}"
-                                                                    BorderThickness="1"
-                                                                    CornerRadius="{DynamicResource Radius.Sm}"
-                                                                    Padding="12,9"
-                                                                    Margin="0,0,0,4">
-                                                                <Border.ContextMenu>
-                                                                    <ContextMenu>
-                                                                        <MenuItem Header="复制服务器名称"
-                                                                                  CommandParameter="{Binding PlacementTarget.DataContext.Name, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                                                                  Click="CopyTextMenuItem_Click" />
-                                                                        <MenuItem Header="复制服务器地址"
-                                                                                  CommandParameter="{Binding PlacementTarget.DataContext.Url, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                                                                  Click="CopyTextMenuItem_Click" />
-                                                                    </ContextMenu>
-                                                                </Border.ContextMenu>
-                                                                <Grid>
-                                                                    <Grid.ColumnDefinitions>
-                                                                        <ColumnDefinition Width="Auto" />
-                                                                        <ColumnDefinition Width="*" />
-                                                                        <ColumnDefinition Width="Auto" />
-                                                                        <ColumnDefinition Width="Auto" />
-                                                                    </Grid.ColumnDefinitions>
-                                                                    <Ellipse Grid.Column="0"
-                                                                             Width="8" Height="8"
-                                                                             Margin="0,0,10,0"
-                                                                             VerticalAlignment="Center">
-                                                                        <Ellipse.Style>
-                                                                            <Style TargetType="Ellipse">
-                                                                                <Setter Property="Fill" Value="{DynamicResource Brush.Text.Muted}" />
-                                                                                <Style.Triggers>
-                                                                                    <DataTrigger Binding="{Binding Enabled}" Value="True">
-                                                                                        <Setter Property="Fill" Value="{DynamicResource Brush.Success}" />
-                                                                                    </DataTrigger>
-                                                                                </Style.Triggers>
-                                                                            </Style>
-                                                                        </Ellipse.Style>
-                                                                    </Ellipse>
-                                                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                                                        <TextBlock Text="{Binding Name}"
-                                                                                   FontWeight="SemiBold"
-                                                                                   FontSize="{DynamicResource Font.Size.Small}"
-                                                                                   Foreground="{DynamicResource Brush.Text.Primary}" />
-                                                                        <TextBlock Text="{Binding Url}"
-                                                                                   FontSize="{DynamicResource Font.Size.XSmall}"
-                                                                                   TextTrimming="CharacterEllipsis"
-                                                                                   Foreground="{DynamicResource Brush.Text.Muted}"
-                                                                                   Margin="0,2,0,0" />
-                                                                    </StackPanel>
-                                                                    <Button Grid.Column="2"
-                                                                            Style="{StaticResource InlineActionButton}"
-                                                                            Margin="4,0,0,0"
-                                                                            ToolTip="编辑"
-                                                                            Tag="{Binding}"
-                                                                            Click="EditMcpServerClick">
-                                                                        <TextBlock Text="&#xE70F;" FontFamily="{DynamicResource Font.Icon}" FontSize="13" />
-                                                                    </Button>
-                                                                    <Button Grid.Column="3"
-                                                                            Style="{StaticResource InlineActionButton}"
-                                                                            Margin="2,0,0,0"
-                                                                            ToolTip="删除"
-                                                                            Tag="{Binding}"
-                                                                            Click="DeleteMcpServerClick">
-                                                                        <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource Font.Icon}" FontSize="13" />
-                                                                    </Button>
-                                                                </Grid>
-                                                            </Border>
-                                                        </DataTemplate>
-                                                    </ItemsControl.ItemTemplate>
-                                                </ItemsControl>
-                                            </Grid>
-                                        </Border>
-
-                                        <TextBlock Text="仅支持 HTTP (Streamable HTTP) 类型。其工具会自动提供给支持工具调用的自定义模型使用。"
-                                                   TextWrapping="Wrap"
-                                                   Margin="0,10,0,0"
-                                                   FontSize="{DynamicResource Font.Size.Small}"
-                                                   Foreground="{DynamicResource Brush.Text.Muted}" />
-                                    </StackPanel>
-                                </Border>
-
-                                <TextBlock Text="外挂视觉"
-                                           FontWeight="SemiBold"
-                                           Margin="0,8,0,8"
-                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-
-                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
-                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
-                                        BorderThickness="1"
-                                        CornerRadius="{DynamicResource Radius.Md}"
-                                        Padding="18,16"
-                                        Margin="0,0,0,16">
-                                    <StackPanel>
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                                <TextBlock Text="图片识别"
-                                                           FontWeight="SemiBold"
-                                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-                                                <TextBlock Text="开启后，纯文本输入模型可调用该工具来识别用户发送的图片"
-                                                           FontSize="{DynamicResource Font.Size.Small}"
-                                                           TextWrapping="Wrap"
-                                                           Foreground="{DynamicResource Brush.Text.Muted}"
-                                                           Margin="0,3,0,0" />
-                                            </StackPanel>
-                                            <CheckBox Grid.Column="1"
-                                                      x:Name="VisionEnabledToggle"
-                                                      IsChecked="{Binding VisionProxyEnabled, Mode=TwoWay}"
-                                                      VerticalAlignment="Center"
-                                                      Margin="12,0,0,0" />
-                                        </Grid>
-
-                                        <StackPanel x:Name="VisionConfigPanel"
-                                                    Margin="0,16,0,0"
-                                                    IsEnabled="{Binding IsChecked, ElementName=VisionEnabledToggle}">
-                                            <TextBlock Text="视觉模型"
-                                                       FontSize="{DynamicResource Font.Size.Small}"
-                                                       Foreground="{DynamicResource Brush.Text.Secondary}"
-                                                       Margin="0,0,0,8" />
-                                            <Border Background="{DynamicResource Brush.Bg.Tertiary}"
-                                                    CornerRadius="{DynamicResource Radius.Sm}"
-                                                    Padding="12,4">
-                                                <ComboBox x:Name="VisionExistingModelCombo"
-                                                          Style="{StaticResource SettingsComboBox}"
-                                                          Background="Transparent"
-                                                          BorderThickness="0"
-                                                          Padding="0,6"
-                                                          DisplayMemberPath="Label"
-                                                          SelectionChanged="VisionExistingModelCombo_SelectionChanged" />
-                                            </Border>
-                                        </StackPanel>
-                                    </StackPanel>
-                                </Border>
-
-                                <TextBlock Text="图像生成"
-                                           FontWeight="SemiBold"
-                                           Margin="0,8,0,8"
-                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-
-                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
-                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
-                                        BorderThickness="1"
-                                        CornerRadius="{DynamicResource Radius.Md}"
-                                        Padding="18,16"
-                                        Margin="0,0,0,16">
-                                    <StackPanel>
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                                <TextBlock Text="图像生成"
-                                                           FontWeight="SemiBold"
-                                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-                                                <TextBlock Text="为 BYOK 文本对话配置可调用的图像生成服务"
-                                                           FontSize="{DynamicResource Font.Size.Small}"
-                                                           TextWrapping="Wrap"
-                                                           Foreground="{DynamicResource Brush.Text.Muted}"
-                                                           Margin="0,3,0,0" />
-                                            </StackPanel>
-                                            <CheckBox Grid.Column="1"
-                                                      x:Name="ImageGenerationEnabledToggle"
-                                                      IsChecked="{Binding ImageGenerationEnabled, Mode=TwoWay}"
-                                                      VerticalAlignment="Center"
-                                                      Margin="12,0,0,0" />
-                                        </Grid>
-
-                                        <StackPanel Margin="0,16,0,0"
-                                                     IsEnabled="{Binding IsChecked, ElementName=ImageGenerationEnabledToggle}">
-                                            <TextBlock Text="图像服务" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                            <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8" Margin="0,0,0,12">
-                                                <ComboBox x:Name="ImageGenerationModelCombo"
-                                                          Style="{StaticResource SettingsComboBox}"
-                                                          Background="Transparent"
-                                                          BorderThickness="0"
-                                                          Padding="0,6"
-                                                          DisplayMemberPath="Label"
-                                                          SelectionChanged="ImageGenerationModelCombo_SelectionChanged" />
-                                            </Border>
-
-                                            <Grid Margin="0,0,0,12">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="*" />
-                                                    <ColumnDefinition Width="16" />
-                                                    <ColumnDefinition Width="160" />
-                                                </Grid.ColumnDefinitions>
-                                                <StackPanel Grid.Column="0">
-                                                    <TextBlock Text="使用范围" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                    <TextBlock Text="开启后，支持工具调用的 BYOK 模型可调用此图像服务。"
-                                                               TextWrapping="Wrap"
-                                                               Foreground="{DynamicResource Brush.Text.Muted}"
-                                                               FontSize="{DynamicResource Font.Size.Small}" />
-                                                </StackPanel>
-                                                <StackPanel Grid.Column="2">
-                                                    <TextBlock Text="尺寸" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                    <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                        <TextBox Style="{StaticResource InlineTextBox}"
-                                                                 Text="{Binding ImageGenerationSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                                                    </Border>
-                                                </StackPanel>
-                                            </Grid>
-
-                                            <StackPanel Margin="0,0,0,12">
-                                                <TextBlock Text="风格" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                    <TextBox Style="{StaticResource InlineTextBox}"
-                                                             Text="{Binding ImageGenerationStyle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                                                </Border>
-                                            </StackPanel>
-
-                                            <DockPanel LastChildFill="True">
-                                                <Button DockPanel.Dock="Right"
-                                                        x:Name="CheckImageGenerationButton"
-                                                        Style="{StaticResource OutlineButton}"
-                                                        Content="测试连接"
-                                                        Width="110"
-                                                        Click="CheckImageGenerationClick" />
-                                                <TextBlock x:Name="ImageGenerationStatusText"
-                                                           VerticalAlignment="Center"
-                                                           TextWrapping="Wrap"
-                                                           FontSize="{DynamicResource Font.Size.Small}"
-                                                           Foreground="{DynamicResource Brush.Text.Muted}" />
-                                            </DockPanel>
-                                        </StackPanel>
-                                    </StackPanel>
-                                </Border>
-
-                                <TextBlock Text="Python 执行"
-                                           FontWeight="SemiBold"
-                                           Margin="0,8,0,8"
-                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-
-                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
-                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
-                                        BorderThickness="1"
-                                        CornerRadius="{DynamicResource Radius.Md}"
-                                        Padding="18,16"
-                                        Margin="0,0,0,16">
-                                    <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="Auto" />
-                                        </Grid.ColumnDefinitions>
-                                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                            <TextBlock Text="文件工具（只读）"
-                                                       FontWeight="SemiBold"
-                                                       Foreground="{DynamicResource Brush.Text.Primary}" />
-                                            <TextBlock Text="允许模型用 Read / Glob / Grep 读取、查找、搜索本地文件（只读，默认放行；受 Python 的拒绝路径限制）"
-                                                       FontSize="{DynamicResource Font.Size.Small}"
-                                                       TextWrapping="Wrap"
-                                                       Foreground="{DynamicResource Brush.Text.Muted}"
-                                                       Margin="0,3,0,0" />
-                                        </StackPanel>
-                                        <CheckBox Grid.Column="1"
-                                                  IsChecked="{Binding FileToolsEnabled, Mode=TwoWay}"
-                                                  VerticalAlignment="Center"
-                                                  Margin="12,0,0,0" />
-                                    </Grid>
-                                </Border>
-
-
-                                <Border Background="{DynamicResource Brush.Bg.Secondary}"
-                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
-                                        BorderThickness="1"
-                                        CornerRadius="{DynamicResource Radius.Md}"
-                                        Padding="18,16"
-                                        Margin="0,0,0,16">
-                                    <StackPanel>
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                                <TextBlock Text="本地 Python Tool"
-                                                           FontWeight="SemiBold"
-                                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-                                                <TextBlock Text="BYOK 对话中按需运行 Python 代码"
-                                                           FontSize="{DynamicResource Font.Size.Small}"
-                                                           TextWrapping="Wrap"
-                                                           Foreground="{DynamicResource Brush.Text.Muted}"
-                                                           Margin="0,3,0,0" />
-                                            </StackPanel>
-                                            <CheckBox Grid.Column="1"
-                                                      x:Name="PythonToolEnabledToggle"
-                                                      IsChecked="{Binding PythonToolEnabled, Mode=TwoWay}"
-                                                      VerticalAlignment="Center"
-                                                      Margin="12,0,0,0" />
-                                        </Grid>
-
-                                        <StackPanel Margin="0,16,0,0">
-                                            <DockPanel LastChildFill="True">
-                                                <StackPanel DockPanel.Dock="Right"
-                                                            Orientation="Horizontal"
-                                                            VerticalAlignment="Center"
-                                                            Margin="12,0,0,0">
-                                                    <Button x:Name="ConfigurePythonRuntimeButton"
-                                                            Style="{StaticResource OutlineButton}"
-                                                            Content="一键配置"
-                                                            Height="32"
-                                                            Padding="16,0"
-                                                            Margin="0,0,6,0"
-                                                            Click="ConfigurePythonRuntimeClick" />
-                                                    <Button x:Name="ClearPythonRuntimeButton"
-                                                            Style="{StaticResource OutlineButton}"
-                                                            Content="清除环境"
-                                                            Height="32"
-                                                            Padding="14,0"
-                                                            Visibility="Collapsed"
-                                                            ToolTip="清除一键配置下载的 Python 环境"
-                                                            Click="ClearPythonRuntimeClick" />
-                                                </StackPanel>
-                                                <TextBlock x:Name="PythonRuntimeStatusText"
-                                                           VerticalAlignment="Center"
-                                                           TextWrapping="Wrap"
-                                                           FontSize="{DynamicResource Font.Size.Small}"
-                                                           Foreground="{DynamicResource Brush.Text.Muted}" />
-                                            </DockPanel>
-                                            <TextBlock Text="一键配置 MolaGPT 专用 Python 环境，或填写已有 python.exe；来源与许可见「关于」。"
-                                                       TextWrapping="Wrap"
-                                                       FontSize="{DynamicResource Font.Size.Small}"
-                                                       Foreground="{DynamicResource Brush.Text.Muted}"
-                                                       Margin="0,8,0,12" />
-
-                                            <TextBlock Text="解释器路径" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                            <DockPanel LastChildFill="True" Margin="0,0,0,12">
-                                                <Button x:Name="OpenPythonRuntimeDirectoryButton"
-                                                        DockPanel.Dock="Right"
-                                                        Style="{StaticResource OutlineButton}"
-                                                        Content="浏览…"
-                                                        Height="34"
-                                                        Padding="14,0"
-                                                        Margin="8,0,0,0"
-                                                        ToolTip="选择 python.exe 位置"
-                                                        Click="OpenPythonRuntimeDirectoryClick" />
-                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8" VerticalAlignment="Center">
-                                                    <TextBox Style="{StaticResource InlineTextBox}"
-                                                             Text="{Binding PythonToolExecutablePath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                                                </Border>
-                                            </DockPanel>
-
-                                            <StackPanel IsEnabled="{Binding IsChecked, ElementName=PythonToolEnabledToggle}">
-                                                <TextBlock Text="执行权限" Margin="0,0,0,6" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                <WrapPanel Margin="0,0,0,6">
-                                                    <RadioButton Content="审批权限（默认）"
-                                                                 GroupName="PythonPermissionMode"
-                                                                 Margin="0,0,16,6"
-                                                                 Foreground="{DynamicResource Brush.Text.Primary}"
-                                                                 IsChecked="{Binding PythonToolPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=Approval}" />
-                                                    <RadioButton Content="完全权限"
-                                                                 GroupName="PythonPermissionMode"
-                                                                 Margin="0,0,16,6"
-                                                                 Foreground="{DynamicResource Brush.Text.Primary}"
-                                                                 IsChecked="{Binding PythonToolPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=FullAccess}" />
-                                                </WrapPanel>
-                                                <TextBlock Text="审批：低风险代码自动放行，危险操作自动拦截，其余弹窗确认 · 完全权限：直接以当前用户身份运行（黑名单与网络限制仍会拦截）"
-                                                           TextWrapping="Wrap"
-                                                           FontSize="{DynamicResource Font.Size.Small}"
-                                                           Foreground="{DynamicResource Brush.Text.Muted}"
-                                                           Margin="0,0,0,12" />
-
-                                                <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="16" />
-                                                        <ColumnDefinition Width="*" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <StackPanel Grid.Column="0">
-                                                        <TextBlock Text="超时（秒）" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                        <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                            <TextBox Style="{StaticResource InlineTextBox}"
-                                                                     Text="{Binding PythonToolTimeoutSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                                        </Border>
-                                                    </StackPanel>
-                                                    <StackPanel Grid.Column="2">
-                                                        <TextBlock Text="输出上限（字符）" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                        <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                            <TextBox Style="{StaticResource InlineTextBox}"
-                                                                     Text="{Binding PythonToolMaxOutputCharacters, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                                        </Border>
-                                                    </StackPanel>
-                                                </Grid>
-
-                                                <CheckBox Content="允许模型在 Python 代码中使用网络"
-                                                          IsChecked="{Binding PythonToolAllowNetwork, Mode=TwoWay}"
-                                                          Foreground="{DynamicResource Brush.Text.Secondary}"
-                                                          FontSize="{DynamicResource Font.Size.Small}"
-                                                          Margin="0,12,0,0" />
-
-                                                <Expander x:Name="PythonAdvancedRulesExpander"
-                                                          Header="高级：自动放行与拦截规则"
-                                                          Foreground="{DynamicResource Brush.Text.Secondary}"
-                                                          FontSize="{DynamicResource Font.Size.Small}"
-                                                          Margin="0,12,0,0">
-                                                    <StackPanel Margin="0,8,0,0">
-                                                        <TextBlock Text="这些规则叠加在审批之上：仅用「额外允许导入」内的模块且无风险时自动放行；命中「禁止导入」或「禁止路径前缀」时直接拦截（完全权限模式下也拦截）。每行或逗号分隔一项。"
-                                                                   TextWrapping="Wrap"
-                                                                   FontSize="{DynamicResource Font.Size.Small}"
-                                                                   Foreground="{DynamicResource Brush.Text.Muted}"
-                                                                   Margin="0,0,0,12" />
-                                                        <Grid Margin="0,0,0,12">
-                                                            <Grid.ColumnDefinitions>
-                                                                <ColumnDefinition Width="*" />
-                                                                <ColumnDefinition Width="16" />
-                                                                <ColumnDefinition Width="*" />
-                                                            </Grid.ColumnDefinitions>
-                                                            <StackPanel Grid.Column="0">
-                                                                <TextBlock Text="额外允许导入" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                                    <TextBox Style="{StaticResource InlineTextBox}"
-                                                                             MinHeight="54"
-                                                                             TextWrapping="Wrap"
-                                                                             AcceptsReturn="True"
-                                                                             Text="{Binding PythonToolAllowedImports, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                                                </Border>
-                                                            </StackPanel>
-                                                            <StackPanel Grid.Column="2">
-                                                                <TextBlock Text="禁止导入" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                                    <TextBox Style="{StaticResource InlineTextBox}"
-                                                                             MinHeight="54"
-                                                                             TextWrapping="Wrap"
-                                                                             AcceptsReturn="True"
-                                                                             Text="{Binding PythonToolDeniedImports, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                                                </Border>
-                                                            </StackPanel>
-                                                        </Grid>
-                                                        <Grid>
-                                                            <Grid.ColumnDefinitions>
-                                                                <ColumnDefinition Width="*" />
-                                                                <ColumnDefinition Width="16" />
-                                                                <ColumnDefinition Width="*" />
-                                                            </Grid.ColumnDefinitions>
-                                                            <StackPanel Grid.Column="0">
-                                                                <TextBlock Text="允许路径前缀" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                                    <TextBox Style="{StaticResource InlineTextBox}"
-                                                                             MinHeight="54"
-                                                                             TextWrapping="Wrap"
-                                                                             AcceptsReturn="True"
-                                                                             Text="{Binding PythonToolAllowedPathPrefixes, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                                                </Border>
-                                                            </StackPanel>
-                                                            <StackPanel Grid.Column="2">
-                                                                <TextBlock Text="禁止路径前缀" Margin="0,0,0,4" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                                                <Border Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                                    <TextBox Style="{StaticResource InlineTextBox}"
-                                                                             MinHeight="54"
-                                                                             TextWrapping="Wrap"
-                                                                             AcceptsReturn="True"
-                                                                             Text="{Binding PythonToolDeniedPathPrefixes, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                                                </Border>
-                                                            </StackPanel>
-                                                        </Grid>
-                                                    </StackPanel>
-                                                </Expander>
-                                            </StackPanel>
-                                        </StackPanel>
-                                    </StackPanel>
-                                </Border>
-
-                                <Border Background="{DynamicResource Brush.Primary.Blockquote}"
-                                        BorderBrush="{DynamicResource Brush.Primary.Border}"
-                                        BorderThickness="1"
-                                        CornerRadius="{DynamicResource Radius.Md}"
-                                        Padding="14,12">
-                                    <StackPanel>
-                                        <TextBlock Text="内置工具"
-                                                   FontWeight="SemiBold"
-                                                   Foreground="{DynamicResource Brush.Text.Primary}"
-                                                   Margin="0,0,0,8" />
-                                        <WrapPanel>
-                                            <Border Background="{DynamicResource Brush.Bg.Elevated}" BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="10,5" Margin="0,0,8,8">
-                                                <TextBlock Text="联网搜索" FontSize="{DynamicResource Font.Size.Small}" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                            </Border>
-                                            <Border Background="{DynamicResource Brush.Bg.Elevated}" BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="10,5" Margin="0,0,8,8">
-                                                <TextBlock Text="网页阅读" FontSize="{DynamicResource Font.Size.Small}" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                            </Border>
-                                            <Border Background="{DynamicResource Brush.Bg.Elevated}" BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="10,5" Margin="0,0,8,8">
-                                                <TextBlock Text="外挂视觉" FontSize="{DynamicResource Font.Size.Small}" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                            </Border>
-                                            <Border Background="{DynamicResource Brush.Bg.Elevated}" BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="10,5" Margin="0,0,8,8">
-                                                <TextBlock Text="图像生成" FontSize="{DynamicResource Font.Size.Small}" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                            </Border>
-                                            <Border Background="{DynamicResource Brush.Bg.Elevated}" BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="10,5" Margin="0,0,8,8">
-                                                <TextBlock Text="Python 执行" FontSize="{DynamicResource Font.Size.Small}" Foreground="{DynamicResource Brush.Text.Secondary}" />
-                                            </Border>
-                                        </WrapPanel>
-                                    </StackPanel>
-                                </Border>
-                            </StackPanel>
-                        </ScrollViewer>
-                    </TabItem>
-
-                    <!-- ===== Tab: 界面与偏好 ===== -->
-                    <TabItem Header="界面与偏好">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
-                            <StackPanel Margin="32,24" MaxWidth="640" HorizontalAlignment="Left">
-                                <TextBlock Text="主题"
-                                           FontSize="{DynamicResource Font.Size.Heading}"
-                                           FontWeight="SemiBold"
-                                           Margin="0,0,0,12"
-                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-                                <StackPanel Orientation="Horizontal">
-                                    <RadioButton x:Name="ThemeSystem" Content="跟随系统" GroupName="theme" Margin="0,0,16,0"
-                                                 Foreground="{DynamicResource Brush.Text.Primary}"
-                                                 IsChecked="{Binding ThemeMode, Converter={StaticResource EnumEq}, ConverterParameter=System}" />
-                                    <RadioButton x:Name="ThemeLight" Content="浅色" GroupName="theme" Margin="0,0,16,0"
-                                                 Foreground="{DynamicResource Brush.Text.Primary}"
-                                                 IsChecked="{Binding ThemeMode, Converter={StaticResource EnumEq}, ConverterParameter=Light}" />
-                                    <RadioButton x:Name="ThemeDark" Content="深色" GroupName="theme"
-                                                 Foreground="{DynamicResource Brush.Text.Primary}"
-                                                 IsChecked="{Binding ThemeMode, Converter={StaticResource EnumEq}, ConverterParameter=Dark}" />
-                                </StackPanel>
-
-                                <TextBlock Text="Enter 键行为"
-                                           FontSize="{DynamicResource Font.Size.Heading}"
-                                           FontWeight="SemiBold"
-                                           Margin="0,26,0,12"
-                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-                                <CheckBox Content="按 Enter 直接发送消息"
-                                          Foreground="{DynamicResource Brush.Text.Primary}"
-                                          IsChecked="{Binding EnterToSend}" />
-                                <TextBlock Text="关闭时 Enter 换行，Ctrl+Enter 发送；开启时 Shift+Enter 仍可换行。"
-                                           Foreground="{DynamicResource Brush.Text.Muted}"
-                                           TextWrapping="Wrap"
-                                           Margin="0,4,0,0"
-                                           FontSize="{DynamicResource Font.Size.Small}" />
-
-                                <TextBlock Text="通知和提醒"
-                                           FontSize="{DynamicResource Font.Size.Heading}"
-                                           FontWeight="SemiBold"
-                                           Margin="0,26,0,12"
-                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-                                <CheckBox Content="后台回答完成时通知"
-                                          Foreground="{DynamicResource Brush.Text.Primary}"
-                                          IsChecked="{Binding EnableCompletionNotification}" />
-                                <TextBlock Text="开启后，若窗口最小化或切换到其它对话，回答完成时系统会弹出通知。"
-                                           Foreground="{DynamicResource Brush.Text.Muted}"
-                                           TextWrapping="Wrap"
-                                           Margin="0,4,0,0"
-                                           FontSize="{DynamicResource Font.Size.Small}" />
-
-                                <TextBlock Text="系统托盘"
-                                           FontSize="{DynamicResource Font.Size.Heading}"
-                                           FontWeight="SemiBold"
-                                           Margin="0,26,0,12"
-                                           Foreground="{DynamicResource Brush.Text.Primary}" />
-                                <CheckBox Content="启用系统托盘"
-                                          Foreground="{DynamicResource Brush.Text.Primary}"
-                                          IsChecked="{Binding EnableTrayIcon}" />
-                                <StackPanel Margin="24,12,0,0"
-                                            Visibility="{Binding EnableTrayIcon, Converter={StaticResource BoolVis}}">
-                                    <TextBlock Text="关闭按钮行为"
-                                               FontWeight="SemiBold"
-                                               Foreground="{DynamicResource Brush.Text.Primary}"
-                                               Margin="0,0,0,8" />
-                                    <RadioButton Content="最小化到托盘"
-                                                 GroupName="trayClose"
-                                                 Margin="0,0,0,8"
-                                                 Foreground="{DynamicResource Brush.Text.Primary}"
-                                                 IsChecked="{Binding TrayCloseBehavior, Converter={StaticResource EnumEq}, ConverterParameter=MinimizeToTray}" />
-                                    <RadioButton Content="关闭软件"
-                                                 GroupName="trayClose"
-                                                 Foreground="{DynamicResource Brush.Text.Primary}"
-                                                 IsChecked="{Binding TrayCloseBehavior, Converter={StaticResource EnumEq}, ConverterParameter=Exit}" />
-                                    <TextBlock Text="您可选择单击关闭按钮时的处理方式。"
-                                               Foreground="{DynamicResource Brush.Text.Muted}"
-                                               TextWrapping="Wrap"
-                                               Margin="0,8,0,0"
-                                               FontSize="{DynamicResource Font.Size.Small}" />
-                                </StackPanel>
-                            </StackPanel>
-                        </ScrollViewer>
+                            </Grid>
+                        </DockPanel>
                     </TabItem>
                 </TabControl>
             </DockPanel>

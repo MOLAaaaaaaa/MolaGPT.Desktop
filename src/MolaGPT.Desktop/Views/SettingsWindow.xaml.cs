@@ -373,7 +373,8 @@ public partial class SettingsWindow : Window
 
     private void NavigateToTab(string header)
     {
-        foreach (TabItem tab in SettingsTabs.Items)
+        // .OfType skips the non-selectable group-header TabItems in the sidebar.
+        foreach (var tab in SettingsTabs.Items.OfType<TabItem>())
         {
             if (string.Equals(tab.Header?.ToString(), header, StringComparison.Ordinal))
             {
@@ -2028,6 +2029,21 @@ public partial class SettingsWindow : Window
         // here so the next conversation send sees the latest defaults.
         if (_editingPersona is null || _loadingPersonaForm || _editingPersonaIsDraft) return;
         _personas.Save(_editingPersona);
+    }
+
+    /// <summary>Inserts a {{variable}} token at the caret of the persona prompt
+    /// box. The chips are only visible while the box is editable, so this is a
+    /// no-op for locked built-in personas.</summary>
+    private void InsertPromptVariableClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button { Tag: string token }) return;
+        if (!PersonaPromptBox.IsEnabled) return;
+
+        var start = PersonaPromptBox.SelectionStart;
+        PersonaPromptBox.SelectedText = token;          // replaces selection or inserts at caret
+        PersonaPromptBox.CaretIndex = start + token.Length;
+        PersonaPromptBox.Focus();
+        PersonaFormChanged(PersonaPromptBox, e);         // persist like the LostFocus path
     }
 
     /// <summary>Avatar picker click — writes the chosen Fluent icon glyph

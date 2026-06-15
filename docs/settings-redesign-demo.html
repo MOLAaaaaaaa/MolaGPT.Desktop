@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MolaGPT 设置 · 重设计 Demo v2</title>
+<style>
+/* ============================================================
+   Design tokens — mirrored from Themes/Tokens.Light.xaml & Tokens.Dark.xaml
+   ============================================================ */
+:root[data-theme="light"]{
+  --primary:#BE727F;--primary-hover:#A05A66;--primary-active:#8E4F5A;
+  --primary-soft:rgba(190,114,127,.10);--primary-tint:rgba(190,114,127,.08);--primary-border:rgba(190,114,127,.22);
+  --bg-canvas:#F2F4F7;--bg-primary:#FFFFFF;--bg-secondary:#F8F9FA;--bg-tertiary:#F1F3F5;--bg-elevated:#FFFFFF;--hover-overlay:rgba(0,0,0,.05);
+  --text-primary:#212529;--text-secondary:#6C757D;--text-muted:#8B95A2;--text-on-primary:#fff;
+  --border:#DEE2E6;--border-strong:#CBD2DB;--divider:#EEF1F4;
+  --success:#2E7D32;--warning:#F57C00;--error:#C62828;--info:#1976D2;--shadow-window:rgba(0,0,0,.18);
+}
+:root[data-theme="dark"]{
+  --primary:#BE727F;--primary-hover:#E1A3AF;--primary-active:#A05A66;
+  --primary-soft:rgba(207,137,150,.18);--primary-tint:rgba(190,114,127,.14);--primary-border:rgba(190,114,127,.32);
+  --bg-canvas:#000000;--bg-primary:#1A1A1A;--bg-secondary:#2D2D2D;--bg-tertiary:#3A3A3A;--bg-elevated:#1A1A1A;--hover-overlay:rgba(255,255,255,.08);
+  --text-primary:#E0E0E0;--text-secondary:#A0A0A0;--text-muted:#777777;--text-on-primary:#fff;
+  --border:#404040;--border-strong:rgba(255,255,255,.10);--divider:#333333;
+  --success:#66BB6A;--warning:#FFA726;--error:#EF5350;--info:#42A5F5;--shadow-window:rgba(0,0,0,.55);
+}
+:root{--r-sm:6px;--r-md:10px;--r-lg:16px;--r-xl:20px;--r-pill:999px;
+  --fs-xs:11px;--fs-sm:12px;--fs-body:14px;--fs-lg:15px;--fs-heading:17px;--fs-title:22px;
+  --font-cjk:"Noto Sans SC","PingFang SC","Microsoft YaHei UI","Segoe UI",sans-serif;}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:var(--font-cjk);font-size:var(--fs-body);color:var(--text-primary);
+  background:radial-gradient(1200px 700px at 12% -10%,rgba(190,114,127,.16),transparent 60%),var(--bg-canvas);
+  display:flex;align-items:center;justify-content:center;padding:26px;transition:background .25s,color .25s;}
+
+.window{width:1000px;height:700px;background:var(--bg-elevated);border-radius:var(--r-xl);
+  border:1.5px solid var(--border-strong);box-shadow:0 24px 60px var(--shadow-window),0 0 0 1px var(--primary-border);
+  display:flex;flex-direction:column;overflow:hidden;}
+.titlebar{height:52px;flex:0 0 auto;display:flex;align-items:center;padding:0 16px 0 20px;
+  border-bottom:1px solid var(--divider);gap:10px;user-select:none;}
+.titlebar .logo{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--primary),var(--primary-hover));
+  display:grid;place-items:center;color:#fff;font-weight:700;font-size:12px}
+.titlebar .title{font-size:var(--fs-body);font-weight:600}
+.titlebar .spacer{flex:1}
+.winbtn{width:30px;height:30px;border:none;background:transparent;border-radius:8px;color:var(--text-secondary);
+  cursor:pointer;font-size:13px;display:grid;place-items:center}
+.winbtn:hover{background:var(--hover-overlay);color:var(--text-primary)}
+.winbtn.close:hover{background:var(--error);color:#fff}
+.body{flex:1;display:flex;min-height:0}
+
+/* Sidebar */
+.sidebar{width:212px;flex:0 0 auto;background:var(--bg-secondary);border-right:1px solid var(--divider);
+  padding:12px 10px;overflow-y:auto;display:flex;flex-direction:column;gap:2px;}
+.nav-group{font-size:var(--fs-xs);font-weight:600;letter-spacing:.05em;color:var(--text-muted);padding:14px 12px 6px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:var(--r-md);color:var(--text-secondary);
+  cursor:pointer;font-weight:500;font-size:var(--fs-body);border:1px solid transparent;transition:.12s}
+.nav-item .ico{width:18px;text-align:center;font-size:15px;opacity:.9}
+.nav-item:hover{background:var(--hover-overlay);color:var(--text-primary)}
+.nav-item.active{background:var(--primary-soft);color:var(--primary);border-color:var(--primary-border);font-weight:600}
+.nav-item .badge{margin-left:auto;font-size:var(--fs-xs);background:var(--bg-tertiary);color:var(--text-secondary);border-radius:var(--r-pill);padding:1px 8px}
+.nav-item.active .badge{background:var(--primary);color:#fff}
+.nav-item .dot{margin-left:auto;width:7px;height:7px;border-radius:50%;background:var(--success)}
+
+/* Content */
+.content{flex:1;min-width:0;overflow-y:auto;padding:28px 34px 40px}
+.panel{display:none;animation:fade .2s ease}
+.panel.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.panel-head{margin-bottom:20px}
+.panel-head h1{font-size:var(--fs-title);font-weight:700;letter-spacing:-.01em}
+.panel-head p{color:var(--text-secondary);font-size:var(--fs-sm);margin-top:6px;max-width:600px;line-height:1.6}
+
+.sub-label{font-size:var(--fs-xs);font-weight:700;letter-spacing:.06em;color:var(--text-muted);
+  text-transform:uppercase;margin:24px 2px 10px}
+.sub-label:first-of-type{margin-top:4px}
+
+/* Cards & setting rows */
+.card{background:var(--bg-tertiary);border:1px solid transparent;border-radius:var(--r-md);padding:4px 16px;margin-bottom:12px}
+.card.pad{padding:16px 18px}
+.card.flush{padding:0;overflow:hidden}
+.srow{display:flex;align-items:center;gap:16px;padding:13px 0}
+.srow + .srow{border-top:1px solid var(--divider)}
+.srow .grow{flex:1;min-width:0}
+.lbl{font-weight:600;font-size:var(--fs-body)}
+.hint{color:var(--text-muted);font-size:var(--fs-sm);margin-top:4px;line-height:1.55}
+
+/* Toggle */
+.switch{position:relative;width:44px;height:25px;flex:0 0 auto;cursor:pointer}
+.switch input{display:none}
+.switch .track{position:absolute;inset:0;border-radius:var(--r-pill);background:var(--bg-secondary);border:1px solid var(--border);transition:.18s}
+.switch .thumb{position:absolute;top:3px;left:3px;width:19px;height:17px;border-radius:7px;background:var(--bg-elevated);box-shadow:0 1px 3px rgba(0,0,0,.35);transition:.18s}
+.switch input:checked + .track{background:var(--primary);border-color:var(--primary)}
+.switch input:checked + .track + .thumb{left:22px}
+
+/* Segmented */
+.segmented{display:inline-flex;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--r-md);padding:3px;gap:3px}
+.segmented button{border:none;background:transparent;color:var(--text-secondary);padding:7px 15px;border-radius:7px;cursor:pointer;font-family:inherit;font-size:var(--fs-body);font-weight:500}
+.segmented button.on{background:var(--primary);color:#fff;font-weight:600}
+
+/* Inputs */
+.field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.field:last-child{margin-bottom:0}
+.field label{font-weight:600;font-size:var(--fs-sm)}
+input[type=text],input[type=password],input[type=number],select,textarea{font-family:inherit;font-size:var(--fs-body);color:var(--text-primary);
+  background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--r-sm);padding:9px 12px;width:100%;outline:none;transition:.12s}
+input:focus,select:focus,textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-soft)}
+textarea{resize:vertical;min-height:72px;line-height:1.5;font-family:SFMono-Regular,Consolas,monospace;font-size:var(--fs-sm)}
+.input-key{position:relative}
+.input-key button{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:none;background:transparent;color:var(--text-muted);cursor:pointer;font-size:var(--fs-sm);padding:4px 8px;border-radius:6px}
+.input-key button:hover{background:var(--hover-overlay)}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+
+/* Buttons */
+.btn{font-family:inherit;font-size:var(--fs-body);font-weight:600;border-radius:var(--r-sm);padding:9px 16px;cursor:pointer;border:1px solid transparent;transition:.12s}
+.btn-primary{background:var(--primary);color:#fff}.btn-primary:hover{background:var(--primary-hover)}
+.btn-outline{background:transparent;color:var(--text-primary);border-color:var(--border-strong)}.btn-outline:hover{background:var(--hover-overlay)}
+.btn-ghost{background:transparent;color:var(--primary);border-color:transparent;padding:7px 10px}.btn-ghost:hover{background:var(--primary-soft)}
+.btn-sm{padding:6px 12px;font-size:var(--fs-sm)}
+
+/* Radio */
+.radio{display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:7px 0}
+.radio input{appearance:none;width:18px;height:18px;border:2px solid var(--border-strong);border-radius:50%;margin-top:1px;flex:0 0 auto;position:relative;cursor:pointer}
+.radio input:checked{border-color:var(--primary)}
+.radio input:checked::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--primary)}
+.radio .rlbl{font-weight:500}
+
+/* Badges */
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-xs);font-weight:600;padding:2px 9px;border-radius:var(--r-pill)}
+.chip-on{background:var(--primary-soft);color:var(--primary)}
+.chip-muted{background:var(--bg-secondary);color:var(--text-secondary)}
+.chip-cap{background:rgba(46,125,50,.12);color:var(--success)}
+.chip-warn{background:rgba(245,124,0,.14);color:var(--warning)}
+.statusdot{width:7px;height:7px;border-radius:50%;display:inline-block}
+
+/* Master-detail */
+.md{display:grid;grid-template-columns:236px 1fr;gap:16px;align-items:start}
+.md-list{background:var(--bg-tertiary);border-radius:var(--r-md);padding:8px;display:flex;flex-direction:column;gap:3px}
+.md-list .add{margin:4px 4px 6px}
+.list-row{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:var(--r-sm);cursor:pointer}
+.list-row:hover{background:var(--hover-overlay)}
+.list-row.sel{background:var(--primary-soft)}
+.list-row .av{width:28px;height:28px;border-radius:8px;background:var(--bg-secondary);display:grid;place-items:center;font-size:14px;flex:0 0 auto}
+.list-row .nm{flex:1;font-weight:600;font-size:var(--fs-body);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.md-detail{background:var(--bg-tertiary);border-radius:var(--r-md);padding:20px 22px}
+
+.tbl{width:100%;border-collapse:collapse;font-size:var(--fs-sm)}
+.tbl th{text-align:left;color:var(--text-muted);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--border)}
+.tbl td{padding:8px;border-bottom:1px solid var(--divider)}
+.endpoint{font-family:SFMono-Regular,Consolas,monospace;font-size:var(--fs-sm);background:var(--bg-secondary);
+  border:1px dashed var(--border);border-radius:var(--r-sm);padding:8px 10px;color:var(--text-secondary);word-break:break-all}
+.callout{display:flex;gap:10px;background:var(--primary-tint);border:1px solid var(--primary-border);border-radius:var(--r-md);
+  padding:11px 14px;font-size:var(--fs-sm);color:var(--text-secondary);line-height:1.55;margin:6px 0 16px}
+.callout .ico{color:var(--primary);font-size:14px}
+.divider{height:1px;background:var(--divider);margin:4px 0}
+.slider{width:220px;accent-color:var(--primary)}
+.disabled{opacity:.45;pointer-events:none}
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="titlebar">
+    <div class="logo">M</div><div class="title">设置</div><div class="spacer"></div>
+    <button class="winbtn" id="themeBtn" title="切换主题">◐</button>
+    <button class="winbtn close" title="关闭">✕</button>
+  </div>
+
+  <div class="body">
+    <nav class="sidebar">
+      <div class="nav-group">通用</div>
+      <div class="nav-item active" data-p="account"><span class="ico">👤</span>账号与同步</div>
+      <div class="nav-item" data-p="appearance"><span class="ico">🎨</span>界面与偏好</div>
+
+      <div class="nav-group">模型</div>
+      <div class="nav-item" data-p="providers"><span class="ico">🧩</span>模型服务<span class="badge">3</span></div>
+      <div class="nav-item" data-p="personas"><span class="ico">🎭</span>角色</div>
+
+      <div class="nav-group">工具与能力</div>
+      <div class="nav-item" data-p="websearch"><span class="ico">🌐</span>联网搜索<span class="dot"></span></div>
+      <div class="nav-item" data-p="imagegen"><span class="ico">🖼️</span>图像生成</div>
+      <div class="nav-item" data-p="vision"><span class="ico">👁️</span>视觉理解</div>
+      <div class="nav-item" data-p="code"><span class="ico">🐍</span>代码与文件<span class="dot"></span></div>
+      <div class="nav-item" data-p="mcp"><span class="ico">🔌</span>MCP 服务器<span class="badge">2</span></div>
+      <div class="nav-item" data-p="skills"><span class="ico">⚡</span>技能</div>
+    </nav>
+
+    <main class="content">
+
+      <!-- ===== 账号与同步 ===== -->
+      <section class="panel active" id="account">
+        <div class="panel-head"><h1>账号与同步</h1>
+          <p>登录后可在桌面端使用网页端同款模型、对话同步与个性化能力。</p></div>
+        <div class="card pad">
+          <div class="srow" style="padding-top:4px">
+            <div class="av list-row" style="width:46px;height:46px;font-size:20px;cursor:default;padding:0;background:var(--bg-secondary);border-radius:12px;display:grid;place-items:center">🦙</div>
+            <div class="grow"><div class="lbl">wljay</div><div class="hint">blog.wljay.cn · 已登录</div></div>
+            <span class="chip chip-on"><span class="statusdot" style="background:var(--success)"></span>已连接</span>
+            <button class="btn btn-outline btn-sm">退出登录</button>
+          </div>
+        </div>
+        <div class="sub-label">数据同步</div>
+        <div class="card">
+          <div class="srow"><div class="grow"><div class="lbl">对话云同步</div>
+            <div class="hint">本机对话与 MolaGPT 网页端双向同步；自定义 API 的对话不会上传。</div></div>
+            <label class="switch"><input type="checkbox" checked><span class="track"></span><span class="thumb"></span></label></div>
+          <div class="srow"><div class="grow"><div class="hint" style="margin:0">上次同步：今天 11:02</div></div>
+            <button class="btn btn-outline btn-sm">立即同步</button></div>
+        </div>
+        <div class="sub-label">个性化（MolaGPT Tracks）</div>
+        <div class="card">
+          <div class="srow"><div class="grow"><div class="lbl">启用个性化记忆</div>
+            <div class="hint">从对话中学习你的偏好，让回复更贴合需求。关闭后不记录任何个性化数据，仅登录时生效。</div></div>
+            <label class="switch"><input type="checkbox" checked><span class="track"></span><span class="thumb"></span></label></div>
+        </div>
+      </section>
+
+      <!-- ===== 界面与偏好 ===== -->
+      <section class="panel" id="appearance">
+        <div class="panel-head"><h1>界面与偏好</h1><p>调整外观、输入习惯与系统集成方式。</p></div>
+        <div class="sub-label">外观</div>
+        <div class="card">
+          <div class="srow"><div class="grow"><div class="lbl">主题</div><div class="hint">跟随系统会随 Windows 明暗设置自动切换。</div></div>
+            <div class="segmented" id="themeSeg"><button data-t="system" class="on">跟随系统</button><button data-t="light">浅色</button><button data-t="dark">深色</button></div></div>
+          <div class="srow"><div class="grow"><div class="lbl">界面字号</div><div class="hint">影响对话与界面文字整体大小。</div></div>
+            <input type="range" class="slider" min="0.8" max="1.4" step="0.1" value="1.0" oninput="this.nextElementSibling.textContent=this.value+'×'"><span style="width:40px;text-align:right;font-weight:600">1.0×</span></div>
+        </div>
+        <div class="sub-label">输入</div>
+        <div class="card">
+          <div class="srow"><div class="grow"><div class="lbl">按 Enter 直接发送消息</div>
+            <div class="hint">关闭时 Enter 换行、Ctrl+Enter 发送；开启时 Shift+Enter 仍可换行。</div></div>
+            <label class="switch"><input type="checkbox" checked><span class="track"></span><span class="thumb"></span></label></div>
+        </div>
+        <div class="sub-label">通知与系统集成</div>
+        <div class="card">
+          <div class="srow"><div class="grow"><div class="lbl">后台回答完成时通知</div>
+            <div class="hint">窗口最小化或切到其它对话时，回答完成弹出系统通知。</div></div>
+            <label class="switch"><input type="checkbox" checked><span class="track"></span><span class="thumb"></span></label></div>
+          <div class="srow"><div class="grow"><div class="lbl">启用系统托盘</div>
+            <div class="hint">关闭窗口时可最小化到托盘而非退出。</div></div>
+            <label class="switch"><input type="checkbox" id="trayToggle" checked><span class="track"></span><span class="thumb"></span></label></div>
+          <div class="srow" id="trayOpts"><div class="grow">
+            <div class="lbl" style="font-weight:500;margin-bottom:2px">关闭按钮行为</div>
+            <label class="radio" style="padding:4px 0"><input type="radio" name="tray" checked><span class="rlbl">最小化到托盘</span></label>
+            <label class="radio" style="padding:4px 0"><input type="radio" name="tray"><span class="rlbl">关闭软件</span></label>
+          </div></div>
+        </div>
+      </section>
+
+      <!-- ===== 模型服务 ===== -->
+      <section class="panel" id="providers">
+        <div class="panel-head"><h1>模型服务</h1>
+          <p>添加自定义 API（OpenAI 兼容 / Anthropic / Gemini），密钥经 DPAPI 加密保存在本机。</p></div>
+        <div class="md">
+          <div class="md-list">
+            <button class="btn btn-primary btn-sm add">+ 添加服务</button>
+            <div class="list-row sel"><div class="av">🟢</div><div class="nm">DeepSeek</div><span class="statusdot" style="background:var(--success)"></span></div>
+            <div class="list-row"><div class="av">🔵</div><div class="nm">OpenAI</div><span class="statusdot" style="background:var(--success)"></span></div>
+            <div class="list-row"><div class="av">🟣</div><div class="nm">SiliconFlow · 图像</div><span class="statusdot" style="background:var(--text-muted)"></span></div>
+          </div>
+          <div class="md-detail">
+            <div class="srow" style="padding-top:0"><div class="grow"><div class="lbl" style="font-size:var(--fs-heading)">DeepSeek</div>
+              <div class="hint" style="margin-top:2px">对话服务 · OpenAI 兼容</div></div>
+              <label class="switch"><input type="checkbox" checked><span class="track"></span><span class="thumb"></span></label></div>
+            <div class="divider" style="margin:8px 0 16px"></div>
+            <div class="field"><label>用途</label><div class="segmented"><button class="on">对话</button><button>图像</button></div></div>
+            <div class="two-col">
+              <div class="field"><label>协议族</label><select><option>OpenAI 兼容</option><option>Anthropic</option><option>Gemini</option></select></div>
+              <div class="field"><label>API 路径</label><input type="text" value="/chat/completions"></div>
+            </div>
+            <div class="field"><label>Base URL</label><input type="text" value="https://api.deepseek.com"></div>
+            <div class="field"><label>API Key</label>
+              <div class="input-key"><input type="password" value="sk-xxxxxxxxxxxxxxxx">
+                <button onclick="const i=this.previousElementSibling;i.type=i.type==='password'?'text':'password'">显示</button></div></div>
+            <div class="field"><label>最终请求地址</label><div class="endpoint">https://api.deepseek.com/chat/completions</div></div>
+            <div class="divider" style="margin:6px 0 14px"></div>
+            <div class="srow" style="padding:0 0 10px"><div class="grow"><div class="lbl">模型</div></div>
+              <button class="btn btn-ghost btn-sm">⟳ 自动获取</button><button class="btn btn-ghost btn-sm">+ 添加</button></div>
+            <table class="tbl"><thead><tr><th>模型 ID</th><th>显示名</th><th>能力</th><th></th></tr></thead><tbody>
+              <tr><td>deepseek-v4-flash</td><td>DeepSeek V4 Flash</td>
+                <td><span class="chip chip-cap">工具</span> <span class="chip chip-cap">思考</span></td>
+                <td><button class="btn btn-ghost btn-sm">编辑</button></td></tr>
+              <tr><td>deepseek-reasoner</td><td>DeepSeek R1</td>
+                <td><span class="chip chip-cap">思考</span></td>
+                <td><button class="btn btn-ghost btn-sm">编辑</button></td></tr>
+            </tbody></table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 角色 ===== -->
+      <section class="panel" id="personas">
+        <div class="panel-head"><h1>角色</h1><p>为不同场景定义系统提示与默认行为，发起对话时一键切换。</p></div>
+        <div class="md">
+          <div class="md-list">
+            <button class="btn btn-primary btn-sm add">+ 新建角色</button>
+            <div class="list-row sel"><div class="av">🦙</div><div class="nm">通用助手</div></div>
+            <div class="list-row"><div class="av">📝</div><div class="nm">博客写手</div></div>
+            <div class="list-row"><div class="av">🔬</div><div class="nm">论文助手</div><span style="font-size:11px">🔒</span></div>
+          </div>
+          <div class="md-detail">
+            <div class="field"><label>头像</label><div style="display:flex;gap:8px;flex-wrap:wrap">
+              <div class="av" style="width:36px;height:36px;background:var(--primary-soft);border:1px solid var(--primary)">🦙</div>
+              <div class="av" style="width:36px;height:36px">📝</div><div class="av" style="width:36px;height:36px">🔬</div>
+              <div class="av" style="width:36px;height:36px">💡</div><div class="av" style="width:36px;height:36px">🎯</div></div></div>
+            <div class="field"><label>名称</label><input type="text" value="通用助手"></div>
+            <div class="field"><label>系统提示词</label><textarea style="font-family:var(--font-cjk);font-size:var(--fs-body);min-height:96px">你是 MolaGPT，一个有帮助、诚实的助手。回答简洁准确，使用中文。</textarea></div>
+            <div class="divider" style="margin:4px 0 6px"></div>
+            <div class="sub-label" style="margin-top:10px">默认行为开关</div>
+            <div class="card" style="background:var(--bg-secondary);margin:0">
+              <div class="srow"><div class="grow"><div class="lbl" style="font-weight:500">默认开启联网搜索</div></div>
+                <label class="switch"><input type="checkbox"><span class="track"></span><span class="thumb"></span></label></div>
+              <div class="srow"><div class="grow"><div class="lbl" style="font-weight:500">默认开启 Python 工具</div></div>
+                <label class="switch"><input type="checkbox" checked><span class="track"></span><span class="thumb"></span></label></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 联网搜索 ===== -->
+      <section class="panel" id="websearch">
+        <div class="panel-head"><h1>联网搜索</h1><p>用于自定义模型的联网搜索能力，仅对支持工具调用的 BYOK 模型生效。</p></div>
+        <div class="sub-label">搜索服务</div>
+        <div class="card pad">
+          <div class="field" style="margin-bottom:0"><label>提供方</label>
+            <div class="segmented"><button class="on">DuckDuckGo</button><button>Tavily</button><button>Exa</button></div>
+            <div class="hint" style="margin-top:8px">DuckDuckGo 免费无需密钥；Tavily / Exa 检索质量更高，需 API Key。</div></div>
+        </div>
+        <div class="sub-label">连接</div>
+        <div class="card pad">
+          <div class="two-col">
+            <div class="field"><label>接入地址</label><input type="text" placeholder="默认（DuckDuckGo 无需填写）"></div>
+            <div class="field"><label>API Key</label><div class="input-key"><input type="password" placeholder="仅 Tavily / Exa"><button>显示</button></div></div>
+          </div>
+          <div class="two-col" style="margin-bottom:14px">
+            <div class="field" style="margin:0"><label>每次返回结果数</label><input type="number" value="6" min="1" max="10"></div>
+            <div class="field" style="margin:0"><label>网页正文截取上限（字符）</label><input type="number" value="12000" min="1000" max="30000"></div>
+          </div>
+          <div class="srow" style="padding:0"><div class="grow"><span class="chip chip-on">● 连接正常</span></div>
+            <button class="btn btn-outline btn-sm">测试连接</button></div>
+        </div>
+      </section>
+
+      <!-- ===== 图像生成 ===== -->
+      <section class="panel" id="imagegen">
+        <div class="panel-head"><h1>图像生成</h1><p>选择用于对话与创意工作台的文生图 / 图生图模型。</p></div>
+        <div class="card">
+          <div class="srow"><div class="grow"><div class="lbl">在对话中启用图像生成</div>
+            <div class="hint">关闭后仍可在创意工作台单独使用。</div></div>
+            <label class="switch"><input type="checkbox" checked><span class="track"></span><span class="thumb"></span></label></div>
+        </div>
+        <div class="sub-label">对话内生成</div>
+        <div class="card pad">
+          <div class="field"><label>图像服务 / 模型</label><select><option>SiliconFlow / FLUX.1-schnell</option><option>OpenAI / gpt-image-1</option></select></div>
+          <div class="two-col">
+            <div class="field" style="margin:0"><label>尺寸</label><select><option>1024×1024</option><option>1024×1792</option><option>1792×1024</option></select></div>
+            <div class="field" style="margin:0"><label>风格</label><input type="text" placeholder="可选，如 natural / vivid"></div></div>
+        </div>
+        <div class="sub-label">创意工作台 · 可独立于对话设置</div>
+        <div class="card pad">
+          <div class="field"><label>图像服务 / 模型</label><select><option>OpenAI / gpt-image-1（支持图生图）</option><option>SiliconFlow / FLUX.1-schnell</option></select></div>
+          <div class="field" style="margin:0"><label>尺寸</label><select><option>1024×1024</option><option>1024×1792</option></select></div>
+        </div>
+      </section>
+
+      <!-- ===== 视觉理解 ===== -->
+      <section class="panel" id="vision">
+        <div class="panel-head"><h1>视觉理解</h1><p>为不支持图片输入、但支持工具调用的模型，外挂一个视觉模型来「看图」。</p></div>
+        <div class="card">
+          <div class="srow"><div class="grow"><div class="lbl">启用外挂视觉</div>
+            <div class="hint">当前模型不支持视觉时，自动用下方视觉模型解析图片，再把描述回传给主模型。</div></div>
+            <label class="switch"><input type="checkbox" id="visToggle"><span class="track"></span><span class="thumb"></span></label></div>
+        </div>
+        <div id="visWrap" class="disabled">
+          <div class="sub-label">视觉模型</div>
+          <div class="card pad"><div class="field" style="margin:0"><label>选择模型</label>
+            <select><option>OpenAI / gpt-4o</option><option>SiliconFlow / Qwen2-VL</option></select></div></div>
+          <div class="callout"><span class="ico">ℹ️</span><div>仅列出已启用、且具备视觉能力的服务与模型。可在「模型服务」中为模型勾选视觉能力。</div></div>
+        </div>
+      </section>
+
+      <!-- ===== 代码与文件 ===== -->
+      <section class="panel" id="code">
+        <div class="panel-head"><h1>代码与文件</h1><p>让 BYOK 模型在对话中按需运行 Python 代码、读取本地文件。</p></div>
+
+        <div class="sub-label">本地 Python 执行</div>
+        <div class="card">
+          <div class="srow"><div class="grow"><div class="lbl">启用 Python 执行</div>
+            <div class="hint">BYOK 对话中按需运行 Python 代码并返回结果。</div></div>
+            <label class="switch"><input type="checkbox" id="pyToggle" checked><span class="track"></span><span class="thumb"></span></label></div>
+        </div>
+        <div id="pyWrap">
+          <div class="card pad">
+            <div class="field"><label>执行权限</label>
+              <label class="radio"><input type="radio" name="pyperm" checked><span><span class="rlbl">每次询问</span><div class="hint">运行前弹窗确认代码内容。</div></span></label>
+              <label class="radio"><input type="radio" name="pyperm"><span><span class="rlbl">完全放行</span><div class="hint">不再确认，直接运行（仅建议受信环境）。</div></span></label></div>
+            <div class="field"><label>Python 可执行文件路径</label><input type="text" placeholder="留空使用内置 Python"></div>
+            <div class="two-col" style="margin-bottom:14px">
+              <div class="field" style="margin:0"><label>超时（秒）</label><input type="number" value="60" min="5" max="300"></div>
+              <div class="field" style="margin:0"><label>最大输出字符</label><input type="number" value="20000" min="2000" max="100000"></div></div>
+            <div class="srow" style="padding:0 0 4px"><div class="grow"><div class="lbl" style="font-weight:500">允许访问网络</div>
+              <div class="hint">关闭时脚本无法发起网络请求。</div></div>
+              <label class="switch"><input type="checkbox"><span class="track"></span><span class="thumb"></span></label></div>
+          </div>
+          <details class="card pad" style="padding:0">
+            <summary style="cursor:pointer;padding:14px 18px;font-weight:600;list-style:none">高级：自动放行与拦截规则 <span class="hint" style="margin:0">（每行一项）</span></summary>
+            <div style="padding:0 18px 18px">
+              <div class="two-col"><div class="field" style="margin:0"><label>允许导入</label><textarea placeholder="numpy&#10;pandas"></textarea></div>
+                <div class="field" style="margin:0"><label>拦截导入</label><textarea placeholder="os&#10;subprocess"></textarea></div></div>
+              <div class="two-col" style="margin-top:14px"><div class="field" style="margin:0"><label>允许路径前缀</label><textarea placeholder="C:\Users\A\Desktop\work"></textarea></div>
+                <div class="field" style="margin:0"><label>拦截路径前缀</label><textarea placeholder="C:\Windows"></textarea></div></div>
+            </div>
+          </details>
+        </div>
+
+        <div class="sub-label">文件工具（只读）</div>
+        <div class="card">
+          <div class="srow"><div class="grow"><div class="lbl">启用只读文件工具</div>
+            <div class="hint">允许模型查找、读取、搜索本地文件（不可写入 / 删除）。</div></div>
+            <label class="switch"><input type="checkbox" checked><span class="track"></span><span class="thumb"></span></label></div>
+        </div>
+      </section>
+
+      <!-- ===== MCP ===== -->
+      <section class="panel" id="mcp">
+        <div class="panel-head"><h1>MCP 服务器</h1><p>接入 Model Context Protocol 服务器，为对话扩展外部工具。</p></div>
+        <div class="srow" style="padding:0 0 14px"><div class="grow"><div class="sub-label" style="margin:0">已连接的服务器</div></div>
+          <button class="btn btn-primary btn-sm">+ 添加服务器</button></div>
+        <div class="card flush">
+          <div style="padding:14px 18px" class="srow"><div class="av list-row" style="width:34px;height:34px;background:var(--bg-secondary);border-radius:9px;display:grid;place-items:center;cursor:default;padding:0">🔌</div>
+            <div class="grow"><div class="lbl">filesystem</div><div class="hint" style="margin-top:2px">http · https://mcp.local/fs</div></div>
+            <span class="chip chip-on">已启用</span><button class="btn btn-ghost btn-sm">编辑</button></div>
+          <div class="divider" style="margin:0"></div>
+          <div style="padding:14px 18px" class="srow"><div class="av list-row" style="width:34px;height:34px;background:var(--bg-secondary);border-radius:9px;display:grid;place-items:center;cursor:default;padding:0">🔌</div>
+            <div class="grow"><div class="lbl">github</div><div class="hint" style="margin-top:2px">http · https://api.githubcopilot.com/mcp</div></div>
+            <span class="chip chip-muted">已停用</span><button class="btn btn-ghost btn-sm">编辑</button></div>
+        </div>
+        <div class="callout"><span class="ico">ℹ️</span><div>令牌经 DPAPI 加密单独保存，不会写入配置 JSON。</div></div>
+      </section>
+
+      <!-- ===== 技能 ===== -->
+      <section class="panel" id="skills">
+        <div class="panel-head"><h1>技能</h1><p>管理内置与自定义技能，对话中按需自动触发或手动调用。</p></div>
+        <div class="md">
+          <div class="md-list">
+            <button class="btn btn-primary btn-sm add">+ 导入技能</button>
+            <div class="list-row sel"><div class="av">📊</div><div class="nm">数据可视化</div><span class="statusdot" style="background:var(--success)"></span></div>
+            <div class="list-row"><div class="av">🔎</div><div class="nm">深度研究</div><span class="statusdot" style="background:var(--success)"></span></div>
+            <div class="list-row"><div class="av">📄</div><div class="nm">PDF 解析</div><span class="statusdot" style="background:var(--text-muted)"></span></div>
+          </div>
+          <div class="md-detail">
+            <div class="srow" style="padding-top:0"><div class="grow"><div class="lbl" style="font-size:var(--fs-heading)">数据可视化</div>
+              <div class="hint" style="margin-top:2px">把表格 / CSV 转成图表，并给出趋势解读。</div></div>
+              <label class="switch"><input type="checkbox" checked><span class="track"></span><span class="thumb"></span></label></div>
+            <div class="divider" style="margin:8px 0 14px"></div>
+            <div class="callout" style="margin-top:0"><span class="ico">ℹ️</span><div>该技能需要绘图时自动触发，依赖「代码与文件」中的 Python 执行能力。</div></div>
+            <div class="field"><label>触发说明</label><textarea style="font-family:var(--font-cjk);font-size:var(--fs-body)">当用户提供数据并要求图表、对比或趋势分析时启用。</textarea></div>
+            <div class="srow" style="padding:0"><div class="grow"><div class="lbl" style="font-weight:500">允许手动调用</div>
+              <div class="hint">在输入框 / 命令面板中显式选用此技能。</div></div>
+              <label class="switch"><input type="checkbox" checked><span class="track"></span><span class="thumb"></span></label></div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<script>
+document.querySelectorAll('.nav-item').forEach(it=>it.addEventListener('click',()=>{
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  it.classList.add('active');document.getElementById(it.dataset.p).classList.add('active');
+  document.querySelector('.content').scrollTop=0;}));
+
+const root=document.documentElement;
+document.getElementById('themeBtn').addEventListener('click',()=>setTheme(root.getAttribute('data-theme')==='light'?'dark':'light'));
+document.querySelectorAll('#themeSeg button').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('#themeSeg button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
+  const t=b.dataset.t;setTheme(t==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t);}));
+function setTheme(t){root.setAttribute('data-theme',t);}
+
+document.querySelectorAll('.segmented:not(#themeSeg)').forEach(seg=>seg.querySelectorAll('button').forEach(b=>
+  b.addEventListener('click',()=>{seg.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');})));
+
+const bind=(t,o,disableMode)=>{const T=document.getElementById(t),O=document.getElementById(o);if(!T||!O)return;
+  const f=()=>{if(disableMode){O.classList.toggle('disabled',!T.checked);}else{O.style.display=T.checked?'':'none';}};T.addEventListener('change',f);f();};
+bind('trayToggle','trayOpts');
+bind('visToggle','visWrap',true);
+bind('pyToggle','pyWrap',true);
+
+document.querySelectorAll('.md-list').forEach(list=>list.querySelectorAll('.list-row').forEach(r=>
+  r.addEventListener('click',()=>{list.querySelectorAll('.list-row').forEach(x=>x.classList.remove('sel'));r.classList.add('sel');})));
+</script>
+</body>
+</html>
