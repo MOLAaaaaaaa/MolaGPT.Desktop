@@ -441,6 +441,20 @@ public sealed class PythonExecutionTool
     /// to <c>shutil.copy</c> artifacts between per-run sandboxes. Falls back to a
     /// fresh timestamped directory when there is no conversation id.
     /// </summary>
+    /// <summary>
+    /// Public accessor for a conversation's Python working directory — the same
+    /// folder <see cref="ToolName"/> runs in and where uploaded files and
+    /// generated artifacts live. Returns the path without creating it; callers
+    /// that only scan should check <see cref="Directory.Exists(string)"/> first.
+    /// </summary>
+    public static string GetSessionDirectory(string? conversationId) =>
+        ResolveSessionDirectory(conversationId);
+
+    /// <summary>Names of the runtime scaffolding scripts written into the session
+    /// directory; artifact scanners exclude these.</summary>
+    public static IReadOnlyCollection<string> RuntimeScriptFileNames { get; } =
+        new[] { UserScriptFileName, RunnerScriptFileName };
+
     private static string ResolveSessionDirectory(string? conversationId)
     {
         var root = Path.Combine(
@@ -455,6 +469,64 @@ public sealed class PythonExecutionTool
             : "conv-" + slug;
 
         return Path.Combine(root, leaf);
+    }
+
+    /// <summary>
+    /// Copies a user-attached file into the per-conversation Python workspace so
+    /// the model can read it later via <see cref="ToolName"/> using a plain
+    /// relative path. Mirrors <see cref="ResolveSessionDirectory"/> so the copied
+    /// file lands in the very directory each <c>execute_python_code</c> run uses
+    /// as its working directory. Returns the workspace-relative path (the file
+    /// name), which is what the model should pass to <c>open()</c>.
+    /// </summary>
+    public static string CopyAttachmentToSession(string? conversationId, string fileName, byte[] bytes, CancellationToken ct = default)
+    {
+        var sessionDir = ResolveSessionDirectory(conversationId);
+        Directory.CreateDirectory(sessionDir);
+
+        var safeName = SanitizeAttachmentFileName(fileName);
+        var destination = EnsureUniquePath(sessionDir, safeName);
+        File.WriteAllBytes(destination, bytes);
+        ct.ThrowIfCancellationRequested();
+        return Path.GetFileName(destination);
+    }
+
+    /// <summary>Strips directory components and illegal characters from an
+    /// attachment file name, falling back to a generic name when nothing usable
+    /// remains, so a malicious or empty name can never escape the workspace.</summary>
+    private static string SanitizeAttachmentFileName(string? fileName)
+    {
+        var name = Path.GetFileName(fileName?.Trim() ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(name))
+            return "attachment-" + Guid.NewGuid().ToString("N")[..8];
+
+        var invalid = Path.GetInvalidFileNameChars();
+        var builder = new StringBuilder(name.Length);
+        foreach (var ch in name)
+            builder.Append(Array.IndexOf(invalid, ch) >= 0 ? '_' : ch);
+
+        var result = builder.ToString().Trim().Trim('.');
+        return string.IsNullOrEmpty(result)
+            ? "attachment-" + Guid.NewGuid().ToString("N")[..8]
+            : result;
+    }
+
+    /// <summary>Appends a numeric suffix when a same-named file already exists in
+    /// the (reused) session directory so a new upload never clobbers an earlier
+    /// one within the same conversation.</summary>
+    private static string EnsureUniquePath(string directory, string fileName)
+    {
+        var candidate = Path.Combine(directory, fileName);
+        if (!File.Exists(candidate)) return candidate;
+
+        var stem = Path.GetFileNameWithoutExtension(fileName);
+        var ext = Path.GetExtension(fileName);
+        for (var i = 1; i < 1000; i++)
+        {
+            candidate = Path.Combine(directory, $"{stem}-{i}{ext}");
+            if (!File.Exists(candidate)) return candidate;
+        }
+        return Path.Combine(directory, $"{stem}-{Guid.NewGuid():N}{ext}");
     }
 
     /// <summary>

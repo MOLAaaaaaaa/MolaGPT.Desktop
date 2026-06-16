@@ -133,6 +133,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsAttachVisible));
                 OnPropertyChanged(nameof(CanAcceptImageAttachments));
                 OnPropertyChanged(nameof(CanAcceptFileAttachments));
+                OnPropertyChanged(nameof(CanProcessNonTextFiles));
                 OnPropertyChanged(nameof(AreNetworkToolsEnabled));
                 OnPropertyChanged(nameof(IsPythonToolVisible));
                 OnPropertyChanged(nameof(IsPersonaPickerVisible));
@@ -203,6 +204,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                     or nameof(SettingsViewModel.PythonToolDeniedPathPrefixes))
                 {
                     OnPropertyChanged(nameof(IsPythonToolVisible));
+                    OnPropertyChanged(nameof(CanProcessNonTextFiles));
                 }
             };
         }
@@ -229,11 +231,20 @@ public sealed partial class ComposerViewModel : ObservableObject
         _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy
         || _chat.ActiveModel?.SupportsVision == true
         || _settings?.IsVisionProxyAvailableFor(_chat.ActiveProvider?.Kind, _chat.ActiveModel) == true;
-    /// <summary>非图片附件目前仅 MolaGPT 代理模式支持（走沙箱上传）。BYOK
-    /// 直连官方端点时，PDF/DOCX 等二进制文件无法解析，文本类文件也只是
-    /// inline 截断 —— 在 UI 入口直接拦截，避免用户误以为模型读到了文件内容。</summary>
+    /// <summary>BYOK 现已支持文档附件：可直接抽文本的文件（md/txt/html/代码/
+    /// json 等）以隔离的 content part 注入上下文；其余需处理的文件（PDF/DOCX/
+    /// 二进制等）在 Python 工具可用时复制到会话工作目录，由模型按需读取。仅当
+    /// 既非文本类、Python 又不可用时，才在入口拦截。该属性用于"附件按钮整体是否
+    /// 可用"，细粒度判定见 <see cref="CanAcceptFileKind"/>。</summary>
     public bool CanAcceptFileAttachments =>
-        _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy;
+        _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy
+        || true; // 文本类恒可；二进制由 CanProcessNonTextFiles 决定，入口逐个校验
+
+    /// <summary>BYOK 下能否处理非文本（需 Python 工具）文件。MolaGPT 代理模式走
+    /// 沙箱上传，不受此限制。</summary>
+    public bool CanProcessNonTextFiles =>
+        _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy
+        || CanUseByokPythonTool;
     public bool AreNetworkToolsEnabled =>
         _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy || _chat.ActiveModel?.SupportsToolCalling == true;
     public bool IsPythonToolVisible => CanUseByokPythonTool;
@@ -480,6 +491,32 @@ public sealed partial class ComposerViewModel : ObservableObject
             userMsg.ContentPartsJson = BuildOpenAiContentPartsJson(outgoingUserText, outgoingAttachments);
             _chat.UpdatePersistedMessage(userMsg);
         }
+
+        // BYOK file attachments: text-like files are inlined as isolated content
+        // parts (handled later by the content builder); everything else is copied
+        // into the per-conversation Python workspace and surfaced to the model via
+        // a hidden system hint so it can read them with the python tool. The chips
+        // the user sees are unchanged — only the model-visible payload differs.
+        if (provider.Kind != ProviderKind.MolaGptProxy
+            && outgoingAttachments.Any(a => a.Kind == AttachmentKind.File))
+        {
+            var (preparedAttachments, fileHint) = PrepareByokFileAttachments(
+                outgoingAttachments, conversationId, cts.Token);
+            outgoingAttachments = preparedAttachments;
+            if (!string.IsNullOrWhiteSpace(fileHint))
+            {
+                outgoingUserText = AppendHiddenSystemHint(outgoingUserText, fileHint!);
+                if (userMsg is not null)
+                {
+                    userMsg.Content = outgoingUserText;
+                    _chat.UpdatePersistedMessage(userMsg);
+                }
+                // Uploaded files now live in the working directory — reflect them
+                // in the artifact panel right away.
+                _chat.RefreshArtifacts();
+            }
+        }
+
         var requestAttachments = BuildRequestAttachments(provider, model, outgoingAttachments);
 
         // BYOK history images are re-fed from the local store so multi-turn
@@ -893,7 +930,16 @@ public sealed partial class ComposerViewModel : ObservableObject
     {
         if (attachments.Count == 0) return Array.Empty<Attachment>();
         if (provider.Kind != ProviderKind.MolaGptProxy)
-            return attachments;
+        {
+            // Workspace files are announced to the model via a hidden system hint
+            // (model-visible, user-hidden) and read on demand through the python
+            // tool, so we drop them from the content-part payload to avoid sending
+            // raw/binary bytes or duplicating the reference. Inline text files and
+            // images stay so the content builder can emit them.
+            return attachments.Any(a => a.IsWorkspaceFile)
+                ? attachments.Where(a => !a.IsWorkspaceFile).ToList()
+                : attachments;
+        }
 
         if (!model.SupportsVision)
             return Array.Empty<Attachment>();
@@ -941,6 +987,82 @@ public sealed partial class ComposerViewModel : ObservableObject
         var name = attachment.FileName ?? string.Empty;
         var ext = Path.GetExtension(name).TrimStart('.').ToUpperInvariant();
         return string.IsNullOrWhiteSpace(ext) ? "文件" : ext;
+    }
+
+    /// <summary>
+    /// BYOK file routing. Splits queued file attachments into two lanes:
+    /// <list type="bullet">
+    /// <item>Small text-like files stay as-is and are inlined as content parts by
+    /// <see cref="OpenAiMessageContentBuilder"/> (model sees the text, the UI only
+    /// shows the chip).</item>
+    /// <item>Binary files and oversized text are copied into the conversation's
+    /// Python workspace; their <see cref="Attachment.WorkspaceRelativePath"/> is
+    /// set and a single hidden system hint enumerating them is returned so the
+    /// model knows to read them with <c>execute_python_code</c>.</item>
+    /// </list>
+    /// Image attachments pass through untouched. The returned hint is empty when
+    /// nothing was copied. Copy failures fall back to leaving the attachment as a
+    /// plain metadata note (no workspace path), never throwing.
+    /// </summary>
+    private List<Attachment> PrepareByokFileAttachmentsInner(
+        IReadOnlyList<Attachment> attachments,
+        string conversationId,
+        List<string> copiedNotes,
+        CancellationToken ct)
+    {
+        var result = new List<Attachment>(attachments.Count);
+        foreach (var attachment in attachments)
+        {
+            if (attachment.Kind != AttachmentKind.File)
+            {
+                result.Add(attachment);
+                continue;
+            }
+
+            var name = string.IsNullOrWhiteSpace(attachment.FileName) ? "附件" : attachment.FileName!;
+            var isText = OpenAiMessageContentBuilder.IsTextLike(attachment.MimeType, name);
+            var fitsInline = attachment.Bytes.Length <= OpenAiMessageContentBuilder.MaxInlineTextBytes;
+            if (isText && fitsInline)
+            {
+                // Small text file: inline directly, no workspace copy needed.
+                result.Add(attachment);
+                continue;
+            }
+
+            try
+            {
+                var relativePath = PythonExecutionTool.CopyAttachmentToSession(
+                    conversationId, name, attachment.Bytes, ct);
+                result.Add(attachment with { WorkspaceRelativePath = relativePath });
+                copiedNotes.Add($"- {name}（{attachment.MimeType}，{attachment.Bytes.Length} bytes）→ {relativePath}");
+            }
+            catch (Exception)
+            {
+                // Copy failed: keep the attachment as a bare metadata note so the
+                // model is at least aware a file was attached.
+                result.Add(attachment);
+            }
+        }
+        return result;
+    }
+
+    private (List<Attachment> Attachments, string? Hint) PrepareByokFileAttachments(
+        IReadOnlyList<Attachment> attachments,
+        string conversationId,
+        CancellationToken ct)
+    {
+        var copiedNotes = new List<string>();
+        var prepared = PrepareByokFileAttachmentsInner(attachments, conversationId, copiedNotes, ct);
+        if (copiedNotes.Count == 0)
+            return (prepared, null);
+
+        var hint = BuildHiddenSystemHint(
+            "[附件提示：用户随消息上传了以下文件，已复制到当前 Python 工作目录"
+            + "（execute_python_code 工具每次运行的工作目录）。如需查看或处理这些文件，"
+            + "请调用 execute_python_code 并用给出的相对路径 open() 读取：\n"
+            + string.Join("\n", copiedNotes)
+            + "\n请根据用户意图主动读取相关文件，不要假设其内容。]");
+        return (prepared, hint);
     }
 
     private static string AppendHiddenSystemHint(string text, string hint)
@@ -1163,6 +1285,9 @@ public sealed partial class ComposerViewModel : ObservableObject
             {
                 RememberPythonArtifactContext(assistantMsg, tool.ResultPreviewJson);
                 RewritePythonArtifactMarkdownLinks(assistantMsg);
+                // A python run may have produced new files; refresh the
+                // session-level artifact panel so they appear immediately.
+                _chat.RefreshArtifacts();
             }
         }
         if (chunk.Sources is { Count: > 0 })

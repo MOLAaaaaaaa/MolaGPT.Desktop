@@ -49,19 +49,19 @@ class CJKReport(FPDF):
 
     def h1(self, text):
         self.set_font(self.base, "B", 20)
-        self.multi_cell(0, 12, text)
+        self.multi_cell(0, 12, text, new_x="LMARGIN", new_y="NEXT")
         self.ln(2)
         self.set_font(self.base, size=12)
 
     def h2(self, text):
         self.set_font(self.base, "B", 15)
-        self.multi_cell(0, 10, text)
+        self.multi_cell(0, 10, text, new_x="LMARGIN", new_y="NEXT")
         self.ln(1)
         self.set_font(self.base, size=12)
 
     def body(self, text):
         self.set_font(self.base, size=12)
-        self.multi_cell(0, 8, text)
+        self.multi_cell(0, 8, text, new_x="LMARGIN", new_y="NEXT")
         self.ln(1)
 
     def table(self, header, rows, col_widths=None):

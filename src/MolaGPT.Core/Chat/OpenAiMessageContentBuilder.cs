@@ -21,6 +21,11 @@ public static class OpenAiMessageContentBuilder
 {
     private const int MaxInlineTextAttachmentBytes = 128 * 1024;
 
+    /// <summary>Byte ceiling for inlining a text attachment's content directly
+    /// into the prompt. Larger text files are better read on demand via the tool;
+    /// callers deciding inline-vs-workspace routing reuse this bound.</summary>
+    public static int MaxInlineTextBytes => MaxInlineTextAttachmentBytes;
+
     public static object Build(ChatMessage message, bool replaceImagesWithText = false)
     {
         var ordinal = 0;
@@ -75,6 +80,18 @@ public static class OpenAiMessageContentBuilder
     public static string BuildFileTextPart(Attachment attachment)
     {
         var name = string.IsNullOrWhiteSpace(attachment.FileName) ? "附件" : attachment.FileName!;
+
+        // Files copied into the per-conversation Python workspace are referenced
+        // by path, not inlined: binary documents (PDF/DOCX/…) would be garbage as
+        // UTF-8, and oversized text is better read on demand by the tool. The
+        // model is told where the file lives so it can open it with python.
+        if (attachment.IsWorkspaceFile)
+        {
+            return $"用户上传了文件：{name}（{attachment.MimeType}，{attachment.Bytes.Length} bytes）。"
+                + $"该文件已复制到当前 Python 工作目录，相对路径为 {attachment.WorkspaceRelativePath}。"
+                + "如需读取或处理它，请调用 execute_python_code 工具，用该相对路径 open() 即可。";
+        }
+
         if (!IsTextLike(attachment.MimeType, name))
             return $"用户上传了文件：{name}（{attachment.MimeType}，{attachment.Bytes.Length} bytes）。";
 
@@ -88,13 +105,20 @@ public static class OpenAiMessageContentBuilder
             : $"用户上传了文件：{name}\n\n{body}";
     }
 
-    private static bool IsTextLike(string mimeType, string fileName)
+    /// <summary>
+    /// True when a file attachment's bytes can be sent to the model directly as
+    /// UTF-8 text (markdown, source code, HTML, structured data). Used both for
+    /// inlining here and by the composer to decide which BYOK files go inline vs.
+    /// get copied into the Python workspace for tool-based reading.
+    /// </summary>
+    public static bool IsTextLike(string mimeType, string fileName)
     {
         if (mimeType.StartsWith("text/", StringComparison.OrdinalIgnoreCase)) return true;
         if (mimeType.Equals("application/json", StringComparison.OrdinalIgnoreCase)) return true;
 
         var ext = Path.GetExtension(fileName).ToLowerInvariant();
         return ext is ".md" or ".txt" or ".json" or ".csv" or ".xml" or ".yaml" or ".yml"
+            or ".html" or ".htm"
             or ".py" or ".js" or ".ts" or ".tsx" or ".jsx" or ".cs" or ".java"
             or ".go" or ".rs" or ".c" or ".cpp" or ".h" or ".hpp" or ".m";
     }

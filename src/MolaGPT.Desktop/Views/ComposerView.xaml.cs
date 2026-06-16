@@ -61,12 +61,7 @@ public partial class ComposerView : UserControl
         {
             Multiselect = true,
             Title = "选择图片或文件",
-            Filter =
-                "图片 (*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp)|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp" +
-                "|文档 (*.pdf;*.docx;*.txt;*.md)|*.pdf;*.docx;*.txt;*.md" +
-                "|代码 (*.py;*.c;*.cpp;*.js;*.ts;*.cs;*.java;*.go;*.rs;*.m;*.json)|" +
-                  "*.py;*.c;*.cpp;*.js;*.ts;*.cs;*.java;*.go;*.rs;*.m;*.json" +
-                "|所有文件 (*.*)|*.*"
+            Filter = "所有文件 (*.*)|*.*"
         };
         if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
 
@@ -87,15 +82,23 @@ public partial class ComposerView : UserControl
                         MessageBoxImage.Information);
                     continue;
                 }
-                if (kind == AttachmentKind.File && !vm.CanAcceptFileAttachments)
+                if (kind == AttachmentKind.File && !vm.CanProcessNonTextFiles)
                 {
-                    MessageBox.Show(
-                        Window.GetWindow(this),
-                        "自定义模型暂不支持上传文档。可登录 MolaGPT 账号使用沙箱上传，或仅上传图片（需模型支持视觉）。",
-                        "暂不支持该附件",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Information);
-                    continue;
+                    // BYOK without the Python tool: text-like files can still be
+                    // inlined, but binary/needs-processing files have nowhere to go.
+                    var isTextLike = MolaGPT.Core.Chat.OpenAiMessageContentBuilder
+                        .IsTextLike(mime, Path.GetFileName(path));
+                    if (!isTextLike)
+                    {
+                        MessageBox.Show(
+                            Window.GetWindow(this),
+                            "该文件需要开启「Python 代码执行」工具才能处理。请在设置中开启 Python 工具，" +
+                            "或登录 MolaGPT 账号使用沙箱上传。文本类文件（txt/md/html/代码等）可直接上传。",
+                            "需要 Python 工具",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Information);
+                        continue;
+                    }
                 }
                 vm.Attachments.Add(new Attachment(
                     Kind: kind,

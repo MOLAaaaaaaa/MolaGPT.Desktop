@@ -35,6 +35,11 @@ public sealed class CloudSyncService
     private static readonly TimeSpan SyncTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan TitleTimeout = TimeSpan.FromSeconds(15);
+    // Single-conversation detail fetch (opening a conversation). The shared
+    // HttpClient has Timeout.InfiniteTimeSpan, so without this an unreachable
+    // network leaves the request — and the "正在修复对话显示..." status —
+    // hung forever. Bounded so a bad network fails fast and resets state.
+    private static readonly TimeSpan DetailFetchTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan PeriodicSyncInterval = TimeSpan.FromMinutes(3);
 
     // .NET 8 marks JsonSerializerOptions read-only on first use through
@@ -285,12 +290,28 @@ public sealed class CloudSyncService
         if (existingMessages.Count > 0 && !needsRefresh && !needsParserRefresh) return false;
 
         JsonObject? detail;
+        using var detailCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        detailCts.CancelAfter(DetailFetchTimeout);
         try
         {
             PublishStatus(CloudSyncState.Syncing, needsParserRefresh ? "正在修复对话显示..." : "正在拉取对话...");
-            detail = await FetchConversationAsync(jwt, conversationId, ct).ConfigureAwait(false);
+            detail = await FetchConversationAsync(jwt, conversationId, detailCts.Token).ConfigureAwait(false);
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Caller cancelled (e.g. switched to another conversation). Stay
+            // quiet; the new load drives its own status.
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            // Our own DetailFetchTimeout fired — the network is unreachable or
+            // too slow. Surface a recoverable error instead of hanging on the
+            // "正在修复对话显示..." spinner forever.
+            PublishStatus(CloudSyncState.Error, "网络不稳定，对话加载超时，请稍后重试。");
+            return false;
+        }
+        catch (Exception ex)
         {
             PublishStatus(CloudSyncState.Error, $"拉取对话失败：{ex.Message}");
             return false;

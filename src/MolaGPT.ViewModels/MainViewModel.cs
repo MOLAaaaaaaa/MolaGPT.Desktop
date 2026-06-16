@@ -18,6 +18,7 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty] private SettingsViewModel _settings;
     [ObservableProperty] private PersonaListViewModel _personas;
     [ObservableProperty] private bool _sidebarCollapsed;
+    [ObservableProperty] private bool _artifactPanelVisible;
     [ObservableProperty] private bool _isImageWorkbenchVisible;
     [ObservableProperty] private string _windowTitle = "MolaGPT";
     [ObservableProperty] private string _cloudSyncStatusKind = "Idle";
@@ -145,11 +146,71 @@ public sealed partial class MainViewModel : ObservableObject
         };
         _settings.Providers.CollectionChanged += (_, _) => RefreshActivePromptState();
 
+        // Auto-open/close the artifact panel per conversation: opening when the
+        // conversation has local artifacts (BYOK only — MolaGPT-account artifacts
+        // live server-side), closing otherwise. Runs on conversation load and
+        // after each python run / upload.
+        _chat.ArtifactsRefreshed += (_, hasArtifacts) =>
+        {
+            ArtifactPanelVisible = hasArtifacts && IsArtifactPanelAvailable;
+            OnPropertyChanged(nameof(IsArtifactPanelAvailable));
+        };
+        _chat.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(ChatViewModel.ActiveProvider))
+                OnPropertyChanged(nameof(IsArtifactPanelAvailable));
+        };
+
         RefreshActivePromptState();
     }
 
+    /// <summary>True when the artifact drawer button should be offered: BYOK
+    /// provider (artifacts are local) and the conversation has at least one.
+    /// MolaGPT-account mode hides it entirely.</summary>
+    public bool IsArtifactPanelAvailable =>
+        Chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy && Chat.HasArtifacts;
+
     [RelayCommand]
     private void ToggleSidebar() => SidebarCollapsed = !SidebarCollapsed;
+
+    [RelayCommand]
+    private void ToggleArtifactPanel() => ArtifactPanelVisible = !ArtifactPanelVisible;
+
+    /// <summary>Opens the OS file explorer with the artifact selected (Windows
+    /// <c>explorer /select,</c>). Falls back to opening the containing folder
+    /// when selection isn't possible. Never throws into the UI.</summary>
+    [RelayCommand]
+    private void RevealArtifact(ArtifactItemViewModel? artifact)
+    {
+        if (artifact is null || string.IsNullOrWhiteSpace(artifact.FullPath))
+            return;
+
+        try
+        {
+            if (System.IO.File.Exists(artifact.FullPath))
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe")
+                {
+                    Arguments = $"/select,\"{artifact.FullPath}\"",
+                    UseShellExecute = true
+                });
+            }
+            else
+            {
+                var dir = System.IO.Path.GetDirectoryName(artifact.FullPath);
+                if (!string.IsNullOrEmpty(dir) && System.IO.Directory.Exists(dir))
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(dir)
+                    {
+                        UseShellExecute = true
+                    });
+            }
+        }
+        catch (Exception)
+        {
+            // Best-effort reveal; swallow shell errors so a missing/locked file
+            // never crashes the UI.
+        }
+    }
 
     [RelayCommand]
     private void NewConversation()

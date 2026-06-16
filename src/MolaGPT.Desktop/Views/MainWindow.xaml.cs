@@ -140,6 +140,23 @@ public partial class MainWindow : Window
         {
             ApplySidebarState(vm.SidebarCollapsed, animate: true);
         }
+        else if (e.PropertyName == nameof(MainViewModel.ArtifactPanelVisible)
+            && sender is MainViewModel vm2)
+        {
+            ApplyArtifactPanelState(vm2.ArtifactPanelVisible, animate: true);
+        }
+    }
+
+    /// <summary>Opens the file explorer with the clicked artifact selected. The
+    /// row's DataContext is the <see cref="ArtifactItemViewModel"/>.</summary>
+    private void ArtifactCard_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        if (sender is FrameworkElement fe && fe.DataContext is ViewModels.ArtifactItemViewModel artifact)
+        {
+            if (vm.RevealArtifactCommand.CanExecute(artifact))
+                vm.RevealArtifactCommand.Execute(artifact);
+        }
     }
 
     private void OnConversationListPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -187,8 +204,26 @@ public partial class MainWindow : Window
             && e.AddedItems[^1] is ConversationListItem clicked
             && clicked.Id != vm.ConversationList.SelectedId)
         {
+            // Paint the loading overlay BEFORE the (synchronous, UI-thread)
+            // load work begins. The VM flips IsConversationLoading inside
+            // LoadConversationAsync, but that binding update can't paint while
+            // the UI thread is busy building a huge FlowDocument — so we set it
+            // here and force one render pass so the overlay is actually visible
+            // before the freeze. Fast loads finish within a frame and the
+            // overlay's fade-in keeps the brief flash unobtrusive.
+            if (clicked.Id != vm.Chat.ConversationId)
+                ShowConversationLoadingOverlayNow(vm);
+
             vm.ConversationList.SelectById(clicked.Id);
         }
+    }
+
+    private void ShowConversationLoadingOverlayNow(MainViewModel vm)
+    {
+        vm.Chat.IsConversationLoading = true;
+        // Push the overlay through layout + render synchronously so it is on
+        // screen before the load freezes the UI thread.
+        Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
     }
 
     private void ClearConversationGroupSelection()
@@ -461,6 +496,48 @@ public partial class MainWindow : Window
                 RestoreMessagesViewportAfterSidebarAnimation();
             });
             AnimateElementOpacity(SidebarCard, 0, 1);
+        }
+    }
+
+    private const double ArtifactPanelWidth = 300;
+    private const double ArtifactPanelGapWidth = 16;
+
+    /// <summary>
+    /// Shows/hides the session artifact panel by toggling its grid column width
+    /// and fading the card. Simpler than the sidebar's slide because the panel
+    /// sits at the trailing edge and doesn't reflow the virtualized message list
+    /// horizontally in a way that needs viewport freezing.
+    /// </summary>
+    private void ApplyArtifactPanelState(bool visible, bool animate)
+    {
+        if (ArtifactColumn is null || ArtifactGapColumn is null || ArtifactCard is null) return;
+
+        ArtifactColumn.Width = new GridLength(visible ? ArtifactPanelWidth : 0);
+        ArtifactGapColumn.Width = new GridLength(visible ? ArtifactPanelGapWidth : 0);
+
+        if (!visible)
+        {
+            ArtifactCard.BeginAnimation(OpacityProperty, null);
+            ArtifactCard.Opacity = 0;
+            ArtifactCard.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        ArtifactCard.Visibility = Visibility.Visible;
+        if (animate)
+        {
+            // Set the base value to the animation's target FIRST: AnimateElementOpacity
+            // uses FillBehavior.Stop, so when the 0→1 animation ends it reverts to the
+            // base value. If the base were still 0 (set by a prior hide) the panel would
+            // flash in then vanish, leaving an empty column. Base=1 makes it stick.
+            ArtifactCard.BeginAnimation(OpacityProperty, null);
+            ArtifactCard.Opacity = 1;
+            AnimateElementOpacity(ArtifactCard, 0, 1);
+        }
+        else
+        {
+            ArtifactCard.BeginAnimation(OpacityProperty, null);
+            ArtifactCard.Opacity = 1;
         }
     }
 

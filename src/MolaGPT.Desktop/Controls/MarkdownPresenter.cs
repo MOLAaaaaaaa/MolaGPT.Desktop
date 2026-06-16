@@ -229,6 +229,19 @@ public sealed partial class MarkdownPresenter : ContentControl
     /// <summary>FastAst-path cache: per-AST-block source slices.</summary>
     private readonly List<string> _fastBlockSources = new();
 
+    // ---- Chunked (frame-spread) build state ----
+    // A single historical message can carry millions of chars; building all its
+    // FlowDocument blocks in one synchronous Flush froze the UI thread for
+    // seconds. When a non-streaming load produces many tail blocks we append
+    // them in small batches, yielding the dispatcher between batches so input
+    // and rendering stay responsive. The end result is byte-identical to the
+    // synchronous build — only the timing changes.
+    private int _chunkedBuildVersion;
+    // Above this many new tail blocks (on a non-streaming render) we spread the
+    // append across frames instead of doing it all at once.
+    private const int ChunkedBuildBlockThreshold = 40;
+    private const int ChunkedBuildBatchSize = 8;
+
     /// <summary>MixedUnits-path cache: one entry per markup unit.</summary>
     private sealed class CachedUnit
     {
@@ -698,11 +711,26 @@ public sealed partial class MarkdownPresenter : ContentControl
 
     private static void OnSourcesChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is MarkdownPresenter mp)
-        {
-            mp.ResetAll();
-            mp.OnSourceChanged(mp.Markdown);
-        }
+        if (d is not MarkdownPresenter mp)
+            return;
+
+        // Sources only affect the rendered output through ProcessCitationRefs,
+        // i.e. when the body actually contains <ref> tags. With no <ref> the
+        // new Sources can't change a single glyph, so the old unconditional
+        // ResetAll()+Flush() was a full re-parse + FlowDocument rebuild for
+        // nothing — and for a multi-MB message that's seconds of UI-thread
+        // freeze per load (every sourced message was rendered twice).
+        var body = mp.Markdown ?? string.Empty;
+        if (body.IndexOf("<ref", StringComparison.OrdinalIgnoreCase) < 0)
+            return;
+
+        // There are <ref>s: the link targets may have changed. Re-run the
+        // source pipeline WITHOUT ResetAll. Flush re-expands the citations and
+        // compares against _lastRenderedSource: if the expansion is identical
+        // it short-circuits entirely; if only the <ref> blocks changed,
+        // FlushFast's incremental block-diff rebuilds just those blocks instead
+        // of the whole multi-MB document.
+        mp.OnSourceChanged(body);
     }
 
     public void RefreshTheme()
@@ -850,6 +878,9 @@ public sealed partial class MarkdownPresenter : ContentControl
 
     private void ResetAll(bool preserveMarkdownImages = false)
     {
+        // Abandon any in-flight chunked build so its queued batches don't append
+        // stale blocks into the document we're about to clear.
+        CancelChunkedAppend();
         StopSelectionAutoScroll();
         ClearPendingClickHyperlink();
         preserveMarkdownImages |= _preserveMarkdownImagesDuringThemeRefresh;
@@ -1233,7 +1264,18 @@ public sealed partial class MarkdownPresenter : ContentControl
             _doc.Blocks.Remove(last);
         }
 
-        // Render and append the new tail blocks.
+        // Render and append the new tail blocks. When a non-streaming load
+        // produces a large tail, spread the append across dispatcher frames so
+        // the UI thread isn't frozen for seconds building one giant document.
+        int tailCount = newSources.Count - stableCount;
+        if (!IsStreaming && tailCount > ChunkedBuildBlockThreshold)
+        {
+            _fastBlockSources.Clear();
+            _fastBlockSources.AddRange(newSources);
+            BeginChunkedAppend(newSources, stableCount, pipeline);
+            return;
+        }
+
         for (int i = stableCount; i < newSources.Count; i++)
         {
             var slice = newSources[i];
@@ -1242,6 +1284,47 @@ public sealed partial class MarkdownPresenter : ContentControl
 
         _fastBlockSources.Clear();
         _fastBlockSources.AddRange(newSources);
+    }
+
+    /// <summary>
+    /// Append <paramref name="sources"/> from index <paramref name="startIndex"/>
+    /// onward in small batches, yielding the dispatcher between batches. Used for
+    /// large non-streaming (historical) renders so building the FlowDocument
+    /// doesn't freeze the UI thread. The visual result is identical to building
+    /// synchronously — only spread over a few frames. A version token guards
+    /// against a newer Flush/ResetAll superseding an in-flight build (recycled
+    /// container, theme refresh, etc).
+    /// </summary>
+    private void BeginChunkedAppend(List<string> sources, int startIndex, MarkdownPipeline pipeline)
+    {
+        int version = ++_chunkedBuildVersion;
+        AppendChunkBatch(sources, startIndex, pipeline, version);
+    }
+
+    private void AppendChunkBatch(List<string> sources, int index, MarkdownPipeline pipeline, int version)
+    {
+        // Superseded by a newer render (or ResetAll) — abandon silently.
+        if (version != _chunkedBuildVersion)
+            return;
+
+        int end = Math.Min(index + ChunkedBuildBatchSize, sources.Count);
+        for (int i = index; i < end; i++)
+            AppendMarkdownSlice(sources[i], pipeline, anchorAfter: null);
+
+        if (end < sources.Count)
+        {
+            // Background priority: lets pending input/layout/render run first,
+            // so each batch slots into idle time instead of blocking the frame.
+            Dispatcher.BeginInvoke(
+                DispatcherPriority.Background,
+                new Action(() => AppendChunkBatch(sources, end, pipeline, version)));
+        }
+    }
+
+    private void CancelChunkedAppend()
+    {
+        // Bump the version so any queued batch callback no-ops on next tick.
+        _chunkedBuildVersion++;
     }
 
     private static List<string> SliceAstBlockSources(MarkdownDocument ast, string src)

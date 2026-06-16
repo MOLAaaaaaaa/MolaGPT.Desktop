@@ -28,6 +28,8 @@
             <ColumnDefinition x:Name="SidebarColumn" Width="280" />
             <ColumnDefinition x:Name="GapColumn" Width="16" />
             <ColumnDefinition Width="*" />
+            <ColumnDefinition x:Name="ArtifactGapColumn" Width="0" />
+            <ColumnDefinition x:Name="ArtifactColumn" Width="0" />
         </Grid.ColumnDefinitions>
 
         <!-- ========================================================
@@ -435,6 +437,85 @@
                 </ScrollViewer>
 
                 </Grid>
+
+                <!-- Conversation-load indicator. A large conversation can take
+                     a few seconds to render its FlowDocument blocks; without
+                     this the window looks frozen on click. A centered pill with
+                     a spinning glyph shows progress while Chat.IsConversationLoading.
+                     No dimming backdrop (it caused a flash on fast loads); the
+                     pill's fade-in keeps brief appearances unobtrusive. Its
+                     first paint is forced synchronously before the load freeze
+                     (see MainWindow.ConversationListBox_SelectionChanged). -->
+                <Border VerticalAlignment="Center"
+                        HorizontalAlignment="Center"
+                        Panel.ZIndex="50"
+                        Background="{DynamicResource Brush.Bg.Elevated}"
+                        BorderBrush="{DynamicResource Brush.Border}"
+                        BorderThickness="1"
+                        CornerRadius="22"
+                        Padding="22,13"
+                        Visibility="{Binding Chat.IsConversationLoading, Converter={x:Static views:BoolToVisibility.Instance}}">
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="22" ShadowDepth="3" Direction="270" Opacity="0.24" Color="#000000" />
+                    </Border.Effect>
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="Opacity" Value="0" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Chat.IsConversationLoading}" Value="True">
+                                    <DataTrigger.EnterActions>
+                                        <BeginStoryboard>
+                                            <Storyboard>
+                                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                                 To="1" Duration="0:0:0.12" />
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </DataTrigger.EnterActions>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock x:Name="ConversationLoadingSpinner"
+                                   Text="&#xF16A;"
+                                   FontFamily="{DynamicResource Font.Icon}"
+                                   FontSize="18"
+                                   Foreground="{DynamicResource Brush.Primary.Hover}"
+                                   VerticalAlignment="Center"
+                                   RenderTransformOrigin="0.5,0.5"
+                                   Margin="0,0,11,0">
+                            <TextBlock.RenderTransform>
+                                <RotateTransform Angle="0" />
+                            </TextBlock.RenderTransform>
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding Chat.IsConversationLoading}" Value="True">
+                                            <DataTrigger.EnterActions>
+                                                <BeginStoryboard Name="SpinStory">
+                                                    <Storyboard>
+                                                        <DoubleAnimation
+                                                            Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                                            From="0" To="360" Duration="0:0:0.9"
+                                                            RepeatBehavior="Forever" />
+                                                    </Storyboard>
+                                                </BeginStoryboard>
+                                            </DataTrigger.EnterActions>
+                                            <DataTrigger.ExitActions>
+                                                <StopStoryboard BeginStoryboardName="SpinStory" />
+                                            </DataTrigger.ExitActions>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <TextBlock Text="加载对话中…"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource Brush.Text.Primary}"
+                                   VerticalAlignment="Center" />
+                    </StackPanel>
+                </Border>
 
                 <!-- Scroll-to-bottom affordance. Fades in when the user
                      scrolls away from the bottom (e.g. reading back while a
@@ -978,6 +1059,173 @@
                 <ContentControl x:Name="ImageWorkbenchHost"
                                 Margin="0,72,0,0"
                                 Visibility="{Binding IsImageWorkbenchVisible, Converter={x:Static views:BoolToVisibility.Instance}}" />
+            </Grid>
+        </Border>
+
+        <!-- Artifact drawer handle — a slim tab pinned to the right edge of the
+             chat area (the seam between chat and the artifact panel). Toggles the
+             panel; arrow flips with state. Hidden entirely in MolaGPT-account mode
+             and when the conversation has no local artifacts. -->
+        <Button x:Name="ArtifactDrawerHandle"
+                Grid.Column="2"
+                Panel.ZIndex="50"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Center"
+                Width="22" Height="64"
+                Margin="0,0,14,0"
+                Cursor="Hand"
+                BorderThickness="0"
+                Command="{Binding ToggleArtifactPanelCommand}"
+                ToolTip="产物面板"
+                Visibility="{Binding IsArtifactPanelAvailable, Converter={x:Static views:BoolToVisibility.Instance}}">
+            <Button.Template>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bg"
+                            Background="{DynamicResource Brush.Primary}"
+                            CornerRadius="8"
+                            Opacity="0.92">
+                        <Border.Effect>
+                            <DropShadowEffect Color="#000000" Opacity="0.25" BlurRadius="8" ShadowDepth="0" />
+                        </Border.Effect>
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bg" Property="Opacity" Value="1" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Button.Template>
+            <Grid>
+                <!-- Panel closed → arrow points left (pull out) -->
+                <TextBlock Text="&#xE76B;"
+                           FontFamily="{DynamicResource Font.Icon}"
+                           FontSize="12"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Foreground="White"
+                           Visibility="{Binding ArtifactPanelVisible, Converter={x:Static views:BoolToVisibilityInverse.Instance}}" />
+                <!-- Panel open → arrow points right (push back) -->
+                <TextBlock Text="&#xE76C;"
+                           FontFamily="{DynamicResource Font.Icon}"
+                           FontSize="12"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Foreground="White"
+                           Visibility="{Binding ArtifactPanelVisible, Converter={x:Static views:BoolToVisibility.Instance}}" />
+            </Grid>
+        </Button>
+
+        <!-- ========================================================
+             ARTIFACT PANEL — session-level files produced by the
+             python tool or uploaded by the user. Width is animated by
+             MainWindow.xaml.cs in response to ArtifactPanelVisible.
+             ======================================================== -->
+        <Border x:Name="ArtifactCard"
+                Grid.Column="4"
+                Background="{DynamicResource Brush.Bg.Primary}"
+                CornerRadius="{DynamicResource Radius.Xxl}"
+                BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                BorderThickness="1"
+                Visibility="Collapsed"
+                ClipToBounds="True">
+            <Grid Margin="14,14,12,14">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!-- Header -->
+                <Grid Grid.Row="0" Margin="2,0,2,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
+                               Text="产物"
+                               VerticalAlignment="Center"
+                               FontFamily="{DynamicResource Font.Cjk}"
+                               FontWeight="SemiBold"
+                               FontSize="{DynamicResource Font.Size.Heading}"
+                               Foreground="{DynamicResource Brush.Text.Primary}" />
+                    <Button Grid.Column="1"
+                            Style="{StaticResource HeaderIconButton}"
+                            Command="{Binding ToggleArtifactPanelCommand}"
+                            ToolTip="关闭产物面板"
+                            Content="&#xE8BB;" />
+                </Grid>
+
+                <!-- Empty state -->
+                <TextBlock Grid.Row="1"
+                           Text="暂无产物"
+                           Margin="2,8,2,0"
+                           VerticalAlignment="Top"
+                           FontFamily="{DynamicResource Font.Cjk}"
+                           FontSize="{DynamicResource Font.Size.Small}"
+                           Foreground="{DynamicResource Brush.Text.Muted}"
+                           Visibility="{Binding Chat.HasArtifacts, Converter={x:Static views:BoolToVisibilityInverse.Instance}}" />
+
+                <!-- Artifact list -->
+                <ScrollViewer Grid.Row="1"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              Visibility="{Binding Chat.HasArtifacts, Converter={x:Static views:BoolToVisibility.Instance}}">
+                    <ItemsControl ItemsSource="{Binding Chat.Artifacts}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Margin="0,0,0,8"
+                                        Padding="8"
+                                        Background="{DynamicResource Brush.Bg.Elevated}"
+                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                                        BorderThickness="1"
+                                        CornerRadius="{DynamicResource Radius.Md}"
+                                        Cursor="Hand"
+                                        ToolTip="{Binding ToolTip}"
+                                        MouseLeftButtonUp="ArtifactCard_Click">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="44" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <!-- Image thumbnail -->
+                                        <Border Grid.Column="0"
+                                                Width="40" Height="40"
+                                                CornerRadius="{DynamicResource Radius.Sm}"
+                                                ClipToBounds="True"
+                                                Visibility="{Binding IsImage, Converter={x:Static views:BoolToVisibility.Instance}}">
+                                            <Image Stretch="UniformToFill"
+                                                   Source="{Binding FullPath}" />
+                                        </Border>
+                                        <!-- Non-image type badge -->
+                                        <Border Grid.Column="0"
+                                                Width="40" Height="40"
+                                                CornerRadius="{DynamicResource Radius.Sm}"
+                                                Background="{DynamicResource Brush.Primary.Tint}"
+                                                Visibility="{Binding IsImage, Converter={x:Static views:BoolToVisibilityInverse.Instance}}">
+                                            <TextBlock Text="{Binding Extension}"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"
+                                                       FontSize="10"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource Brush.Primary}" />
+                                        </Border>
+                                        <StackPanel Grid.Column="1"
+                                                    Margin="8,0,0,0"
+                                                    VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding FileName}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       FontFamily="{DynamicResource Font.Cjk}"
+                                                       FontSize="{DynamicResource Font.Size.Small}"
+                                                       Foreground="{DynamicResource Brush.Text.Primary}" />
+                                            <TextBlock Text="{Binding SizeLabel}"
+                                                       Margin="0,2,0,0"
+                                                       FontSize="{DynamicResource Font.Size.XSmall}"
+                                                       Foreground="{DynamicResource Brush.Text.Muted}" />
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
             </Grid>
         </Border>
     </Grid>
