@@ -587,7 +587,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             assistantMsg.AppendDelta($"\n\n> ⚠️ {ex.Message}");
             try
             {
-                if (provider.Id == "molagpt-proxy" && _chat.ActiveProvider?.Id == provider.Id)
+                if (MolaGptProviderIds.IsMolaGptAccount(provider.Id) && _chat.ActiveProvider?.Id == provider.Id)
                 {
                     _chat.ActiveProvider = null;
                     _chat.ActiveModel = null;
@@ -1279,6 +1279,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 && string.Equals(tool.Name, ImageGenerationTool.ToolName, StringComparison.Ordinal))
             {
                 AttachGeneratedImages(assistantMsg, tool.ResultPreviewJson);
+                RememberGeneratedImageContext(assistantMsg);
             }
             if (string.Equals(tool.Status, "completed", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(tool.Name, PythonExecutionTool.ToolName, StringComparison.Ordinal))
@@ -1315,44 +1316,36 @@ public sealed partial class ComposerViewModel : ObservableObject
     {
         if (_attachmentStore is null || string.IsNullOrWhiteSpace(resultJson)) return;
 
+        // Collect image references robustly. The tool-result *preview* fed here can
+        // be truncated by the provider (~1600 chars) — which corrupts the JSON and
+        // drops the images[] tail when a long revised_prompt precedes it, so a plain
+        // JsonDocument.Parse silently yields nothing. We parse when intact (for
+        // file_name / mime_type) and always also raw-scan for local_name / image_path
+        // so the reference survives truncation.
+        var refs = ExtractGeneratedImageRefs(resultJson);
+        if (refs.Count == 0) return;
+
+        var existing = new HashSet<string>(
+            (assistantMsg.Attachments ?? Array.Empty<AttachmentChip>())
+                .Select(c => c.LocalName)
+                .Where(n => !string.IsNullOrEmpty(n))!,
+            StringComparer.Ordinal);
+
         List<AttachmentChip>? added = null;
-        try
+        foreach (var (localName, fileName, mime) in refs)
         {
-            using var doc = JsonDocument.Parse(resultJson);
-            var root = doc.RootElement;
-            if (root.ValueKind != JsonValueKind.Object) return;
-            if (!(root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True)) return;
-            if (!root.TryGetProperty("images", out var images) || images.ValueKind != JsonValueKind.Array) return;
+            if (string.IsNullOrEmpty(localName) || !existing.Add(localName)) continue;
 
-            var existing = new HashSet<string>(
-                (assistantMsg.Attachments ?? Array.Empty<AttachmentChip>())
-                    .Select(c => c.LocalName)
-                    .Where(n => !string.IsNullOrEmpty(n))!,
-                StringComparer.Ordinal);
+            var bytes = _attachmentStore.Load(localName);
+            if (bytes is not { Length: > 0 }) continue;
 
-            foreach (var img in images.EnumerateArray())
+            added ??= new List<AttachmentChip>();
+            added.Add(new AttachmentChip(fileName ?? localName, "图片")
             {
-                if (img.ValueKind != JsonValueKind.Object) continue;
-                var localName = ReadJsonString(img, "local_name");
-                if (string.IsNullOrEmpty(localName) || !existing.Add(localName!)) continue;
-
-                var bytes = _attachmentStore.Load(localName);
-                if (bytes is not { Length: > 0 }) continue;
-
-                added ??= new List<AttachmentChip>();
-                added.Add(new AttachmentChip(
-                    ReadJsonString(img, "file_name") ?? localName!,
-                    "图片")
-                {
-                    Bytes = bytes,
-                    LocalName = localName,
-                    MimeType = ReadJsonString(img, "mime_type") ?? "image/png"
-                });
-            }
-        }
-        catch (JsonException)
-        {
-            return;
+                Bytes = bytes,
+                LocalName = localName,
+                MimeType = mime ?? "image/png"
+            });
         }
 
         if (added is not { Count: > 0 }) return;
@@ -1360,6 +1353,68 @@ public sealed partial class ComposerViewModel : ObservableObject
         var merged = new List<AttachmentChip>(assistantMsg.Attachments ?? Array.Empty<AttachmentChip>());
         merged.AddRange(added);
         assistantMsg.Attachments = merged;
+    }
+
+    /// <summary>Pull generated-image references out of a (possibly truncated) tool
+    /// result. Tries a structured parse first for full metadata, then raw-scans for
+    /// <c>local_name</c> / <c>image_path</c> values so a truncated preview can't
+    /// hide the reference.</summary>
+    private static List<(string LocalName, string? FileName, string? Mime)> ExtractGeneratedImageRefs(string resultJson)
+    {
+        var refs = new List<(string, string?, string?)>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        try
+        {
+            using var doc = JsonDocument.Parse(resultJson);
+            var root = doc.RootElement;
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True
+                && root.TryGetProperty("images", out var images) && images.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var img in images.EnumerateArray())
+                {
+                    if (img.ValueKind != JsonValueKind.Object) continue;
+                    var localName = ReadJsonString(img, "local_name");
+                    if (string.IsNullOrEmpty(localName) || !seen.Add(localName!)) continue;
+                    refs.Add((localName!, ReadJsonString(img, "file_name"), ReadJsonString(img, "mime_type")));
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // Truncated/invalid preview — the raw scan below recovers the reference.
+        }
+
+        foreach (System.Text.RegularExpressions.Match m in GeneratedImageRefRegex().Matches(resultJson))
+        {
+            var localName = m.Groups["name"].Value;
+            if (string.IsNullOrEmpty(localName) || !seen.Add(localName)) continue;
+            refs.Add((localName, null, null));
+        }
+
+        return refs;
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex("\"(?:local_name|image_path)\"\\s*:\\s*\"(?<name>[^\"]+)\"")]
+    private static partial System.Text.RegularExpressions.Regex GeneratedImageRefRegex();
+
+
+    /// <summary>Register a markdown-link rewrite context for BYOK generate_image
+    /// results so an inline ![](generated-image-1.png) resolves to the real local
+    /// attachment file (mirrors the python-artifact link rewrite). Built from the
+    /// chips just attached by <see cref="AttachGeneratedImages"/>.</summary>
+    private void RememberGeneratedImageContext(MessageViewModel assistantMsg)
+    {
+        var context = PythonArtifactMarkdownRewriter.CreateAttachmentContext(assistantMsg.Attachments);
+        if (context is null) return;
+
+        if (!_pythonArtifactContexts.TryGetValue(assistantMsg, out var contexts))
+        {
+            contexts = new List<PythonArtifactMarkdownRewriter.ArtifactContext>();
+            _pythonArtifactContexts[assistantMsg] = contexts;
+        }
+        contexts.Add(context);
     }
 
     private void RememberPythonArtifactContext(MessageViewModel assistantMsg, string? resultJson)

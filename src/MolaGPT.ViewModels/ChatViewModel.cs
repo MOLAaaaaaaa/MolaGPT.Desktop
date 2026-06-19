@@ -75,6 +75,8 @@ public sealed partial class ChatViewModel : ObservableObject
     [ObservableProperty] private string _conversationTitle = "新对话";
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsBYOKActive))]
+    [NotifyPropertyChangedFor(nameof(CurrentMode))]
+    [NotifyPropertyChangedFor(nameof(ActiveModeLabel))]
     private IChatProvider? _activeProvider;
     [ObservableProperty] private ProviderModel? _activeModel;
     [ObservableProperty] private bool _isStreaming;
@@ -137,9 +139,25 @@ public sealed partial class ChatViewModel : ObservableObject
 
     /// <summary>True when persona-related surfaces should be shown. We treat
     /// "no provider yet" as BYOK because the welcome screen needs to surface
-    /// roles before the user has signed in to MolaGPT.</summary>
+    /// roles before the user has signed in to MolaGPT. Semantically this is
+    /// "local-agent mode" (BYOK or Work) — both run the agent loop locally with
+    /// the local-tools toolbar; only Chat (MolaGPT proxy) hides it.</summary>
     public bool IsBYOKActive =>
-        _personas is not null && (ActiveProvider is null || ActiveProvider.Kind != ProviderKind.MolaGptProxy);
+        _personas is not null && CurrentMode.IsLocalAgent();
+
+    /// <summary>Explicit three-way app mode (Byok / Chat / Work) derived from the
+    /// active provider. UI-layer truth source for the sidebar mode slider, quota
+    /// chip visibility, and per-mode labels. See <see cref="AppMode"/>.</summary>
+    public AppMode CurrentMode => ActiveProvider.ToAppMode();
+
+    /// <summary>Per-mode provider subtitle shown beside the model name in the
+    /// top-bar pill: "BYOK · 自带密钥" / "MolaGPT 账号" / "MolaGPT 共享额度".</summary>
+    public string ActiveModeLabel => CurrentMode switch
+    {
+        AppMode.Chat => "MolaGPT 账号",
+        AppMode.Work => "MolaGPT 额度",
+        _ => ActiveProvider is null ? "BYOK · 自带密钥" : $"{ActiveProvider.DisplayName} · BYOK",
+    };
 
     /// <summary>True iff <see cref="Messages"/> is empty; drives welcome screen visibility.</summary>
     public bool IsEmpty => Messages.Count == 0;
@@ -161,6 +179,7 @@ public sealed partial class ChatViewModel : ObservableObject
     private readonly MessageRepository? _messageRepo;
     private readonly ConversationRepository? _conversationRepo;
     private readonly PersonaListViewModel? _personas;
+    private readonly SettingsRepository? _settingsRepo;
     private int _messageLoadVersion;
 
     /// <summary>
@@ -184,11 +203,20 @@ public sealed partial class ChatViewModel : ObservableObject
         MessageRepository? messageRepo,
         ConversationRepository? conversationRepo,
         PersonaListViewModel? personas)
+        : this(providers, messageRepo, conversationRepo, personas, null) { }
+
+    public ChatViewModel(
+        ProviderRegistry providers,
+        MessageRepository? messageRepo,
+        ConversationRepository? conversationRepo,
+        PersonaListViewModel? personas,
+        SettingsRepository? settingsRepo)
     {
         _providers = providers;
         _messageRepo = messageRepo;
         _conversationRepo = conversationRepo;
         _personas = personas;
+        _settingsRepo = settingsRepo;
 
         Messages.CollectionChanged += (_, _) =>
         {
@@ -239,18 +267,104 @@ public sealed partial class ChatViewModel : ObservableObject
             return false;
 
         SetActive(resolved.Value.Provider, resolved.Value.Model);
+        RememberModeSelection(resolved.Value.Provider.ToAppMode(), providerId, modelId);
         return true;
     }
 
     public bool CanSwitchToProvider(IChatProvider provider)
     {
+        // Boundary is by capability, not wallet: a Chat (cloud) conversation can
+        // only continue with the proxy; a local-agent conversation (Work or BYOK)
+        // can continue with either local-tools or any BYOK provider.
         var family = GetCurrentConversationProviderFamily();
         return family switch
         {
-            ConversationProviderFamily.MolaGpt => provider.Kind == ProviderKind.MolaGptProxy,
-            ConversationProviderFamily.Byok => provider.Kind != ProviderKind.MolaGptProxy,
+            ConversationProviderFamily.Chat => provider.Kind == ProviderKind.MolaGptProxy,
+            ConversationProviderFamily.Agent => provider.Kind != ProviderKind.MolaGptProxy,
             _ => true
         };
+    }
+
+    // ===== Three-way mode slider (BYOK / Chat / Work) =====
+    // The slider is the UI truth source for AppMode. Switching modes routes to
+    // each mode's representative provider: Chat → molagpt-proxy, Work →
+    // molagpt-local-tools, BYOK → the user's last-chosen BYOK provider (or the
+    // first registered one). The active provider drives CurrentMode back, so the
+    // slider thumb always reflects reality. Per-mode (provider,model) memory
+    // persists via SettingsRepository.
+
+    private const string ModeLastProviderKeyPrefix = "mode_last_provider_";
+    private const string ModeLastModelKeyPrefix = "mode_last_model_";
+
+    /// <summary>Switch to the representative provider of the given mode. Returns
+    /// false (and surfaces a login request via <paramref name="needsLogin"/>) when
+    /// the target MolaGPT-account provider isn't registered (user not signed in).</summary>
+    public bool SwitchToMode(AppMode mode, out bool needsLogin)
+    {
+        needsLogin = false;
+        var (providerId, modelId) = ResolveModeTarget(mode, out needsLogin);
+        if (providerId is null || modelId is null) return false;
+
+        if (SetActiveByIds(providerId, modelId, ignoreConversationBoundary: true))
+        {
+            RememberModeSelection(mode, providerId, modelId);
+            return true;
+        }
+        return false;
+    }
+
+    private (string? ProviderId, string? ModelId) ResolveModeTarget(AppMode mode, out bool needsLogin)
+    {
+        needsLogin = false;
+        switch (mode)
+        {
+            case AppMode.Chat:
+            {
+                var p = _providers.GetById(MolaGptProviderIds.Proxy);
+                if (p is null) { needsLogin = true; return (null, null); }
+                return (p.Id, RecallModel(p) ?? p.Models.FirstOrDefault()?.Id);
+            }
+            case AppMode.Work:
+            {
+                // "MolaGPT Work" is the unified local-agent capability. Land on the
+                // agent provider the user last used (shared-quota Work or a BYOK
+                // provider); fall back to shared-quota Work, then the first BYOK.
+                var lastAgentId = _settingsRepo?.Get(ModeLastProviderKeyPrefix + "agent");
+                var provider = string.IsNullOrWhiteSpace(lastAgentId) ? null : _providers.GetById(lastAgentId!);
+                if (provider is null || provider.Kind == ProviderKind.MolaGptProxy)
+                    provider = _providers.GetById(MolaGptProviderIds.LocalTools)
+                               ?? _providers.Providers.FirstOrDefault(p => !p.Kind.IsMolaGptAccount());
+                if (provider is null) { needsLogin = true; return (null, null); }
+                return (provider.Id, RecallModel(provider) ?? provider.Models.FirstOrDefault()?.Id);
+            }
+            default:
+            {
+                // BYOK: last-chosen BYOK provider if still registered, else first BYOK.
+                var byok = _providers.Providers.Where(p => !p.Kind.IsMolaGptAccount()).ToList();
+                if (byok.Count == 0) return (null, null);
+                var lastId = _settingsRepo?.Get(ModeLastProviderKeyPrefix + "byok");
+                var chosen = byok.FirstOrDefault(p => p.Id == lastId) ?? byok[0];
+                return (chosen.Id, RecallModel(chosen) ?? chosen.Models.FirstOrDefault()?.Id);
+            }
+        }
+    }
+
+    private string? RecallModel(IChatProvider provider)
+    {
+        var key = ModeLastModelKeyPrefix + provider.Id;
+        var recalled = _settingsRepo?.Get(key);
+        return string.IsNullOrWhiteSpace(recalled) ? null : recalled;
+    }
+
+    private void RememberModeSelection(AppMode mode, string providerId, string modelId)
+    {
+        if (_settingsRepo is null) return;
+        _settingsRepo.Set(ModeLastProviderKeyPrefix + mode.ToString().ToLowerInvariant(), providerId);
+        _settingsRepo.Set(ModeLastModelKeyPrefix + providerId, modelId);
+        // The unified "MolaGPT Work" switcher button lands on whichever agent
+        // provider was last active — shared-quota Work or a BYOK provider.
+        if (mode.IsLocalAgent())
+            _settingsRepo.Set(ModeLastProviderKeyPrefix + "agent", providerId);
     }
 
     public void SaveConversationSystemPrompt(string? prompt)
@@ -311,6 +425,9 @@ public sealed partial class ChatViewModel : ObservableObject
         ConversationSystemPrompt = null;
         ActivePersonaId = ResolveDefaultPersonaId();
         SystemPromptMode = "override";
+        // New conversation has no working directory yet — clear artifacts
+        // and dismiss the panel so the previous conversation's files don't stick.
+        RefreshArtifacts();
     }
 
     private string? ResolveDefaultPersonaId() =>
@@ -465,9 +582,16 @@ public sealed partial class ChatViewModel : ObservableObject
 
             var visibleContent = split.Visible;
             if (row.Role == ChatMessage.RoleAssistant)
-                visibleContent = PythonArtifactMarkdownRewriter.Rewrite(
-                    visibleContent,
+            {
+                var rewriteContexts = new List<PythonArtifactMarkdownRewriter.ArtifactContext>(
                     PythonArtifactMarkdownRewriter.CreateContexts(toolCalls));
+                // Resolve inline BYOK generate_image links (![](generated-image-1.png))
+                // to the real local attachment file so they render and can be zoomed.
+                var imageContext = PythonArtifactMarkdownRewriter.CreateAttachmentContext(attachments);
+                if (imageContext is not null)
+                    rewriteContexts.Add(imageContext);
+                visibleContent = PythonArtifactMarkdownRewriter.Rewrite(visibleContent, rewriteContexts);
+            }
 
             prepared.Add(new PreparedMessage(
                 row.Id,
@@ -957,15 +1081,17 @@ public sealed partial class ChatViewModel : ObservableObject
     private static ConversationProviderFamily? GetProviderFamily(string? providerId)
     {
         if (string.IsNullOrWhiteSpace(providerId)) return null;
-        return string.Equals(providerId, "molagpt-proxy", StringComparison.OrdinalIgnoreCase)
-            ? ConversationProviderFamily.MolaGpt
-            : ConversationProviderFamily.Byok;
+        // Chat (proxy) is its own family; local-tools (Work) and BYOK share the
+        // local-agent family so a conversation can move freely between them.
+        return string.Equals(providerId, MolaGptProviderIds.Proxy, StringComparison.OrdinalIgnoreCase)
+            ? ConversationProviderFamily.Chat
+            : ConversationProviderFamily.Agent;
     }
 
     private enum ConversationProviderFamily
     {
-        MolaGpt,
-        Byok
+        Chat,
+        Agent
     }
 
     private void UpdateLatestAssistantFlags()

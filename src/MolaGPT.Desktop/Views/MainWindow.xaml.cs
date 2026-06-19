@@ -7,6 +7,8 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Media3D;
 using System.Windows.Threading;
+using System.Runtime.InteropServices;
+using System.Windows.Interop;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Models;
 using MolaGPT.ViewModels;
@@ -112,6 +114,66 @@ public partial class MainWindow : Window
     public bool IsImageWorkbenchGenerating =>
         ImageWorkbenchHost.Content is ImageGenerationWorkbenchWindow { IsGenerating: true };
 
+    // ===== Self-drawn window chrome (WindowChrome) caption buttons =====
+    private void MinimizeWindow_Click(object sender, RoutedEventArgs e) =>
+        SystemCommands.MinimizeWindow(this);
+
+    private void MaximizeRestoreWindow_Click(object sender, RoutedEventArgs e)
+    {
+        if (WindowState == WindowState.Maximized)
+            SystemCommands.RestoreWindow(this);
+        else
+            SystemCommands.MaximizeWindow(this);
+    }
+
+    // Close goes through Window.Close() so the existing closing logic (tray / confirm) still runs.
+    private void CloseWindow_Click(object sender, RoutedEventArgs e) => Close();
+
+    /// <summary>Keep the maximize/restore glyph in sync and inset the content when
+    /// maximized — a WindowChrome window's client area otherwise overhangs the work
+    /// area by the resize border, clipping the title bar and card edges.</summary>
+    private void MainWindow_StateChanged(object? sender, EventArgs e)
+    {
+        var maximized = WindowState == WindowState.Maximized;
+        if (RootBorder is not null)
+            RootBorder.Margin = maximized ? new Thickness(8) : new Thickness(0);
+        if (MaximizeRestoreGlyph is not null)
+            MaximizeRestoreGlyph.Text = maximized ? "" : "";
+        if (MaximizeRestoreButton is not null)
+            MaximizeRestoreButton.ToolTip = maximized ? "向下还原" : "最大化";
+    }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        TryEnableModernWindowFrame();
+    }
+
+    /// <summary>Win11: round the window corners, which also makes DWM draw the
+    /// system drop shadow — so the borderless WindowChrome window reads as a
+    /// floating card instead of a flat rectangle. Swallowed on Windows 10 / older
+    /// where the attribute is unknown (corners simply stay square).</summary>
+    private void TryEnableModernWindowFrame()
+    {
+        try
+        {
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd == IntPtr.Zero) return;
+            int round = DWMWCP_ROUND;
+            DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref round, sizeof(int));
+        }
+        catch
+        {
+            // Pre-Win11 or DWM unavailable — keep the plain square frame.
+        }
+    }
+
+    private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+    private const int DWMWCP_ROUND = 2;
+
+    [DllImport("dwmapi.dll", SetLastError = true)]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int pvAttribute, int cbAttribute);
+
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         if (e.OldValue is MainViewModel oldMainVm)
@@ -180,17 +242,14 @@ public partial class MainWindow : Window
         if (DataContext is not MainViewModel vm || sender is not ListBox listBox) return;
 
         // The sidebar is split into two parallel ListBoxes (BYOK / MolaGPT).
-        // Keep bulk selection within one source group. BYOK and MolaGPT
-        // conversations have different account/sync semantics, so crossing
-        // groups while Ctrl/Shift-selecting clears the previous group first.
+        // Keep bulk selection within one source group so own-key and account
+        // conversations do not get mixed during Ctrl/Shift selection.
         if (e.AddedItems.Count > 0)
             ClearOtherConversationGroupSelection(listBox);
 
         var ids = new List<string>();
-        if (ByokListBox is not null)
-            ids.AddRange(ByokListBox.SelectedItems.OfType<ConversationListItem>().Select(i => i.Id));
-        if (MolaGptListBox is not null)
-            ids.AddRange(MolaGptListBox.SelectedItems.OfType<ConversationListItem>().Select(i => i.Id));
+        foreach (var lb in ConversationGroupListBoxes())
+            ids.AddRange(lb.SelectedItems.OfType<ConversationListItem>().Select(i => i.Id));
         vm.ConversationList.SetSelectedIds(ids);
 
         // Drive the active conversation off e.AddedItems rather than the
@@ -226,17 +285,25 @@ public partial class MainWindow : Window
         Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
     }
 
+    /// <summary>All sidebar conversation group ListBoxes (BYOK / MolaGPT),
+    /// skipping any not yet realized. Single source of truth so selection sync
+    /// stays correct as groups are added.</summary>
+    private IEnumerable<ListBox> ConversationGroupListBoxes()
+    {
+        if (ByokListBox is not null) yield return ByokListBox;
+        if (MolaGptListBox is not null) yield return MolaGptListBox;
+    }
+
     private void ClearConversationGroupSelection()
     {
-        if ((ByokListBox?.SelectedItems.Count ?? 0) == 0
-            && (MolaGptListBox?.SelectedItems.Count ?? 0) == 0)
+        if (ConversationGroupListBoxes().All(lb => lb.SelectedItems.Count == 0))
             return;
 
         _clearingOtherConversationGroupSelection = true;
         try
         {
-            ByokListBox?.SelectedItems.Clear();
-            MolaGptListBox?.SelectedItems.Clear();
+            foreach (var lb in ConversationGroupListBoxes())
+                lb.SelectedItems.Clear();
         }
         finally
         {
@@ -252,9 +319,9 @@ public partial class MainWindow : Window
     {
         if (string.IsNullOrEmpty(id)) return;
 
-        var inByok = ConversationListContainsId(ByokListBox, id);
-        var inMola = ConversationListContainsId(MolaGptListBox, id);
-        if (!inByok && !inMola)
+        var owner = ConversationGroupListBoxes()
+            .FirstOrDefault(lb => ConversationListContainsId(lb, id));
+        if (owner is null)
         {
             if (!allowRetry) return;
             Dispatcher.InvokeAsync(
@@ -269,17 +336,10 @@ public partial class MainWindow : Window
         _clearingOtherConversationGroupSelection = true;
         try
         {
-            if (inByok)
+            foreach (var lb in ConversationGroupListBoxes())
             {
-                MolaGptListBox?.SelectedItems.Clear();
-                if (ByokListBox is not null)
-                    ByokListBox.SelectedValue = id;
-            }
-            else
-            {
-                ByokListBox?.SelectedItems.Clear();
-                if (MolaGptListBox is not null)
-                    MolaGptListBox.SelectedValue = id;
+                if (ReferenceEquals(lb, owner)) lb.SelectedValue = id;
+                else lb.SelectedItems.Clear();
             }
         }
         finally
@@ -301,20 +361,21 @@ public partial class MainWindow : Window
 
     private bool IsConversationSelectedInListBoxes(string id)
     {
-        if (ByokListBox?.SelectedValue is string byokId && byokId == id) return true;
-        if (MolaGptListBox?.SelectedValue is string molaId && molaId == id) return true;
+        foreach (var lb in ConversationGroupListBoxes())
+            if (lb.SelectedValue is string sel && sel == id) return true;
         return false;
     }
 
     private void ClearOtherConversationGroupSelection(ListBox activeList)
     {
-        var other = ReferenceEquals(activeList, ByokListBox) ? MolaGptListBox : ByokListBox;
-        if (other is null || other.SelectedItems.Count == 0) return;
-
         _clearingOtherConversationGroupSelection = true;
         try
         {
-            other.SelectedItems.Clear();
+            foreach (var lb in ConversationGroupListBoxes())
+            {
+                if (ReferenceEquals(lb, activeList)) continue;
+                if (lb.SelectedItems.Count > 0) lb.SelectedItems.Clear();
+            }
         }
         finally
         {
@@ -789,25 +850,32 @@ public partial class MainWindow : Window
         if (DataContext is not MainViewModel vm) return;
         var rows = new List<ModelSelectorRow>();
         var query = ModelSelectorSearchBox?.Text?.Trim() ?? string.Empty;
+        var currentMode = vm.Chat.CurrentMode;
 
         var providers = _providers.Providers
-            .Where(vm.Chat.CanSwitchToProvider)
-            .OrderBy(prov => prov.Kind == ProviderKind.MolaGptProxy ? 1 : 0)
+            .OrderBy(prov => prov.DisplayName, StringComparer.CurrentCultureIgnoreCase)
             .ToList();
 
-        foreach (var prov in providers)
+        // Top section = the current mode's whole "family": Chat alone, or both
+        // local-agent wallets (Work + BYOK) when in an agent mode. The active
+        // mode's group is listed first so the user's current pick stays on top.
+        var topModes = ModesInChatFamily(currentMode);
+        foreach (var mode in topModes)
+            AddModelSelectorModeSection(rows, providers.Where(p => p.ToAppMode() == mode), mode, query);
+
+        // Other section = the modes across the Chat boundary; picking one of these
+        // starts a new conversation.
+        var otherModes = new[] { AppMode.Chat, AppMode.Work, AppMode.Byok }
+            .Where(mode => !topModes.Contains(mode));
+        var otherRows = new List<ModelSelectorRow>();
+        foreach (var mode in otherModes)
+            AddModelSelectorModeSection(otherRows, providers.Where(p => p.ToAppMode() == mode), mode, query);
+
+        if (otherRows.Any(row => row.Model is not null))
         {
-            var providerMatches = MatchesModelSearch(query, prov.DisplayName, prov.Id);
-            var models = prov.Models
-                .Where(model => providerMatches || MatchesModelSearch(query, model.DisplayName, model.Id))
-                .ToList();
-            if (models.Count == 0)
-                continue;
-
-            rows.Add(ModelSelectorRow.ForHeader(prov.DisplayName));
-
-            foreach (var model in models)
-                rows.Add(ModelSelectorRow.ForModel(prov, model));
+            rows.Add(ModelSelectorRow.ForHeader("其他模式可用模型"));
+            rows.Add(ModelSelectorRow.ForHint("选择这些模型会切换到对应模式，并新建一个对话。"));
+            rows.AddRange(otherRows);
         }
 
         if (rows.Count == 0)
@@ -821,6 +889,50 @@ public partial class MainWindow : Window
         ModelSelectorItems.ItemsSource = rows;
     }
 
+    /// <summary>Modes on the same side of the Chat ↔ local-agent boundary as
+    /// <paramref name="currentMode"/>, ordered with the active mode first. Chat is
+    /// alone; Work and BYOK travel together (either can continue an agent chat).</summary>
+    private static IReadOnlyList<AppMode> ModesInChatFamily(AppMode currentMode) =>
+        currentMode == AppMode.Chat
+            ? new[] { AppMode.Chat }
+            : currentMode == AppMode.Work
+                ? new[] { AppMode.Work, AppMode.Byok }
+                : new[] { AppMode.Byok, AppMode.Work };
+
+    private static void AddModelSelectorModeSection(
+        ICollection<ModelSelectorRow> rows,
+        IEnumerable<IChatProvider> providers,
+        AppMode mode,
+        string query)
+    {
+        var addedHeader = false;
+        foreach (var prov in providers)
+        {
+            var providerMatches = MatchesModelSearch(query, prov.DisplayName, prov.Id);
+            var models = prov.Models
+                .Where(model => providerMatches || MatchesModelSearch(query, model.DisplayName, model.Id))
+                .ToList();
+            if (models.Count == 0)
+                continue;
+
+            if (!addedHeader)
+            {
+                rows.Add(ModelSelectorRow.ForHeader($"{ModeLabel(mode)} 模型"));
+                addedHeader = true;
+            }
+
+            foreach (var model in models)
+                rows.Add(ModelSelectorRow.ForModel(prov, model));
+        }
+    }
+
+    private static string ModeLabel(AppMode mode) => mode switch
+    {
+        AppMode.Chat => "MolaGPT Chat",
+        AppMode.Work => "MolaGPT 账号",
+        _ => "自定义 API"
+    };
+
     private void ModelSelectorRow_Click(object sender, RoutedEventArgs e)
     {
         if (DataContext is not MainViewModel vm
@@ -831,7 +943,16 @@ public partial class MainWindow : Window
             return;
         }
 
-        vm.Chat.SetActiveByIds(row.Provider.Id, row.Model.Id);
+        // Only crossing the Chat ↔ local-agent boundary needs a new conversation;
+        // Work ↔ BYOK share the local agent thread and continue the current one.
+        if (vm.Chat.CurrentMode.CrossesChatBoundary(row.Provider.ToAppMode()))
+        {
+            vm.ConversationList.ClearSelection();
+            vm.IsImageWorkbenchVisible = false;
+            vm.Chat.StartDraftConversation();
+        }
+
+        vm.Chat.SetActiveByIds(row.Provider.Id, row.Model.Id, ignoreConversationBoundary: true);
         ModelSelectorPopup.IsOpen = false;
     }
 
@@ -981,29 +1102,34 @@ public sealed class ModelSelectorRow
 {
     private ModelSelectorRow(
         string? headerText,
+        string? hintText,
         string? emptyText,
         IChatProvider? provider,
         ProviderModel? model)
     {
         HeaderText = headerText;
+        HintText = hintText;
         EmptyText = emptyText;
         Provider = provider;
         Model = model;
     }
 
     public string? HeaderText { get; }
+    public string? HintText { get; }
     public string? EmptyText { get; }
     public IChatProvider? Provider { get; }
     public ProviderModel? Model { get; }
     public string? ModelName => Model?.DisplayName;
     public Visibility HeaderVisibility => HeaderText is null ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility HintVisibility => HintText is null ? Visibility.Collapsed : Visibility.Visible;
     public Visibility EmptyVisibility => EmptyText is null ? Visibility.Collapsed : Visibility.Visible;
     public Visibility ModelVisibility => Model is null ? Visibility.Collapsed : Visibility.Visible;
     public Visibility ThinkingVisibility => Model?.SupportsThinking == true ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ToolsVisibility => Model?.SupportsToolCalling == true ? Visibility.Visible : Visibility.Collapsed;
     public Visibility VisionVisibility => Model?.SupportsVision == true ? Visibility.Visible : Visibility.Collapsed;
 
-    public static ModelSelectorRow ForHeader(string text) => new(text, null, null, null);
-    public static ModelSelectorRow ForEmpty(string text) => new(null, text, null, null);
-    public static ModelSelectorRow ForModel(IChatProvider provider, ProviderModel model) => new(null, null, provider, model);
+    public static ModelSelectorRow ForHeader(string text) => new(text, null, null, null, null);
+    public static ModelSelectorRow ForHint(string text) => new(null, text, null, null, null);
+    public static ModelSelectorRow ForEmpty(string text) => new(null, null, text, null, null);
+    public static ModelSelectorRow ForModel(IChatProvider provider, ProviderModel model) => new(null, null, null, provider, model);
 }

@@ -2,6 +2,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media.Imaging;
 using Microsoft.Win32;
 using MolaGPT.Core.Models;
 using MolaGPT.ViewModels;
@@ -17,9 +18,18 @@ public partial class ComposerView : UserControl
     /// </summary>
     private void InputBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        var ctrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
+
+        // Ctrl+V: queue clipboard images / files as attachments. Plain text still
+        // pastes normally (TryPasteAttachments leaves e.Handled false for text).
+        if (ctrl && e.Key == Key.V && DataContext is ComposerViewModel pasteVm)
+        {
+            TryPasteAttachments(pasteVm, e);
+            return;
+        }
+
         if (e.Key != Key.Enter) return;
 
-        var ctrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
         var shift = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
 
         if (DataContext is not ComposerViewModel vm) return;
@@ -66,56 +76,153 @@ public partial class ComposerView : UserControl
         if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
 
         foreach (var path in dlg.FileNames)
+            AddFileFromPath(vm, path);
+    }
+
+    /// <summary>
+    /// Read one file from disk and queue it as an attachment, applying the same
+    /// per-kind support checks as the file picker. Shared by the attach button
+    /// and clipboard paste (file-drop-list) paths. Bad files surface a dialog
+    /// and are skipped; the caller keeps going with the rest.
+    /// </summary>
+    private void AddFileFromPath(ComposerViewModel vm, string path)
+    {
+        try
         {
-            try
-            {
-                var bytes = File.ReadAllBytes(path);
-                var ext = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
-                var (mime, kind) = GuessKind(ext);
-                if (kind == AttachmentKind.Image && !vm.CanAcceptImageAttachments)
-                {
-                    MessageBox.Show(
-                        Window.GetWindow(this),
-                        "当前模型不支持图片识别。请在模型配置中开启“视觉”，或切换到支持多模态的模型。",
-                        "模型不支持图片",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Information);
-                    continue;
-                }
-                if (kind == AttachmentKind.File && !vm.CanProcessNonTextFiles)
-                {
-                    // BYOK without the Python tool: text-like files can still be
-                    // inlined, but binary/needs-processing files have nowhere to go.
-                    var isTextLike = MolaGPT.Core.Chat.OpenAiMessageContentBuilder
-                        .IsTextLike(mime, Path.GetFileName(path));
-                    if (!isTextLike)
-                    {
-                        MessageBox.Show(
-                            Window.GetWindow(this),
-                            "该文件需要开启「Python 代码执行」工具才能处理。请在设置中开启 Python 工具，" +
-                            "或登录 MolaGPT 账号使用沙箱上传。文本类文件（txt/md/html/代码等）可直接上传。",
-                            "需要 Python 工具",
-                            MessageBoxButton.OK,
-                            MessageBoxImage.Information);
-                        continue;
-                    }
-                }
-                vm.Attachments.Add(new Attachment(
-                    Kind: kind,
-                    MimeType: mime,
-                    Bytes: bytes,
-                    FileName: Path.GetFileName(path)));
-            }
-            catch (Exception ex)
+            var bytes = File.ReadAllBytes(path);
+            var ext = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
+            var (mime, kind) = GuessKind(ext);
+            if (kind == AttachmentKind.Image && !vm.CanAcceptImageAttachments)
             {
                 MessageBox.Show(
                     Window.GetWindow(this),
-                    $"无法读取 {path}：{ex.Message}",
-                    "附件错误",
+                    "当前模型不支持图片识别。请在模型配置中开启“视觉”，或切换到支持多模态的模型。",
+                    "模型不支持图片",
                     MessageBoxButton.OK,
-                    MessageBoxImage.Warning);
+                    MessageBoxImage.Information);
+                return;
             }
+            if (kind == AttachmentKind.File && !vm.CanProcessNonTextFiles)
+            {
+                // BYOK without the Python tool: text-like files can still be
+                // inlined, but binary/needs-processing files have nowhere to go.
+                var isTextLike = MolaGPT.Core.Chat.OpenAiMessageContentBuilder
+                    .IsTextLike(mime, Path.GetFileName(path));
+                if (!isTextLike)
+                {
+                    MessageBox.Show(
+                        Window.GetWindow(this),
+                        "该文件需要开启「Python 代码执行」工具才能处理。请在设置中开启 Python 工具，" +
+                        "或登录 MolaGPT 账号使用沙箱上传。文本类文件（txt/md/html/代码等）可直接上传。",
+                        "需要 Python 工具",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                    return;
+                }
+            }
+            vm.Attachments.Add(new Attachment(
+                Kind: kind,
+                MimeType: mime,
+                Bytes: bytes,
+                FileName: Path.GetFileName(path)));
         }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                Window.GetWindow(this),
+                $"无法读取 {path}：{ex.Message}",
+                "附件错误",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+    }
+
+    /// <summary>
+    /// Ctrl+V handler: queue clipboard files (copied in Explorer) or a bitmap
+    /// image (screenshot / copied image) as attachments and suppress the plain-
+    /// text paste. Plain text leaves <paramref name="e"/> unhandled so the
+    /// TextBox pastes it normally. Clipboard access is wrapped because it can be
+    /// transiently locked by another process.
+    /// </summary>
+    private void TryPasteAttachments(ComposerViewModel vm, KeyEventArgs e)
+    {
+        try
+        {
+            if (Clipboard.ContainsFileDropList())
+            {
+                var added = false;
+                foreach (string? path in Clipboard.GetFileDropList())
+                {
+                    if (string.IsNullOrEmpty(path) || !File.Exists(path)) continue;
+                    AddFileFromPath(vm, path!);
+                    added = true;
+                }
+                if (added)
+                {
+                    e.Handled = true;
+                    return;
+                }
+            }
+
+            if (Clipboard.ContainsImage())
+            {
+                var png = TryGetClipboardImagePng();
+                if (png is { Length: > 0 })
+                {
+                    AddPastedImage(vm, png);
+                    e.Handled = true;
+                }
+            }
+            // Otherwise: plain text / unsupported format → fall through to the
+            // TextBox's own paste.
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Paste-as-attachment failed: {ex.Message}");
+        }
+    }
+
+    private void AddPastedImage(ComposerViewModel vm, byte[] pngBytes)
+    {
+        if (!vm.CanAcceptImageAttachments)
+        {
+            MessageBox.Show(
+                Window.GetWindow(this),
+                "当前模型不支持图片识别。请在模型配置中开启“视觉”，或切换到支持多模态的模型。",
+                "模型不支持图片",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+        vm.Attachments.Add(new Attachment(
+            Kind: AttachmentKind.Image,
+            MimeType: "image/png",
+            Bytes: pngBytes,
+            FileName: $"粘贴图片_{DateTime.Now:HHmmss}.png"));
+    }
+
+    /// <summary>Extract the clipboard image as PNG bytes. Prefers a real "PNG"
+    /// payload when the source app provides one (preserves alpha); otherwise
+    /// encodes the bitmap from <see cref="Clipboard.GetImage"/>.</summary>
+    private static byte[]? TryGetClipboardImagePng()
+    {
+        try
+        {
+            if (Clipboard.ContainsData("PNG") && Clipboard.GetData("PNG") is MemoryStream pngStream)
+                return pngStream.ToArray();
+        }
+        catch
+        {
+            // Fall back to encoding the bitmap below.
+        }
+
+        var source = Clipboard.GetImage();
+        if (source is null) return null;
+        using var ms = new MemoryStream();
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(source));
+        encoder.Save(ms);
+        return ms.ToArray();
     }
 
     /// <summary>

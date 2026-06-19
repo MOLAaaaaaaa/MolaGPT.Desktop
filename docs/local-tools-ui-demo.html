@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MolaGPT Chat / Work · WPF 还原 Demo</title>
+<style>
+  /* ===== tokens ported from Themes/Tokens.Light.xaml & Tokens.Dark.xaml ===== */
+  :root{
+    --primary:#BE727F; --primary-hover:#A05A66; --primary-active:#8E4F5A;
+    --primary-soft:rgba(190,114,127,.10); --primary-tint:rgba(190,114,127,.08);
+    --primary-blockquote:rgba(190,114,127,.05); --primary-border:rgba(190,114,127,.22);
+    --bg-canvas:#F2F4F7; --bg-primary:#FFFFFF; --bg-secondary:#F8F9FA; --bg-tertiary:#F1F3F5; --bg-elevated:#FFFFFF;
+    --hover-overlay:rgba(0,0,0,.05);
+    --text-primary:#212529; --text-secondary:#6C757D; --text-muted:#8B95A2; --text-onprimary:#fff;
+    --border:#DEE2E6; --border-strong:#CBD2DB; --border-subtle:rgba(0,0,0,.03); --divider:#EEF1F4;
+    --success:#2E7D32; --warning:#F57C00; --error:#C62828; --info:#1976D2;
+    --shadow-card:0 1px 2px rgba(0,0,0,.04); --shadow-modal:0 10px 48px rgba(0,0,0,.28);
+    --r-2xs:4px; --r-sm:6px; --r-md:10px; --r-lg:16px; --r-xl:20px; --r-xxl:24px;
+    --font-ui:"Segoe UI Variable","Segoe UI","Microsoft YaHei UI","Microsoft YaHei","Helvetica Neue",Arial,sans-serif;
+    --font-cjk:"Microsoft YaHei UI","Microsoft YaHei","Segoe UI Variable","Segoe UI",sans-serif;
+    --font-mono:"Cascadia Code",Consolas,"Liberation Mono",Menlo,monospace;
+    --font-icon:"Segoe Fluent Icons","Segoe MDL2 Assets";
+    --fs-xs:11px; --fs-sm:12px; --fs-body:14px; --fs-bodylg:15px; --fs-heading:18px;
+  }
+  [data-theme="dark"]{
+    --primary:#BE727F; --primary-hover:#E1A3AF; --primary-active:#A05A66;
+    --primary-soft:rgba(207,137,150,.18); --primary-tint:rgba(190,114,127,.14);
+    --primary-blockquote:rgba(190,114,127,.10); --primary-border:rgba(190,114,127,.32);
+    --bg-canvas:#000; --bg-primary:#1A1A1A; --bg-secondary:#2D2D2D; --bg-tertiary:#3A3A3A; --bg-elevated:#1A1A1A;
+    --hover-overlay:rgba(255,255,255,.08);
+    --text-primary:#E0E0E0; --text-secondary:#A0A0A0; --text-muted:#777; --text-onprimary:#fff;
+    --border:#404040; --border-strong:rgba(255,255,255,.10); --border-subtle:rgba(255,255,255,.08); --divider:#333;
+    --success:#4CAF50; --warning:#FFB74D; --error:#F44336; --info:#64B5F6;
+    --shadow-card:0 1px 2px rgba(0,0,0,.35); --shadow-modal:0 10px 48px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:#c9ccd1;font-family:var(--font-ui);color:var(--text-primary);font-size:var(--fs-body);
+    display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px;-webkit-font-smoothing:antialiased}
+  [data-theme="dark"] body{background:#0c0c0c}
+  .g{font-family:var(--font-icon);font-style:normal;line-height:1;display:inline-block}
+
+  /* mode-gated visibility */
+  [data-mode="chat"] .only-work{display:none !important}
+  [data-mode="work"] .only-chat{display:none !important}
+
+  /* demo-only bar */
+  .demobar{display:flex;align-items:center;gap:6px;background:#1f1f1f;color:#ddd;border-radius:10px;padding:6px;font-size:12px;box-shadow:0 2px 10px rgba(0,0,0,.3)}
+  .demobar .lbl{color:#888;padding:0 8px;font-size:11px}
+  .demobar button{appearance:none;border:none;background:transparent;color:#cfcfcf;font-family:inherit;font-size:12px;padding:6px 12px;border-radius:7px;cursor:pointer}
+  .demobar button:hover{background:#333}
+  .demobar button.on{background:var(--primary);color:#fff}
+  .demobar .sep{width:1px;height:20px;background:#3a3a3a;margin:0 2px}
+
+  /* window */
+  .win{width:1160px;max-width:100%;height:760px;background:var(--bg-canvas);border-radius:10px;overflow:hidden;
+    box-shadow:0 24px 70px rgba(0,0,0,.4);display:flex;flex-direction:column;position:relative;border:1px solid rgba(0,0,0,.15)}
+  [data-theme="dark"] .win{border-color:#000}
+  .titlebar{height:40px;flex:none;display:flex;align-items:center;padding:0 6px 0 14px;background:var(--bg-elevated);border-bottom:1px solid var(--divider)}
+  .titlebar .app{display:flex;align-items:center;gap:9px;font-size:12.5px;font-weight:600;color:var(--text-secondary)}
+  .titlebar .app .m{width:20px;height:20px;border-radius:5px;background:var(--primary);color:#fff;display:grid;place-items:center;font-weight:800;font-size:12px}
+  .titlebar .sp{flex:1}
+  .cap{width:44px;height:40px;display:grid;place-items:center;color:var(--text-secondary);font-size:10px}
+  .cap:hover{background:var(--hover-overlay)} .cap.x:hover{background:#e81123;color:#fff}
+  .canvas{flex:1;display:flex;gap:12px;padding:12px;min-height:0}
+  .card{background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:var(--r-xl);box-shadow:var(--shadow-card)}
+
+  /* ===== sidebar ===== */
+  .sidebar{width:272px;flex:none;display:flex;flex-direction:column;padding:12px;gap:10px}
+  /* mode slider */
+  .modeslider{position:relative;display:flex;background:var(--bg-tertiary);border:1px solid var(--border-subtle);border-radius:var(--r-md);padding:3px;height:40px}
+  .modeslider .thumb{position:absolute;top:3px;left:3px;width:calc(50% - 3px);height:calc(100% - 6px);background:var(--bg-elevated);
+    border:1px solid var(--border-subtle);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.10);transition:transform .22s cubic-bezier(.4,0,.2,1)}
+  .win[data-mode="work"] .modeslider .thumb{transform:translateX(100%)}
+  .modeslider button{position:relative;z-index:1;flex:1;border:none;background:transparent;cursor:pointer;font-family:var(--font-ui);
+    font-size:12.5px;font-weight:600;color:var(--text-muted);display:flex;align-items:center;justify-content:center;gap:6px}
+  .win[data-mode="chat"] .modeslider button[data-mode="chat"]{color:var(--primary)}
+  .win[data-mode="work"] .modeslider button[data-mode="work"]{color:var(--primary)}
+  .modeslider .g{font-size:13px}
+  .synced-note{font-size:11px;color:var(--text-muted);padding:0 4px;display:flex;align-items:center;gap:6px;line-height:1.3}
+  .synced-note .dot{width:6px;height:6px;border-radius:50%;flex:none}
+  .synced-note.chat .dot{background:var(--success)} .synced-note.work .dot{background:var(--warning)}
+
+  .newchat{background:var(--primary);color:#fff;border:none;border-radius:var(--r-md);height:38px;cursor:pointer;
+    font-family:var(--font-ui);font-size:var(--fs-body);font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px}
+  .newchat:hover{background:var(--primary-hover)}
+  .search{display:flex;align-items:center;gap:8px;background:var(--bg-tertiary);border:1px solid var(--border-subtle);border-radius:var(--r-sm);padding:8px 10px;color:var(--text-muted);font-size:var(--fs-body)}
+  .convlist{display:flex;flex-direction:column;gap:2px;margin-top:2px;overflow:auto;flex:1}
+  .conv{padding:8px 12px;border-radius:var(--r-sm);font-size:13.5px;color:var(--text-primary);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .conv:hover{background:var(--hover-overlay)}
+  .conv.sel{background:var(--primary-soft);color:var(--primary-hover);font-weight:500}
+  .acctrow{display:flex;align-items:center;gap:10px;padding:8px;border-radius:var(--r-md);cursor:pointer;margin-top:auto}
+  .acctrow:hover{background:var(--hover-overlay)}
+  .avatar{width:32px;height:32px;border-radius:50%;background:var(--primary);color:#fff;display:grid;place-items:center;font-weight:700;font-size:13px;flex:none}
+  .acctrow .nm{font-size:13px;font-weight:600;line-height:1.2} .acctrow .em{font-size:11px;color:var(--text-muted)}
+
+  /* ===== main ===== */
+  .main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+  .topbar{height:56px;flex:none;display:flex;align-items:center;gap:10px;padding:0 14px;border-bottom:1px solid var(--divider)}
+  .iconbtn{width:36px;height:36px;border-radius:var(--r-sm);border:none;background:transparent;color:var(--text-secondary);display:grid;place-items:center;cursor:pointer;font-size:16px}
+  .iconbtn:hover{background:var(--hover-overlay);color:var(--text-primary)}
+  .modelpill{display:inline-flex;align-items:center;background:transparent;border:1px solid var(--border);border-radius:var(--r-sm);padding:6px 14px;cursor:pointer;color:var(--text-primary);margin-left:6px}
+  .modelpill:hover{background:var(--hover-overlay)}
+  .modelpill .mi{font-size:14px;margin-right:8px}
+  .modelpill .nm{font-size:var(--fs-body);font-weight:600}
+  .modelpill .prov{font-size:var(--fs-xs);color:var(--text-muted);margin-left:8px}
+  .modelpill .chev{font-size:10px;margin-left:8px;opacity:.6}
+  .topbar .sp{flex:1}
+  .chip-status{display:inline-flex;align-items:center;gap:7px;border-radius:var(--r-sm);padding:5px 9px;font-size:var(--fs-xs);font-weight:600;margin-right:6px}
+  .chip-status .dot{width:7px;height:7px;border-radius:50%}
+  .chip-quota{background:var(--primary-tint);border:1px solid var(--primary-border);color:var(--primary)}
+  .chip-quota .dot{background:var(--primary)}
+  .chip-sync{background:var(--bg-tertiary);border:1px solid var(--border-subtle);color:var(--text-secondary)}
+  .chip-sync .dot{background:var(--success)}
+  .chip-local{background:var(--bg-tertiary);border:1px solid var(--border-subtle);color:var(--text-muted)}
+  .chip-local .dot{background:var(--warning)}
+
+  .thread{flex:1;overflow:auto;padding:24px 0}
+  .turn{max-width:760px;margin:0 auto;padding:0 28px}
+  .userrow{display:flex;justify-content:flex-end;margin:6px 0 22px}
+  .userbubble{background:var(--primary-tint);border:1px solid var(--primary-border);border-radius:10px 0 10px 10px;padding:14px;max-width:640px;font-size:var(--fs-body);line-height:1.55;color:var(--text-primary)}
+  .asst{display:grid;grid-template-columns:32px 1fr;column-gap:10px;row-gap:8px}
+  .asst .ava{width:32px;height:32px;border-radius:var(--r-sm);background:var(--bg-tertiary);border:1px solid var(--border-subtle);display:grid;place-items:center;color:var(--text-primary);font-size:14px}
+  .asst .mlabel{align-self:center;font-size:13px;font-weight:500;color:var(--text-secondary)}
+  .asst .content{grid-column:1 / span 2}
+
+  .think{display:flex;background:var(--primary-blockquote);border-radius:var(--r-sm);overflow:hidden;margin-bottom:8px}
+  .think .stripe{width:4px;background:var(--primary);flex:none;border-radius:2px 0 0 2px}
+  .think .inner{flex:1}
+  .think .thead{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;min-height:34px}
+  .think .sdot{width:8px;height:8px;border-radius:50%;background:var(--success)}
+  .think .stext{font-size:var(--fs-sm);font-weight:500;color:var(--text-secondary)}
+  .think .tchev{margin-left:auto;font-size:10px;color:var(--text-muted)}
+  .think .tbody{background:var(--bg-secondary);padding:10px 14px 12px;border-radius:0 0 6px 0;font-size:13px;color:var(--text-secondary);line-height:1.6}
+
+  .tool{background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--r-md);padding:14px 16px;margin:8px 0;max-width:720px}
+  .tool .thead{display:grid;grid-template-columns:32px 10px 1fr auto auto auto;align-items:center}
+  .tool .ticon{width:32px;height:32px;border-radius:var(--r-sm);background:var(--primary-tint);color:var(--primary);display:grid;place-items:center;font-size:14px;align-self:start}
+  .tool .tmeta{grid-column:3}
+  .tool .tlabel{font-size:var(--fs-body);font-weight:600;color:var(--text-primary)}
+  .tool .targ{font-family:var(--font-mono);font-size:11.5px;color:var(--text-secondary);margin-left:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px;display:inline-block;vertical-align:bottom}
+  .tool .status{display:inline-flex;align-items:center;gap:5px;background:var(--bg-tertiary);border-radius:var(--r-sm);padding:3px 8px}
+  .tool .status .sd{width:6px;height:6px;border-radius:50%;background:var(--primary)}
+  .tool .status.done .sd{background:var(--success)}
+  .tool .status .st{font-size:var(--fs-xs);color:var(--text-secondary)}
+  .tool .tact{width:28px;height:28px;border:none;background:transparent;color:var(--text-secondary);cursor:pointer;border-radius:6px;font-size:13px;margin-left:6px}
+  .tool .tact:hover{background:var(--bg-tertiary);color:var(--text-primary)}
+  .tool .tchevbtn{width:28px;height:28px;border:none;background:transparent;color:var(--text-muted);cursor:pointer;font-size:11px}
+  .tool .tbody{margin-top:12px;border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden;background:var(--bg-secondary)}
+  .tool .tbody .bar{display:flex;align-items:center;justify-content:space-between;background:var(--bg-tertiary);padding:6px 10px}
+  .tool .tbody .bar .lang{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-muted)}
+  .tool .tbody pre{margin:0;padding:8px 10px;font-family:var(--font-mono);font-size:12px;color:var(--text-primary);white-space:pre-wrap;line-height:1.5}
+  .answer{font-size:var(--fs-body);line-height:1.65;color:var(--text-primary);margin-top:10px}
+  .answer p{margin:0 0 10px}
+  .answer code{font-family:var(--font-mono);font-size:12.5px;background:var(--bg-tertiary);border:1px solid var(--border-subtle);padding:1px 5px;border-radius:4px}
+  .src{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text-secondary);background:var(--bg-tertiary);border:1px solid var(--border-subtle);border-radius:var(--r-sm);padding:3px 8px;margin:0 4px 4px 0}
+
+  /* composer */
+  .composer{flex:none;padding:0 14px 14px}
+  .compcard{background:var(--bg-elevated);border:1.5px solid var(--border-strong);border-radius:var(--r-xl);padding:10px 14px;max-width:900px;margin:0 auto}
+  .toolbar{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-bottom:4px}
+  .chip{height:30px;display:inline-flex;align-items:center;gap:6px;padding:0 10px;border:1px solid transparent;border-radius:10px;background:transparent;color:var(--text-secondary);font-family:var(--font-cjk);font-size:var(--fs-sm);font-weight:500;cursor:pointer}
+  .chip:hover{background:var(--hover-overlay);color:var(--text-primary)}
+  .chip.on{background:var(--primary-tint);border-color:var(--primary-border);color:var(--primary-hover)}
+  .chip .gi{font-size:12px}
+  .compinput{font-family:var(--font-cjk);font-size:var(--fs-bodylg);color:var(--text-muted);padding:6px 6px 10px;min-height:30px}
+  .actionbar{display:flex;align-items:center;margin-top:6px}
+  .actionbar .hint{flex:1;font-size:var(--fs-xs);color:var(--text-muted)}
+  .send{width:32px;height:32px;border-radius:var(--r-sm);border:none;background:var(--primary);color:#fff;cursor:pointer;display:grid;place-items:center;font-size:14px}
+  .send:hover{background:var(--primary-hover)}
+
+  /* ===== overlays ===== */
+  .overlay{position:absolute;inset:0;display:none} .overlay.show{display:block}
+  .popup{position:absolute;top:96px;left:300px;background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:var(--r-md);padding:6px;min-width:360px;max-height:480px;box-shadow:var(--shadow-modal);display:flex;flex-direction:column}
+  .popup .psearch{display:flex;align-items:center;gap:8px;background:var(--bg-tertiary);border:1px solid var(--border-subtle);border-radius:var(--r-sm);padding:6px 10px;margin:4px 4px 6px;color:var(--text-muted);font-size:var(--fs-body)}
+  .popup .plist{overflow:auto}
+  .phdr{font-size:var(--fs-xs);font-weight:600;color:var(--text-muted);opacity:.85;margin:8px 6px 4px 10px;display:flex;align-items:center;gap:6px}
+  .phdr .g{font-size:12px}
+  .prow{display:flex;align-items:center;background:var(--bg-tertiary);border:1px solid transparent;border-radius:var(--r-md);padding:7px 12px;margin:2px 4px;cursor:pointer}
+  .prow:hover{border-color:var(--primary-border)}
+  .prow.sel{border-color:var(--primary-border);background:var(--primary-soft)}
+  .prow .pname{font-size:13px;font-weight:500;color:var(--text-primary)}
+  .prow .psub{font-size:11px;color:var(--text-muted);margin-top:2px}
+  .prow .pcheck{color:var(--primary);font-size:13px;margin-left:8px}
+  .prow .pbadges{margin-left:auto;display:flex;align-items:center;gap:6px;padding-left:10px}
+  .pbadge{font-size:10px;color:var(--text-muted);background:var(--bg-tertiary);border:1px solid var(--border-subtle);border-radius:var(--r-sm);padding:1px 5px}
+  [data-theme="dark"] .pbadge{background:#2a2a2a}
+  .pbadge.q{color:var(--primary);border-color:var(--primary-border);background:var(--primary-tint);font-weight:600}
+  .pbadge.byok{color:var(--info);border-color:transparent;background:rgba(25,118,210,.10)}
+  .prow.manage{background:transparent;color:var(--primary);font-weight:600;font-size:12.5px;justify-content:flex-start;gap:8px;margin-top:4px}
+  .prow.manage:hover{background:var(--primary-tint);border-color:transparent}
+
+  /* modal dialog (ModalWindowSurface + glow) */
+  .scrim{position:absolute;inset:0;background:rgba(0,0,0,.32);display:grid;place-items:center}
+  .dialog{position:relative;width:560px;max-width:92%;background:var(--bg-elevated);border:1.5px solid var(--border-strong);border-radius:var(--r-xl);box-shadow:var(--shadow-modal);overflow:hidden}
+  .dialog::before{content:"";position:absolute;inset:-2px;border-radius:var(--r-xl);border:1px solid var(--primary-border);box-shadow:0 0 28px rgba(190,114,127,.18);pointer-events:none}
+  .dlg-head{display:flex;align-items:center;padding:16px 20px;border-bottom:1px solid var(--divider)}
+  .dlg-head .t{font-size:var(--fs-heading);font-weight:600}
+  .dlg-head .x{margin-left:auto;width:36px;height:36px;border:none;background:transparent;color:var(--text-secondary);border-radius:var(--r-sm);cursor:pointer;font-size:14px}
+  .dlg-head .x:hover{background:var(--hover-overlay)}
+  .dlg-foot{display:flex;justify-content:flex-end;gap:10px;padding:14px 20px;border-top:1px solid var(--divider)}
+  .btn{height:38px;padding:0 20px;border-radius:var(--r-md);font-family:var(--font-ui);font-size:var(--fs-body);font-weight:600;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--text-primary)}
+  .btn:hover{background:var(--hover-overlay)}
+  .btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)} .btn.primary:hover{background:var(--primary-hover)}
+
+  /* onboarding */
+  .dhero{padding:24px 24px 14px;text-align:center}
+  .dhero .dbadge{width:52px;height:52px;border-radius:14px;margin:0 auto 14px;background:var(--primary);color:#fff;display:grid;place-items:center;font-size:22px}
+  .dhero .dtitle{font-size:var(--fs-heading);font-weight:700}
+  .dhero .dlead{font-size:13px;color:var(--text-secondary);margin-top:8px;line-height:1.6;max-width:440px;margin-inline:auto}
+  .dcmp{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:6px 20px}
+  .dcol{border:1px solid var(--border);border-radius:var(--r-md);padding:13px;background:var(--bg-secondary)}
+  .dcol .ch{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;margin-bottom:9px}
+  .dcol .ch .g{color:var(--primary);font-size:15px}
+  .dcol ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:7px}
+  .dcol li{font-size:12px;color:var(--text-secondary);line-height:1.45;display:flex;gap:7px}
+  .dcol li .g{color:var(--primary);font-size:12px;margin-top:1px;flex:none}
+  .dkeys{padding:10px 20px 16px;display:flex;flex-direction:column;gap:2px}
+  .dkey{display:flex;gap:11px;align-items:flex-start;padding:8px}
+  .dkey .ki{width:30px;height:30px;border-radius:8px;flex:none;background:var(--primary-tint);color:var(--primary);display:grid;place-items:center;font-size:15px}
+  .dkey .kt{font-size:13px;font-weight:600} .dkey .kd{font-size:12px;color:var(--text-secondary);margin-top:2px;line-height:1.45}
+
+  /* BYOK key manager */
+  .dbody{padding:16px 20px;max-height:420px;overflow:auto}
+  .byok-card{background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--r-md);padding:14px;margin-bottom:10px}
+  .byok-card .bh{display:flex;align-items:center;gap:9px;margin-bottom:12px}
+  .byok-card .bh .bi{width:28px;height:28px;border-radius:var(--r-sm);background:var(--bg-elevated);border:1px solid var(--border-subtle);display:grid;place-items:center;font-size:13px;color:var(--text-secondary)}
+  .byok-card .bh .bn{font-size:14px;font-weight:600}
+  .byok-card .bh .bstate{margin-left:auto;font-size:11px;color:var(--success);display:inline-flex;align-items:center;gap:5px}
+  .byok-card .bh .bstate .d{width:6px;height:6px;border-radius:50%;background:var(--success)}
+  .fieldlabel{font-size:12px;color:var(--text-secondary);margin:0 0 4px}
+  .field{display:flex;align-items:center;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--r-sm);padding:9px 12px;margin-bottom:10px}
+  .field input{flex:1;border:none;background:transparent;outline:none;font-family:var(--font-ui);font-size:var(--fs-body);color:var(--text-primary)}
+  .field .eye{border:none;background:transparent;color:var(--text-muted);cursor:pointer;font-size:14px;padding:0 0 0 8px}
+  .byok-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+  .byok-foot{display:flex;align-items:center;margin-top:2px}
+  .byok-foot .test{margin-left:auto}
+  .addsvc{display:flex;align-items:center;justify-content:center;gap:8px;border:1px dashed var(--border-strong);border-radius:var(--r-md);padding:11px;color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer}
+  .addsvc:hover{border-color:var(--primary-border);color:var(--primary)}
+</style>
+</head>
+<body>
+
+<div class="demobar">
+  <span class="lbl">演示视图</span>
+  <button data-view="chat" class="on">对话</button>
+  <button data-view="picker">模型选择器</button>
+  <button data-view="byok">BYOK 密钥</button>
+  <button data-view="onboarding">入门说明</button>
+  <span class="sep"></span>
+  <span class="lbl">左上滑块切 Chat / Work</span>
+  <span class="sep"></span>
+  <button id="themeToggle"><span class="g">&#xE793;</span>&nbsp;主题</button>
+</div>
+
+<div class="win" data-mode="work">
+  <div class="titlebar">
+    <div class="app"><span class="m">M</span> MolaGPT</div>
+    <div class="sp"></div>
+    <div class="cap"><span class="g">&#xE921;</span></div>
+    <div class="cap"><span class="g">&#xE922;</span></div>
+    <div class="cap x"><span class="g">&#xE8BB;</span></div>
+  </div>
+
+  <div class="canvas">
+    <!-- sidebar -->
+    <div class="card sidebar">
+      <div class="modeslider">
+        <div class="thumb"></div>
+        <button data-mode="chat"><span class="g">&#xE8BD;</span> MolaGPT Chat</button>
+        <button data-mode="work"><span class="g">&#xE90F;</span> MolaGPT Work</button>
+      </div>
+      <div class="synced-note chat only-chat"><span class="dot"></span> 已同步到云端 Web，多端可见</div>
+      <div class="synced-note work only-work"><span class="dot"></span> Work 对话保存在本机，暂不同步到云端</div>
+
+      <button class="newchat"><span class="g">&#xE710;</span> 新建对话</button>
+      <div class="search"><span class="g" style="font-size:12px">&#xE721;</span> 搜索对话</div>
+
+      <!-- chat conversations (synced) -->
+      <div class="convlist only-chat">
+        <div class="conv sel">发布会要点整理</div>
+        <div class="conv">周报草稿</div>
+        <div class="conv">英语邮件润色</div>
+        <div class="conv">健身计划建议</div>
+      </div>
+      <!-- work conversations (local) -->
+      <div class="convlist only-work">
+        <div class="conv sel">修复流式中断检测</div>
+        <div class="conv">重构 sanitize_payload</div>
+        <div class="conv">批量重命名脚本</div>
+      </div>
+
+      <div class="acctrow">
+        <div class="avatar">M</div>
+        <div>
+          <div class="nm">example</div>
+          <div class="em">example@wljay.cn</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- main -->
+    <div class="card main">
+      <div class="topbar">
+        <button class="iconbtn"><span class="g">&#xE700;</span></button>
+
+        <!-- chat model pill -->
+        <button class="modelpill only-chat" data-open="picker">
+          <span class="g mi">&#xE99A;</span><span class="nm">智能对话</span>
+          <span class="prov">MolaGPT 账号</span><span class="g chev">&#xE70D;</span>
+        </button>
+        <!-- work model pill -->
+        <button class="modelpill only-work" data-open="picker">
+          <span class="g mi">&#xE99A;</span><span class="nm">Qwen 3.5 Plus</span>
+          <span class="prov">MolaGPT 本地工具</span><span class="g chev">&#xE70D;</span>
+        </button>
+
+        <div class="sp"></div>
+        <!-- chat: synced -->
+        <div class="chip-status chip-sync only-chat"><span class="dot"></span><span class="g" style="font-size:12px">&#xE753;</span> 已同步</div>
+        <!-- work: quota + local -->
+        <div class="chip-status chip-quota only-work" title="本地工具与账号 / 网页聊天共用每日额度"><span class="dot"></span> 今日 8/30 · 账号共用</div>
+        <div class="chip-status chip-local only-work">本地 · 未同步</div>
+
+        <button class="iconbtn" title="设置"><span class="g">&#xE713;</span></button>
+        <button class="iconbtn" title="关于 MolaGPT"><span class="g">&#xE946;</span></button>
+      </div>
+
+      <!-- ===== CHAT thread ===== -->
+      <div class="thread only-chat">
+        <div class="turn">
+          <div class="userrow"><div class="userbubble">帮我把上周发布会的几个要点整理成三条，用于周报。</div></div>
+          <div class="asst">
+            <div class="ava"><span class="g">&#xE99A;</span></div>
+            <div class="mlabel">智能对话</div>
+            <div class="content">
+              <div style="margin:2px 0 10px"><span class="src"><span class="g" style="font-size:11px">&#xE753;</span> 记忆：上周发布会纪要</span><span class="src"><span class="g" style="font-size:11px">&#xE721;</span> 已联网核对日期</span></div>
+              <div class="answer">
+                <p>根据你上周的会议记忆，整理为三条：</p>
+                <p>1. 新版本如期发布，核心是本地工具 Agent；2. 与网页端共用账号额度；3. 下阶段接入自带密钥(BYOK)。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== WORK thread ===== -->
+      <div class="thread only-work">
+        <div class="turn">
+          <div class="userrow"><div class="userbubble">看看 desktop_chat_completions.php 流式那段有没有问题，顺手在我本地改一下。</div></div>
+          <div class="asst">
+            <div class="ava"><span class="g">&#xE99A;</span></div>
+            <div class="mlabel">Qwen 3.5 Plus</div>
+            <div class="content">
+              <div class="think">
+                <div class="stripe"></div>
+                <div class="inner">
+                  <div class="thead"><span class="sdot"></span><span class="stext">思考已完成 · 用时 6 秒</span><span class="g tchev">&#xE76C;</span></div>
+                  <div class="tbody">先读取目标文件确认流式写回逻辑，再用 grep 定位 flush 调用，最后做最小修改并保存到本地。</div>
+                </div>
+              </div>
+
+              <div class="tool">
+                <div class="thead">
+                  <div class="ticon"><span class="g">&#xE8A5;</span></div><div></div>
+                  <div class="tmeta"><span class="tlabel">读取文件</span><span class="targ">api/auth/desktop_chat_completions.php</span></div>
+                  <div class="status done"><span class="sd"></span><span class="st">已完成</span></div>
+                  <button class="tact"><span class="g">&#xE8C8;</span></button>
+                  <button class="tchevbtn"><span class="g">&#xE76C;</span></button>
+                </div>
+              </div>
+
+              <div class="tool">
+                <div class="thead">
+                  <div class="ticon"><span class="g">&#xE773;</span></div><div></div>
+                  <div class="tmeta"><span class="tlabel">搜索内容</span><span class="targ">"flush(" · *.php</span></div>
+                  <div class="status done"><span class="sd"></span><span class="st">已完成</span></div>
+                  <button class="tact"><span class="g">&#xE8C8;</span></button>
+                  <button class="tchevbtn"><span class="g" style="transform:rotate(90deg)">&#xE76C;</span></button>
+                </div>
+                <div class="tbody">
+                  <div class="bar"><span class="lang">grep</span><span class="g" style="font-size:12px;color:var(--text-secondary)">&#xE8C8;</span></div>
+                  <pre>desktop_chat_completions.php:196:        flush();</pre>
+                </div>
+              </div>
+
+              <div class="tool" id="runTool">
+                <div class="thead">
+                  <div class="ticon"><span class="g">&#xE90F;</span></div><div></div>
+                  <div class="tmeta"><span class="tlabel">edit_file</span><span class="targ">desktop_chat_completions.php</span></div>
+                  <div class="status" id="runStatus"><span class="sd"></span><span class="st">运行中</span></div>
+                  <button class="tact"><span class="g">&#xE8C8;</span></button>
+                  <button class="tchevbtn"><span class="g">&#xE76C;</span></button>
+                </div>
+              </div>
+
+              <div class="answer" id="answer" style="opacity:.4"><p>正在根据本地文件生成修改…</p></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- composer -->
+      <div class="composer">
+        <div class="compcard">
+          <div class="toolbar">
+            <button class="chip"><span class="g gi">&#xE723;</span> 附件</button>
+            <button class="chip on"><span class="g gi">&#xE82F;</span> 推理</button>
+            <button class="chip"><span class="g gi">&#xE721;</span> 联网搜索</button>
+            <button class="chip only-chat"><span class="g gi">&#xE773;</span> 深度研究</button>
+            <button class="chip only-work"><span class="g gi">&#xE774;</span> 网页阅读</button>
+          </div>
+          <div class="compinput only-chat">给 MolaGPT 发消息…</div>
+          <div class="compinput only-work">继续向本地 Agent 提问…</div>
+          <div class="actionbar">
+            <div class="hint">Enter 发送 · Shift+Enter 换行</div>
+            <button class="send"><span class="g">&#xE724;</span></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== model picker popup ===== -->
+  <div class="overlay" id="ov-picker">
+    <div class="popup">
+      <div class="psearch"><span class="g" style="font-size:12px">&#xE721;</span> 搜索模型</div>
+      <div class="plist">
+
+        <!-- CHAT picker: account models only -->
+        <div class="only-chat">
+          <div class="phdr"><span class="g">&#xE753;</span> MolaGPT 账号</div>
+          <div class="prow sel"><span class="pname">智能对话（默认）</span><span class="g pcheck">&#xE73E;</span>
+            <span class="pbadges"><span class="pbadge">联网</span><span class="pbadge">记忆</span><span class="pbadge">深研</span></span></div>
+          <div class="prow"><span class="pname">GPT 5.5</span>
+            <span class="pbadges"><span class="pbadge">联网</span><span class="pbadge">记忆</span></span></div>
+          <div class="prow"><span class="pname">Claude Sonnet 4.6</span>
+            <span class="pbadges"><span class="pbadge">联网</span><span class="pbadge">深研</span></span></div>
+        </div>
+
+        <!-- WORK picker: local-tools group + BYOK group + manage -->
+        <div class="only-work">
+          <div class="phdr"><span class="g">&#xE90F;</span> MolaGPT 本地工具 · 账号额度</div>
+          <div class="prow sel"><span class="pname">Qwen 3.5 Plus</span><span class="g pcheck">&#xE73E;</span>
+            <span class="pbadges"><span class="pbadge">推理</span><span class="pbadge">工具</span><span class="pbadge q">8/30</span></span></div>
+          <div class="prow"><span class="pname">DeepSeek V4 Pro</span>
+            <span class="pbadges"><span class="pbadge">推理</span><span class="pbadge">工具</span><span class="pbadge q">12/50</span></span></div>
+          <div class="prow"><span class="pname">Claude Sonnet 4.6</span>
+            <span class="pbadges"><span class="pbadge">工具</span><span class="pbadge">视觉</span><span class="pbadge q">无限</span></span></div>
+          <div class="prow"><span class="pname">Kimi K2.7 Code</span>
+            <span class="pbadges"><span class="pbadge">工具</span><span class="pbadge q">19/25</span></span></div>
+
+          <div class="phdr"><span class="g">&#xE72E;</span> BYOK · 自带密钥</div>
+          <div class="prow"><div><span class="pname">GPT-4o</span><div class="psub">我的 OpenAI</div></div>
+            <span class="pbadges"><span class="pbadge byok">自带密钥</span><span class="pbadge">工具</span><span class="pbadge">视觉</span></span></div>
+          <div class="prow"><div><span class="pname">Claude Opus 4.8</span><div class="psub">我的 Anthropic</div></div>
+            <span class="pbadges"><span class="pbadge byok">自带密钥</span><span class="pbadge">工具</span></span></div>
+          <div class="prow manage" data-open="byok"><span class="g">&#xE710;</span> 管理 API 密钥…</div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== BYOK key manager ===== -->
+  <div class="overlay" id="ov-byok">
+    <div class="scrim">
+      <div class="dialog">
+        <div class="dlg-head"><span class="t">API 密钥（BYOK）</span><button class="x" data-open="picker"><span class="g">&#xE711;</span></button></div>
+        <div class="dbody">
+          <p style="font-size:12px;color:var(--text-secondary);margin:0 0 14px;line-height:1.5">
+            接入你自己的模型服务密钥，仅用于 <b>Work</b> 模式。密钥保存在本机，不上传云端。</p>
+
+          <div class="byok-card">
+            <div class="bh"><div class="bi"><span class="g">&#xE99A;</span></div><span class="bn">OpenAI</span>
+              <span class="bstate"><span class="d"></span> 已连接</span></div>
+            <div class="byok-grid">
+              <div><div class="fieldlabel">接入地址 (BaseUrl)</div>
+                <div class="field"><input value="https://api.openai.com/v1" readonly></div></div>
+              <div><div class="fieldlabel">API Key</div>
+                <div class="field"><input type="password" value="sk-proj-xxxxxxxxxxxx" readonly><button class="eye"><span class="g">&#xE7B3;</span></button></div></div>
+            </div>
+            <div class="byok-foot"><span style="font-size:11px;color:var(--text-muted)">检测到 12 个可用模型</span>
+              <button class="btn test" style="height:32px;padding:0 14px;font-size:12px">测试连接</button></div>
+          </div>
+
+          <div class="byok-card">
+            <div class="bh"><div class="bi"><span class="g">&#xE99A;</span></div><span class="bn">Anthropic</span>
+              <span class="bstate"><span class="d"></span> 已连接</span></div>
+            <div class="byok-grid">
+              <div><div class="fieldlabel">接入地址 (BaseUrl)</div>
+                <div class="field"><input value="https://api.anthropic.com" readonly></div></div>
+              <div><div class="fieldlabel">API Key</div>
+                <div class="field"><input type="password" value="sk-ant-xxxxxxxxxxxx" readonly><button class="eye"><span class="g">&#xE7B3;</span></button></div></div>
+            </div>
+            <div class="byok-foot"><span style="font-size:11px;color:var(--text-muted)">检测到 6 个可用模型</span>
+              <button class="btn test" style="height:32px;padding:0 14px;font-size:12px">测试连接</button></div>
+          </div>
+
+          <div class="addsvc"><span class="g">&#xE710;</span> 添加服务</div>
+        </div>
+        <div class="dlg-foot">
+          <button class="btn" data-open="picker">取消</button>
+          <button class="btn primary" data-open="picker">确定</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== onboarding ===== -->
+  <div class="overlay" id="ov-onboarding">
+    <div class="scrim">
+      <div class="dialog">
+        <div class="dhero">
+          <div class="dbadge"><span class="g">&#xE90F;</span></div>
+          <div class="dtitle">两种模式，一个账号</div>
+          <div class="dlead">顶部滑块在 <b>Chat</b> 与 <b>Work</b> 间切换。两种模式共用你的 MolaGPT 账号与每日额度。</div>
+        </div>
+        <div class="dcmp">
+          <div class="dcol">
+            <div class="ch"><span class="g">&#xE8BD;</span> MolaGPT Chat</div>
+            <ul>
+              <li><span class="g">&#xE73E;</span> 服务端编排，记忆 / 联网 / 深研</li>
+              <li><span class="g">&#xE73E;</span> 对话同步到云端 Web，多端可见</li>
+              <li><span class="g">&#xE73E;</span> 适合日常对话与检索</li>
+            </ul>
+          </div>
+          <div class="dcol">
+            <div class="ch"><span class="g">&#xE90F;</span> MolaGPT Work</div>
+            <ul>
+              <li><span class="g">&#xE73E;</span> 本地 Agent，工具在本机执行</li>
+              <li><span class="g">&#xE73E;</span> 对话留在本机，暂不同步云端</li>
+              <li><span class="g">&#xE73E;</span> 可用账号额度，也可接入 BYOK 密钥</li>
+            </ul>
+          </div>
+        </div>
+        <div class="dkeys">
+          <div class="dkey"><div class="ki"><span class="g">&#xE9D9;</span></div>
+            <div><div class="kt">共享额度</div><div class="kd">Chat 与 Work 用 MolaGPT 账号时，共用同一份每日额度。</div></div></div>
+          <div class="dkey"><div class="ki"><span class="g">&#xE72E;</span></div>
+            <div><div class="kt">BYOK 在 Work 里</div><div class="kd">自带密钥的模型归入 Work 模型选择器，与「本地工具」并列；密钥存本机。</div></div></div>
+        </div>
+        <div class="dlg-foot">
+          <button class="btn" data-open="chat">稍后</button>
+          <button class="btn primary" data-open="chat">开始使用</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const win = document.querySelector('.win');
+  const overlays = {picker:'ov-picker', byok:'ov-byok', onboarding:'ov-onboarding'};
+  function view(v){
+    Object.values(overlays).forEach(id=>document.getElementById(id).classList.remove('show'));
+    if(overlays[v]) document.getElementById(overlays[v]).classList.add('show');
+    document.querySelectorAll('.demobar [data-view]').forEach(b=>b.classList.toggle('on', b.dataset.view===v));
+    if(v==='chat' && win.dataset.mode==='work') runAgent();
+  }
+  function setMode(m){ win.dataset.mode=m; if(m==='work') runAgent(); }
+
+  document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>view(b.dataset.view)));
+  document.querySelectorAll('[data-open]').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();view(b.dataset.open);}));
+  document.querySelectorAll('[data-mode]').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
+  document.querySelectorAll('.overlay').forEach(o=>o.addEventListener('click',e=>{ if(e.target===o||e.target.classList.contains('scrim')) view('chat'); }));
+  document.getElementById('themeToggle').addEventListener('click',()=>{
+    const r=document.documentElement; r.dataset.theme = r.dataset.theme==='dark'?'light':'dark';
+  });
+
+  let ran=false;
+  function runAgent(){
+    if(ran) return; ran=true;
+    setTimeout(()=>{
+      const st=document.getElementById('runStatus'); if(!st) return;
+      st.classList.add('done'); st.innerHTML='<span class="sd"></span><span class="st">已完成</span>';
+      const a=document.getElementById('answer'); a.style.opacity='1';
+      a.innerHTML='<p>流式那段本身没问题：<code>WRITEFUNCTION</code> 边收边 <code>flush()</code> 回写，错误体也单独缓冲。唯一隐患是<b>客户端断开后没检测，会空转到上游结束</b>。</p><p>已在本地补上 <code>connection_aborted()</code> 检测并保存。</p>';
+    },1700);
+  }
+  runAgent();
+</script>
+</body>
+</html>

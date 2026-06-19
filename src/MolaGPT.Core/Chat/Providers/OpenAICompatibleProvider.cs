@@ -1,5 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Net;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Encodings.Web;
@@ -25,9 +27,10 @@ namespace MolaGPT.Core.Chat.Providers;
 ///   - generativelanguage.googleapis.com/v1beta/openai/chat/completions (Gemini compat mode)
 ///   - any OneAPI deployment
 ///
-/// Configured via <see cref="BaseUrl"/> + <see cref="ApiKey"/>; models are user-defined
+/// Configured via <see cref="BaseUrl"/> + a private API key; models are user-defined
 /// (UI presents them via <see cref="Models"/>). This is the most common BYOK path.
 /// </summary>
+[DebuggerDisplay("{DisplayName} [ApiKey=***]")]
 public sealed class OpenAICompatibleProvider : IChatProvider
 {
     private const long ToolPreviewMinIntervalMs = 120;
@@ -44,7 +47,6 @@ public sealed class OpenAICompatibleProvider : IChatProvider
     public ProviderKind Kind { get; init; } = ProviderKind.OpenAICompatible;
     public IReadOnlyList<ProviderModel> Models { get; private set; }
     public string BaseUrl { get; }
-    public string ApiKey { get; }
 
     public const string DefaultChatPath = "v1/chat/completions";
 
@@ -58,6 +60,13 @@ public sealed class OpenAICompatibleProvider : IChatProvider
 
     private readonly HttpClient _http;
     private readonly IChatToolHost? _toolHost;
+    private readonly Func<string?> _apiKeyProvider;
+
+    /// <summary>
+    /// Optional hook for account-backed compatible providers. BYOK providers
+    /// leave this null and keep the generic error path.
+    /// </summary>
+    public Func<CancellationToken, Task>? UnauthorizedHandler { get; init; }
 
     public OpenAICompatibleProvider(
         string id,
@@ -67,11 +76,23 @@ public sealed class OpenAICompatibleProvider : IChatProvider
         IReadOnlyList<ProviderModel> models,
         HttpClient http,
         IChatToolHost? toolHost = null)
+        : this(id, displayName, baseUrl, () => apiKey, models, http, toolHost)
+    {
+    }
+
+    public OpenAICompatibleProvider(
+        string id,
+        string displayName,
+        string baseUrl,
+        Func<string?> apiKeyProvider,
+        IReadOnlyList<ProviderModel> models,
+        HttpClient http,
+        IChatToolHost? toolHost = null)
     {
         Id = id;
         DisplayName = displayName;
         BaseUrl = NetworkSecurity.RequireHttpsBaseUrl(baseUrl, $"{displayName} Base URL");
-        ApiKey = apiKey;
+        _apiKeyProvider = apiKeyProvider ?? throw new ArgumentNullException(nameof(apiKeyProvider));
         Models = models;
         _http = http;
         _toolHost = toolHost;
@@ -115,11 +136,17 @@ public sealed class OpenAICompatibleProvider : IChatProvider
                 body["tool_choice"] = "auto";
             }
 
+            var apiKey = _apiKeyProvider();
+            if (string.IsNullOrWhiteSpace(apiKey))
+                throw new InvalidOperationException($"{DisplayName}缺少可用的访问令牌。");
+
             using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = JsonContent.Create(body) };
-            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ApiKey);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
             req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
             using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (resp.StatusCode == HttpStatusCode.Unauthorized && UnauthorizedHandler is not null)
+                await UnauthorizedHandler(ct).ConfigureAwait(false);
             await ChatApiErrorHelper.EnsureSuccessAsync(resp, DisplayName, ct).ConfigureAwait(false);
 
             await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);

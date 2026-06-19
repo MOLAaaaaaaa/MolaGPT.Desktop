@@ -13,6 +13,42 @@
         MouseDown="OnRootMouseDown"
         KeyDown="OnRootKeyDown"
         Focusable="True">
+    <Window.Resources>
+        <Style x:Key="PreviewToolButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#E5111827" />
+            <Setter Property="Background" Value="#F2FFFFFF" />
+            <Setter Property="BorderBrush" Value="#22000000" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="12,5" />
+            <Setter Property="Margin" Value="6,0,0,0" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#FFFFFFFF" />
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="#33BE727F" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#FFF1E7E9" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
     <Grid Margin="18">
         <Border Background="#F8FFFFFF"
                 BorderBrush="#22000000"
@@ -35,6 +71,25 @@
                    Stretch="Uniform"
                    StretchDirection="DownOnly"
                    RenderOptions.BitmapScalingMode="HighQuality" />
+
+            <Border Grid.Row="0"
+                    VerticalAlignment="Top"
+                    HorizontalAlignment="Right"
+                    MouseDown="OnToolbarMouseDown">
+                <StackPanel Orientation="Horizontal">
+                    <Button x:Name="CopyButton"
+                            Content="复制"
+                            Style="{StaticResource PreviewToolButton}"
+                            Click="OnCopyClick" />
+                    <Button x:Name="SaveButton"
+                            Content="保存"
+                            Style="{StaticResource PreviewToolButton}"
+                            Click="OnSaveClick" />
+                    <Button Content="✕"
+                            Style="{StaticResource PreviewToolButton}"
+                            Click="OnCloseClick" />
+                </StackPanel>
+            </Border>
 
             <Border Grid.Row="1"
                     Background="#11000000"

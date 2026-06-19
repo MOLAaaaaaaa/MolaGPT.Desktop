@@ -4,6 +4,7 @@ using System.Windows.Input;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Providers;
+using MolaGPT.Desktop.Services;
 
 namespace MolaGPT.Desktop.Views;
 
@@ -25,6 +26,7 @@ public partial class LoginDialog : Window
     private readonly MolaGptAuthService _auth;
     private readonly MolaGptProxyProvider _proxy;
     private readonly ProviderRegistry _registry;
+    private readonly MolaGptLocalToolsRegistrar _localToolsRegistrar;
     private bool _waitingForExternal;
 
     /// <summary>
@@ -39,12 +41,17 @@ public partial class LoginDialog : Window
     /// <summary>App.xaml.cs calls this after OAuth code exchange succeeds.</summary>
     public static void NotifyExternalLoginCompleted() => ExternalLoginCompleted?.Invoke();
 
-    public LoginDialog(MolaGptAuthService auth, MolaGptProxyProvider proxy, ProviderRegistry registry)
+    public LoginDialog(
+        MolaGptAuthService auth,
+        MolaGptProxyProvider proxy,
+        ProviderRegistry registry,
+        MolaGptLocalToolsRegistrar localToolsRegistrar)
     {
         InitializeComponent();
         _auth = auth;
         _proxy = proxy;
         _registry = registry;
+        _localToolsRegistrar = localToolsRegistrar;
 
         MouseLeftButtonDown += (_, e) =>
         {
@@ -102,6 +109,8 @@ public partial class LoginDialog : Window
             }
 
             _registry.Register(_proxy);
+            try { await _localToolsRegistrar.RefreshAsync(); }
+            catch { /* optional gateway — keep normal account login usable */ }
             DialogResult = true;
             Close();
         }

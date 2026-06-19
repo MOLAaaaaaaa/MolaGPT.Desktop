@@ -62,6 +62,43 @@ internal static partial class PythonArtifactMarkdownRewriter
         return contexts;
     }
 
+    /// <summary>Build a rewrite context from image attachment chips (BYOK
+    /// <c>generate_image</c>). Maps each chip's display file name (and its
+    /// content-hash local name) to the real on-disk AttachmentStore path, so an
+    /// inline <c>![](generated-image-1.png)</c> resolves to a loadable local file
+    /// — fixing both display and click-to-zoom. Self-contained (resolves against
+    /// the fixed store root) so it works on reload without a store instance.</summary>
+    public static ArtifactContext? CreateAttachmentContext(IEnumerable<AttachmentChip>? attachments)
+    {
+        if (attachments is null) return null;
+
+        string root;
+        try { root = MolaGPT.Storage.AttachmentStore.DefaultRoot(); }
+        catch { return null; }
+
+        var byRelativePath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var chip in attachments)
+        {
+            var localName = chip.LocalName;
+            // local names are bare content hashes; reject anything with separators.
+            if (string.IsNullOrWhiteSpace(localName)
+                || localName.Contains('/') || localName.Contains('\\')
+                || localName.Contains("..", StringComparison.Ordinal))
+                continue;
+
+            var path = Path.Combine(root, localName);
+            if (!File.Exists(path)) continue;
+
+            if (!string.IsNullOrWhiteSpace(chip.FileName))
+                byRelativePath[NormalizeRelativeKey(chip.FileName)] = path;
+            byRelativePath[NormalizeRelativeKey(localName)] = path;
+        }
+
+        return byRelativePath.Count == 0
+            ? null
+            : new ArtifactContext(byRelativePath, Array.Empty<string>());
+    }
+
     public static string Rewrite(string content, IReadOnlyList<ArtifactContext>? contexts)
     {
         if (string.IsNullOrWhiteSpace(content) || contexts is not { Count: > 0 })

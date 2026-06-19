@@ -1,6 +1,8 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Providers;
 using MolaGPT.ViewModels.Services;
 
 namespace MolaGPT.ViewModels;
@@ -35,6 +37,7 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty] private string _updateState = "Available";
     [ObservableProperty] private string _updateChipLabel = "发现更新";
     [ObservableProperty] private string _updateChipDetail = string.Empty;
+    [ObservableProperty] private string _quotaText = "账号额度 · 今日";
     private string? _updateNotes;
 
     /// <summary>Hooked at app startup; opens the LoginDialog. Set by App.xaml.cs to avoid View dependency here.</summary>
@@ -65,6 +68,8 @@ public sealed partial class MainViewModel : ObservableObject
     public Func<string, Task<bool>>? EnsureConversationDetailAsync { get; set; }
 
     private readonly BackgroundStreamService? _backgroundStreams;
+    private readonly MolaGptProxyProvider? _molaGptProxy;
+    private int _quotaRefreshVersion;
 
     public MainViewModel(
         ConversationListViewModel conversationList,
@@ -72,7 +77,8 @@ public sealed partial class MainViewModel : ObservableObject
         ComposerViewModel composer,
         SettingsViewModel settings,
         PersonaListViewModel personas,
-        BackgroundStreamService? backgroundStreams = null)
+        BackgroundStreamService? backgroundStreams = null,
+        MolaGptProxyProvider? molaGptProxy = null)
     {
         _conversationList = conversationList;
         _chat = chat;
@@ -80,6 +86,7 @@ public sealed partial class MainViewModel : ObservableObject
         _settings = settings;
         _personas = personas;
         _backgroundStreams = backgroundStreams;
+        _molaGptProxy = molaGptProxy;
 
         _conversationList.ConversationSelected += async (_, id) =>
         {
@@ -161,7 +168,120 @@ public sealed partial class MainViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsArtifactPanelAvailable));
         };
 
+        // Quota chip visibility follows the active mode (Chat/Work = MolaGPT
+        // account, BYOK never) and the account login state. Refresh whenever
+        // either moves. The text is pulled from status.php and scoped to the
+        // active model so Chat and Work show the same shared account quota.
+        _chat.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(ChatViewModel.CurrentMode)
+                or nameof(ChatViewModel.ActiveModel)
+                or nameof(ChatViewModel.ActiveProvider))
+            {
+                OnPropertyChanged(nameof(IsQuotaChipVisible));
+                OnPropertyChanged(nameof(IsCloudSyncChipVisible));
+                _ = RefreshQuotaAsync();
+            }
+        };
+        _settings.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(SettingsViewModel.IsLoggedIn))
+            {
+                OnPropertyChanged(nameof(IsQuotaChipVisible));
+                _ = RefreshQuotaAsync();
+            }
+        };
+        _composer.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(ComposerViewModel.IsSending) && !Composer.IsSending)
+                _ = RefreshQuotaAsync();
+        };
+
         RefreshActivePromptState();
+        _ = RefreshQuotaAsync();
+    }
+
+    /// <summary>Quota chip shows only for MolaGPT-account modes (Chat / Work) and
+    /// only after the user has signed in. BYOK uses the user's own key and has no
+    /// shared quota to display.</summary>
+    public bool IsQuotaChipVisible =>
+        Chat.CurrentMode.IsMolaGptAccount() && Settings.IsLoggedIn;
+
+    public bool IsCloudSyncChipVisible =>
+        CloudSyncStatusVisible && Chat.CurrentMode == AppMode.Chat;
+
+    public async Task RefreshQuotaAsync(CancellationToken ct = default)
+    {
+        var version = ++_quotaRefreshVersion;
+        if (!IsQuotaChipVisible || _molaGptProxy is null || Chat.ActiveModel is null)
+        {
+            QuotaText = "账号额度 · 今日";
+            return;
+        }
+
+        try
+        {
+            var status = await _molaGptProxy.FetchStatusAsync(ct);
+            if (version != _quotaRefreshVersion) return;
+            if (status is null)
+            {
+                Settings.IsLoggedIn = false;
+                QuotaText = "账号额度 · 今日";
+                return;
+            }
+            QuotaText = BuildQuotaText(status, Chat.ActiveModel.Id);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (MolaGptAuthExpiredException)
+        {
+            if (version == _quotaRefreshVersion)
+            {
+                Settings.IsLoggedIn = false;
+                QuotaText = "账号额度 · 今日";
+            }
+        }
+        catch
+        {
+            if (version == _quotaRefreshVersion)
+                QuotaText = "账号额度 · 暂不可用";
+        }
+    }
+
+    private static string BuildQuotaText(MolaGptStatus? status, string modelId)
+    {
+        if (status is null || string.IsNullOrWhiteSpace(modelId))
+            return "账号额度 · 今日";
+
+        var used = status.Usage.GetValueOrDefault(modelId, 0);
+        status.Limits.TryGetValue(modelId, out var limit);
+        status.ModelStatus.TryGetValue(modelId, out var modelStatus);
+
+        var unlimited = status.Unlimited
+            || limit?.DailyRequests == -1
+            || modelStatus?.Remaining == -1;
+        if (unlimited)
+            return $"今日 {used}/无限 · 账号共用";
+
+        var effectiveLimit = EffectiveLimit(limit?.DailyRequests, modelStatus?.Remaining, used);
+        if (effectiveLimit > 0)
+            return $"今日 {used}/{effectiveLimit} · 账号共用";
+
+        if (modelStatus?.Remaining is { } remaining)
+            return $"剩余 {remaining} · 账号共用";
+
+        return "账号额度 · 今日";
+    }
+
+    private static int EffectiveLimit(int? declaredLimit, int? remaining, int used)
+    {
+        if (declaredLimit is -1 or null)
+            return remaining is null ? 0 : Math.Max(0, remaining.Value + used);
+        if (remaining is null)
+            return declaredLimit.Value;
+        return Math.Min(declaredLimit.Value, remaining.Value + used);
     }
 
     /// <summary>True when the artifact drawer button should be offered: BYOK
@@ -221,6 +341,45 @@ public sealed partial class MainViewModel : ObservableObject
         ConversationList.ClearSelection();
         IsImageWorkbenchVisible = false;
         Chat.StartDraftConversation();
+    }
+
+    /// <summary>Switch the sidebar mode slider to BYOK / Chat / Work. Routes to each
+    /// mode's representative provider. When the target MolaGPT-account provider
+    /// isn't registered (user not signed in) it opens the login dialog instead.</summary>
+    [RelayCommand]
+    private void SwitchMode(string? mode)
+    {
+        var target = mode?.ToLowerInvariant() == "chat" ? AppMode.Chat : AppMode.Work;
+        var fromMode = Chat.CurrentMode;
+
+        // "MolaGPT Work" is the unified local-agent capability. Clicking it while
+        // already in an agent mode (Work or BYOK) is a no-op — the specific wallet
+        // (MolaGPT account vs custom API key) is chosen in the model selector.
+        if (target == AppMode.Work && fromMode.IsLocalAgent())
+            return;
+
+        if (Chat.SwitchToMode(target, out var needsLogin))
+        {
+            // Crossing the Chat ↔ local-agent boundary can't continue the same
+            // conversation (Chat is cloud-orchestrated; the agent modes share the
+            // local thread). Always reset to a clean draft when the boundary is
+            // crossed, even if the current view is an image workbench with no
+            // loaded chat thread.
+            if (fromMode.CrossesChatBoundary(target))
+            {
+                ConversationList.ClearSelection();
+                IsImageWorkbenchVisible = false;
+                Chat.StartDraftConversation();
+            }
+            return;
+        }
+
+        // Target not ready: surface login when that's the gap (Chat / shared Work
+        // need a signed-in account), otherwise open Settings to add a provider.
+        if (needsLogin)
+            LoginRequested?.Invoke();
+        else
+            SettingsRequested?.Invoke();
     }
 
     public void OpenImageWorkbenchTask()
@@ -370,6 +529,9 @@ public sealed partial class MainViewModel : ObservableObject
     {
         CloudSyncStatusVisible = false;
     }
+
+    partial void OnCloudSyncStatusVisibleChanged(bool value) =>
+        OnPropertyChanged(nameof(IsCloudSyncChipVisible));
 
     private void RefreshActivePromptState()
     {

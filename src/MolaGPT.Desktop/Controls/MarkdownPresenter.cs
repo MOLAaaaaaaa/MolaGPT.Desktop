@@ -287,7 +287,8 @@ public sealed partial class MarkdownPresenter : ContentControl
     private ScrollViewer? _selectionAutoScrollViewer;
     private Hyperlink? _pendingClickHyperlink;
     private Point _pendingClickHyperlinkStart = new(double.NaN, double.NaN);
-    private Point _markdownImagePreviewStart = new(double.NaN, double.NaN);
+    private Image? _pendingClickImage;
+    private Point _pendingClickImageStart = new(double.NaN, double.NaN);
     private sealed class SmoothTextBoxScrollState
     {
         public TextBox? Owner;
@@ -323,6 +324,9 @@ public sealed partial class MarkdownPresenter : ContentControl
             Focusable = true,
             Cursor = Cursors.IBeam
         };
+        // Localized right-click menu (复制 / 全选), replacing WPF's built-in
+        // English "Copy / Select All" text menu on the selectable answer surface.
+        _viewer.ContextMenu = BuildChineseTextSelectionMenu(_viewer);
 
         // FlowDocumentScrollViewer is a known WPF MouseWheel sink — even with
         // VerticalScrollBarVisibility=Disabled it marks every wheel tick as
@@ -375,6 +379,21 @@ public sealed partial class MarkdownPresenter : ContentControl
         if (IsEmbeddedInteractiveSurface(e.OriginalSource as DependencyObject))
             return;
 
+        // Images must be handled at the viewer level (like hyperlinks): the
+        // FlowDocumentScrollViewer captures the mouse for text selection on
+        // button-down, so a per-element PreviewMouseLeftButtonUp on the Image
+        // never fires. Capture here and resolve the click on button-up instead.
+        if (FindClickableImage(e.OriginalSource as DependencyObject) is { } image)
+        {
+            StopSelectionAutoScroll();
+            _pendingClickImage = image;
+            _pendingClickImageStart = e.GetPosition(_viewer);
+            _viewer.Focus();
+            _viewer.CaptureMouse();
+            e.Handled = true;
+            return;
+        }
+
         _viewer.Focus();
         _isDraggingSelection = true;
         _selectionDragStart = e.GetPosition(_viewer);
@@ -418,6 +437,17 @@ public sealed partial class MarkdownPresenter : ContentControl
             return;
         }
 
+        if (_pendingClickImage is { } image)
+        {
+            var imageStart = _pendingClickImageStart;
+            var clickedImage = image;
+            ClearPendingClickImage();
+            if (IsClickGesture(imageStart, e.GetPosition(_viewer)))
+                ShowImagePreview(clickedImage);
+            e.Handled = true;
+            return;
+        }
+
         StopSelectionAutoScroll();
     }
 
@@ -425,6 +455,14 @@ public sealed partial class MarkdownPresenter : ContentControl
     {
         _pendingClickHyperlink = null;
         _pendingClickHyperlinkStart = new Point(double.NaN, double.NaN);
+        if (_viewer.IsMouseCaptured)
+            _viewer.ReleaseMouseCapture();
+    }
+
+    private void ClearPendingClickImage()
+    {
+        _pendingClickImage = null;
+        _pendingClickImageStart = new Point(double.NaN, double.NaN);
         if (_viewer.IsMouseCaptured)
             _viewer.ReleaseMouseCapture();
     }
@@ -661,6 +699,41 @@ public sealed partial class MarkdownPresenter : ContentControl
     {
         var hyperlink = FindTreeAncestor<Hyperlink>(source);
         return hyperlink?.NavigateUri is null ? null : hyperlink;
+    }
+
+    /// <summary>Walk up from the hit-tested element to the markdown image the user
+    /// clicked. Handles both a directly-hit <see cref="Image"/> (inline images and
+    /// AI cards) and an image-card container (clicking the padding around the
+    /// image), so click-to-zoom works no matter which wrapper holds the image.</summary>
+    private static Image? FindClickableImage(DependencyObject? source)
+    {
+        var node = source;
+        while (node is not null)
+        {
+            if (node is Image { Source: not null } image)
+                return image;
+            if (node is FrameworkElement { Tag: MarkdownImageCardState { Image: { } cardImage } })
+                return cardImage;
+            node = GetTreeParent(node);
+        }
+
+        return null;
+    }
+
+    private void ShowImagePreview(Image image)
+    {
+        // Prefer the already-decoded pixels: a local/generated image loads via a
+        // stream, so BitmapImage.UriSource is null and the source URL can't be
+        // recovered — but the bitmap is right here. Fall back to the source URL
+        // for the rare case the bitmap can't be re-encoded.
+        if (TryShowPreviewFromImageBitmap(image))
+            return;
+
+        var source = ResolveImageSource(image);
+        if (string.IsNullOrWhiteSpace(source))
+            return;
+
+        ImagePreviewWindow.Show(Window.GetWindow(this), source, Path.GetFileName(SafeUnescape(source)));
     }
 
     private static T? FindTreeAncestor<T>(DependencyObject? source)
@@ -1932,7 +2005,6 @@ public sealed partial class MarkdownPresenter : ContentControl
         {
             root.Cursor = Cursors.Hand;
             root.ToolTip = imageUrl;
-            WireMarkdownImagePreview(root, imageUrl);
         }
 
         return root;
@@ -2247,6 +2319,7 @@ public sealed partial class MarkdownPresenter : ContentControl
         if (hasCodeBlockMaxHeight)
             codeViewer.MaxHeight = codeBlockMaxHeight;
         codeViewerForCopy = codeViewer;
+        codeViewer.ContextMenu = BuildChineseTextSelectionMenu(codeViewer);
         root.Children.Add(codeViewer);
         return (border, codeViewer);
     }
@@ -2254,6 +2327,30 @@ public sealed partial class MarkdownPresenter : ContentControl
     private static bool IsFinitePositive(double value)
     {
         return value > 0 && !double.IsNaN(value) && !double.IsInfinity(value);
+    }
+
+    /// <summary>Build a localized (zh-CN) "复制 / 全选" context menu for a
+    /// selectable text surface (FlowDocumentScrollViewer or read-only TextBox),
+    /// replacing WPF's built-in English text menu. Commands target the supplied
+    /// element so they act on its current selection.</summary>
+    private static ContextMenu BuildChineseTextSelectionMenu(IInputElement target)
+    {
+        var menu = new ContextMenu();
+        menu.Items.Add(new MenuItem
+        {
+            Header = "复制",
+            Command = ApplicationCommands.Copy,
+            CommandTarget = target,
+            InputGestureText = "Ctrl+C"
+        });
+        menu.Items.Add(new MenuItem
+        {
+            Header = "全选",
+            Command = ApplicationCommands.SelectAll,
+            CommandTarget = target,
+            InputGestureText = "Ctrl+A"
+        });
+        return menu;
     }
 
     private static bool IsMathFenceLanguage(string language)
@@ -3263,26 +3360,6 @@ public sealed partial class MarkdownPresenter : ContentControl
         };
     }
 
-    private void WireMarkdownImagePreview(FrameworkElement element, string imageUrl)
-    {
-        var start = new Point(double.NaN, double.NaN);
-        element.PreviewMouseLeftButtonDown += (_, e) =>
-        {
-            start = e.GetPosition(element);
-        };
-        element.PreviewMouseLeftButtonUp += (_, e) =>
-        {
-            var end = e.GetPosition(element);
-            var shouldOpen = IsClickGesture(start, end);
-            start = new Point(double.NaN, double.NaN);
-            if (!shouldOpen)
-                return;
-
-            ImagePreviewWindow.Show(Window.GetWindow(this), imageUrl, Path.GetFileName(SafeUnescape(imageUrl)));
-            e.Handled = true;
-        };
-    }
-
     private static bool IsClickGesture(Point start, Point end) =>
         !double.IsNaN(start.X)
         && !double.IsNaN(start.Y)
@@ -3317,35 +3394,27 @@ public sealed partial class MarkdownPresenter : ContentControl
         image.Loaded -= OnMarkdownImageLoaded;
         image.Loaded += OnMarkdownImageLoaded;
         image.Cursor = Cursors.Hand;
-        image.PreviewMouseLeftButtonDown -= OnMarkdownInlineImagePreviewMouseLeftButtonDown;
-        image.PreviewMouseLeftButtonUp -= OnMarkdownInlineImagePreviewMouseLeftButtonUp;
-        image.PreviewMouseLeftButtonDown += OnMarkdownInlineImagePreviewMouseLeftButtonDown;
-        image.PreviewMouseLeftButtonUp += OnMarkdownInlineImagePreviewMouseLeftButtonUp;
     }
 
-    private void OnMarkdownInlineImagePreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    /// <summary>Open the preview from an image's already-decoded pixels (encoded to
+    /// PNG), so click-to-zoom works regardless of how the source was loaded.</summary>
+    private bool TryShowPreviewFromImageBitmap(Image image)
     {
-        if (sender is FrameworkElement element)
-            _markdownImagePreviewStart = e.GetPosition(element);
-    }
-
-    private void OnMarkdownInlineImagePreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
-    {
-        if (sender is not Image image)
-            return;
-
-        var end = e.GetPosition(image);
-        var shouldOpen = IsClickGesture(_markdownImagePreviewStart, end);
-        _markdownImagePreviewStart = new Point(double.NaN, double.NaN);
-        if (!shouldOpen)
-            return;
-
-        var source = ResolveImageSource(image);
-        if (string.IsNullOrWhiteSpace(source))
-            return;
-
-        ImagePreviewWindow.Show(Window.GetWindow(this), source, Path.GetFileName(SafeUnescape(source)));
-        e.Handled = true;
+        if (image.Source is not BitmapSource bitmap || bitmap.PixelWidth <= 0 || bitmap.PixelHeight <= 0)
+            return false;
+        try
+        {
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(bitmap));
+            using var stream = new MemoryStream();
+            encoder.Save(stream);
+            ImagePreviewWindow.Show(Window.GetWindow(this), stream.ToArray(), null);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void OnMarkdownImageLoaded(object sender, RoutedEventArgs e)

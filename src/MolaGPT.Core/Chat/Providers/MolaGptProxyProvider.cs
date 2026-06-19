@@ -29,7 +29,11 @@ public sealed class MolaGptProxyProvider : IChatProvider
 {
     private const int MaxPublicImageUploadBytes = 10 * 1024 * 1024;
 
-    public string Id => "molagpt-proxy";
+    public const string LocalToolsModelsPath = "api/auth/desktop_local_models.php";
+    public const string LocalToolsChatPath = "api/auth/desktop_chat_completions.php";
+    public const string LocalToolsDisplayName = "MolaGPT 本地工具";
+
+    public string Id => MolaGptProviderIds.Proxy;
     public string DisplayName => "MolaGPT 账号";
     public ProviderKind Kind => ProviderKind.MolaGptProxy;
     public IReadOnlyList<ProviderModel> Models => _models;
@@ -93,6 +97,74 @@ public sealed class MolaGptProxyProvider : IChatProvider
 
         _models = list;
         _modelToApiUrl = apiMap;
+    }
+
+    /// <summary>
+    /// Loads the subset of MolaGPT account models that the server exposes via
+    /// the desktop OpenAI-compatible gateway. These models still bill against
+    /// the MolaGPT account, but the desktop client runs the tool loop locally.
+    /// </summary>
+    public async Task<IReadOnlyList<ProviderModel>> FetchLocalToolsModelsAsync(CancellationToken ct = default)
+    {
+        var jwt = _auth.CurrentJwt;
+        if (string.IsNullOrEmpty(jwt)) return Array.Empty<ProviderModel>();
+
+        var baseUri = new Uri(NetworkSecurity.RequireHttpsBaseUrl(BaseUrl, "MolaGPT 云服务"));
+        var url = NetworkSecurity.RequireHttps(new Uri(baseUri, LocalToolsModelsPath), "MolaGPT 本地工具模型列表");
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+        using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
+        if (resp.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            _auth.Logout();
+            throw new MolaGptAuthExpiredException();
+        }
+        resp.EnsureSuccessStatusCode();
+
+        var root = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: ct).ConfigureAwait(false);
+        var modelsObj = root?["models"]?.AsObject();
+        if (modelsObj is null) return Array.Empty<ProviderModel>();
+
+        var list = new List<ProviderModel>();
+        foreach (var (_, value) in modelsObj)
+        {
+            if (value is not JsonObject cfg) continue;
+            if (cfg["show_in_frontend"]?.GetValue<bool>() == false) continue;
+
+            var modelName = cfg["modelName"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(modelName)) continue;
+            var tipText = cfg["tipText"]?.GetValue<string>() ?? modelName!;
+            var supportsThinking = cfg["supportsThinking"]?.GetValue<bool>() ?? false;
+            var supportsReasoning = cfg["supportsReasoningEffort"]?.GetValue<bool>() ?? false;
+            var showImageUpload = cfg["showImageUpload"]?.GetValue<bool>() ?? false;
+            var supportsToolCalling = cfg["supportsToolCalling"]?.GetValue<bool>() ?? false;
+
+            list.Add(new ProviderModel(
+                Id: modelName!,
+                DisplayName: tipText,
+                SupportsVision: showImageUpload,
+                SupportsThinking: supportsThinking,
+                SupportsReasoningEffort: supportsReasoning,
+                SupportsToolCalling: supportsToolCalling,
+                ThinkingConfig: BuildLocalToolsThinkingConfig(modelName!, supportsThinking, supportsReasoning)));
+        }
+
+        return list;
+    }
+
+    private static ThinkingConfig? BuildLocalToolsThinkingConfig(
+        string modelName,
+        bool supportsThinking,
+        bool supportsReasoningEffort)
+    {
+        if (!supportsThinking) return null;
+
+        var inferred = ThinkingParamKindInference.InferFromModelId(modelName);
+        if (inferred == ThinkingParamKind.None && supportsReasoningEffort)
+            inferred = ThinkingParamKind.OpenAiReasoningEffort;
+        if (inferred == ThinkingParamKind.None) return null;
+
+        return new ThinkingConfig(inferred);
     }
 
     /// <summary>

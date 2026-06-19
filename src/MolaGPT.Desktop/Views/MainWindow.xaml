@@ -5,6 +5,8 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
         xmlns:views="clr-namespace:MolaGPT.Desktop.Views"
+        xmlns:chat="clr-namespace:MolaGPT.Core.Chat;assembly=MolaGPT.Core"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="{Binding WindowTitle}"
         Icon="/Assets/app-logo.png"
         Height="820" Width="1280"
@@ -14,16 +16,219 @@
         FontFamily="{DynamicResource Font.UI}"
         FontSize="{DynamicResource Font.Size.Body}"
         WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        ResizeMode="CanResize"
+        StateChanged="MainWindow_StateChanged"
         d:DataContext="{d:DesignInstance vm:MainViewModel}"
         mc:Ignorable="d">
+
+    <shell:WindowChrome.WindowChrome>
+        <shell:WindowChrome CaptionHeight="46"
+                            ResizeBorderThickness="6"
+                            CornerRadius="0"
+                            GlassFrameThickness="0"
+                            UseAeroCaptionButtons="False" />
+    </shell:WindowChrome.WindowChrome>
 
     <!-- Main desktop layout: two floating cards (sidebar + main) on a soft
          canvas with 16px padding/gap.
          SidebarColumn.Width is animated by MainWindow.xaml.cs in response
          to MainViewModel.SidebarCollapsed (no XAML binding because Grid
          columns aren't FrameworkElements and can't carry storyboards). -->
-    <Border Background="{DynamicResource Brush.Bg.Canvas}">
-    <Grid Margin="16">
+    <Border x:Name="RootBorder" Background="{DynamicResource Brush.Bg.Canvas}">
+    <DockPanel>
+
+        <!-- ===== Self-drawn title bar (WindowChrome) =====
+             Replaces the default OS title bar: brand on the left, the mode
+             switcher centered, self-drawn min/max/close on the right. The 46px
+             caption region is draggable; interactive controls opt back in with
+             shell:WindowChrome.IsHitTestVisibleInChrome="True". -->
+        <Grid DockPanel.Dock="Top" Height="46" Background="{DynamicResource Brush.Bg.Canvas}">
+            <Grid.Resources>
+                <!-- Horizontal mode segment: transparent, rose-soft when active. -->
+                <Style x:Key="ModeSegButton" TargetType="Button">
+                    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+                    <Setter Property="Background" Value="Transparent" />
+                    <Setter Property="BorderBrush" Value="Transparent" />
+                    <Setter Property="BorderThickness" Value="1" />
+                    <Setter Property="Padding" Value="12,4" />
+                    <Setter Property="Cursor" Value="Hand" />
+                    <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+                    <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
+                    <Setter Property="FontSize" Value="12" />
+                    <Setter Property="FontWeight" Value="SemiBold" />
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="Button">
+                                <Border Background="{TemplateBinding Background}"
+                                        BorderBrush="{TemplateBinding BorderBrush}"
+                                        BorderThickness="{TemplateBinding BorderThickness}"
+                                        CornerRadius="7"
+                                        Padding="{TemplateBinding Padding}">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+                <!-- Window caption button (minimize / maximize). -->
+                <Style x:Key="CaptionButton" TargetType="Button">
+                    <Setter Property="Width" Value="46" />
+                    <Setter Property="Height" Value="46" />
+                    <Setter Property="Background" Value="Transparent" />
+                    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+                    <Setter Property="BorderThickness" Value="0" />
+                    <Setter Property="FontFamily" Value="{DynamicResource Font.Icon}" />
+                    <Setter Property="FontSize" Value="10" />
+                    <Setter Property="Cursor" Value="Hand" />
+                    <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+                    <Setter Property="shell:WindowChrome.IsHitTestVisibleInChrome" Value="True" />
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="Button">
+                                <Border x:Name="Bg" Background="{TemplateBinding Background}">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="Bg" Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+                <!-- Close button: red hover (Windows convention). -->
+                <Style x:Key="CaptionCloseButton" TargetType="Button" BasedOn="{StaticResource CaptionButton}">
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="Button">
+                                <Border x:Name="Bg" Background="{TemplateBinding Background}">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="Bg" Property="Background" Value="#E81123" />
+                                        <Setter Property="Foreground" Value="White" />
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+            </Grid.Resources>
+
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Left: brand (drag region; heart opts back in to clicks) -->
+            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="14,0,0,0">
+                <Border Width="24" Height="24" CornerRadius="7" ClipToBounds="True">
+                    <Image Source="/Assets/app-logo.png"
+                           Stretch="UniformToFill"
+                           SnapsToDevicePixels="True"
+                           RenderOptions.BitmapScalingMode="HighQuality" />
+                </Border>
+                <Button Style="{StaticResource HeaderIconButton}"
+                        Margin="4,0,0,0"
+                        ToolTip="支持我"
+                        FontFamily="Segoe UI Emoji"
+                        shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                    <TextBlock Text="❤" Foreground="{DynamicResource Brush.Primary}" FontSize="13" />
+                </Button>
+            </StackPanel>
+
+            <!-- Center: mode switcher — MolaGPT Chat (web) vs MolaGPT Work (local
+                 agent). The BYOK-vs-account wallet split is NOT shown here; it's
+                 chosen in the model selector. Work is active for both Work and BYOK. -->
+            <Border Grid.Column="1"
+                    VerticalAlignment="Center"
+                    Background="{DynamicResource Brush.Bg.Tertiary}"
+                    BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                    BorderThickness="1"
+                    CornerRadius="{DynamicResource Radius.Md}"
+                    Padding="3"
+                    shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                <StackPanel Orientation="Horizontal">
+                    <Button Command="{Binding SwitchModeCommand}" CommandParameter="chat"
+                            ToolTip="MolaGPT 网页版对话 · 云端同步。">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource ModeSegButton}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Chat.CurrentMode}" Value="{x:Static chat:AppMode.Chat}">
+                                        <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+                                        <Setter Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+                                        <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                        <StackPanel>
+                            <TextBlock Text="MolaGPT Chat" FontSize="12" HorizontalAlignment="Center" />
+                            <TextBlock Text="网页版对话" FontSize="9" Opacity="0.7" HorizontalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                    <Button Margin="2,0,0,0" Command="{Binding SwitchModeCommand}" CommandParameter="work"
+                            ToolTip="MolaGPT Work · 工具 / Agent。账号额度或自定义 API Key.">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource ModeSegButton}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Chat.CurrentMode}" Value="{x:Static chat:AppMode.Work}">
+                                        <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+                                        <Setter Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+                                        <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding Chat.CurrentMode}" Value="{x:Static chat:AppMode.Byok}">
+                                        <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+                                        <Setter Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+                                        <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                        <StackPanel>
+                            <TextBlock Text="MolaGPT Work" FontSize="12" HorizontalAlignment="Center" />
+                            <TextBlock Text="本地对话" FontSize="9" Opacity="0.7" HorizontalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Border>
+
+            <!-- Right: global actions (moved up from the content header) + window controls -->
+            <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                <StackPanel Orientation="Horizontal"
+                            VerticalAlignment="Center"
+                            Margin="0,0,6,0"
+                            shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                    <Button Style="{StaticResource HeaderIconButton}" Command="{Binding OpenSettingsCommand}" ToolTip="设置">
+                        <TextBlock Text="&#xE713;" FontFamily="{DynamicResource Font.Icon}" />
+                    </Button>
+                    <Button Style="{StaticResource HeaderIconButton}" Command="{Binding OpenAboutCommand}" ToolTip="关于 MolaGPT">
+                        <TextBlock Text="&#xE946;" FontFamily="{DynamicResource Font.Icon}" />
+                    </Button>
+                    <Button Style="{StaticResource HeaderIconButton}" Command="{Binding ToggleThemeCommand}" ToolTip="主题切换">
+                        <TextBlock Text="&#xE793;" FontFamily="{DynamicResource Font.Icon}" />
+                    </Button>
+                    <Button Style="{StaticResource HeaderIconButton}" Command="{Binding OpenLoginCommand}" ToolTip="登录 / 账户">
+                        <TextBlock Text="&#xE77B;" FontFamily="{DynamicResource Font.Icon}" />
+                    </Button>
+                </StackPanel>
+                <Button Style="{StaticResource CaptionButton}" Click="MinimizeWindow_Click" ToolTip="最小化">
+                    <TextBlock Text="&#xE921;" />
+                </Button>
+                <Button x:Name="MaximizeRestoreButton" Style="{StaticResource CaptionButton}" Click="MaximizeRestoreWindow_Click" ToolTip="最大化">
+                    <TextBlock x:Name="MaximizeRestoreGlyph" Text="&#xE922;" />
+                </Button>
+                <Button Style="{StaticResource CaptionCloseButton}" Click="CloseWindow_Click" ToolTip="关闭">
+                    <TextBlock Text="&#xE8BB;" />
+                </Button>
+            </StackPanel>
+        </Grid>
+
+    <Grid Margin="16,6,16,16">
         <Grid.ColumnDefinitions>
             <ColumnDefinition x:Name="SidebarColumn" Width="280" />
             <ColumnDefinition x:Name="GapColumn" Width="16" />
@@ -69,6 +274,9 @@
                         <TextBlock Text="新建对话" Style="{StaticResource InlineTextBlock}" />
                     </StackPanel>
                 </Button>
+
+                <!-- Mode switcher moved to the custom title bar (top of window). -->
+
 
                 <!-- Search box -->
                 <Border DockPanel.Dock="Top"
@@ -190,6 +398,27 @@
                                                LineHeight="12"
                                                LineStackingStrategy="BlockLineHeight" />
                                 </Border>
+                                <Border DockPanel.Dock="Right"
+                                        Margin="6,0,0,0"
+                                        Padding="6,0"
+                                        Height="20"
+                                        MinWidth="32"
+                                        VerticalAlignment="Center"
+                                        Background="{DynamicResource Brush.Bg.Tertiary}"
+                                        BorderBrush="{DynamicResource Brush.Border}"
+                                        BorderThickness="1"
+                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                        Visibility="{Binding IsWork, Converter={x:Static views:BoolToVisibility.Instance}}"
+                                        ToolTip="MolaGPT Work">
+                                    <TextBlock Text="{Binding ModeBadgeLabel}"
+                                               FontSize="{DynamicResource Font.Size.XSmall}"
+                                               FontWeight="SemiBold"
+                                               Foreground="{DynamicResource Brush.Text.Secondary}"
+                                               TextAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               LineHeight="12"
+                                               LineStackingStrategy="BlockLineHeight" />
+                                </Border>
                                 <TextBlock DockPanel.Dock="Left"
                                            Text="{Binding IconGlyph}"
                                            FontFamily="{DynamicResource Font.Icon}"
@@ -298,7 +527,7 @@
                                 Style="{StaticResource SidebarGroupHeaderButton}"
                                 Command="{Binding ConversationList.ToggleMolaGptGroupCommand}"
                                 Click="ConversationGroupHeader_Click"
-                                Visibility="{Binding ConversationList.HasMolaGptConversations, Converter={x:Static views:BoolToVisibility.Instance}}">
+                                Visibility="{Binding ConversationList.HasMolaGptConversationItems, Converter={x:Static views:BoolToVisibility.Instance}}">
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto" />
@@ -324,7 +553,7 @@
                                         CornerRadius="8"
                                         Padding="6,1"
                                         VerticalAlignment="Center">
-                                    <TextBlock Text="{Binding ConversationList.MolaGptCount}"
+                                    <TextBlock Text="{Binding ConversationList.MolaGptConversationCount}"
                                                Style="{StaticResource InlineTextBlock.Small}"
                                                FontSize="10"
                                                FontWeight="SemiBold"
@@ -334,7 +563,7 @@
                         </Button>
                         <ListBox Grid.Row="3"
                                  x:Name="MolaGptListBox"
-                                 ItemsSource="{Binding ConversationList.MolaGptItems}"
+                                 ItemsSource="{Binding ConversationList.MolaGptConversationItems}"
                                  SelectedValue="{Binding ConversationList.SelectedId, Mode=OneWayToSource}"
                                  SelectedValuePath="Id"
                                  SelectionMode="Extended"
@@ -357,7 +586,7 @@
                                     <Style.Triggers>
                                         <MultiDataTrigger>
                                             <MultiDataTrigger.Conditions>
-                                                <Condition Binding="{Binding ConversationList.HasMolaGptConversations}" Value="True" />
+                                                <Condition Binding="{Binding ConversationList.HasMolaGptConversationItems}" Value="True" />
                                                 <Condition Binding="{Binding ConversationList.IsMolaGptGroupExpanded}" Value="True" />
                                             </MultiDataTrigger.Conditions>
                                             <Setter Property="Visibility" Value="Visible" />
@@ -366,6 +595,7 @@
                                 </Style>
                             </ListBox.Style>
                         </ListBox>
+
                     </Grid>
                 </Grid>
             </DockPanel>
@@ -593,22 +823,15 @@
                                     Visibility="{Binding SidebarCollapsed, Converter={x:Static views:BoolToVisibility.Instance}}">
                                 <TextBlock Text="&#xE700;" FontFamily="{DynamicResource Font.Icon}" FontSize="12" />
                             </Button>
-                            <Border Width="32" Height="32" CornerRadius="8" ClipToBounds="True">
-                                <Image Source="/Assets/app-logo.png"
-                                       Stretch="UniformToFill"
-                                       SnapsToDevicePixels="True"
-                                       RenderOptions.BitmapScalingMode="HighQuality" />
-                            </Border>
-                            <Button Style="{StaticResource HeaderIconButton}" Margin="2,0,0,0" ToolTip="支持我"
-                                    FontFamily="Segoe UI Emoji">
-                                <TextBlock Text="❤" Foreground="{DynamicResource Brush.Primary}" FontSize="14" />
-                            </Button>
+                            <!-- App logo + heart moved to the custom title bar. -->
+
                         </StackPanel>
 
                         <!-- Center: model selector pill -->
                         <Button Grid.Column="1"
                                 x:Name="ChatModelSelectorButton"
                                 HorizontalAlignment="Left"
+                                VerticalAlignment="Center"
                                 Style="{StaticResource OutlineButton}"
                                 Padding="14,6"
                                 Margin="16,0,0,0"
@@ -618,7 +841,7 @@
                             <StackPanel Style="{StaticResource InlineIconTextPanel}">
                                 <TextBlock Text="&#xE99A;" Style="{StaticResource InlineIconTextBlock}" FontSize="14" Margin="0,0,8,0" />
                                 <TextBlock Text="{Binding Chat.ActiveModelLabel}" Style="{StaticResource InlineTextBlock}" FontWeight="SemiBold" />
-                                <TextBlock Text="{Binding Chat.ActiveProviderLabel}"
+                                <TextBlock Text="{Binding Chat.ActiveModeLabel}"
                                            Style="{StaticResource InlineTextBlock.Small}"
                                            Foreground="{DynamicResource Brush.Text.Muted}"
                                            FontSize="{DynamicResource Font.Size.XSmall}"
@@ -629,6 +852,7 @@
                         <Button Grid.Column="1"
                                 x:Name="WorkbenchModelSelectorButton"
                                 HorizontalAlignment="Left"
+                                VerticalAlignment="Center"
                                 Style="{StaticResource OutlineButton}"
                                 Padding="14,6"
                                 Margin="16,0,0,0"
@@ -648,6 +872,8 @@
 
                         <!-- Right: action icons -->
                         <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                            <!-- Quota chip is prewired in MainViewModel and kept out of the
+                                 current chrome for now. -->
                             <Button Style="{StaticResource HeaderIconButton}"
                                     Width="Auto"
                                     Padding="8,4"
@@ -689,7 +915,7 @@
                                     Margin="0,0,6,0"
                                     Command="{Binding SyncCloudCommand}"
                                     ToolTip="{Binding CloudSyncStatusToolTip}"
-                                    Visibility="{Binding CloudSyncStatusVisible, Converter={x:Static views:BoolToVisibility.Instance}}">
+                                    Visibility="{Binding IsCloudSyncChipVisible, Converter={x:Static views:BoolToVisibility.Instance}}">
                                 <Border Padding="8,3"
                                         BorderThickness="1"
                                         CornerRadius="{DynamicResource Radius.Sm}">
@@ -767,26 +993,7 @@
                                              Visibility="{Binding Chat.ConversationSystemPrompt, Converter={x:Static views:NullToInverseVisibility.Instance}}" />
                                 </Grid>
                             </Button>
-                            <Button Style="{StaticResource HeaderIconButton}"
-                                    Command="{Binding OpenSettingsCommand}"
-                                    ToolTip="设置">
-                                <TextBlock Text="&#xE713;" FontFamily="{DynamicResource Font.Icon}" />
-                            </Button>
-                            <Button Style="{StaticResource HeaderIconButton}"
-                                    Command="{Binding OpenAboutCommand}"
-                                    ToolTip="关于 MolaGPT">
-                                <TextBlock Text="&#xE946;" FontFamily="{DynamicResource Font.Icon}" />
-                            </Button>
-                            <Button Style="{StaticResource HeaderIconButton}"
-                                    Command="{Binding ToggleThemeCommand}"
-                                    ToolTip="主题切换">
-                                <TextBlock Text="&#xE793;" FontFamily="{DynamicResource Font.Icon}" />
-                            </Button>
-                            <Button Style="{StaticResource HeaderIconButton}"
-                                    Command="{Binding OpenLoginCommand}"
-                                    ToolTip="登录 MolaGPT">
-                                <TextBlock Text="&#xE77B;" FontFamily="{DynamicResource Font.Icon}" />
-                            </Button>
+                            <!-- 设置 / 关于 / 主题 / 账户 已移到顶部标题栏 header。 -->
                         </StackPanel>
                     </Grid>
                 </Border>
@@ -989,6 +1196,21 @@
                                                            Margin="10,8,6,4"
                                                            Opacity="0.85"
                                                            Visibility="{Binding HeaderVisibility}" />
+                                                <Border Margin="8,3,8,7"
+                                                        Padding="10,7"
+                                                        Background="{DynamicResource Brush.Primary.Tint}"
+                                                        BorderBrush="{DynamicResource Brush.Primary.Border}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                                        Visibility="{Binding HintVisibility}">
+                                                    <TextBlock Text="{Binding HintText}"
+                                                               FontSize="11"
+                                                               FontWeight="SemiBold"
+                                                               Foreground="{DynamicResource Brush.Primary.Hover}"
+                                                               TextWrapping="Wrap"
+                                                               LineHeight="16"
+                                                               LineStackingStrategy="BlockLineHeight" />
+                                                </Border>
                                                 <Button Style="{StaticResource HintChip}"
                                                         Margin="4,2"
                                                         Padding="12,6"
@@ -1229,5 +1451,6 @@
             </Grid>
         </Border>
     </Grid>
+    </DockPanel>
     </Border>
 </Window>

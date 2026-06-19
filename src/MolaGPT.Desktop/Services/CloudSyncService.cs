@@ -30,6 +30,17 @@ public sealed class CloudSyncService
     private const string ConversationMetadataPrefix = "cloud_sync.metadata.";
     private const string TitleGeneratedPrefix = "cloud_sync.ai_title_generated.";
     private const string MolaGptProviderId = "molagpt-proxy";
+    private const string MolaGptLocalToolsProviderId = "molagpt-local-tools";
+    /// <summary>
+    /// Work-mode (MolaGPT local-tools agent) cloud sync is intentionally NOT
+    /// surfaced yet. Work conversations stay local for now; the sync pipeline
+    /// only processes <see cref="MolaGptProviderId"/> (Chat) rows. This flag is
+    /// the seam for a future opt-in: when flipped, extend
+    /// <see cref="IsMolaGptCloudConversation"/> to also admit Work rows and add
+    /// a Work-specific upload branch. No UI references this — it is code-level
+    /// pre-wiring only.
+    /// </summary>
+    private const bool WorkCloudSyncEnabled = false;
     private const string EpochIso = "1970-01-01T00:00:00.000Z";
     private const int ChunkSize = 5 * 1024 * 1024;
     private static readonly TimeSpan SyncTimeout = TimeSpan.FromMinutes(3);
@@ -1940,7 +1951,12 @@ public sealed class CloudSyncService
     }
 
     private static bool IsCloudSyncable(ConversationRow row) =>
-        string.Equals(row.ProviderId, MolaGptProviderId, StringComparison.OrdinalIgnoreCase);
+        // Chat (molagpt-proxy) always syncs. Work (molagpt-local-tools) is gated
+        // behind WorkCloudSyncEnabled — currently false, so Work conversations
+        // stay local and no sync UI is exposed for them.
+        string.Equals(row.ProviderId, MolaGptProviderId, StringComparison.OrdinalIgnoreCase)
+        || (WorkCloudSyncEnabled
+            && string.Equals(row.ProviderId, MolaGptLocalToolsProviderId, StringComparison.OrdinalIgnoreCase));
 
     private bool HasConversationSyncTimestamp(string conversationId) =>
         !string.IsNullOrWhiteSpace(_settings.Get(ConversationSyncKey(conversationId)));

@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using MolaGPT.Core.Models;
@@ -17,6 +18,7 @@ namespace MolaGPT.Core.Chat.Providers;
 ///   - Streaming events: message_start / content_block_start / content_block_delta /
 ///     content_block_stop / message_delta / message_stop; thinking blocks separate.
 /// </summary>
+[DebuggerDisplay("{DisplayName} [ApiKey=***]")]
 public sealed class AnthropicProvider : IChatProvider
 {
     public string Id { get; }
@@ -28,20 +30,20 @@ public sealed class AnthropicProvider : IChatProvider
     public const string AnthropicVersion = "2023-06-01";
 
     public string BaseUrl { get; }
-    public string ApiKey { get; }
 
     /// <summary>Messages path, relative to <see cref="BaseUrl"/> (carries the version
     /// segment, e.g. "v1/messages"). User-configurable per provider.</summary>
     public string MessagesPath { get; init; } = "v1/messages";
 
     private readonly HttpClient _http;
+    private readonly string _apiKey;
 
     public AnthropicProvider(string id, string displayName, string apiKey,
         IReadOnlyList<ProviderModel> models, HttpClient http, string? baseUrl = null)
     {
         Id = id;
         DisplayName = displayName;
-        ApiKey = apiKey;
+        _apiKey = apiKey;
         Models = models;
         BaseUrl = NetworkSecurity.RequireHttpsBaseUrl(baseUrl ?? DefaultBaseUrl, $"{displayName} Base URL");
         _http = http;
@@ -101,7 +103,7 @@ public sealed class AnthropicProvider : IChatProvider
 
         var url = NetworkSecurity.CombineEndpoint(BaseUrl, MessagesPath, DisplayName);
         using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = JsonContent.Create(body) };
-        req.Headers.Add("x-api-key", ApiKey);
+        req.Headers.Add("x-api-key", _apiKey);
         req.Headers.Add("anthropic-version", AnthropicVersion);
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 

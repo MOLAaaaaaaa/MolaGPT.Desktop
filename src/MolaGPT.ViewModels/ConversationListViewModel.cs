@@ -4,6 +4,7 @@ using System.ComponentModel;
 using MolaGPT.Storage;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using MolaGPT.Core.Chat;
 using MolaGPT.Storage.Repositories;
 
 namespace MolaGPT.ViewModels;
@@ -14,15 +15,16 @@ namespace MolaGPT.ViewModels;
 /// boot) falls back to in-memory mock data. Selection changes always raise
 /// <see cref="ConversationSelected"/> so MainViewModel can swap the chat.
 ///
-/// The list is split into two parallel collections — <see cref="ByokItems"/>
-/// and <see cref="MolaGptItems"/> — both individually collapsible. Group
+/// The list is split into two rendered collections — <see cref="ByokItems"/>
+/// and <see cref="MolaGptConversationItems"/> — both individually collapsible. Group
 /// expansion state persists across restarts via <see cref="SettingsRepository"/>
 /// under the keys <c>sidebar_group_byok_expanded</c> /
 /// <c>sidebar_group_molagpt_expanded</c>. BYOK is rendered first (above
-/// MolaGPT) per product preference.
+/// MolaGPT) per product preference. MolaGPT Chat and Work are shown together;
+/// Work remains marked at row level and does not participate in Chat cloud sync.
 ///
 /// We keep a single master <see cref="Items"/> collection (used by sync /
-/// search / upsert paths) and derive the two group collections by
+/// search / upsert paths) and derive the rendered group collections by
 /// subscribing to its CollectionChanged event. Two-collection-with-sync is
 /// simpler than introducing a WPF <c>ICollectionView</c> in this project,
 /// which intentionally has no PresentationFramework reference.
@@ -32,18 +34,27 @@ public sealed partial class ConversationListViewModel : ObservableObject
     public const string ImageWorkbenchProviderId = "byok-image-workbench";
     private const string SettingByokExpandedKey = "sidebar_group_byok_expanded";
     private const string SettingMolaGptExpandedKey = "sidebar_group_molagpt_expanded";
+    private const string SettingWorkExpandedKey = "sidebar_group_work_expanded";
 
     private readonly BulkObservableCollection<ConversationListItem> _items = new();
     private readonly BulkObservableCollection<ConversationListItem> _byokItems = new();
     private readonly BulkObservableCollection<ConversationListItem> _molaGptItems = new();
+    private readonly BulkObservableCollection<ConversationListItem> _workItems = new();
+    private readonly BulkObservableCollection<ConversationListItem> _molaGptConversationItems = new();
 
     public ObservableCollection<ConversationListItem> Items => _items;
 
     /// <summary>BYOK conversations only — bound to the BYOK ListBox in the sidebar.</summary>
     public ObservableCollection<ConversationListItem> ByokItems => _byokItems;
 
-    /// <summary>MolaGPT-account conversations only — bound to the MolaGPT ListBox.</summary>
+    /// <summary>MolaGPT Chat (cloud) conversations — bound to the Chat ListBox.</summary>
     public ObservableCollection<ConversationListItem> MolaGptItems => _molaGptItems;
+
+    /// <summary>MolaGPT Work (local-agent, shared quota) conversations — bound to the Work ListBox.</summary>
+    public ObservableCollection<ConversationListItem> WorkItems => _workItems;
+
+    /// <summary>MolaGPT Chat + Work conversations — bound to the unified MolaGPT sidebar group.</summary>
+    public ObservableCollection<ConversationListItem> MolaGptConversationItems => _molaGptConversationItems;
 
     [ObservableProperty] private string? _selectedId;
     [ObservableProperty] private string _searchQuery = string.Empty;
@@ -54,21 +65,29 @@ public sealed partial class ConversationListViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(MolaGptGroupChevron))]
     private bool _isMolaGptGroupExpanded = true;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(WorkGroupChevron))]
+    private bool _isWorkGroupExpanded = true;
 
     /// <summary>Fluent chevron glyph for the BYOK group header (E70D = down,
     /// E70E = up). Bound directly so the header doesn't need a converter.</summary>
     public string ByokGroupChevron => IsByokGroupExpanded ? "" : "";
     public string MolaGptGroupChevron => IsMolaGptGroupExpanded ? "" : "";
+    public string WorkGroupChevron => IsWorkGroupExpanded ? "" : "";
 
     /// <summary>Counts shown next to each group header.</summary>
     public int ByokCount => ByokItems.Count;
     public int MolaGptCount => MolaGptItems.Count;
+    public int WorkCount => WorkItems.Count;
+    public int MolaGptConversationCount => MolaGptConversationItems.Count;
 
     /// <summary>True when the BYOK group has at least one conversation.
     /// Lets the XAML hide the entire group block (header + list) for
     /// users who never use BYOK, instead of showing an empty section.</summary>
     public bool HasByokConversations => ByokItems.Count > 0;
     public bool HasMolaGptConversations => MolaGptItems.Count > 0;
+    public bool HasWorkConversations => WorkItems.Count > 0;
+    public bool HasMolaGptConversationItems => MolaGptConversationItems.Count > 0;
 
     private readonly ConversationRepository? _repository;
     private readonly PersonaListViewModel? _personas;
@@ -91,6 +110,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
 
     [RelayCommand]
     private void ToggleMolaGptGroup() => IsMolaGptGroupExpanded = !IsMolaGptGroupExpanded;
+
+    [RelayCommand]
+    private void ToggleWorkGroup() => IsWorkGroupExpanded = !IsWorkGroupExpanded;
 
     /// <summary>
     /// True iff the user has multi-selected (≥2) conversations — drives the
@@ -133,6 +155,8 @@ public sealed partial class ConversationListViewModel : ObservableObject
                     IsByokGroupExpanded = byok;
                 if (bool.TryParse(_settingsRepo.Get(SettingMolaGptExpandedKey), out var mgpt))
                     IsMolaGptGroupExpanded = mgpt;
+                if (bool.TryParse(_settingsRepo.Get(SettingWorkExpandedKey), out var work))
+                    IsWorkGroupExpanded = work;
             }
             finally { _suspendExpansionPersist = false; }
         }
@@ -161,6 +185,12 @@ public sealed partial class ConversationListViewModel : ObservableObject
         _settingsRepo.Set(SettingMolaGptExpandedKey, value.ToString());
     }
 
+    partial void OnIsWorkGroupExpandedChanged(bool value)
+    {
+        if (_suspendExpansionPersist || _settingsRepo is null) return;
+        _settingsRepo.Set(SettingWorkExpandedKey, value.ToString());
+    }
+
     private void OnItemsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
         if (_bulkUpdatingItems) return;
@@ -171,6 +201,8 @@ public sealed partial class ConversationListViewModel : ObservableObject
             // Items is empty here and groups simply mirror that emptiness.
             ByokItems.Clear();
             MolaGptItems.Clear();
+            WorkItems.Clear();
+            MolaGptConversationItems.Clear();
             RaiseGroupCountChanges();
             return;
         }
@@ -179,8 +211,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
         {
             foreach (ConversationListItem old in e.OldItems)
             {
-                if (old.IsByok) ByokItems.Remove(old);
-                else MolaGptItems.Remove(old);
+                GroupFor(old).Remove(old);
+                if (old.IsMolaGptAccountConversation)
+                    MolaGptConversationItems.Remove(old);
             }
         }
         if (e.NewItems is not null)
@@ -194,21 +227,39 @@ public sealed partial class ConversationListViewModel : ObservableObject
             var prepend = e.NewStartingIndex == 0;
             foreach (ConversationListItem n in e.NewItems)
             {
-                var target = n.IsByok ? ByokItems : MolaGptItems;
+                var target = GroupFor(n);
                 if (prepend) target.Insert(0, n);
                 else target.Add(n);
+
+                if (n.IsMolaGptAccountConversation)
+                    RefreshMolaGptConversationItems();
             }
         }
         RaiseGroupCountChanges();
     }
 
+    /// <summary>Maps a conversation item to its mirror collection by group.</summary>
+    private ObservableCollection<ConversationListItem> GroupFor(ConversationListItem item) => item.Group switch
+    {
+        AppMode.Chat => _molaGptItems,
+        AppMode.Work => _workItems,
+        _ => _byokItems,
+    };
+
     private void RaiseGroupCountChanges()
     {
         OnPropertyChanged(nameof(ByokCount));
         OnPropertyChanged(nameof(MolaGptCount));
+        OnPropertyChanged(nameof(WorkCount));
+        OnPropertyChanged(nameof(MolaGptConversationCount));
         OnPropertyChanged(nameof(HasByokConversations));
         OnPropertyChanged(nameof(HasMolaGptConversations));
+        OnPropertyChanged(nameof(HasWorkConversations));
+        OnPropertyChanged(nameof(HasMolaGptConversationItems));
     }
+
+    private void RefreshMolaGptConversationItems() =>
+        _molaGptConversationItems.ReplaceAll(Items.Where(item => item.IsMolaGptAccountConversation));
 
     private void RefreshAllPersonaLabels()
     {
@@ -311,7 +362,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
             row.Id,
             string.IsNullOrWhiteSpace(row.Title) ? "新对话" : row.Title,
             DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt),
-            IsByokProvider(row.ProviderId),
+            ClassifyGroup(row.ProviderId),
             _personas?.Find(row.PersonaId)?.Name ?? existing?.PersonaLabel,
             IsImageWorkbenchProvider(row.ProviderId),
             row.Pinned);
@@ -331,8 +382,10 @@ public sealed partial class ConversationListViewModel : ObservableObject
                 SetSelectedIds(Array.Empty<string>());
 
             _items.ReplaceAll(items);
-            _byokItems.ReplaceAll(items.Where(item => item.IsByok));
-            _molaGptItems.ReplaceAll(items.Where(item => !item.IsByok));
+            _byokItems.ReplaceAll(items.Where(item => item.Group == AppMode.Byok));
+            _molaGptItems.ReplaceAll(items.Where(item => item.Group == AppMode.Chat));
+            _workItems.ReplaceAll(items.Where(item => item.Group == AppMode.Work));
+            _molaGptConversationItems.ReplaceAll(items.Where(item => item.IsMolaGptAccountConversation));
         }
         finally
         {
@@ -364,7 +417,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
             if (item.Id != row.Id
                 || (!string.IsNullOrWhiteSpace(row.Title) && item.Title != row.Title)
                 || item.UpdatedAt != DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt)
-                || item.IsByok != IsByokProvider(row.ProviderId)
+                || item.Group != ClassifyGroup(row.ProviderId)
                 || item.IsImageTask != IsImageWorkbenchProvider(row.ProviderId)
                 || item.Pinned != row.Pinned)
             {
@@ -398,9 +451,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
         }
 
         var normalized = string.IsNullOrWhiteSpace(title) ? "新对话" : title;
-        var isByok = providerId is null && existingIdx >= 0
-            ? Items[existingIdx].IsByok
-            : IsByokProvider(providerId);
+        var group = providerId is null && existingIdx >= 0
+            ? Items[existingIdx].Group
+            : ClassifyGroup(providerId);
         var isImageTask = providerId is null && existingIdx >= 0
             ? Items[existingIdx].IsImageTask
             : IsImageWorkbenchProvider(providerId);
@@ -416,7 +469,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
             "" => null,
             _ => personaLabel
         };
-        var next = new ConversationListItem(id, normalized, updatedAt, isByok, resolvedPersonaLabel, isImageTask, isPinned);
+        var next = new ConversationListItem(id, normalized, updatedAt, group, resolvedPersonaLabel, isImageTask, isPinned);
         if (wasGenerating) next.IsGenerating = true;
 
         if (existingIdx < 0)
@@ -574,7 +627,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
                 row.Id,
                 title,
                 DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt),
-                IsByokProvider(row.ProviderId),
+                ClassifyGroup(row.ProviderId),
                 _personas?.Find(row.PersonaId)?.Name,
                 IsImageWorkbenchProvider(row.ProviderId)));
         }
@@ -619,9 +672,17 @@ public sealed partial class ConversationListViewModel : ObservableObject
         }
     }
 
-    private static bool IsByokProvider(string? providerId) =>
-        !string.IsNullOrWhiteSpace(providerId)
-        && !string.Equals(providerId, "molagpt-proxy", StringComparison.OrdinalIgnoreCase);
+    /// <summary>Three-way sidebar group for a conversation, derived from its
+    /// provider id. molagpt-proxy → Chat, molagpt-local-tools → Work, anything
+    /// else (incl. BYOK image workbench) → Byok. Mirrors <see cref="AppMode"/>.</summary>
+    private static AppMode ClassifyGroup(string? providerId)
+    {
+        if (string.Equals(providerId, MolaGptProviderIds.Proxy, StringComparison.OrdinalIgnoreCase))
+            return AppMode.Chat;
+        if (string.Equals(providerId, MolaGptProviderIds.LocalTools, StringComparison.OrdinalIgnoreCase))
+            return AppMode.Work;
+        return AppMode.Byok;
+    }
 
     public static bool IsImageWorkbenchProvider(string? providerId) =>
         string.Equals(providerId, ImageWorkbenchProviderId, StringComparison.OrdinalIgnoreCase);
@@ -632,10 +693,16 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
     public string Id { get; }
     public string Title { get; }
     public DateTimeOffset UpdatedAt { get; }
-    public bool IsByok { get; }
+    /// <summary>Three-way sidebar group (Byok / Chat / Work).</summary>
+    public AppMode Group { get; }
+    /// <summary>Back-compat: true for any non-MolaGPT-account conversation (Byok group).</summary>
+    public bool IsByok => Group == AppMode.Byok;
+    public bool IsWork => Group == AppMode.Work;
+    public bool IsMolaGptAccountConversation => Group is AppMode.Chat or AppMode.Work;
     public bool IsImageTask { get; }
     public bool Pinned { get; }
     public string IconGlyph => IsImageTask ? "\uE91B" : "\uE8BD";
+    public string ModeBadgeLabel => IsWork ? "Work" : string.Empty;
 
     private bool _isGenerating;
     public bool IsGenerating
@@ -665,17 +732,17 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
     public string BadgeLabel => IsImageTask ? "图像" : string.IsNullOrWhiteSpace(PersonaLabel) ? "自定义" : PersonaLabel!;
 
     public ConversationListItem(string id, string title, DateTimeOffset updatedAt, bool isByok)
-        : this(id, title, updatedAt, isByok, null) { }
+        : this(id, title, updatedAt, isByok ? AppMode.Byok : AppMode.Chat, null, false) { }
 
     public ConversationListItem(
         string id, string title, DateTimeOffset updatedAt, bool isByok, string? personaLabel)
-        : this(id, title, updatedAt, isByok, personaLabel, false) { }
+        : this(id, title, updatedAt, isByok ? AppMode.Byok : AppMode.Chat, personaLabel, false) { }
 
     public ConversationListItem(
         string id,
         string title,
         DateTimeOffset updatedAt,
-        bool isByok,
+        AppMode group,
         string? personaLabel,
         bool isImageTask,
         bool pinned = false)
@@ -683,7 +750,7 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
         Id = id;
         Title = title;
         UpdatedAt = updatedAt;
-        IsByok = isByok;
+        Group = group;
         IsImageTask = isImageTask;
         Pinned = pinned;
         _personaLabel = personaLabel;

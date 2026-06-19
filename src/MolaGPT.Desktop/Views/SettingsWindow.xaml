@@ -9,7 +9,7 @@
         xmlns:scm="clr-namespace:System.ComponentModel;assembly=WindowsBase"
         Title="设置 — MolaGPT"
         Icon="/Assets/app-logo.png"
-        Width="1040" Height="700"
+        Width="1040" Height="740"
         WindowStartupLocation="CenterOwner"
         WindowStyle="None"
         AllowsTransparency="True"

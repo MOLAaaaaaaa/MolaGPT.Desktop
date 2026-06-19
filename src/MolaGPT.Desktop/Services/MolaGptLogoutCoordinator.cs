@@ -8,8 +8,6 @@ namespace MolaGPT.Desktop.Services;
 
 public sealed class MolaGptLogoutCoordinator
 {
-    private const string MolaGptProviderId = "molagpt-proxy";
-
     private readonly MolaGptAuthService _auth;
     private readonly ProviderRegistry _registry;
     private readonly CloudSyncService _cloudSync;
@@ -54,7 +52,8 @@ public sealed class MolaGptLogoutCoordinator
 
             var currentWasMolaGpt = IsMolaGptConversation(_chat.ConversationId);
             var selectedId = _conversationList.SelectedId;
-            var providerRemoved = _registry.Unregister(MolaGptProviderId);
+            var providerRemoved = _registry.Unregister(MolaGptProviderIds.Proxy);
+            var localToolsProviderRemoved = _registry.Unregister(MolaGptProviderIds.LocalTools);
             var deleted = _cloudSync.CleanupLocalPlaceholdersForLogout();
 
             _conversationList.Reload();
@@ -73,7 +72,7 @@ public sealed class MolaGptLogoutCoordinator
 
             DiagnosticLog.Write(
                 "MolaGptLogout",
-                $"cleanup reason={reason} providerRemoved={providerRemoved} deletedPlaceholders={deleted} currentWasMolaGpt={currentWasMolaGpt}");
+                $"cleanup reason={reason} providerRemoved={providerRemoved} localToolsProviderRemoved={localToolsProviderRemoved} deletedPlaceholders={deleted} currentWasMolaGpt={currentWasMolaGpt}");
         }
         catch (Exception ex)
         {
@@ -88,6 +87,6 @@ public sealed class MolaGptLogoutCoordinator
     {
         if (string.IsNullOrWhiteSpace(conversationId)) return false;
         var row = _conversations.Get(conversationId);
-        return string.Equals(row?.ProviderId, MolaGptProviderId, StringComparison.OrdinalIgnoreCase);
+        return MolaGptProviderIds.IsMolaGptAccount(row?.ProviderId);
     }
 }

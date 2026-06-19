@@ -509,7 +509,19 @@
         </Setter>
     </Style>
 
+    <!-- Localized (zh-CN) text selection menu shared by selectable read-only
+         TextBoxes, replacing WPF's built-in English "Copy / Select All".
+         x:Shared="False" so each TextBox gets its own ContextMenu instance;
+         commands target the box the menu pops over (the PlacementTarget). -->
+    <ContextMenu x:Key="ChineseTextSelectionMenu" x:Shared="False">
+        <MenuItem Header="复制" Command="Copy" InputGestureText="Ctrl+C"
+                  CommandTarget="{Binding PlacementTarget, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+        <MenuItem Header="全选" Command="SelectAll" InputGestureText="Ctrl+A"
+                  CommandTarget="{Binding PlacementTarget, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+    </ContextMenu>
+
     <Style x:Key="SelectableBlockTextBox" TargetType="TextBox">
+        <Setter Property="ContextMenu" Value="{StaticResource ChineseTextSelectionMenu}" />
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
         <Setter Property="BorderThickness" Value="0" />

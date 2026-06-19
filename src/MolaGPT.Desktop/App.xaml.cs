@@ -60,7 +60,16 @@ public partial class App : Application
 
     protected override async void OnStartup(StartupEventArgs e)
     {
-        DiagnosticLog.Write("App", $"OnStartup pid={Environment.ProcessId} args=[{string.Join(" | ", e.Args)}]");
+        var hasDeepLinkArg = false;
+        foreach (var arg in e.Args)
+        {
+            if (arg.StartsWith(UrlSchemeRegistrar.Scheme + ":", StringComparison.OrdinalIgnoreCase))
+            {
+                hasDeepLinkArg = true;
+                break;
+            }
+        }
+        DiagnosticLog.Write("App", $"OnStartup pid={Environment.ProcessId} args.len={e.Args.Length} deepLink={hasDeepLinkArg}");
 
         // Single-instance guard runs before anything else: a second launch
         // forwards its argv (typically the molagpt:// deep link from the
@@ -120,6 +129,8 @@ public partial class App : Application
 
             if (!string.IsNullOrEmpty(auth.CurrentJwt))
                 registry.Register(proxy);
+            try { await Services.GetRequiredService<MolaGptLocalToolsRegistrar>().RefreshAsync(); }
+            catch { /* optional gateway — keep regular MolaGPT login usable */ }
         }
 
         if (string.IsNullOrEmpty(auth.CurrentJwt))
@@ -132,6 +143,8 @@ public partial class App : Application
         var composerVm = Services.GetRequiredService<ComposerViewModel>();
         var conversationListVm = Services.GetRequiredService<ConversationListViewModel>();
         var settingsVm = Services.GetRequiredService<SettingsViewModel>();
+        settingsVm.IsLoggedIn = !string.IsNullOrEmpty(auth.CurrentJwt);
+        settingsVm.MolaGptUsername = auth.CurrentUsername;
 
         // Wire theme preference: settings VM holds the user's choice, and we
         // own the actual ResourceDictionary swap. Apply once before showing
@@ -203,14 +216,24 @@ public partial class App : Application
             {
                 var dlg = Services.GetRequiredService<AccountDialog>();
                 dlg.Owner = window;
-                dlg.ShowDialog();
+                if (dlg.ShowDialog() == true)
+                {
+                    settingsVm.IsLoggedIn = !string.IsNullOrEmpty(auth.CurrentJwt);
+                    settingsVm.MolaGptUsername = auth.CurrentUsername;
+                    _ = mainVm.RefreshQuotaAsync();
+                }
             }
             else
             {
                 var dlg = Services.GetRequiredService<LoginDialog>();
                 dlg.Owner = window;
                 if (dlg.ShowDialog() == true)
+                {
+                    settingsVm.IsLoggedIn = true;
+                    settingsVm.MolaGptUsername = auth.CurrentUsername;
+                    _ = mainVm.RefreshQuotaAsync();
                     _ = RunCloudSyncAndReloadAsync(cloudSync, conversationListVm);
+                }
             }
         };
         mainVm.SettingsRequested = () =>
@@ -524,6 +547,7 @@ public partial class App : Application
                 sp.GetRequiredService<SettingsRepository>());
         });
         services.AddSingleton<MolaGptLogoutCoordinator>();
+        services.AddSingleton<MolaGptLocalToolsRegistrar>();
 
         services.AddSingleton<BackgroundStreamService>();
         services.AddSingleton(sp => new McpHttpClient(
@@ -549,7 +573,8 @@ public partial class App : Application
             sp.GetRequiredService<ProviderRegistry>(),
             sp.GetRequiredService<MessageRepository>(),
             sp.GetRequiredService<ConversationRepository>(),
-            sp.GetRequiredService<PersonaListViewModel>()));
+            sp.GetRequiredService<PersonaListViewModel>(),
+            sp.GetRequiredService<SettingsRepository>()));
         services.AddSingleton(_ => new AttachmentStore());
         services.AddSingleton(sp => new ComposerViewModel(
             sp.GetRequiredService<ChatViewModel>(),
@@ -572,7 +597,8 @@ public partial class App : Application
             sp.GetRequiredService<ComposerViewModel>(),
             sp.GetRequiredService<SettingsViewModel>(),
             sp.GetRequiredService<PersonaListViewModel>(),
-            sp.GetRequiredService<BackgroundStreamService>()));
+            sp.GetRequiredService<BackgroundStreamService>(),
+            sp.GetRequiredService<MolaGptProxyProvider>()));
 
         services.AddSingleton<NotificationService>(sp => new NotificationService(
             sp.GetRequiredService<BackgroundStreamService>(),
@@ -611,7 +637,8 @@ public partial class App : Application
         services.AddTransient(sp => new LoginDialog(
             sp.GetRequiredService<MolaGptAuthService>(),
             sp.GetRequiredService<MolaGptProxyProvider>(),
-            sp.GetRequiredService<ProviderRegistry>()));
+            sp.GetRequiredService<ProviderRegistry>(),
+            sp.GetRequiredService<MolaGptLocalToolsRegistrar>()));
         services.AddTransient(sp => new AccountDialog(
             sp.GetRequiredService<MolaGptAuthService>(),
             sp.GetRequiredService<MolaGptProxyProvider>()));
@@ -928,6 +955,8 @@ public partial class App : Application
             var proxy = Services.GetRequiredService<MolaGptProxyProvider>();
             await proxy.RefreshModelsAsync();
             registry.Register(proxy);
+            try { await Services.GetRequiredService<MolaGptLocalToolsRegistrar>().RefreshAsync(); }
+            catch { /* optional gateway — ignore refresh errors after login */ }
             DiagnosticLog.Write("OAuthDeepLink", "proxy registered");
         }
         catch (MolaGptAuthExpiredException ex)
