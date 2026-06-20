@@ -106,13 +106,13 @@ public static partial class LocalToolRegistry
                 function = new
                 {
                     name = "read_file",
-                    description = "读取本地文件的文本内容。优先用本工具读取文件，而不是写 Python 代码去 open()。可选按行范围读取大文件。",
+                    description = "读取本地文件的文本内容。优先用本工具读取文本文件，而不是写 Python 代码去 open()。如果 path 是相对路径，会优先按当前对话工作目录（上传附件与 Python 工具共享的目录）解析；找不到再按应用当前目录解析。可选按行范围读取大文件。",
                     parameters = new
                     {
                         type = "object",
                         properties = new
                         {
-                            path = new { type = "string", description = "文件的绝对路径或相对路径" },
+                            path = new { type = "string", description = "文件的绝对路径或相对路径。上传附件可直接使用附件提示给出的相对路径，如 1.grd。" },
                             offset = new { type = "integer", description = "起始行号（1 基，可选）" },
                             limit = new { type = "integer", description = "读取行数（可选，默认整文件，最多 2000 行）" }
                         },
@@ -126,14 +126,14 @@ public static partial class LocalToolRegistry
                 function = new
                 {
                     name = "glob_files",
-                    description = "按通配模式查找文件（支持 ** 和 *，如 **/*.cs）。优先用本工具找文件，而不是写 Python 遍历目录。结果按修改时间倒序。",
+                    description = "按通配模式查找文件（支持 ** 和 *，如 **/*.cs）。优先用本工具找文件，而不是写 Python 遍历目录。path 省略或为相对路径时，会优先使用当前对话工作目录。结果按修改时间倒序。",
                     parameters = new
                     {
                         type = "object",
                         properties = new
                         {
                             pattern = new { type = "string", description = "通配模式，如 **/*.md 或 src/**/*.cs" },
-                            path = new { type = "string", description = "搜索根目录（可选，默认当前工作目录）" },
+                            path = new { type = "string", description = "搜索根目录（可选，默认当前对话工作目录；没有工作目录时使用应用当前目录）" },
                             limit = new { type = "integer", description = "最多返回多少条（可选，默认 200）" }
                         },
                         required = new[] { "pattern" }
@@ -146,14 +146,14 @@ public static partial class LocalToolRegistry
                 function = new
                 {
                     name = "grep_files",
-                    description = "在文件内容中按正则搜索（类似 grep/ripgrep）。优先用本工具搜内容，而不是写 Python。返回命中的文件、行号、行文本。",
+                    description = "在文件内容中按正则搜索（类似 grep/ripgrep）。优先用本工具搜内容，而不是写 Python。path 省略或为相对路径时，会优先使用当前对话工作目录。返回命中的文件、行号、行文本。",
                     parameters = new
                     {
                         type = "object",
                         properties = new
                         {
                             pattern = new { type = "string", description = "正则表达式" },
-                            path = new { type = "string", description = "搜索根目录（可选，默认当前工作目录）" },
+                            path = new { type = "string", description = "搜索根目录（可选，默认当前对话工作目录；没有工作目录时使用应用当前目录）" },
                             glob = new { type = "string", description = "限定文件名/路径的通配，如 *.cs（可选）" },
                             ignore_case = new { type = "boolean", description = "是否忽略大小写（可选）" },
                             max_matches = new { type = "integer", description = "最多命中条数（可选，默认 100）" }
@@ -207,7 +207,7 @@ public static partial class LocalToolRegistry
         var path = ReadArgString(root, "path");
         var offset = ReadArgInt(root, "offset");
         var limit = ReadArgInt(root, "limit");
-        return SerializeToolResult(FileToolset.ReadFile(path, offset, limit, options.DeniedPathPrefixList, ct));
+        return SerializeToolResult(FileToolset.ReadFile(path, offset, limit, options.DeniedPathPrefixList, options.WorkspaceRoot, ct));
     }
 
     private static string ExecuteGlob(string argumentsJson, LocalToolOptions options, CancellationToken ct)
@@ -217,7 +217,7 @@ public static partial class LocalToolRegistry
         var pattern = ReadArgString(root, "pattern");
         var path = ReadArgString(root, "path");
         var limit = ReadArgInt(root, "limit");
-        return SerializeToolResult(FileToolset.Glob(pattern, path, limit, options.DeniedPathPrefixList, ct));
+        return SerializeToolResult(FileToolset.Glob(pattern, path, limit, options.DeniedPathPrefixList, options.WorkspaceRoot, ct));
     }
 
     private static string ExecuteGrep(string argumentsJson, LocalToolOptions options, CancellationToken ct)
@@ -229,7 +229,7 @@ public static partial class LocalToolRegistry
         var glob = ReadArgString(root, "glob");
         var ignoreCase = ReadArgBool(root, "ignore_case");
         var max = ReadArgInt(root, "max_matches");
-        return SerializeToolResult(FileToolset.Grep(pattern, path, glob, ignoreCase, max, options.DeniedPathPrefixList, ct));
+        return SerializeToolResult(FileToolset.Grep(pattern, path, glob, ignoreCase, max, options.DeniedPathPrefixList, options.WorkspaceRoot, ct));
     }
 
     private static JsonDocument? ParseArgs(string argumentsJson)

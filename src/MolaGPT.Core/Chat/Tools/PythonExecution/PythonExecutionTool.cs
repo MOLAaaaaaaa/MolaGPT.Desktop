@@ -684,15 +684,12 @@ public sealed class PythonExecutionTool
         {
             var relative = Path.GetRelativePath(sessionDir, file);
             var name = Path.GetFileName(file);
-            if (string.Equals(name, UserScriptFileName, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(name, RunnerScriptFileName, StringComparison.OrdinalIgnoreCase))
+            if (!PythonWorkspaceInternals.IsReportableUserFile(sessionDir, file, RuntimeScriptFileNames))
             {
                 continue;
             }
 
             var info = new FileInfo(file);
-            if (!IsArtifactExtension(info.Extension))
-                continue;
 
             // Only report files this run produced or touched. In a reused
             // per-conversation directory this excludes earlier turns' artifacts
@@ -715,11 +712,6 @@ public sealed class PythonExecutionTool
             .Take(32)
             .ToArray();
     }
-
-    private static bool IsArtifactExtension(string extension) =>
-        extension.ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".webp" or ".gif"
-            or ".svg" or ".csv" or ".tsv" or ".txt" or ".json" or ".xlsx"
-            or ".html" or ".htm" or ".pdf" or ".parquet";
 
     private static object BuildDisplayInstructions(IReadOnlyList<PythonArtifact> artifacts)
     {
@@ -769,10 +761,17 @@ public sealed class PythonExecutionTool
         ".tsv" => "text/tab-separated-values",
         ".txt" => "text/plain",
         ".json" => "application/json",
+        ".xml" => "application/xml",
+        ".yaml" or ".yml" => "application/yaml",
+        ".md" => "text/markdown",
         ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".xls" => "application/vnd.ms-excel",
+        ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         ".html" or ".htm" => "text/html",
         ".pdf" => "application/pdf",
         ".parquet" => "application/vnd.apache.parquet",
+        ".zip" => "application/zip",
         _ => "application/octet-stream"
     };
 

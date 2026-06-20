@@ -34,6 +34,7 @@ public sealed class ChatToolHost : IChatToolHost
         LocalToolOptions options,
         CancellationToken ct)
     {
+        options = WithConversationWorkspace(options, context);
         var tools = new List<object>();
 
         if (options.Vision?.Enabled == true && !context.ModelSupportsVision)
@@ -67,6 +68,8 @@ public sealed class ChatToolHost : IChatToolHost
         LocalToolOptions options,
         CancellationToken ct)
     {
+        options = WithConversationWorkspace(options, context);
+
         if (toolName is "search_web" or "web_fetch" or "read_file" or "glob_files" or "grep_files")
         {
             var request = ToolCapabilityCatalog.ForBuiltIn(toolName, argumentsJson);
@@ -159,6 +162,11 @@ public sealed class ChatToolHost : IChatToolHost
             });
         }
     }
+
+    private static LocalToolOptions WithConversationWorkspace(LocalToolOptions options, ChatToolContext context) =>
+        string.IsNullOrWhiteSpace(options.WorkspaceRoot) && !string.IsNullOrWhiteSpace(context.Request.ConversationId)
+            ? options with { WorkspaceRoot = PythonExecutionTool.GetSessionDirectory(context.Request.ConversationId) }
+            : options;
 
     private async Task<bool> IsApprovedAsync(
         ToolApprovalRequest request,

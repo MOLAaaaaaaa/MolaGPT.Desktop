@@ -61,12 +61,18 @@ internal static class FileToolset
         }
     }
 
-    public static object ReadFile(string? path, int? offset, int? limit, IReadOnlyList<string> deniedPrefixes, CancellationToken ct = default)
+    public static object ReadFile(
+        string? path,
+        int? offset,
+        int? limit,
+        IReadOnlyList<string> deniedPrefixes,
+        string? workspaceRoot = null,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(path))
             return Error("read_file 需要 path 参数。");
 
-        var full = ResolveAndGuard(path!, deniedPrefixes, out var denyError);
+        var full = ResolveAndGuard(path!, deniedPrefixes, workspaceRoot, File.Exists, out var denyError);
         if (full is null)
             return denyError!;
 
@@ -111,12 +117,18 @@ internal static class FileToolset
         }
     }
 
-    public static object Glob(string? pattern, string? path, int? limit, IReadOnlyList<string> deniedPrefixes, CancellationToken ct = default)
+    public static object Glob(
+        string? pattern,
+        string? path,
+        int? limit,
+        IReadOnlyList<string> deniedPrefixes,
+        string? workspaceRoot = null,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(pattern))
             return Error("glob_files 需要 pattern 参数（如 **/*.cs）。");
 
-        var root = ResolveRoot(path, deniedPrefixes, out var denyError);
+        var root = ResolveRoot(path, deniedPrefixes, workspaceRoot, out var denyError);
         if (root is null)
             return denyError!;
 
@@ -168,12 +180,13 @@ internal static class FileToolset
         bool ignoreCase,
         int? maxMatches,
         IReadOnlyList<string> deniedPrefixes,
+        string? workspaceRoot = null,
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(pattern))
             return Error("grep_files 需要 pattern 参数（正则）。");
 
-        var root = ResolveRoot(path, deniedPrefixes, out var denyError);
+        var root = ResolveRoot(path, deniedPrefixes, workspaceRoot, out var denyError);
         if (root is null)
             return denyError!;
 
@@ -259,11 +272,16 @@ internal static class FileToolset
 
     private static object Error(string message) => new { success = false, source = "local_file_tool", error = message };
 
-    private static string? ResolveAndGuard(string path, IReadOnlyList<string> denied, out object? error)
+    private static string? ResolveAndGuard(
+        string path,
+        IReadOnlyList<string> denied,
+        string? workspaceRoot,
+        Func<string, bool> exists,
+        out object? error)
     {
         error = null;
         string full;
-        try { full = Path.GetFullPath(path.Trim().Trim('"', '\'')); }
+        try { full = ResolvePath(path.Trim().Trim('"', '\''), workspaceRoot, exists); }
         catch (Exception ex) { error = Error($"无效路径：{ex.Message}"); return null; }
 
         if (IsDenied(full, denied))
@@ -274,17 +292,15 @@ internal static class FileToolset
         return full;
     }
 
-    private static string? ResolveRoot(string? path, IReadOnlyList<string> denied, out object? error)
+    private static string? ResolveRoot(string? path, IReadOnlyList<string> denied, string? workspaceRoot, out object? error)
     {
         error = null;
         var raw = string.IsNullOrWhiteSpace(path)
-            ? (Directory.Exists(Directory.GetCurrentDirectory())
-                ? Directory.GetCurrentDirectory()
-                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile))
+            ? null
             : path!.Trim().Trim('"', '\'');
 
         string full;
-        try { full = Path.GetFullPath(raw); }
+        try { full = ResolveDirectory(raw, workspaceRoot); }
         catch (Exception ex) { error = Error($"无效路径：{ex.Message}"); return null; }
 
         if (!Directory.Exists(full))
@@ -298,6 +314,76 @@ internal static class FileToolset
             return null;
         }
         return full;
+    }
+
+    private static string ResolvePath(string raw, string? workspaceRoot, Func<string, bool> exists)
+    {
+        if (Path.IsPathRooted(raw))
+            return Path.GetFullPath(raw);
+
+        var workspaceCandidate = ResolveWorkspaceRelative(raw, workspaceRoot);
+        if (workspaceCandidate is not null)
+        {
+            if (exists(workspaceCandidate))
+                return workspaceCandidate;
+
+            var currentCandidate = Path.GetFullPath(raw);
+            if (exists(currentCandidate))
+                return currentCandidate;
+
+            return workspaceCandidate;
+        }
+
+        return Path.GetFullPath(raw);
+    }
+
+    private static string ResolveDirectory(string? raw, string? workspaceRoot)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            if (TryNormalizeExistingDirectory(workspaceRoot, out var workspace))
+                return workspace;
+
+            return Directory.Exists(Directory.GetCurrentDirectory())
+                ? Directory.GetCurrentDirectory()
+                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        }
+
+        if (Path.IsPathRooted(raw))
+            return Path.GetFullPath(raw);
+
+        var workspaceCandidate = ResolveWorkspaceRelative(raw, workspaceRoot);
+        if (workspaceCandidate is not null)
+        {
+            if (Directory.Exists(workspaceCandidate))
+                return workspaceCandidate;
+
+            var currentCandidate = Path.GetFullPath(raw);
+            if (Directory.Exists(currentCandidate))
+                return currentCandidate;
+
+            return workspaceCandidate;
+        }
+
+        return Path.GetFullPath(raw);
+    }
+
+    private static string? ResolveWorkspaceRelative(string raw, string? workspaceRoot)
+    {
+        if (!TryNormalizeExistingDirectory(workspaceRoot, out var workspace))
+            return null;
+
+        return Path.GetFullPath(Path.Combine(workspace, raw));
+    }
+
+    private static bool TryNormalizeExistingDirectory(string? path, out string full)
+    {
+        full = string.Empty;
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+            return false;
+
+        full = Path.GetFullPath(path);
+        return true;
     }
 
     private static bool IsDenied(string fullPath, IReadOnlyList<string> denied)

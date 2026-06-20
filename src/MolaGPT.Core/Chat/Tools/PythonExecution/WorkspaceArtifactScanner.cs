@@ -10,8 +10,9 @@ namespace MolaGPT.Core.Chat.Tools.PythonExecution;
 /// conversation's accumulated artifacts so a session-level UI panel can list
 /// everything generated (or uploaded) across the conversation.
 ///
-/// Reuses the tool's artifact extension allow-list and scaffolding exclusions so
-/// the panel shows the same kinds of files the model is told about.
+/// Uses the shared workspace-file policy from <see cref="PythonWorkspaceInternals"/>
+/// so the panel does not miss legitimate outputs just because their extension is
+/// new to us. Runtime scaffolding, caches, and transient lock files stay hidden.
 /// </summary>
 public static class WorkspaceArtifactScanner
 {
@@ -60,9 +61,15 @@ public static class WorkspaceArtifactScanner
                 continue;
             }
 
-            var name = Path.GetFileName(file);
-            if (IsRuntimeScript(name))
+            if (!PythonWorkspaceInternals.IsReportableUserFile(
+                    sessionDir,
+                    file,
+                    PythonExecutionTool.RuntimeScriptFileNames))
+            {
                 continue;
+            }
+
+            var name = Path.GetFileName(file);
 
             FileInfo info;
             try
@@ -74,8 +81,6 @@ public static class WorkspaceArtifactScanner
                 continue;
             }
 
-            if (!IsArtifactExtension(info.Extension))
-                continue;
             if (info.Length > MaxReportableBytes)
                 continue;
 
@@ -94,18 +99,6 @@ public static class WorkspaceArtifactScanner
             .ThenBy(a => a.RelativePath, StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
-
-    private static bool IsRuntimeScript(string name) =>
-        PythonExecutionTool.RuntimeScriptFileNames
-            .Any(s => string.Equals(s, name, StringComparison.OrdinalIgnoreCase));
-
-    private static bool IsArtifactExtension(string extension) =>
-        extension.ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".webp" or ".gif"
-            or ".svg" or ".csv" or ".tsv" or ".txt" or ".json" or ".xlsx"
-            or ".html" or ".htm" or ".pdf" or ".parquet"
-            // Session-level panel also surfaces these common doc/data outputs and
-            // user uploads that the per-run scanner intentionally ignores.
-            or ".md" or ".docx" or ".xls" or ".xml" or ".yaml" or ".yml" or ".zip";
 
     private static bool IsImageExtension(string extension) =>
         extension.ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".webp" or ".gif" or ".svg";

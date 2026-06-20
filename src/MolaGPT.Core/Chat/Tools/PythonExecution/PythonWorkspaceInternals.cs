@@ -22,6 +22,53 @@ internal static class PythonWorkspaceInternals
         return InternalDirectoryNames.Contains(firstSegment);
     }
 
+    public static bool IsReportableUserFile(
+        string root,
+        string file,
+        IReadOnlyCollection<string>? runtimeScriptFileNames = null)
+    {
+        if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(file))
+            return false;
+
+        string relative;
+        try
+        {
+            relative = Path.GetRelativePath(root, file);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+
+        if (relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+            || relative.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal)
+            || string.Equals(relative, "..", StringComparison.Ordinal)
+            || Path.IsPathRooted(relative)
+            || IsInternalPath(relative))
+        {
+            return false;
+        }
+
+        var name = Path.GetFileName(file);
+        if (string.IsNullOrWhiteSpace(name))
+            return false;
+
+        if (runtimeScriptFileNames?.Any(s => string.Equals(s, name, StringComparison.OrdinalIgnoreCase)) == true)
+            return false;
+
+        return !IsEphemeralWorkspaceFileName(name);
+    }
+
+    private static bool IsEphemeralWorkspaceFileName(string name)
+    {
+        if (name.StartsWith("~$", StringComparison.Ordinal))
+            return true;
+
+        return name.Equals(".DS_Store", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("Thumbs.db", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>
     /// Enumerates user-visible workspace files without descending into package,
     /// cache, and isolated-profile directories that can contain tens of thousands

@@ -105,6 +105,7 @@ public sealed class OpenAICompatibleProvider : IChatProvider
         [EnumeratorCancellation] CancellationToken ct)
     {
         var localToolOptions = LocalToolOptions.FromExtraBody(request.ExtraBody);
+        localToolOptions = WithConversationWorkspace(localToolOptions, request);
         var modelSupportsTools = SupportsLocalTools(request.ModelId);
         var modelSupportsVision = SupportsVision(request.ModelId);
         var toolContext = new ChatToolContext(request, Id, request.ModelId, modelSupportsVision, Models, _http);
@@ -393,6 +394,11 @@ public sealed class OpenAICompatibleProvider : IChatProvider
                 }))
             : _toolHost.ExecuteAsync(name, argumentsJson, context, options, ct);
     }
+
+    private static LocalToolOptions WithConversationWorkspace(LocalToolOptions options, ChatRequest request) =>
+        string.IsNullOrWhiteSpace(options.WorkspaceRoot) && !string.IsNullOrWhiteSpace(request.ConversationId)
+            ? options with { WorkspaceRoot = PythonExecutionTool.GetSessionDirectory(request.ConversationId) }
+            : options;
 
     private static bool ShouldPassReasoningContent(ChatRequest request, string role, string? reasoningContent) =>
         request.UseThinking == true

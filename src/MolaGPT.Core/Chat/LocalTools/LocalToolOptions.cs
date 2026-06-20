@@ -21,7 +21,8 @@ public sealed record LocalToolOptions(
     ToolPermissionMode PermissionMode = ToolPermissionMode.Approval,
     ToolPermissionMode ImageGenerationPermissionMode = ToolPermissionMode.Approval,
     ToolPermissionMode VisionPermissionMode = ToolPermissionMode.Approval,
-    ToolPermissionMode McpPermissionMode = ToolPermissionMode.Approval)
+    ToolPermissionMode McpPermissionMode = ToolPermissionMode.Approval,
+    string? WorkspaceRoot = null)
 {
     public bool HasAny =>
         Network
