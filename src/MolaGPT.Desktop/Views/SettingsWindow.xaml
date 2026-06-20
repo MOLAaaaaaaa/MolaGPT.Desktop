@@ -1138,8 +1138,8 @@
                             </Grid>
                         </DockPanel>
                     </TabItem>
-                    <!-- ===== 工具与能力 ===== -->
-                    <TabItem Header="工具与能力" Style="{StaticResource NavGroupHeader}" />
+                    <!-- ===== Harness 与环境 ===== -->
+                    <TabItem Header="Harness 与环境" Style="{StaticResource NavGroupHeader}" />
                     <TabItem Header="联网搜索">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="32,26" MaxWidth="640" HorizontalAlignment="Left">
@@ -1409,10 +1409,10 @@
                             </StackPanel>
                         </ScrollViewer>
                     </TabItem>
-                    <TabItem Header="代码与文件">
+                    <TabItem Header="沙箱与文件">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="32,26" MaxWidth="640" HorizontalAlignment="Left">
-                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="代码与文件" />
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="沙箱与文件" />
                                 <TextBlock Style="{StaticResource SettingsPageSubtitle}"
                                            Text="让 BYOK 模型在对话中按需运行 Python 代码、读取本地文件。" />
 
@@ -1441,12 +1441,15 @@
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock x:Name="PythonRuntimeStatusText"
-                                                       Grid.Column="0"
-                                                       VerticalAlignment="Center"
-                                                       Margin="0,0,16,0"
-                                                       TextWrapping="Wrap"
-                                                       Style="{StaticResource SettingsRowTitle}" />
+                                            <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                                <TextBlock x:Name="PythonRuntimeStatusText"
+                                                           TextWrapping="Wrap"
+                                                           Style="{StaticResource SettingsRowTitle}" />
+                                                <TextBlock x:Name="PythonRuntimeDetailText"
+                                                           TextWrapping="Wrap"
+                                                           Margin="0,3,0,0"
+                                                           Style="{StaticResource SettingsRowHint}" />
+                                            </StackPanel>
                                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                                 <Button x:Name="ConfigurePythonRuntimeButton"
                                                         Style="{StaticResource OutlineButton}"
@@ -1457,18 +1460,14 @@
                                                         Click="ConfigurePythonRuntimeClick" />
                                                 <Button x:Name="ClearPythonRuntimeButton"
                                                         Style="{StaticResource OutlineButton}"
-                                                        Content="清除环境"
+                                                        Content="重置环境"
                                                         Height="32"
                                                         Padding="14,0"
                                                         Visibility="Collapsed"
-                                                        ToolTip="清除一键配置下载的 Python 环境"
+                                                        ToolTip="删除专属运行时和会话依赖缓存，保留用户产物"
                                                         Click="ClearPythonRuntimeClick" />
                                             </StackPanel>
                                         </Grid>
-                                        <TextBlock Style="{StaticResource SettingsRowHint}"
-                                                   Margin="0,8,0,14"
-                                                   Text="一键配置 MolaGPT 专用 Python 环境，或填写已有 python.exe；来源与许可见「关于」。" />
-
                                         <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="解释器路径" />
                                         <DockPanel LastChildFill="True">
                                             <Button x:Name="OpenPythonRuntimeDirectoryButton"
@@ -1494,25 +1493,8 @@
                                 </Border>
 
                                 <Border Style="{StaticResource SettingsCard}">
-                                    <StackPanel Margin="16,14" IsEnabled="{Binding IsChecked, ElementName=PythonToolEnabledToggle}">
-                                        <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="执行权限" />
-                                        <Border Style="{StaticResource SettingsSegmentTrack}" Margin="0,0,0,8">
-                                            <StackPanel Orientation="Horizontal">
-                                                <RadioButton Content="审批权限（默认）"
-                                                             GroupName="PythonPermissionMode"
-                                                             Style="{StaticResource SettingsSegment}"
-                                                             IsChecked="{Binding PythonToolPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=Approval}" />
-                                                <RadioButton Content="完全权限"
-                                                             GroupName="PythonPermissionMode"
-                                                             Style="{StaticResource SettingsSegment}"
-                                                             IsChecked="{Binding PythonToolPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=FullAccess}" />
-                                            </StackPanel>
-                                        </Border>
-                                        <TextBlock Style="{StaticResource SettingsRowHint}"
-                                                   Margin="0,0,0,16"
-                                                   Text="审批：低风险代码自动放行，危险操作自动拦截，其余弹窗确认 · 完全权限：直接以当前用户身份运行（黑名单与网络限制仍会拦截）" />
-
-                                        <Grid Margin="0,0,0,16">
+                                    <StackPanel Margin="16,14">
+                                        <Grid Margin="0,0,0,16" IsEnabled="{Binding IsChecked, ElementName=PythonToolEnabledToggle}">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="16" />
@@ -1542,77 +1524,20 @@
                                             </StackPanel>
                                         </Grid>
 
-                                        <Grid>
+                                        <Grid IsEnabled="{Binding IsChecked, ElementName=PythonToolEnabledToggle}">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
                                             <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
-                                                <TextBlock Style="{StaticResource SettingsRowTitle}" Text="允许访问网络" />
-                                                <TextBlock Style="{StaticResource SettingsRowHint}" Text="关闭时脚本无法发起网络请求。" />
+                                                <TextBlock Style="{StaticResource SettingsRowTitle}" Text="联网访问" />
+                                                <TextBlock Style="{StaticResource SettingsRowHint}" Text="允许代码发起网络请求和安装第三方包" />
                                             </StackPanel>
                                             <ToggleButton Grid.Column="1"
                                                           Style="{StaticResource SettingsToggle}"
                                                           IsChecked="{Binding PythonToolAllowNetwork, Mode=TwoWay}" />
                                         </Grid>
 
-                                        <Expander x:Name="PythonAdvancedRulesExpander"
-                                                  Header="高级：自动放行与拦截规则"
-                                                  Foreground="{DynamicResource Brush.Text.Secondary}"
-                                                  FontSize="{DynamicResource Font.Size.Small}"
-                                                  Margin="0,16,0,0">
-                                            <StackPanel Margin="0,10,0,0">
-                                                <TextBlock Style="{StaticResource SettingsRowHint}"
-                                                           Margin="0,0,0,12"
-                                                           Text="这些规则叠加在审批之上：仅用「额外允许导入」内的模块且无风险时自动放行；命中「禁止导入」或「禁止路径前缀」时直接拦截（完全权限模式下也拦截）。每行或逗号分隔一项。" />
-                                                <Grid Margin="0,0,0,12">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="16" />
-                                                        <ColumnDefinition Width="*" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <StackPanel Grid.Column="0">
-                                                        <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="额外允许导入" />
-                                                        <Border Background="{DynamicResource Brush.Bg.Secondary}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                            <TextBox Style="{StaticResource InlineTextBox}"
-                                                                     MinHeight="54" TextWrapping="Wrap" AcceptsReturn="True"
-                                                                     Text="{Binding PythonToolAllowedImports, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                                        </Border>
-                                                    </StackPanel>
-                                                    <StackPanel Grid.Column="2">
-                                                        <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="禁止导入" />
-                                                        <Border Background="{DynamicResource Brush.Bg.Secondary}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                            <TextBox Style="{StaticResource InlineTextBox}"
-                                                                     MinHeight="54" TextWrapping="Wrap" AcceptsReturn="True"
-                                                                     Text="{Binding PythonToolDeniedImports, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                                        </Border>
-                                                    </StackPanel>
-                                                </Grid>
-                                                <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="16" />
-                                                        <ColumnDefinition Width="*" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <StackPanel Grid.Column="0">
-                                                        <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="允许路径前缀" />
-                                                        <Border Background="{DynamicResource Brush.Bg.Secondary}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                            <TextBox Style="{StaticResource InlineTextBox}"
-                                                                     MinHeight="54" TextWrapping="Wrap" AcceptsReturn="True"
-                                                                     Text="{Binding PythonToolAllowedPathPrefixes, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                                        </Border>
-                                                    </StackPanel>
-                                                    <StackPanel Grid.Column="2">
-                                                        <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="禁止路径前缀" />
-                                                        <Border Background="{DynamicResource Brush.Bg.Secondary}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
-                                                            <TextBox Style="{StaticResource InlineTextBox}"
-                                                                     MinHeight="54" TextWrapping="Wrap" AcceptsReturn="True"
-                                                                     Text="{Binding PythonToolDeniedPathPrefixes, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
-                                                        </Border>
-                                                    </StackPanel>
-                                                </Grid>
-                                            </StackPanel>
-                                        </Expander>
                                     </StackPanel>
                                 </Border>
 
@@ -1632,6 +1557,192 @@
                                                       Style="{StaticResource SettingsToggle}"
                                                       IsChecked="{Binding FileToolsEnabled, Mode=TwoWay}" />
                                     </Grid>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+                    <TabItem Header="审批与安全">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="32,26" MaxWidth="640" HorizontalAlignment="Left">
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="审批与安全" />
+                                <TextBlock Style="{StaticResource SettingsPageSubtitle}"
+                                           Text="控制工具调用的审批策略，以及 Python 执行的自动放行与拦截规则。" />
+
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="所有本地工具" />
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <StackPanel Margin="16,14">
+                                        <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="统一权限模式" />
+                                        <Border Style="{StaticResource SettingsSegmentTrack}" Margin="0,0,0,8">
+                                            <StackPanel Orientation="Horizontal">
+                                                <RadioButton Content="审批权限（默认）"
+                                                             GroupName="ToolPermissionMode"
+                                                             Style="{StaticResource SettingsSegment}"
+                                                             IsChecked="{Binding LocalToolPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=Approval}" />
+                                                <RadioButton Content="完全权限"
+                                                             GroupName="ToolPermissionMode"
+                                                             Style="{StaticResource SettingsSegment}"
+                                                             IsChecked="{Binding LocalToolPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=FullAccess}" />
+                                            </StackPanel>
+                                        </Border>
+                                        <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                   Text="读取工具自动放行；写入、外部副作用和破坏性操作进入统一审批。完全权限可跳过普通写入审批，但破坏性操作和 Python 包安装仍需确认。" />
+                                    </StackPanel>
+                                </Border>
+
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="按工具类型" />
+                                <Border Style="{StaticResource SettingsCard}"
+                                        IsEnabled="{Binding LocalToolPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=Approval}">
+                                    <StackPanel Margin="16,12">
+                                        <!-- Image generation -->
+                                        <Grid Margin="0,2,0,2">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0">
+                                                <TextBlock Style="{StaticResource SettingsRowTitle}" Text="图像生成" />
+                                            </StackPanel>
+                                            <Border Grid.Column="1" Style="{StaticResource SettingsSegmentTrack}">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <RadioButton Content="审批"
+                                                                 GroupName="ImageGenPermMode"
+                                                                 Style="{StaticResource SettingsSegment}"
+                                                                 IsChecked="{Binding ImageGenerationPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=Approval}" />
+                                                    <RadioButton Content="完全"
+                                                                 GroupName="ImageGenPermMode"
+                                                                 Style="{StaticResource SettingsSegment}"
+                                                                 IsChecked="{Binding ImageGenerationPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=FullAccess}" />
+                                                </StackPanel>
+                                            </Border>
+                                        </Grid>
+                                        <Border Style="{StaticResource SettingsRowDivider}" />
+                                        <!-- Vision -->
+                                        <Grid Margin="0,2,0,2">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0">
+                                                <TextBlock Style="{StaticResource SettingsRowTitle}" Text="视觉理解" />
+                                            </StackPanel>
+                                            <Border Grid.Column="1" Style="{StaticResource SettingsSegmentTrack}">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <RadioButton Content="审批"
+                                                                 GroupName="VisionPermMode"
+                                                                 Style="{StaticResource SettingsSegment}"
+                                                                 IsChecked="{Binding VisionPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=Approval}" />
+                                                    <RadioButton Content="完全"
+                                                                 GroupName="VisionPermMode"
+                                                                 Style="{StaticResource SettingsSegment}"
+                                                                 IsChecked="{Binding VisionPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=FullAccess}" />
+                                                </StackPanel>
+                                            </Border>
+                                        </Grid>
+                                        <Border Style="{StaticResource SettingsRowDivider}" />
+                                        <!-- MCP -->
+                                        <Grid Margin="0,2,0,2">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0">
+                                                <TextBlock Style="{StaticResource SettingsRowTitle}" Text="MCP 工具" />
+                                            </StackPanel>
+                                            <Border Grid.Column="1" Style="{StaticResource SettingsSegmentTrack}">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <RadioButton Content="审批"
+                                                                 GroupName="McpPermMode"
+                                                                 Style="{StaticResource SettingsSegment}"
+                                                                 IsChecked="{Binding McpPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=Approval}" />
+                                                    <RadioButton Content="完全"
+                                                                 GroupName="McpPermMode"
+                                                                 Style="{StaticResource SettingsSegment}"
+                                                                 IsChecked="{Binding McpPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=FullAccess}" />
+                                                </StackPanel>
+                                            </Border>
+                                        </Grid>
+                                        <Border Style="{StaticResource SettingsRowDivider}" />
+                                        <!-- Python -->
+                                        <Grid Margin="0,2,0,2">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0">
+                                                <TextBlock Style="{StaticResource SettingsRowTitle}" Text="Python 执行" />
+                                            </StackPanel>
+                                            <Border Grid.Column="1" Style="{StaticResource SettingsSegmentTrack}">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <RadioButton Content="审批"
+                                                                 GroupName="PythonPermMode"
+                                                                 Style="{StaticResource SettingsSegment}"
+                                                                 IsChecked="{Binding PythonExecutionPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=Approval}" />
+                                                    <RadioButton Content="完全"
+                                                                 GroupName="PythonPermMode"
+                                                                 Style="{StaticResource SettingsSegment}"
+                                                                 IsChecked="{Binding PythonExecutionPermissionMode, Converter={StaticResource EnumEq}, ConverterParameter=FullAccess}" />
+                                                </StackPanel>
+                                            </Border>
+                                        </Grid>
+                                        <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                   Margin="0,8,0,2"
+                                                   Text="完全权限跳过普通审批；破坏性操作除外；全局设为完全权限时此处设置不生效。" />
+                                    </StackPanel>
+                                </Border>
+
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="Python 执行 — 放行与拦截规则" />
+                                <Border Style="{StaticResource SettingsCard}" IsEnabled="{Binding PythonToolEnabled}">
+                                    <StackPanel Margin="16,14">
+                                        <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                   Margin="0,0,0,12"
+                                                   Text="这些规则叠加在审批之上：仅用「额外允许导入」内的模块且无风险时自动放行；命中「禁止导入」或「禁止路径前缀」时直接拦截（完全权限模式下也拦截）。每行或逗号分隔一项。" />
+                                        <Grid Margin="0,0,0,12">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="16" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="额外允许导入" />
+                                                <Border Background="{DynamicResource Brush.Bg.Secondary}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                             MinHeight="54" TextWrapping="Wrap" AcceptsReturn="True"
+                                                             Text="{Binding PythonToolAllowedImports, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                </Border>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2">
+                                                <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="禁止导入" />
+                                                <Border Background="{DynamicResource Brush.Bg.Secondary}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                             MinHeight="54" TextWrapping="Wrap" AcceptsReturn="True"
+                                                             Text="{Binding PythonToolDeniedImports, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                </Border>
+                                            </StackPanel>
+                                        </Grid>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="16" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="允许路径前缀" />
+                                                <Border Background="{DynamicResource Brush.Bg.Secondary}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                             MinHeight="54" TextWrapping="Wrap" AcceptsReturn="True"
+                                                             Text="{Binding PythonToolAllowedPathPrefixes, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                </Border>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2">
+                                                <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="禁止路径前缀" />
+                                                <Border Background="{DynamicResource Brush.Bg.Secondary}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="12,8">
+                                                    <TextBox Style="{StaticResource InlineTextBox}"
+                                                             MinHeight="54" TextWrapping="Wrap" AcceptsReturn="True"
+                                                             Text="{Binding PythonToolDeniedPathPrefixes, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                                                </Border>
+                                            </StackPanel>
+                                        </Grid>
+                                    </StackPanel>
                                 </Border>
                             </StackPanel>
                         </ScrollViewer>

@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text.Json;
+using MolaGPT.Core.Chat.Tools;
 
 namespace MolaGPT.Core.Chat.LocalTools;
 
@@ -16,7 +17,11 @@ public sealed record LocalToolOptions(
     ImageGenerationOptions? ImageGeneration = null,
     PythonExecutionOptions? Python = null,
     bool FileTools = false,
-    string? DeniedPathPrefixes = null)
+    string? DeniedPathPrefixes = null,
+    ToolPermissionMode PermissionMode = ToolPermissionMode.Approval,
+    ToolPermissionMode ImageGenerationPermissionMode = ToolPermissionMode.Approval,
+    ToolPermissionMode VisionPermissionMode = ToolPermissionMode.Approval,
+    ToolPermissionMode McpPermissionMode = ToolPermissionMode.Approval)
 {
     public bool HasAny =>
         Network
@@ -51,7 +56,11 @@ public sealed record LocalToolOptions(
             ReadImageGeneration(raw),
             ReadPythonExecution(raw),
             ReadBool(raw, "fileTools"),
-            ReadString(raw, "fileToolsDeniedPaths"));
+            ReadString(raw, "fileToolsDeniedPaths"),
+            ReadEnum(raw, "permissionMode", ToolPermissionMode.Approval),
+            ReadEnum(raw, "imageGenerationPermissionMode", ToolPermissionMode.Approval),
+            ReadEnum(raw, "visionPermissionMode", ToolPermissionMode.Approval),
+            ReadEnum(raw, "mcpPermissionMode", ToolPermissionMode.Approval));
     }
 
     private static IReadOnlyList<McpServerOptions> ReadMcpServers(object raw)

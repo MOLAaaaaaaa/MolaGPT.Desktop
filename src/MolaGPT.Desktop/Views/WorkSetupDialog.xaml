@@ -1,0 +1,151 @@
+<Window x:Class="MolaGPT.Desktop.Views.WorkSetupDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        Title="MolaGPT Work"
+        Icon="/Assets/app-logo.png"
+        Width="500"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        ResizeMode="NoResize"
+        Background="Transparent"
+        FontFamily="{DynamicResource Font.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        mc:Ignorable="d">
+
+    <Grid Margin="24">
+        <Border Style="{StaticResource ModalWindowGlow}" />
+        <Border Style="{StaticResource ModalWindowSurface}" Padding="28">
+            <StackPanel>
+
+                <!-- Header -->
+                <Grid Margin="0,0,0,20">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Border Width="36" Height="36" CornerRadius="9" Margin="0,0,12,0" ClipToBounds="True">
+                            <Image Source="/Assets/app-logo.png"
+                                   Stretch="UniformToFill"
+                                   RenderOptions.BitmapScalingMode="HighQuality" />
+                        </Border>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="MolaGPT Work"
+                                       FontSize="{DynamicResource Font.Size.Heading}"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource Brush.Text.Primary}" />
+                            <TextBlock Text="本地工作助理"
+                                       FontSize="{DynamicResource Font.Size.Small}"
+                                       Foreground="{DynamicResource Brush.Text.Muted}" />
+                        </StackPanel>
+                    </StackPanel>
+                    <Button HorizontalAlignment="Right"
+                            VerticalAlignment="Top"
+                            Style="{StaticResource HeaderIconButton}"
+                            Click="CloseClick"
+                            ToolTip="关闭">
+                        <TextBlock Text="&#xE711;" FontFamily="{DynamicResource Font.Icon}" FontSize="14" />
+                    </Button>
+                </Grid>
+
+                <!-- Capabilities -->
+                <TextBlock Text="不只是对话 — 真正在你的电脑上工作。"
+                           FontSize="15"
+                           FontWeight="Medium"
+                           Foreground="{DynamicResource Brush.Text.Primary}"
+                           Margin="0,0,0,14" />
+
+                <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                        CornerRadius="{DynamicResource Radius.Md}"
+                        Padding="16,12"
+                        Margin="0,0,0,20">
+                    <StackPanel>
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="28" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="&#xE9D2;" FontFamily="{DynamicResource Font.Icon}" FontSize="16"
+                                       Foreground="{DynamicResource Brush.Primary}" VerticalAlignment="Top" Margin="0,1,0,0" />
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="运行 Python 代码" FontWeight="SemiBold" Foreground="{DynamicResource Brush.Text.Primary}" />
+                                <TextBlock Text="数据分析、文件处理、图表生成，样样能干；"
+                                           FontSize="{DynamicResource Font.Size.Small}"
+                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                           TextWrapping="Wrap" Margin="0,2,0,0" />
+                            </StackPanel>
+                        </Grid>
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="28" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="&#xE721;" FontFamily="{DynamicResource Font.Icon}" FontSize="16"
+                                       Foreground="{DynamicResource Brush.Primary}" VerticalAlignment="Top" Margin="0,1,0,0" />
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="联网搜索 · 本地文件搜寻" FontWeight="SemiBold" Foreground="{DynamicResource Brush.Text.Primary}" />
+                                <TextBlock Text="搜索最新资讯，或让模型直接读取你的文档和数据"
+                                           FontSize="{DynamicResource Font.Size.Small}"
+                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                           TextWrapping="Wrap" Margin="0,2,0,0" />
+                            </StackPanel>
+                        </Grid>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="28" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="&#xECA5;" FontFamily="{DynamicResource Font.Icon}" FontSize="16"
+                                       Foreground="{DynamicResource Brush.Primary}" VerticalAlignment="Top" Margin="0,1,0,0" />
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="MCP 工具扩展" FontWeight="SemiBold" Foreground="{DynamicResource Brush.Text.Primary}" />
+                                <TextBlock Text="接入任意 MCP 服务器，按需接入数据库、API 或自动化流程"
+                                           FontSize="{DynamicResource Font.Size.Small}"
+                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                           TextWrapping="Wrap" Margin="0,2,0,0" />
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <!-- Python setup section -->
+                <Border Height="1" Background="{DynamicResource Brush.Divider}" Margin="0,0,0,16" />
+
+                <TextBlock Text="配置 Python 环境"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource Brush.Text.Primary}"
+                           Margin="0,0,0,6" />
+                <TextBlock x:Name="StatusText"
+                           Text="下载 MolaGPT 专属 Python，独立安装，不影响系统环境。"
+                           FontSize="{DynamicResource Font.Size.Small}"
+                           Foreground="{DynamicResource Brush.Text.Muted}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,16" />
+
+                <!-- Buttons -->
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="SkipButton"
+                            Grid.Column="0"
+                            HorizontalAlignment="Left"
+                            Style="{StaticResource OutlineButton}"
+                            Content="稍后再说"
+                            Height="36"
+                            Padding="16,0"
+                            Click="SkipClick" />
+                    <Button x:Name="ConfigureButton"
+                            Grid.Column="1"
+                            Style="{StaticResource PillPrimaryButton}"
+                            Content="一键配置 Python 环境"
+                            Height="36"
+                            Padding="20,0"
+                            Click="ConfigureClick" />
+                </Grid>
+
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

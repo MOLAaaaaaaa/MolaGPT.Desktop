@@ -198,6 +198,37 @@ public sealed class PythonExecutionTool
         if (risk.HardDenied)
             return new PermissionDecision(false, risk.BlockReason ?? "已被拒绝规则拦截。");
 
+        // Package installation always needs a separate, explicit decision. It
+        // persists into this conversation's .packages directory and therefore
+        // must not be hidden by FullAccess or a remembered import/path rule.
+        if (risk.Flags.Any(flag => string.Equals(flag.Code, "package_install", StringComparison.Ordinal)))
+        {
+            if (_approval is null)
+                return new PermissionDecision(false, "Python 包安装需要用户审批，但当前没有可用的审批服务。");
+
+            var installDecision = await _approval.RequestApprovalAsync(
+                new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk)),
+                ct).ConfigureAwait(false);
+            return installDecision == PythonExecutionApprovalDecision.Approved
+                ? new PermissionDecision(true, "用户已批准将包安装到当前对话环境。")
+                : new PermissionDecision(false, "用户已拒绝 Python 包安装。");
+        }
+
+        // Destructive filesystem operations stay reviewable even when the user
+        // selected FullAccess, matching the global tool policy.
+        if (risk.Flags.Any(flag => string.Equals(flag.Code, "destructive_file", StringComparison.Ordinal)))
+        {
+            if (_approval is null)
+                return new PermissionDecision(false, "破坏性文件操作需要用户审批，但当前没有可用的审批服务。");
+
+            var destructiveDecision = await _approval.RequestApprovalAsync(
+                new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk)),
+                ct).ConfigureAwait(false);
+            return destructiveDecision == PythonExecutionApprovalDecision.Approved
+                ? new PermissionDecision(true, "用户已批准破坏性文件操作。")
+                : new PermissionDecision(false, "用户已拒绝破坏性文件操作。");
+        }
+
         // [2] Full access: trust everything that survived the deny layer.
         if (options.PermissionMode == PythonPermissionMode.FullAccess)
             return new PermissionDecision(true, "完全权限模式已允许执行。");
@@ -211,7 +242,7 @@ public sealed class PythonExecutionTool
             return new PermissionDecision(false, "需要用户审批，但当前没有可用的审批服务。");
 
         var decision = await _approval.RequestApprovalAsync(
-            new PythonExecutionApprovalRequest(code, description, options, risk),
+            new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk)),
             ct).ConfigureAwait(false);
         return decision == PythonExecutionApprovalDecision.Approved
             ? new PermissionDecision(true, "用户已批准。")
@@ -267,46 +298,42 @@ public sealed class PythonExecutionTool
         }
 
         var detail = failures.Count == 0 ? string.Empty : " " + string.Join(" | ", failures.Take(3));
-        throw new InvalidOperationException("找不到可用的 Python。请在设置中填写 python.exe 路径，或把便携 Python 放到应用目录的 python\\python.exe。" + detail);
+        throw new InvalidOperationException("找不到已配置的 Python。请在设置中一键配置 MolaGPT 专用环境，或明确选择一个 python.exe。不会回退到系统 Python。" + detail);
     }
 
     private static IEnumerable<PythonCandidate> BuildPythonCandidates(string? configuredPath)
     {
-        if (!string.IsNullOrWhiteSpace(configuredPath))
-        {
-            var trimmed = configuredPath.Trim().Trim('"');
-            yield return new PythonCandidate(trimmed, Array.Empty<string>(), trimmed);
-        }
+        if (string.IsNullOrWhiteSpace(configuredPath))
+            yield break;
 
-        var appBase = ResolveAppBaseDirectory();
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        foreach (var path in new[]
-                 {
-                     Path.Combine(appBase, "python", "python.exe"),
-                     Path.Combine(appBase, "runtime", "python", "python.exe"),
-                     Path.Combine(appBase, "runtimes", "python", "python.exe"),
-                     Path.Combine(localAppData, "MolaGPT", "python", "python.exe")
-                 })
-        {
-            if (File.Exists(path))
-                yield return new PythonCandidate(path, Array.Empty<string>(), path);
-        }
-
-        yield return new PythonCandidate("py", new[] { "-3" }, "py -3");
-        yield return new PythonCandidate("python", Array.Empty<string>(), "python");
-        yield return new PythonCandidate("python3", Array.Empty<string>(), "python3");
+        var trimmed = configuredPath.Trim().Trim('"');
+        if (File.Exists(trimmed))
+            yield return new PythonCandidate(Path.GetFullPath(trimmed), Array.Empty<string>(), Path.GetFullPath(trimmed));
     }
 
     private static async Task<string?> ProbePythonAsync(PythonCandidate candidate, CancellationToken ct)
     {
-        using var process = CreateProcess(candidate, Array.Empty<string>(), Environment.CurrentDirectory, allowNetwork: false);
+        using var process = CreateProcess(
+            candidate,
+            Array.Empty<string>(),
+            Environment.CurrentDirectory,
+            allowNetwork: false,
+            configureSessionEnvironment: false);
         process.StartInfo.ArgumentList.Add("--version");
         if (!process.Start())
             return null;
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(4));
-        await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+        try
+        {
+            await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            throw;
+        }
 
         var stdout = await process.StandardOutput.ReadToEndAsync(ct).ConfigureAwait(false);
         var stderr = await process.StandardError.ReadToEndAsync(ct).ConfigureAwait(false);
@@ -322,7 +349,7 @@ public sealed class PythonExecutionTool
         bool allowNetwork,
         CancellationToken ct)
     {
-        using var process = CreateProcess(candidate, new[] { "-X", "utf8", "-u", runnerScriptPath }, workingDirectory, allowNetwork);
+        using var process = CreateProcess(candidate, new[] { "-I", "-X", "utf8", "-u", runnerScriptPath }, workingDirectory, allowNetwork);
         var stdout = new BoundedTextCollector(maxOutputCharacters);
         var stderr = new BoundedTextCollector(maxOutputCharacters);
         process.OutputDataReceived += (_, e) => stdout.AppendLine(e.Data);
@@ -347,6 +374,12 @@ public sealed class PythonExecutionTool
             TryKill(process);
             await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
         }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
 
         process.WaitForExit();
         return new PythonRunResult(
@@ -362,7 +395,8 @@ public sealed class PythonExecutionTool
         PythonCandidate candidate,
         IReadOnlyList<string> extraArgs,
         string workingDirectory,
-        bool allowNetwork)
+        bool allowNetwork,
+        bool configureSessionEnvironment = true)
     {
         var process = new Process
         {
@@ -385,23 +419,110 @@ public sealed class PythonExecutionTool
         foreach (var arg in extraArgs)
             process.StartInfo.ArgumentList.Add(arg);
 
+        // Start from a small, deterministic environment. In particular, do not
+        // inherit PATH/PYTHONPATH/VIRTUAL_ENV/pip configuration from the desktop
+        // process: those are the routes by which a bare `python` or `pip` could
+        // accidentally mutate another interpreter.
+        process.StartInfo.Environment.Clear();
+        CopyEnvironmentIfPresent(process.StartInfo, "SystemRoot");
+        CopyEnvironmentIfPresent(process.StartInfo, "WINDIR");
+        CopyEnvironmentIfPresent(process.StartInfo, "COMSPEC");
+        CopyEnvironmentIfPresent(process.StartInfo, "NUMBER_OF_PROCESSORS");
+        CopyEnvironmentIfPresent(process.StartInfo, "PROCESSOR_ARCHITECTURE");
+
+        var pythonDirectory = Path.GetDirectoryName(Path.GetFullPath(candidate.FileName))!;
+        var scriptsDirectory = Path.Combine(pythonDirectory, "Scripts");
+        var systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        process.StartInfo.Environment["PATH"] = string.Join(
+            Path.PathSeparator,
+            new[] { pythonDirectory, scriptsDirectory, systemDirectory }
+                .Where(Directory.Exists)
+                .Distinct(StringComparer.OrdinalIgnoreCase));
+
+        if (configureSessionEnvironment)
+        {
+            var tempDirectory = Path.Combine(workingDirectory, ".tmp");
+            var packageDirectory = Path.Combine(workingDirectory, ".packages");
+            var pipCacheDirectory = Path.Combine(workingDirectory, ".pip-cache");
+            var appDataDirectory = Path.Combine(workingDirectory, ".appdata");
+            var localAppDataDirectory = Path.Combine(workingDirectory, ".localappdata");
+            Directory.CreateDirectory(tempDirectory);
+            Directory.CreateDirectory(appDataDirectory);
+            Directory.CreateDirectory(localAppDataDirectory);
+            process.StartInfo.Environment["TEMP"] = tempDirectory;
+            process.StartInfo.Environment["TMP"] = tempDirectory;
+            process.StartInfo.Environment["HOME"] = workingDirectory;
+            process.StartInfo.Environment["USERPROFILE"] = workingDirectory;
+            process.StartInfo.Environment["APPDATA"] = appDataDirectory;
+            process.StartInfo.Environment["LOCALAPPDATA"] = localAppDataDirectory;
+            process.StartInfo.Environment["PIP_TARGET"] = packageDirectory;
+            process.StartInfo.Environment["PIP_CACHE_DIR"] = pipCacheDirectory;
+            process.StartInfo.Environment["UV_CACHE_DIR"] = Path.Combine(workingDirectory, ".uv-cache");
+        }
+        else
+        {
+            CopyEnvironmentIfPresent(process.StartInfo, "TEMP");
+            CopyEnvironmentIfPresent(process.StartInfo, "TMP");
+        }
         process.StartInfo.Environment["PYTHONIOENCODING"] = "utf-8";
         process.StartInfo.Environment["PYTHONUTF8"] = "1";
+        process.StartInfo.Environment["PYTHONNOUSERSITE"] = "1";
+        process.StartInfo.Environment["PYTHONSAFEPATH"] = "1";
         process.StartInfo.Environment["MPLBACKEND"] = "Agg";
         process.StartInfo.Environment["MPLCONFIGDIR"] = Path.Combine(workingDirectory, ".matplotlib");
         process.StartInfo.Environment["MOLAGPT_PYTHON_ALLOW_NETWORK"] = allowNetwork ? "1" : "0";
         process.StartInfo.Environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1";
+        process.StartInfo.Environment["PIP_CONFIG_FILE"] = "NUL";
+        if (!allowNetwork)
+            process.StartInfo.Environment["PIP_NO_INDEX"] = "1";
         return process;
+    }
+
+    private static ToolCapability BuildCapabilities(
+        PythonExecutionOptions options,
+        PythonExecutionRiskAnalysis risk)
+    {
+        var capabilities = ToolCapability.Read | ToolCapability.Write;
+        if (options.AllowNetwork
+            || risk.Flags.Any(flag => flag.Code is "network_import" or "network_call" or "package_install"))
+        {
+            capabilities |= ToolCapability.External;
+        }
+        if (risk.Flags.Any(flag => flag.Code == "destructive_file"))
+            capabilities |= ToolCapability.Destructive;
+        return capabilities;
+    }
+
+    private static void CopyEnvironmentIfPresent(ProcessStartInfo startInfo, string name)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        if (!string.IsNullOrWhiteSpace(value))
+            startInfo.Environment[name] = value;
     }
 
     private static string BuildRunnerScript() =>
         """
         import os
         import runpy
+        import site
+        import sys
 
         os.environ.setdefault("PYTHONIOENCODING", "utf-8")
         os.environ.setdefault("PYTHONUTF8", "1")
         os.environ.setdefault("MPLBACKEND", "Agg")
+
+        workspace = os.getcwd()
+        packages = os.path.join(workspace, ".packages")
+        # -I deliberately ignores inherited PYTHONPATH and user site packages.
+        # Add only the current conversation workspace and its controlled package
+        # overlay back to sys.path.
+        if workspace not in sys.path:
+            sys.path.insert(0, workspace)
+        if os.path.isdir(packages):
+            site.addsitedir(packages)
+            if packages in sys.path:
+                sys.path.remove(packages)
+            sys.path.insert(0, packages)
 
         try:
             import matplotlib
@@ -421,17 +542,6 @@ public sealed class PythonExecutionTool
 
         runpy.run_path("main.py", run_name="__main__")
         """;
-
-    private static string ResolveAppBaseDirectory()
-    {
-        var processPath = Environment.ProcessPath;
-        var dir = string.IsNullOrWhiteSpace(processPath)
-            ? null
-            : Path.GetDirectoryName(processPath);
-        return string.IsNullOrWhiteSpace(dir)
-            ? AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-            : dir!;
-    }
 
     /// <summary>
     /// Resolves the working directory for a run. When a conversation id is
@@ -570,12 +680,9 @@ public sealed class PythonExecutionTool
             return Array.Empty<PythonArtifact>();
 
         var artifacts = new List<PythonArtifact>();
-        foreach (var file in Directory.EnumerateFiles(sessionDir, "*", SearchOption.AllDirectories))
+        foreach (var file in PythonWorkspaceInternals.EnumerateUserFiles(sessionDir))
         {
             var relative = Path.GetRelativePath(sessionDir, file);
-            if (IsInternalRuntimeArtifact(relative))
-                continue;
-
             var name = Path.GetFileName(file);
             if (string.Equals(name, UserScriptFileName, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(name, RunnerScriptFileName, StringComparison.OrdinalIgnoreCase))
@@ -613,13 +720,6 @@ public sealed class PythonExecutionTool
         extension.ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".webp" or ".gif"
             or ".svg" or ".csv" or ".tsv" or ".txt" or ".json" or ".xlsx"
             or ".html" or ".htm" or ".pdf" or ".parquet";
-
-    private static bool IsInternalRuntimeArtifact(string relativePath)
-    {
-        var normalized = relativePath.Replace('\\', '/');
-        return normalized.StartsWith(".matplotlib/", StringComparison.OrdinalIgnoreCase)
-            || normalized.StartsWith("__pycache__/", StringComparison.OrdinalIgnoreCase);
-    }
 
     private static object BuildDisplayInstructions(IReadOnlyList<PythonArtifact> artifacts)
     {

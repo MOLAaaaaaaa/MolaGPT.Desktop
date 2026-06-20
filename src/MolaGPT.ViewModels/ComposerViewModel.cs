@@ -8,6 +8,7 @@ using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Providers;
@@ -197,7 +198,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                     or nameof(SettingsViewModel.PythonToolTimeoutSeconds)
                     or nameof(SettingsViewModel.PythonToolMaxOutputCharacters)
                     or nameof(SettingsViewModel.PythonToolAllowNetwork)
-                    or nameof(SettingsViewModel.PythonToolPermissionMode)
+                    or nameof(SettingsViewModel.LocalToolPermissionMode)
                     or nameof(SettingsViewModel.PythonToolAllowedImports)
                     or nameof(SettingsViewModel.PythonToolDeniedImports)
                     or nameof(SettingsViewModel.PythonToolAllowedPathPrefixes)
@@ -791,7 +792,11 @@ public sealed partial class ComposerViewModel : ObservableObject
             ["network"] = EnableNetwork,
             ["steelBrowser"] = EnableWebFetch,
             ["code"] = true,
-            ["deepResearch"] = false
+            ["deepResearch"] = false,
+            ["permissionMode"] = _settings?.LocalToolPermissionMode ?? ToolPermissionMode.Approval,
+            ["imageGenerationPermissionMode"] = _settings?.ImageGenerationPermissionMode ?? ToolPermissionMode.Approval,
+            ["visionPermissionMode"] = _settings?.VisionPermissionMode ?? ToolPermissionMode.Approval,
+            ["mcpPermissionMode"] = _settings?.McpPermissionMode ?? ToolPermissionMode.Approval
         };
 
         if (_chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy)

@@ -107,7 +107,7 @@ public sealed class OpenAICompatibleProvider : IChatProvider
         var localToolOptions = LocalToolOptions.FromExtraBody(request.ExtraBody);
         var modelSupportsTools = SupportsLocalTools(request.ModelId);
         var modelSupportsVision = SupportsVision(request.ModelId);
-        var toolContext = new ChatToolContext(request, Id, request.ModelId, modelSupportsVision, Models);
+        var toolContext = new ChatToolContext(request, Id, request.ModelId, modelSupportsVision, Models, _http);
         var localToolDefinitions = modelSupportsTools
             ? LocalToolRegistry.BuildOpenAiToolDefinitions(localToolOptions)
             : Array.Empty<object>();
@@ -383,15 +383,14 @@ public sealed class OpenAICompatibleProvider : IChatProvider
         LocalToolOptions options,
         CancellationToken ct)
     {
-        if (name is "search_web" or "web_fetch" or "read_file" or "glob_files" or "grep_files")
-            return LocalToolRegistry.ExecuteAsync(name, argumentsJson, options, _http, ct);
-
         return _toolHost is null
-            ? Task.FromResult(JsonSerializer.Serialize(new
-            {
-                success = false,
-                error = $"Unknown local tool: {name}"
-            }))
+            ? name is "search_web" or "web_fetch" or "read_file" or "glob_files" or "grep_files"
+                ? LocalToolRegistry.ExecuteAsync(name, argumentsJson, options, _http, ct)
+                : Task.FromResult(JsonSerializer.Serialize(new
+                {
+                    success = false,
+                    error = $"Unknown local tool: {name}"
+                }))
             : _toolHost.ExecuteAsync(name, argumentsJson, context, options, ct);
     }
 

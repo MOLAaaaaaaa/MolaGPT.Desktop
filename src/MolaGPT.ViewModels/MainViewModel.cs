@@ -52,6 +52,9 @@ public sealed partial class MainViewModel : ObservableObject
     /// <summary>Opens the AboutWindow. Set by App.xaml.cs.</summary>
     public Action? AboutRequested { get; set; }
 
+    /// <summary>Fired when switching to Work mode; App.xaml.cs checks if Python needs setup and shows the wizard.</summary>
+    public Action? WorkSetupRequested { get; set; }
+
     private bool _openSettingsToPersonas;
     private bool _openSettingsWithNewPersona;
 
@@ -360,17 +363,14 @@ public sealed partial class MainViewModel : ObservableObject
 
         if (Chat.SwitchToMode(target, out var needsLogin))
         {
-            // Crossing the Chat ↔ local-agent boundary can't continue the same
-            // conversation (Chat is cloud-orchestrated; the agent modes share the
-            // local thread). Always reset to a clean draft when the boundary is
-            // crossed, even if the current view is an image workbench with no
-            // loaded chat thread.
             if (fromMode.CrossesChatBoundary(target))
             {
                 ConversationList.ClearSelection();
                 IsImageWorkbenchVisible = false;
                 Chat.StartDraftConversation();
             }
+            if (target == AppMode.Work)
+                WorkSetupRequested?.Invoke();
             return;
         }
 

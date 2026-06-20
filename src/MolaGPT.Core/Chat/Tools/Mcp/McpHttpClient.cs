@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Sse;
 
 namespace MolaGPT.Core.Chat.Tools.Mcp;
@@ -49,10 +50,29 @@ public sealed class McpHttpClient
         {
             var name = ReadString(tool, "name");
             if (string.IsNullOrWhiteSpace(name)) continue;
+            var capabilities = ToolCapability.External;
+            if (tool.TryGetProperty("annotations", out var annotations)
+                && annotations.ValueKind == JsonValueKind.Object)
+            {
+                capabilities |= ReadBool(annotations, "readOnlyHint")
+                    ? ToolCapability.Read
+                    : ToolCapability.Write;
+                if (ReadBool(annotations, "destructiveHint"))
+                    capabilities |= ToolCapability.Destructive;
+            }
+            else
+            {
+                // MCP annotations are optional. Unknown tools fail closed as
+                // externally connected write operations until a server declares
+                // them read-only.
+                capabilities |= ToolCapability.Write;
+            }
+
             list.Add(new McpToolDescriptor(
                 name!,
                 ReadString(tool, "description"),
-                tool.TryGetProperty("inputSchema", out var schema) ? schema.Clone() : default));
+                tool.TryGetProperty("inputSchema", out var schema) ? schema.Clone() : default,
+                capabilities));
         }
 
         return list;
@@ -163,9 +183,18 @@ public sealed class McpHttpClient
             ? value.GetString()
             : null;
 
+    private static bool ReadBool(JsonElement obj, string name) =>
+        obj.ValueKind == JsonValueKind.Object
+        && obj.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.True;
+
     private sealed record McpJsonRpcResponse(JsonElement Json, string? SessionId);
 }
 
 public sealed record McpSession(McpServerOptions Server, string? SessionId);
 
-public sealed record McpToolDescriptor(string Name, string? Description, JsonElement InputSchema);
+public sealed record McpToolDescriptor(
+    string Name,
+    string? Description,
+    JsonElement InputSchema,
+    ToolCapability Capabilities);

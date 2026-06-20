@@ -3,12 +3,13 @@ using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.ViewModels;
 
 namespace MolaGPT.Desktop.Services;
 
-public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalService
+public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalService, IToolApprovalService
 {
     private readonly IPythonSessionAllowList _sessionAllowList;
     private readonly SettingsViewModel _settings;
@@ -34,6 +35,150 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         ct.ThrowIfCancellationRequested();
         return decision;
     }
+
+    public async Task<ToolApprovalDecision> RequestApprovalAsync(
+        ToolApprovalRequest request,
+        ToolPermissionMode mode,
+        CancellationToken ct)
+    {
+        var needsPrompt = request.AlwaysAsk
+                          || request.Capabilities.HasFlag(ToolCapability.Destructive)
+                          || (mode == ToolPermissionMode.Approval
+                              && request.Capabilities.HasFlag(ToolCapability.Write));
+        if (!needsPrompt)
+            return ToolApprovalDecision.Approved;
+
+        var app = Application.Current;
+        if (app?.Dispatcher is null)
+            return ToolApprovalDecision.Denied;
+
+        ct.ThrowIfCancellationRequested();
+        var (approved, alwaysAllow) = await app.Dispatcher.InvokeAsync(() => ShowToolApprovalDialog(request, mode))
+            .Task.ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        if (approved && alwaysAllow)
+            ApplyAlwaysAllow(request.ToolName);
+        return approved ? ToolApprovalDecision.Approved : ToolApprovalDecision.Denied;
+    }
+
+    private void ApplyAlwaysAllow(string toolName)
+    {
+        if (string.Equals(toolName, "generate_image", StringComparison.Ordinal))
+            _settings.ImageGenerationPermissionMode = ToolPermissionMode.FullAccess;
+        else if (string.Equals(toolName, "view_image", StringComparison.Ordinal))
+            _settings.VisionPermissionMode = ToolPermissionMode.FullAccess;
+        else if (string.Equals(toolName, "execute_python_code", StringComparison.Ordinal))
+            _settings.PythonExecutionPermissionMode = ToolPermissionMode.FullAccess;
+        else if (toolName.StartsWith("mcp__", StringComparison.Ordinal))
+            _settings.McpPermissionMode = ToolPermissionMode.FullAccess;
+    }
+
+    private static (bool Approved, bool Always) ShowToolApprovalDialog(ToolApprovalRequest request, ToolPermissionMode mode)
+    {
+        var owner = FindOwnerWindow();
+        var dialog = new Window
+        {
+            Title = "审批工具调用",
+            Width = 680,
+            Height = 500,
+            MinWidth = 560,
+            MinHeight = 400,
+            WindowStartupLocation = owner is null ? WindowStartupLocation.CenterScreen : WindowStartupLocation.CenterOwner,
+            Owner = owner,
+            ResizeMode = ResizeMode.CanResize,
+            Background = TryFindBrush("Brush.Bg.Primary") ?? Brushes.White,
+            FontFamily = TryFindFont("Font.Cjk") ?? new FontFamily("Microsoft YaHei UI, Segoe UI"),
+            FontSize = 13
+        };
+
+        var root = new Grid { Margin = new Thickness(20) };
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        var heading = new StackPanel { Margin = new Thickness(0, 0, 0, 14) };
+        heading.Children.Add(new TextBlock
+        {
+            Text = request.DisplayName,
+            FontSize = 18,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = TryFindBrush("Brush.Text.Primary") ?? Brushes.Black
+        });
+        heading.Children.Add(new TextBlock
+        {
+            Text = string.IsNullOrWhiteSpace(request.Description)
+                ? "模型请求调用此工具。"
+                : request.Description,
+            Margin = new Thickness(0, 5, 0, 0),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = TryFindBrush("Brush.Text.Secondary") ?? Brushes.Gray
+        });
+        root.Children.Add(heading);
+
+        var capabilityText = new TextBlock
+        {
+            Text = $"能力：{FormatCapabilities(request.Capabilities)} · 权限模式：{FormatMode(mode)}"
+                   + (request.AlwaysAsk ? " · 此操作始终需要确认" : string.Empty),
+            Padding = new Thickness(12, 9, 12, 9),
+            Margin = new Thickness(0, 0, 0, 12),
+            TextWrapping = TextWrapping.Wrap,
+            Background = TryFindBrush("Brush.Primary.Blockquote") ?? new SolidColorBrush(Color.FromRgb(0xEE, 0xF4, 0xFF)),
+            Foreground = TryFindBrush("Brush.Text.Primary") ?? Brushes.Black
+        };
+        Grid.SetRow(capabilityText, 1);
+        root.Children.Add(capabilityText);
+
+        var argsBox = new TextBox
+        {
+            Text = string.IsNullOrWhiteSpace(request.ArgumentsJson) ? "{}" : request.ArgumentsJson,
+            IsReadOnly = true,
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            FontFamily = new FontFamily("Cascadia Mono, Consolas"),
+            FontSize = 12,
+            Padding = new Thickness(10)
+        };
+        Grid.SetRow(argsBox, 2);
+        root.Children.Add(argsBox);
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 14, 0, 0)
+        };
+        var deny = new Button { Content = "拒绝", Width = 96, Height = 34, Margin = new Thickness(0, 0, 8, 0), IsCancel = true };
+        var alwaysAllow = new Button { Content = "始终允许", Width = 110, Height = 34, Margin = new Thickness(0, 0, 8, 0) };
+        var allow = new Button { Content = "允许本次", Width = 110, Height = 34, IsDefault = true };
+        deny.Click += (_, _) => { dialog.Tag = "deny"; dialog.DialogResult = false; dialog.Close(); };
+        alwaysAllow.Click += (_, _) => { dialog.Tag = "always"; dialog.DialogResult = true; dialog.Close(); };
+        allow.Click += (_, _) => { dialog.Tag = "once"; dialog.DialogResult = true; dialog.Close(); };
+        buttons.Children.Add(deny);
+        buttons.Children.Add(alwaysAllow);
+        buttons.Children.Add(allow);
+        Grid.SetRow(buttons, 3);
+        root.Children.Add(buttons);
+
+        dialog.Content = root;
+        dialog.ShowDialog();
+        return (dialog.DialogResult == true, dialog.Tag as string == "always");
+    }
+
+    private static string FormatCapabilities(ToolCapability capabilities)
+    {
+        var labels = new List<string>();
+        if (capabilities.HasFlag(ToolCapability.Read)) labels.Add("读取");
+        if (capabilities.HasFlag(ToolCapability.Write)) labels.Add("写入");
+        if (capabilities.HasFlag(ToolCapability.External)) labels.Add("外部服务");
+        if (capabilities.HasFlag(ToolCapability.Destructive)) labels.Add("破坏性");
+        return labels.Count == 0 ? "未声明" : string.Join(" / ", labels);
+    }
+
+    private static string FormatMode(ToolPermissionMode mode) =>
+        mode == ToolPermissionMode.FullAccess ? "完全权限" : "审批权限";
 
     private PythonExecutionApprovalDecision ShowApprovalDialog(PythonExecutionApprovalRequest request)
     {
@@ -327,8 +472,11 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
     {
         var builder = new StringBuilder();
         builder.Append("权限模式：").AppendLine(request.Options.PermissionMode.ToString());
+        builder.Append("能力标签：").AppendLine(FormatCapabilities(request.Capabilities));
         builder.Append("风险等级：").AppendLine(request.Risk.Level.ToString());
-        builder.AppendLine("这段代码将以当前 Windows 用户权限运行。");
+        builder.AppendLine("这段代码仍以当前 Windows 用户权限运行，但解释器 PATH 与 Python 环境变量已隔离。");
+        if (request.Risk.Flags.Any(flag => string.Equals(flag.Code, "package_install", StringComparison.Ordinal)))
+            builder.AppendLine("包将安装到当前对话的 .packages 目录，不会写入 MolaGPT 基础运行时或系统 Python。");
 
         if (request.Risk.Imports.Count > 0)
             builder.Append("导入模块：").AppendLine(string.Join(", ", request.Risk.Imports));

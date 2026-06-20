@@ -37,7 +37,7 @@ public static class WorkspaceArtifactScanner
         IEnumerable<string> files;
         try
         {
-            files = Directory.EnumerateFiles(sessionDir, "*", SearchOption.AllDirectories);
+            files = PythonWorkspaceInternals.EnumerateUserFiles(sessionDir);
         }
         catch (IOException)
         {
@@ -59,9 +59,6 @@ public static class WorkspaceArtifactScanner
             {
                 continue;
             }
-
-            if (IsInternalRuntimeArtifact(relative))
-                continue;
 
             var name = Path.GetFileName(file);
             if (IsRuntimeScript(name))
@@ -113,12 +110,6 @@ public static class WorkspaceArtifactScanner
     private static bool IsImageExtension(string extension) =>
         extension.ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".webp" or ".gif" or ".svg";
 
-    private static bool IsInternalRuntimeArtifact(string relativePath)
-    {
-        var normalized = relativePath.Replace('\\', '/');
-        return normalized.StartsWith(".matplotlib/", StringComparison.OrdinalIgnoreCase)
-            || normalized.StartsWith("__pycache__/", StringComparison.OrdinalIgnoreCase);
-    }
 }
 
 /// <summary>A single artifact surfaced to the session-level artifact panel.</summary>

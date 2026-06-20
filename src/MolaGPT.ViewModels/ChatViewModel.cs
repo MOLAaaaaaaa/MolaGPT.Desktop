@@ -155,7 +155,7 @@ public sealed partial class ChatViewModel : ObservableObject
     public string ActiveModeLabel => CurrentMode switch
     {
         AppMode.Chat => "MolaGPT 账号",
-        AppMode.Work => "MolaGPT 额度",
+        AppMode.Work => "   ",
         _ => ActiveProvider is null ? "BYOK · 自带密钥" : $"{ActiveProvider.DisplayName} · BYOK",
     };
 

@@ -12,8 +12,9 @@ public sealed class PythonRuntimeManager
     public const string DefaultManifestUrl =
         "https://chatgpt.wljay.cn/v2/python-runtime-win-x64.json";
 
-    private const string RuntimeDirectoryName = "python";
+    private const string RuntimeDirectoryName = "runtimes";
     private const string StampFileName = ".molagpt-python-runtime.json";
+    private const string ActiveRuntimeFileName = ".active-runtime.json";
     private readonly HttpClient _http;
     private readonly string _manifestUrl;
 
@@ -25,44 +26,84 @@ public sealed class PythonRuntimeManager
             : manifestUrl!;
     }
 
-    public string RuntimeDirectory => Path.Combine(GetAppDirectory(), RuntimeDirectoryName);
-    public string StampPath => Path.Combine(RuntimeDirectory, StampFileName);
+    public string RuntimeBaseDirectory => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "MolaGPT Desktop",
+        "PythonRuntime");
+
+    public string RuntimeRootDirectory => Path.Combine(RuntimeBaseDirectory, RuntimeDirectoryName);
+
+    public string RuntimeDirectory => GetInstalledRuntime()?.RuntimeDirectory ?? RuntimeRootDirectory;
+
+    public bool IsManagedInterpreterPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        try
+        {
+            return IsPathInside(path, RuntimeRootDirectory)
+                   || IsPathInside(path, GetLegacyRuntimeDirectory());
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     public void DeleteRuntime()
     {
-        var appDir = Path.GetFullPath(GetAppDirectory()).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var runtimeDir = Path.GetFullPath(RuntimeDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (!runtimeDir.StartsWith(appDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("拒绝删除安装目录之外的 Python 环境。");
-        if (!Directory.Exists(runtimeDir))
-            return;
+        DeleteManagedDirectory(RuntimeRootDirectory);
+        DeleteManagedDirectory(Path.Combine(RuntimeBaseDirectory, "archives"));
 
-        Directory.Delete(runtimeDir, recursive: true);
+        // Clean up the legacy app-local one-click runtime as part of migration.
+        // A manually selected interpreter is never inside this exact directory.
+        var legacy = GetLegacyRuntimeDirectory();
+        if (Directory.Exists(legacy))
+            DeleteManagedDirectory(legacy, GetAppDirectory());
+
+        ResetSessionDependencyOverlays();
     }
 
     public InstalledPythonRuntime? GetInstalledRuntime()
     {
         try
         {
-            if (!File.Exists(StampPath))
+            var activePath = Path.Combine(RuntimeRootDirectory, ActiveRuntimeFileName);
+            if (File.Exists(activePath))
             {
-                var fallbackPython = Path.Combine(RuntimeDirectory, "python.exe");
-                return File.Exists(fallbackPython)
-                    ? new InstalledPythonRuntime("unknown", "unknown", fallbackPython, RuntimeDirectory, Array.Empty<string>())
-                    : null;
+                var active = JsonSerializer.Deserialize<ActiveRuntimeStamp>(File.ReadAllText(activePath));
+                if (!string.IsNullOrWhiteSpace(active?.DirectoryName))
+                {
+                    var activeDir = Path.Combine(RuntimeRootDirectory, SafeDirectoryName(active.DirectoryName));
+                    if (TryReadInstalledRuntime(activeDir) is { } selected)
+                        return selected;
+                }
             }
 
-            var stamp = JsonSerializer.Deserialize<RuntimeStamp>(File.ReadAllText(StampPath));
-            if (stamp is null) return null;
-            var pythonPath = Path.Combine(RuntimeDirectory, NormalizeRelativePath(stamp.PythonExecutable));
-            return File.Exists(pythonPath)
-                ? new InstalledPythonRuntime(stamp.Version, stamp.Runtime, pythonPath, RuntimeDirectory, stamp.Packages ?? Array.Empty<string>())
-                : null;
+            if (Directory.Exists(RuntimeRootDirectory))
+            {
+                foreach (var directory in Directory.EnumerateDirectories(RuntimeRootDirectory)
+                             .OrderByDescending(Directory.GetLastWriteTimeUtc))
+                {
+                    if (TryReadInstalledRuntime(directory) is { } installed)
+                        return installed;
+                }
+            }
+
+            // Read old installations so the UI can migrate them on the next
+            // one-click configuration instead of silently losing the setting.
+            return TryReadInstalledRuntime(GetLegacyRuntimeDirectory(), allowMissingStamp: true);
         }
         catch
         {
             return null;
         }
+    }
+
+    public PythonRuntimeStorageUsage GetStorageUsage()
+    {
+        var runtimeBytes = GetDirectorySize(RuntimeBaseDirectory) + GetDirectorySize(GetLegacyRuntimeDirectory());
+        var sessionBytes = GetSessionDependencyOverlaySize();
+        return new PythonRuntimeStorageUsage(runtimeBytes, sessionBytes);
     }
 
     public async Task<PythonRuntimeManifest> FetchManifestAsync(CancellationToken ct = default)
@@ -92,18 +133,21 @@ public sealed class PythonRuntimeManager
         var runtime = manifest.Runtime!;
         var sha256 = manifest.Sha256!;
         var installed = GetInstalledRuntime();
-        if (installed is not null && IsInstalledRuntimeCurrent(installed, manifest))
+        if (installed is not null
+            && IsPathInside(installed.RuntimeDirectory, RuntimeRootDirectory)
+            && IsInstalledRuntimeCurrent(installed, manifest))
         {
             progress?.Report(new PythonRuntimeProgress("done", 1, $"已是最新版本 {installed.Version}"));
             return installed;
         }
 
-        EnsureWritableAppDirectory();
+        EnsureWritableRuntimeRoot();
 
         var downloadDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "MolaGPT Desktop",
             "PythonRuntime",
+            "archives",
             version);
         Directory.CreateDirectory(downloadDir);
         var archivePath = Path.Combine(downloadDir, SafeFileName(manifest.FileName ?? $"python-runtime-{version}.zip"));
@@ -122,8 +166,8 @@ public sealed class PythonRuntimeManager
             File.Move(tempArchivePath, archivePath);
         }
 
-        progress?.Report(new PythonRuntimeProgress("extract", 0.88, "正在解压到 MolaGPT 安装目录..."));
-        var stagingDir = Path.Combine(GetAppDirectory(), $".python-staging-{Guid.NewGuid():N}");
+        progress?.Report(new PythonRuntimeProgress("extract", 0.88, "正在解压到 MolaGPT 目录..."));
+        var stagingDir = Path.Combine(RuntimeRootDirectory, $".staging-{Guid.NewGuid():N}");
         Directory.CreateDirectory(stagingDir);
         try
         {
@@ -146,14 +190,20 @@ public sealed class PythonRuntimeManager
                 JsonSerializer.Serialize(stamp, RuntimeJsonOptions),
                 ct).ConfigureAwait(false);
 
-            ReplaceRuntimeDirectory(stagingDir);
-            var finalPythonPath = Path.Combine(RuntimeDirectory, pythonRelative);
+            var directoryName = SafeDirectoryName(version);
+            var finalRuntimeDirectory = Path.Combine(RuntimeRootDirectory, directoryName);
+            ReplaceRuntimeDirectory(stagingDir, finalRuntimeDirectory);
+            await File.WriteAllTextAsync(
+                Path.Combine(RuntimeRootDirectory, ActiveRuntimeFileName),
+                JsonSerializer.Serialize(new ActiveRuntimeStamp(directoryName), RuntimeJsonOptions),
+                ct).ConfigureAwait(false);
+            var finalPythonPath = Path.Combine(finalRuntimeDirectory, pythonRelative);
             progress?.Report(new PythonRuntimeProgress("done", 1, $"Python 运行时 {version} 已配置完成"));
             return new InstalledPythonRuntime(
                 version,
                 runtime,
                 finalPythonPath,
-                RuntimeDirectory,
+                finalRuntimeDirectory,
                 manifest.Packages ?? Array.Empty<string>());
         }
         catch
@@ -269,15 +319,23 @@ public sealed class PythonRuntimeManager
         Directory.Delete(root, recursive: true);
     }
 
-    private void ReplaceRuntimeDirectory(string stagingDir)
+    private static void ReplaceRuntimeDirectory(string stagingDir, string runtimeDir)
     {
-        var runtimeDir = RuntimeDirectory;
         var backupDir = runtimeDir + ".old-" + Guid.NewGuid().ToString("N");
-
-        if (Directory.Exists(runtimeDir))
+        var hadExisting = Directory.Exists(runtimeDir);
+        if (hadExisting)
             Directory.Move(runtimeDir, backupDir);
 
-        Directory.Move(stagingDir, runtimeDir);
+        try
+        {
+            Directory.Move(stagingDir, runtimeDir);
+        }
+        catch
+        {
+            if (hadExisting && Directory.Exists(backupDir) && !Directory.Exists(runtimeDir))
+                Directory.Move(backupDir, runtimeDir);
+            throw;
+        }
         TryDeleteDirectory(backupDir);
     }
 
@@ -293,10 +351,10 @@ public sealed class PythonRuntimeManager
         return string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static void EnsureWritableAppDirectory()
+    private void EnsureWritableRuntimeRoot()
     {
-        var appDir = GetAppDirectory();
-        var probe = Path.Combine(appDir, $".molagpt-write-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(RuntimeRootDirectory);
+        var probe = Path.Combine(RuntimeRootDirectory, $".write-test-{Guid.NewGuid():N}");
         try
         {
             File.WriteAllText(probe, string.Empty);
@@ -304,7 +362,111 @@ public sealed class PythonRuntimeManager
         }
         catch (Exception ex)
         {
-            throw new InvalidOperationException($"当前安装目录不可写，无法安装内置 Python 运行时：{appDir}", ex);
+            throw new InvalidOperationException($"MolaGPT 运行时目录不可写：{RuntimeRootDirectory}", ex);
+        }
+    }
+
+    private InstalledPythonRuntime? TryReadInstalledRuntime(string runtimeDirectory, bool allowMissingStamp = false)
+    {
+        if (string.IsNullOrWhiteSpace(runtimeDirectory) || !Directory.Exists(runtimeDirectory))
+            return null;
+
+        var stampPath = Path.Combine(runtimeDirectory, StampFileName);
+        if (!File.Exists(stampPath))
+        {
+            if (!allowMissingStamp) return null;
+            var fallbackPython = Path.Combine(runtimeDirectory, "python.exe");
+            return File.Exists(fallbackPython)
+                ? new InstalledPythonRuntime("unknown", "legacy", fallbackPython, runtimeDirectory, Array.Empty<string>())
+                : null;
+        }
+
+        var stamp = JsonSerializer.Deserialize<RuntimeStamp>(File.ReadAllText(stampPath));
+        if (stamp is null) return null;
+        var pythonPath = Path.Combine(runtimeDirectory, NormalizeRelativePath(stamp.PythonExecutable));
+        return File.Exists(pythonPath)
+            ? new InstalledPythonRuntime(
+                stamp.Version,
+                stamp.Runtime,
+                pythonPath,
+                runtimeDirectory,
+                stamp.Packages ?? Array.Empty<string>())
+            : null;
+    }
+
+    private static string GetLegacyRuntimeDirectory() =>
+        Path.Combine(GetAppDirectory(), "python");
+
+    private static bool IsPathInside(string path, string root)
+    {
+        var fullPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return fullPath.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+               || string.Equals(fullPath, fullRoot, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void DeleteManagedDirectory(string path, string? requiredRoot = null)
+    {
+        if (!Directory.Exists(path)) return;
+        var root = requiredRoot ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "MolaGPT Desktop",
+            "PythonRuntime");
+        if (!IsPathInside(path, root))
+            throw new InvalidOperationException($"拒绝删除托管目录之外的 Python 环境：{path}");
+        Directory.Delete(path, recursive: true);
+    }
+
+    private static string GetSessionRootDirectory() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "MolaGPT",
+        "python-tool",
+        "sessions");
+
+    private static readonly string[] SessionEnvironmentDirectories =
+    [
+        ".packages", ".pip-cache", ".uv-cache", ".tmp", ".appdata", ".localappdata", ".matplotlib", "__pycache__"
+    ];
+
+    private static void ResetSessionDependencyOverlays()
+    {
+        var root = GetSessionRootDirectory();
+        if (!Directory.Exists(root)) return;
+        foreach (var session in Directory.EnumerateDirectories(root))
+        {
+            foreach (var name in SessionEnvironmentDirectories)
+                TryDeleteDirectory(Path.Combine(session, name));
+        }
+    }
+
+    private static long GetSessionDependencyOverlaySize()
+    {
+        var root = GetSessionRootDirectory();
+        if (!Directory.Exists(root)) return 0;
+        long total = 0;
+        foreach (var session in Directory.EnumerateDirectories(root))
+        {
+            foreach (var name in SessionEnvironmentDirectories)
+                total += GetDirectorySize(Path.Combine(session, name));
+        }
+        return total;
+    }
+
+    private static long GetDirectorySize(string path)
+    {
+        if (!Directory.Exists(path)) return 0;
+        try
+        {
+            return Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories)
+                .Sum(file =>
+                {
+                    try { return new FileInfo(file).Length; }
+                    catch { return 0L; }
+                });
+        }
+        catch
+        {
+            return 0;
         }
     }
 
@@ -333,6 +495,14 @@ public sealed class PythonRuntimeManager
         var invalid = Path.GetInvalidFileNameChars();
         var chars = value.Select(ch => invalid.Contains(ch) ? '-' : ch).ToArray();
         return new string(chars);
+    }
+
+    private static string SafeDirectoryName(string value)
+    {
+        var safe = SafeFileName(value).Trim().Trim('.');
+        if (string.IsNullOrWhiteSpace(safe))
+            throw new InvalidOperationException("Python 运行时版本不能映射为安全目录名。");
+        return safe;
     }
 
     private static void TryDeleteDirectory(string path)
@@ -371,6 +541,9 @@ public sealed class PythonRuntimeManager
         [property: JsonPropertyName("python_executable")] string PythonExecutable,
         [property: JsonPropertyName("packages")] IReadOnlyList<string> Packages,
         [property: JsonPropertyName("installed_at")] DateTimeOffset InstalledAt);
+
+    private sealed record ActiveRuntimeStamp(
+        [property: JsonPropertyName("directory_name")] string DirectoryName);
 }
 
 public sealed record InstalledPythonRuntime(
@@ -381,6 +554,11 @@ public sealed record InstalledPythonRuntime(
     IReadOnlyList<string> Packages);
 
 public sealed record PythonRuntimeProgress(string Stage, double Progress, string Message);
+
+public sealed record PythonRuntimeStorageUsage(long RuntimeBytes, long SessionEnvironmentBytes)
+{
+    public long TotalBytes => RuntimeBytes + SessionEnvironmentBytes;
+}
 
 public sealed record PythonRuntimeManifest(
     [property: JsonPropertyName("version")] string? Version,

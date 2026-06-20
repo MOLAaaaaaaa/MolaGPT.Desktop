@@ -62,6 +62,16 @@ public sealed class McpClientManager
         });
     }
 
+    public async Task<McpToolDescriptor?> GetToolDescriptorAsync(
+        McpServerOptions server,
+        string toolSlug,
+        CancellationToken ct)
+    {
+        var state = await GetStateAsync(server, ct).ConfigureAwait(false);
+        return state.Tools.FirstOrDefault(t =>
+            string.Equals(McpToolName.Slugify(t.Name), toolSlug, StringComparison.Ordinal));
+    }
+
     private Task<McpServerState> GetStateAsync(McpServerOptions server, CancellationToken ct)
     {
         var key = $"{server.Id}|{server.Url}|{server.HeaderName}|{server.Token}";

@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
 using MolaGPT.Storage.Repositories;
 
@@ -47,7 +48,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string PythonToolTimeoutSecondsKey = "python_tool_timeout_seconds";
     private const string PythonToolMaxOutputCharactersKey = "python_tool_max_output_characters";
     private const string PythonToolAllowNetworkKey = "python_tool_allow_network";
+    private const string ToolPermissionModeKey = "tool_permission_mode";
     private const string PythonToolPermissionModeKey = "python_tool_permission_mode";
+    private const string ImageGenerationPermissionModeKey = "image_generation_permission_mode";
+    private const string VisionPermissionModeKey = "vision_permission_mode";
+    private const string McpPermissionModeKey = "mcp_permission_mode";
+    private const string PythonExecutionPermissionModeKey = "python_execution_permission_mode";
     private const string PythonToolAllowedImportsKey = "python_tool_allowed_imports";
     private const string PythonToolDeniedImportsKey = "python_tool_denied_imports";
     private const string PythonToolAllowedPathPrefixesKey = "python_tool_allowed_path_prefixes";
@@ -93,7 +99,11 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private int _pythonToolTimeoutSeconds = 60;
     [ObservableProperty] private int _pythonToolMaxOutputCharacters = 20000;
     [ObservableProperty] private bool _pythonToolAllowNetwork;
-    [ObservableProperty] private PythonPermissionMode _pythonToolPermissionMode = PythonPermissionMode.Approval;
+    [ObservableProperty] private ToolPermissionMode _localToolPermissionMode = ToolPermissionMode.Approval;
+    [ObservableProperty] private ToolPermissionMode _imageGenerationPermissionMode = ToolPermissionMode.Approval;
+    [ObservableProperty] private ToolPermissionMode _visionPermissionMode = ToolPermissionMode.Approval;
+    [ObservableProperty] private ToolPermissionMode _mcpPermissionMode = ToolPermissionMode.Approval;
+    [ObservableProperty] private ToolPermissionMode _pythonExecutionPermissionMode = ToolPermissionMode.Approval;
     [ObservableProperty] private string? _pythonToolAllowedImports;
     [ObservableProperty] private string? _pythonToolDeniedImports;
     [ObservableProperty] private string? _pythonToolAllowedPathPrefixes;
@@ -187,16 +197,21 @@ public sealed partial class SettingsViewModel : ObservableObject
             if (int.TryParse(_settingsRepo.Get(PythonToolMaxOutputCharactersKey), out var pythonMaxOutput))
                 PythonToolMaxOutputCharacters = Math.Clamp(pythonMaxOutput, 2000, 100000);
             PythonToolAllowNetwork = bool.TryParse(_settingsRepo.Get(PythonToolAllowNetworkKey), out var pythonAllowNetwork) && pythonAllowNetwork;
-            var permissionModeRaw = _settingsRepo.Get(PythonToolPermissionModeKey);
+            var permissionModeRaw = _settingsRepo.Get(ToolPermissionModeKey)
+                                    ?? _settingsRepo.Get(PythonToolPermissionModeKey);
             if (!string.IsNullOrWhiteSpace(permissionModeRaw)
-                && Enum.TryParse<PythonPermissionMode>(permissionModeRaw, true, out var permissionMode))
+                && Enum.TryParse<ToolPermissionMode>(permissionModeRaw, true, out var permissionMode))
             {
-                // The rules mode is no longer exposed in the UI; fold any stored
-                // value back to the approval default so the radio group stays valid.
-                PythonToolPermissionMode = permissionMode == PythonPermissionMode.FullAccess
-                    ? PythonPermissionMode.FullAccess
-                    : PythonPermissionMode.Approval;
+                LocalToolPermissionMode = permissionMode;
             }
+            if (Enum.TryParse<ToolPermissionMode>(_settingsRepo.Get(ImageGenerationPermissionModeKey), true, out var imgMode))
+                ImageGenerationPermissionMode = imgMode;
+            if (Enum.TryParse<ToolPermissionMode>(_settingsRepo.Get(VisionPermissionModeKey), true, out var visMode))
+                VisionPermissionMode = visMode;
+            if (Enum.TryParse<ToolPermissionMode>(_settingsRepo.Get(McpPermissionModeKey), true, out var mcpMode))
+                McpPermissionMode = mcpMode;
+            if (Enum.TryParse<ToolPermissionMode>(_settingsRepo.Get(PythonExecutionPermissionModeKey), true, out var pyMode))
+                PythonExecutionPermissionMode = pyMode;
             PythonToolAllowedImports = _settingsRepo.Get(PythonToolAllowedImportsKey);
             PythonToolDeniedImports = _settingsRepo.Get(PythonToolDeniedImportsKey);
             PythonToolAllowedPathPrefixes = _settingsRepo.Get(PythonToolAllowedPathPrefixesKey);
@@ -446,10 +461,34 @@ public sealed partial class SettingsViewModel : ObservableObject
         _settingsRepo.Set(PythonToolAllowNetworkKey, value.ToString());
     }
 
-    partial void OnPythonToolPermissionModeChanged(PythonPermissionMode value)
+    partial void OnLocalToolPermissionModeChanged(ToolPermissionMode value)
     {
         if (_loadingSettings || _settingsRepo is null) return;
-        _settingsRepo.Set(PythonToolPermissionModeKey, value.ToString());
+        _settingsRepo.Set(ToolPermissionModeKey, value.ToString());
+    }
+
+    partial void OnImageGenerationPermissionModeChanged(ToolPermissionMode value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(ImageGenerationPermissionModeKey, value.ToString());
+    }
+
+    partial void OnVisionPermissionModeChanged(ToolPermissionMode value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(VisionPermissionModeKey, value.ToString());
+    }
+
+    partial void OnMcpPermissionModeChanged(ToolPermissionMode value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(McpPermissionModeKey, value.ToString());
+    }
+
+    partial void OnPythonExecutionPermissionModeChanged(ToolPermissionMode value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(PythonExecutionPermissionModeKey, value.ToString());
     }
 
     partial void OnPythonToolAllowedImportsChanged(string? value)
@@ -599,7 +638,9 @@ public sealed partial class SettingsViewModel : ObservableObject
         Math.Clamp(PythonToolTimeoutSeconds, 5, 300),
         Math.Clamp(PythonToolMaxOutputCharacters, 2000, 100000),
         PythonToolAllowNetwork,
-        PythonToolPermissionMode,
+        LocalToolPermissionMode == ToolPermissionMode.FullAccess || PythonExecutionPermissionMode == ToolPermissionMode.FullAccess
+            ? PythonPermissionMode.FullAccess
+            : PythonPermissionMode.Approval,
         PythonToolAllowedImports,
         PythonToolDeniedImports,
         PythonToolAllowedPathPrefixes,

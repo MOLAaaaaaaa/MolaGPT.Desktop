@@ -173,35 +173,14 @@ public partial class SettingsWindow : Window
         UpdateAccountUi();
         InitializeWebSearchUi();
         UpdatePythonRuntimeStatusHint();
-        // Open the advanced rules section up front when persistent allow/deny
-        // rules already exist, so they are visible rather than hidden behind a
-        // collapsed expander.
-        RefreshPythonAdvancedRulesExpander();
+        Activated += (_, _) => UpdatePythonRuntimeStatusHint();
         // Keep the browse/open button label in sync when the path is edited by
-        // hand (typed, pasted, or cleared) in addition to picker-driven changes;
-        // and reveal the advanced rules when a permanent allow rule is written
-        // (e.g. from the execution approval dialog) while settings is open.
+        // hand (typed, pasted, or cleared) in addition to picker-driven changes.
         _vm.PropertyChanged += (_, args) =>
         {
             if (args.PropertyName == nameof(SettingsViewModel.PythonToolExecutablePath))
                 RefreshPythonBrowseButton();
-            else if (args.PropertyName is nameof(SettingsViewModel.PythonToolAllowedImports)
-                     or nameof(SettingsViewModel.PythonToolAllowedPathPrefixes)
-                     or nameof(SettingsViewModel.PythonToolDeniedImports)
-                     or nameof(SettingsViewModel.PythonToolDeniedPathPrefixes))
-                RefreshPythonAdvancedRulesExpander();
         };
-    }
-
-    private void RefreshPythonAdvancedRulesExpander()
-    {
-        var hasRules =
-            !string.IsNullOrWhiteSpace(_vm.PythonToolAllowedImports)
-            || !string.IsNullOrWhiteSpace(_vm.PythonToolDeniedImports)
-            || !string.IsNullOrWhiteSpace(_vm.PythonToolAllowedPathPrefixes)
-            || !string.IsNullOrWhiteSpace(_vm.PythonToolDeniedPathPrefixes);
-        if (hasRules)
-            PythonAdvancedRulesExpander.IsExpanded = true;
     }
 
     public void OpenPersonasTab(bool startNewPersona)
@@ -444,21 +423,59 @@ public partial class SettingsWindow : Window
             : "选择图像服务与模型后，即可在 BYOK 对话中创建图片。";
     }
 
-    private void UpdatePythonRuntimeStatusHint()
+    private async void UpdatePythonRuntimeStatusHint()
     {
         var runtime = _pythonRuntime.GetInstalledRuntime();
+        var storage = await Task.Run(_pythonRuntime.GetStorageUsage);
+        var storageText = $"占用 {FormatBytes(storage.TotalBytes)}  ·  运行时 {FormatBytes(storage.RuntimeBytes)}  ·  会话依赖 {FormatBytes(storage.SessionEnvironmentBytes)}";
         if (runtime is null)
         {
-            PythonRuntimeStatusText.Text = "尚未安装内置运行时；可填写已有 python.exe，或一键下载 MolaGPT 专用便携环境。";
+            ClearMissingBundledRuntimeConfiguration();
+            var external = _vm.PythonToolExecutablePath?.Trim().Trim('"');
+            if (!string.IsNullOrWhiteSpace(external) && File.Exists(external))
+            {
+                PythonRuntimeStatusText.Text = "外部 Python（无基础环境隔离）";
+                PythonRuntimeDetailText.Text = external + "  ·  " + storageText;
+            }
+            else
+            {
+                PythonRuntimeStatusText.Text = "尚未配置专属 Python";
+                PythonRuntimeDetailText.Text = "点击「一键配置」下载 MolaGPT 托管版本，或在下方选择外部解释器";
+            }
             RefreshPythonRuntimeButtons();
             return;
         }
 
         var packages = runtime.Packages.Count == 0
             ? string.Empty
-            : $"；内置库：{string.Join(", ", runtime.Packages.Take(8))}";
-        PythonRuntimeStatusText.Text = $"已配置 MolaGPT 专用 Python {runtime.Version}（{runtime.Runtime}）{packages}";
+            : string.Join(", ", runtime.Packages.Take(8));
+        var configured = _vm.PythonToolExecutablePath?.Trim().Trim('"');
+        var isConfigured = !string.IsNullOrWhiteSpace(configured)
+            && File.Exists(configured)
+            && string.Equals(
+                Path.GetFullPath(configured),
+                Path.GetFullPath(runtime.PythonExecutablePath),
+                StringComparison.OrdinalIgnoreCase);
+        PythonRuntimeStatusText.Text = $"Python {runtime.Version}  ·  {runtime.Runtime}";
+        var detailParts = new List<string>();
+        if (!string.IsNullOrEmpty(packages)) detailParts.Add(packages);
+        if (!isConfigured) detailParts.Add("当前未选择此解释器");
+        detailParts.Add(storageText);
+        PythonRuntimeDetailText.Text = string.Join("  ·  ", detailParts);
         RefreshPythonRuntimeButtons();
+    }
+
+    private void ClearMissingBundledRuntimeConfiguration()
+    {
+        var configured = _vm.PythonToolExecutablePath?.Trim().Trim('"');
+        if (!_pythonRuntime.IsManagedInterpreterPath(configured)
+            || (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured)))
+        {
+            return;
+        }
+
+        _vm.PythonToolExecutablePath = string.Empty;
+        _vm.PythonToolEnabled = false;
     }
 
     private async void ConfigurePythonRuntimeClick(object sender, RoutedEventArgs e)
@@ -547,7 +564,10 @@ public partial class SettingsWindow : Window
 
             _vm.PythonToolExecutablePath = picked;
             _vm.PythonToolEnabled = true;
-            PythonRuntimeStatusText.Text = $"已选择 {version}：{picked}";
+            var managed = _pythonRuntime.IsManagedInterpreterPath(picked);
+            PythonRuntimeStatusText.Text = managed
+                ? $"已选择 {version}：{picked}"
+                : $"已选择外部 {version}：{picked}。该解释器不受 MolaGPT 基础环境隔离保护。";
             _appStatus.Publish("Success", "Python 解释器已就绪");
         }
         catch (Exception ex)
@@ -619,17 +639,17 @@ public partial class SettingsWindow : Window
 
     private void ClearPythonRuntimeClick(object sender, RoutedEventArgs e)
     {
-        if (!Directory.Exists(_pythonRuntime.RuntimeDirectory))
+        if (_pythonRuntime.GetInstalledRuntime() is null
+            && _pythonRuntime.GetStorageUsage().TotalBytes == 0)
         {
-            PythonRuntimeStatusText.Text = "Python 环境目录尚不存在。";
-            RefreshPythonRuntimeButtons();
+            UpdatePythonRuntimeStatusHint();
             return;
         }
 
         var result = MessageBox.Show(
             this,
-            "仅删除通过一键配置部署的 MolaGPT 专用 Python 环境。",
-            "清除环境",
+            "将删除一键配置的版本化 Python、下载缓存，以及所有对话中的 .packages / pip / uv 缓存；用户生成的文档、表格、图片等产物会保留。",
+            "重置 Python 环境",
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning);
         if (result != MessageBoxResult.Yes)
@@ -637,21 +657,21 @@ public partial class SettingsWindow : Window
 
         try
         {
-            var runtimeDir = _pythonRuntime.RuntimeDirectory;
+            var managedInterpreter = _pythonRuntime.IsManagedInterpreterPath(_vm.PythonToolExecutablePath);
             _pythonRuntime.DeleteRuntime();
-            if (IsPathInside(_vm.PythonToolExecutablePath, runtimeDir))
+            if (managedInterpreter)
             {
                 _vm.PythonToolExecutablePath = string.Empty;
                 _vm.PythonToolEnabled = false;
             }
 
-            PythonRuntimeStatusText.Text = "已清除 MolaGPT 专用 Python 环境。";
-            _appStatus.Publish("Success", "Python 环境已清除");
+            PythonRuntimeStatusText.Text = "已重置 MolaGPT 专用 Python 环境，会话产物已保留。";
+            _appStatus.Publish("Success", "Python 环境已重置");
         }
         catch (Exception ex)
         {
-            PythonRuntimeStatusText.Text = "清除失败：" + ex.Message;
-            _appStatus.Publish("Error", "Python 环境清除失败");
+            PythonRuntimeStatusText.Text = "重置失败：" + ex.Message;
+            _appStatus.Publish("Error", "Python 环境重置失败");
         }
         finally
         {
@@ -663,7 +683,8 @@ public partial class SettingsWindow : Window
     {
         // The clear action only makes sense for a one-click downloaded runtime,
         // so it stays hidden until that runtime exists on disk.
-        ClearPythonRuntimeButton.Visibility = Directory.Exists(_pythonRuntime.RuntimeDirectory)
+        ClearPythonRuntimeButton.Visibility = _pythonRuntime.GetInstalledRuntime() is not null
+                                              || _pythonRuntime.GetStorageUsage().TotalBytes > 0
             ? Visibility.Visible
             : Visibility.Collapsed;
         RefreshPythonBrowseButton();
@@ -691,6 +712,14 @@ public partial class SettingsWindow : Window
             "done" => "Python 环境已可用",
             _ => "正在配置 Python 环境"
         };
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1024L * 1024L * 1024L) return $"{bytes / 1024d / 1024d / 1024d:0.##} GB";
+        if (bytes >= 1024L * 1024L) return $"{bytes / 1024d / 1024d:0.##} MB";
+        if (bytes >= 1024L) return $"{bytes / 1024d:0.##} KB";
+        return $"{bytes} B";
+    }
 
     // ---- Skills tab ----
 
@@ -776,24 +805,6 @@ public partial class SettingsWindow : Window
         catch (Exception ex)
         {
             MessageBox.Show(this, "删除失败：" + ex.Message, "删除技能", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-    }
-
-    private static bool IsPathInside(string? path, string root)
-    {
-        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(root))
-            return false;
-
-        try
-        {
-            var fullPath = Path.GetFullPath(path);
-            var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            return fullPath.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(fullPath, fullRoot, StringComparison.OrdinalIgnoreCase);
-        }
-        catch
-        {
-            return false;
         }
     }
 

@@ -245,6 +245,15 @@ public partial class App : Application
                 dlg.OpenPersonasTab(settingsRequest.StartNewPersona);
             dlg.ShowDialog();
         };
+        mainVm.WorkSetupRequested = () =>
+        {
+            var pythonRuntime = Services.GetRequiredService<PythonRuntimeManager>();
+            var settings = Services.GetRequiredService<SettingsViewModel>();
+            if (settings.PythonToolEnabled && !string.IsNullOrWhiteSpace(settings.PythonToolExecutablePath))
+                return;
+            var dlg = new WorkSetupDialog(pythonRuntime, settings) { Owner = window };
+            dlg.ShowDialog();
+        };
         mainVm.AboutRequested = () =>
         {
             var dlg = Services.GetRequiredService<AboutWindow>();
@@ -560,7 +569,11 @@ public partial class App : Application
             () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient),
             sp.GetRequiredService<AttachmentStore>().Save));
         services.AddSingleton<IPythonSessionAllowList, PythonSessionAllowList>();
-        services.AddSingleton<IPythonExecutionApprovalService, PythonExecutionApprovalService>();
+        services.AddSingleton<PythonExecutionApprovalService>();
+        services.AddSingleton<IPythonExecutionApprovalService>(sp =>
+            sp.GetRequiredService<PythonExecutionApprovalService>());
+        services.AddSingleton<IToolApprovalService>(sp =>
+            sp.GetRequiredService<PythonExecutionApprovalService>());
         services.AddSingleton<PythonExecutionTool>();
         services.AddSingleton<IChatToolHost, ChatToolHost>();
 

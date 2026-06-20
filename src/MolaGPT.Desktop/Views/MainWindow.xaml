@@ -134,6 +134,7 @@
                 </Border>
                 <Button Style="{StaticResource HeaderIconButton}"
                         Margin="4,0,0,0"
+                        Visibility="Collapsed"
                         ToolTip="支持我"
                         FontFamily="Segoe UI Emoji"
                         shell:WindowChrome.IsHitTestVisibleInChrome="True">
@@ -322,21 +323,6 @@
                     </DockPanel>
                 </Border>
 
-                <!-- Footer -->
-                <Border DockPanel.Dock="Bottom"
-                        BorderBrush="{DynamicResource Brush.Divider}"
-                        BorderThickness="0,1,0,0"
-                        Padding="20,10,16,16">
-                    <TextBlock TextWrapping="Wrap"
-                               FontSize="{DynamicResource Font.Size.XSmall}"
-                               Foreground="{DynamicResource Brush.Text.Muted}">
-                        <Run Text="对话历史可能会受到限制。" />
-                        <LineBreak />
-                        <Hyperlink Foreground="{DynamicResource Brush.Text.Secondary}" TextDecorations="None">近期更新</Hyperlink>
-                        <Run Text=" · " />
-                        <Hyperlink Foreground="{DynamicResource Brush.Text.Secondary}" TextDecorations="None">更新日志</Hyperlink>
-                    </TextBlock>
-                </Border>
 
                 <!-- ============================================================
                      Grouped conversation list — BYOK on top, MolaGPT below.

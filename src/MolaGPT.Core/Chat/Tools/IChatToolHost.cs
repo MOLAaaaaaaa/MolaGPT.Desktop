@@ -23,4 +23,5 @@ public sealed record ChatToolContext(
     string ProviderId,
     string ModelId,
     bool ModelSupportsVision,
-    IReadOnlyList<ProviderModel> ProviderModels);
+    IReadOnlyList<ProviderModel> ProviderModels,
+    HttpClient? LocalHttpClient = null);
