@@ -24,7 +24,7 @@ MolaGPT Desktop 是 [MolaGPT](https://chatgpt.wljay.cn) 的原生 Windows 桌面
 
 它同时支持 MolaGPT 账号模式和 BYOK 模式。可以直接登录 MolaGPT 账号使用平台模型、账号额度和同步能力，也可以接入自己的 OpenAI、Anthropic、DeepSeek、Gemini 或 OpenAI-compatible 服务。
 
-相比 Web 端，Desktop 版本更强调本地工作流。它可以保存本地对话，管理 Provider，处理附件，调用工具，执行联网搜索，也可以通过 Work 模式读取指定工作目录，让模型真正理解项目、文档和文件结构。
+它可以保存本地对话，管理 Provider，处理附件，调用工具，执行联网搜索，也可以通过 Work 模式读取指定工作目录，让模型真正理解项目、文档和文件结构。
 
 ## 功能特性
 
