@@ -16,6 +16,7 @@ using MolaGPT.Core.Models;
 using MolaGPT.Desktop.Views;
 using Markdig;
 using Markdig.Syntax;
+using MdTable = Markdig.Extensions.Tables.Table;
 using WpfMath.Controls;
 using WpfBlock = System.Windows.Documents.Block;
 using MdContainerInline = Markdig.Syntax.Inlines.ContainerInline;
@@ -160,7 +161,15 @@ public sealed partial class MarkdownPresenter : ContentControl
     [GeneratedRegex(@"^\s*(?:\$\$(?<math>[\s\S]*?)\$\$|```(?:math|latex|tex)\s*\r?\n(?<fenced>[\s\S]*?)(?:\r?\n)?```\s*)$", RegexOptions.IgnoreCase)]
     private static partial Regex MathBlockRegex();
 
-    [GeneratedRegex(@"(?<!\\)\$(?<dollar>[^$\r\n]+?)(?<!\\)\$|\\\((?<paren>[\s\S]+?)\\\)|\\\[(?<bracket>[\s\S]+?)\\\]")]
+    // Inline math: $...$, \(...\), \[...\]. The $...$ branch follows Pandoc's
+    // rule so plain-text currency doesn't get mis-parsed as math: the opening
+    // $ must be followed by a non-space, the content must end in a non-space,
+    // and the closing $ must NOT be followed by a digit. That last guard is
+    // what stops a currency pair from matching —
+    // the first $ pairs with the $ before 238, whose trailing digit rejects
+    // the match — so the table's | cell separators and the second amount are
+    // no longer swallowed into a bogus formula.
+    [GeneratedRegex(@"(?<!\\)\$(?!\s)(?<dollar>[^$\r\n]*?[^$\r\n\s])(?<!\\)\$(?!\d)|\\\((?<paren>[\s\S]+?)\\\)|\\\[(?<bracket>[\s\S]+?)\\\]")]
     private static partial Regex LatexInlineMathRegex();
 
     [GeneratedRegex(@"<ref\b(?<attrs>[^>]*)>(?<inner>[\s\S]*?)</ref>|<ref\b(?<attrs2>[^>]*)/?>", RegexOptions.IgnoreCase)]
@@ -337,6 +346,19 @@ public sealed partial class MarkdownPresenter : ContentControl
         _viewer.PreviewMouseLeftButtonDown += OnViewerPreviewMouseLeftButtonDown;
         _viewer.PreviewMouseMove += OnViewerPreviewMouseMove;
         _viewer.PreviewMouseLeftButtonUp += OnViewerPreviewMouseLeftButtonUp;
+        // Clicking an embedded interactive control (the read-only code TextBox)
+        // gives it keyboard focus, and WPF auto-raises a bubbling
+        // RequestBringIntoView from the focused element. The viewer's own
+        // scrollbars are Disabled, so it can't honor the request — the event
+        // bubbles up to the outer virtualizing MessagesScroll, which resolves
+        // the embedded element's geometry to ~document-origin and snaps the
+        // whole message to the viewport top (the jump; only
+        // visible when the conversation is scrollable, hence it disappears when
+        // the window is maximized). Nothing inside a single message's
+        // FlowDocument needs bring-into-view (the viewer doesn't scroll), so we
+        // swallow it here before it can reach the outer scroller. Caret/selection
+        // scrolling inside the TextBox is internal and unaffected.
+        _viewer.RequestBringIntoView += OnViewerRequestBringIntoView;
         _viewer.LostKeyboardFocus += (_, _) =>
         {
             StopSelectionAutoScroll();
@@ -575,6 +597,20 @@ public sealed partial class MarkdownPresenter : ContentControl
         if (FindScrollableAncestor(e.OriginalSource as DependencyObject, e.Delta) is not null)
             return;
         ForwardMouseWheelToParent(e);
+    }
+
+    /// <summary>
+    /// Swallow RequestBringIntoView raised from inside the message's
+    /// FlowDocument (e.g. a code TextBox gaining focus on click). The viewer
+    /// doesn't scroll, so left unhandled the event bubbles to the outer
+    /// virtualizing ScrollViewer, which mis-resolves the embedded element's
+    /// bounds and snaps the message to the viewport top. Nothing here needs
+    /// bring-into-view, so marking it Handled stops the outer scroll hijack
+    /// without affecting the TextBox's internal caret scrolling.
+    /// </summary>
+    private void OnViewerRequestBringIntoView(object sender, RequestBringIntoViewEventArgs e)
+    {
+        e.Handled = true;
     }
 
     private void OnCodeViewerPreviewMouseWheel(object sender, MouseWheelEventArgs e)
@@ -1413,6 +1449,21 @@ public sealed partial class MarkdownPresenter : ContentControl
             }
             int start = Math.Max(0, span.Start);
             int end = Math.Min(src.Length, span.End + 1);   // Markdig.End is inclusive.
+
+            // Markdig 0.22.0 under-reports Table.Span.End: it stops inside the
+            // last row's final cell (right at the closing "**" of an emphasis),
+            // so slicing by span.End drops the tail of that cell — the last row
+            // renders truncated (e.g. "**#17（跌出前10）**" became just "**").
+            // The Table object itself parsed every row correctly; only the
+            // source span is short. Extend the slice to the end of the line
+            // span.End lands on so the whole final row is captured. The next
+            // block always begins after this newline, so we never cross into it.
+            if (block is MdTable && end > start)
+            {
+                while (end < src.Length && src[end] is not '\n' and not '\r')
+                    end++;
+            }
+
             int len = Math.Max(0, end - start);
             slices.Add(len > 0 ? src.Substring(start, len) : string.Empty);
         }

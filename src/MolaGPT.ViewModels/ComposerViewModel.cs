@@ -72,11 +72,18 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     public Func<string, CancellationToken, Task<string?>>? ConversationCompletedAsync { get; set; }
 
+    /// <summary>
+    /// Platform folder-picker hook, wired by the Desktop layer. Returns the
+    /// chosen absolute directory, or null if the user cancelled.
+    /// </summary>
+    public Func<Task<string?>>? PickFolderAsync { get; set; }
+
     private readonly ChatViewModel _chat;
     private readonly BackgroundStreamService? _backgroundStreams;
     private readonly SettingsViewModel? _settings;
     private readonly PersonaListViewModel? _personas;
     private readonly SkillsViewModel? _skills;
+    private readonly MolaGPT.Core.Chat.Agents.IAgentConfigProvider? _agentConfig;
     private readonly MolaGPT.Storage.AttachmentStore? _attachmentStore;
     private readonly Dictionary<MessageViewModel, List<PythonArtifactMarkdownRewriter.ArtifactContext>> _pythonArtifactContexts = new();
     private CancellationTokenSource? _cts;
@@ -99,6 +106,27 @@ public sealed partial class ComposerViewModel : ObservableObject
     public bool IsPersonaPickerVisible =>
         _chat.ActiveProvider is not null && _chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
 
+    /// <summary>True when the active provider is a local agent CLI (Claude Code /
+    /// Codex) — gates the working-directory chip in the composer toolbar.</summary>
+    public bool IsAgentProviderActive =>
+        _chat.ActiveProvider?.Kind == ProviderKind.Agent;
+
+    /// <summary>Short label for the working-directory chip: the folder name, or a
+    /// prompt to choose one.</summary>
+    public string WorkingDirectoryLabel
+    {
+        get
+        {
+            var dir = _agentConfig?.GetWorkingDirectory(_chat.ConversationId);
+            if (string.IsNullOrEmpty(dir)) return "选择工作目录";
+            var name = Path.GetFileName(dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            return string.IsNullOrEmpty(name) ? dir : name;
+        }
+    }
+
+    /// <summary>Full working-directory path for the chip tooltip.</summary>
+    public string? WorkingDirectoryTooltip => _agentConfig?.GetWorkingDirectory(_chat.ConversationId);
+
     public ComposerViewModel(ChatViewModel chat, BackgroundStreamService? backgroundStreams = null, SettingsViewModel? settings = null)
         : this(chat, backgroundStreams, settings, null, null) { }
 
@@ -115,7 +143,8 @@ public sealed partial class ComposerViewModel : ObservableObject
         SettingsViewModel? settings,
         PersonaListViewModel? personas,
         MolaGPT.Storage.AttachmentStore? attachmentStore,
-        SkillsViewModel? skills = null)
+        SkillsViewModel? skills = null,
+        MolaGPT.Core.Chat.Agents.IAgentConfigProvider? agentConfig = null)
     {
         _chat = chat;
         _backgroundStreams = backgroundStreams;
@@ -123,8 +152,14 @@ public sealed partial class ComposerViewModel : ObservableObject
         _personas = personas;
         _attachmentStore = attachmentStore;
         _skills = skills;
+        _agentConfig = agentConfig;
         _chat.PropertyChanged += (_, e) =>
         {
+            if (e.PropertyName is nameof(ChatViewModel.ConversationId))
+            {
+                OnPropertyChanged(nameof(WorkingDirectoryLabel));
+                OnPropertyChanged(nameof(WorkingDirectoryTooltip));
+            }
             if (e.PropertyName is nameof(ChatViewModel.ActiveProvider) or nameof(ChatViewModel.ActiveModel))
             {
                 SendCommand.NotifyCanExecuteChanged();
@@ -140,6 +175,9 @@ public sealed partial class ComposerViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsPersonaPickerVisible));
                 OnPropertyChanged(nameof(IsImageGenerationAvailable));
                 OnPropertyChanged(nameof(IsImageOptionsVisible));
+                OnPropertyChanged(nameof(IsAgentProviderActive));
+                OnPropertyChanged(nameof(WorkingDirectoryLabel));
+                OnPropertyChanged(nameof(WorkingDirectoryTooltip));
 
                 if (!IsThinkingVisible && EnableThinking) EnableThinking = false;
                 if (!AreNetworkToolsEnabled)
@@ -352,6 +390,27 @@ public sealed partial class ComposerViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(hint)) return;
         Text = hint;
+    }
+
+    /// <summary>
+    /// Choose the working directory for the active agent conversation. Ensures a
+    /// conversation id exists first (so the choice can be persisted per-conversation),
+    /// then opens the platform folder picker and stores the result.
+    /// </summary>
+    [RelayCommand]
+    public async Task PickWorkingDirectoryAsync()
+    {
+        if (_agentConfig is null || PickFolderAsync is null) return;
+
+        if (string.IsNullOrEmpty(_chat.ConversationId))
+            _chat.ConversationId = CreateWebCompatibleConversationId();
+
+        var chosen = await PickFolderAsync().ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(chosen)) return;
+
+        _agentConfig.SetWorkingDirectory(_chat.ConversationId!, chosen);
+        OnPropertyChanged(nameof(WorkingDirectoryLabel));
+        OnPropertyChanged(nameof(WorkingDirectoryTooltip));
     }
 
     /// <summary>Cycle the reasoning effort low → medium → high → low.</summary>

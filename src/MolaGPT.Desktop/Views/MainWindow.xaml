@@ -204,6 +204,9 @@
                             VerticalAlignment="Center"
                             Margin="0,0,6,0"
                             shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                    <Button Style="{StaticResource HeaderIconButton}" Command="{Binding OpenAgentStatusCommand}" ToolTip="Agent 状态（Claude Code / Codex）">
+                        <TextBlock Text="&#xE756;" FontFamily="{DynamicResource Font.Icon}" />
+                    </Button>
                     <Button Style="{StaticResource HeaderIconButton}" Command="{Binding OpenSettingsCommand}" ToolTip="设置">
                         <TextBlock Text="&#xE713;" FontFamily="{DynamicResource Font.Icon}" />
                     </Button>
@@ -1348,7 +1351,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0"
-                               Text="产物"
+                               Text="产物和工作区"
                                VerticalAlignment="Center"
                                FontFamily="{DynamicResource Font.Cjk}"
                                FontWeight="SemiBold"

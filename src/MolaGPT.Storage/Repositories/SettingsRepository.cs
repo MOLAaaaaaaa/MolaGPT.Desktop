@@ -35,6 +35,16 @@ public sealed class SettingsRepository
         conn.Execute("DELETE FROM settings WHERE key LIKE @pattern ESCAPE '\\'",
             new { pattern = prefix.Replace("%", "\\%").Replace("_", "\\_") + "%" });
     }
+
+    /// <summary>All (key, value) pairs whose key starts with <paramref name="prefix"/>.</summary>
+    public IReadOnlyList<(string Key, string Value)> GetByPrefix(string prefix)
+    {
+        if (string.IsNullOrEmpty(prefix)) return Array.Empty<(string, string)>();
+        using var conn = _db.Open();
+        return conn.Query<(string Key, string Value)>(
+            "SELECT key AS Key, value AS Value FROM settings WHERE key LIKE @pattern ESCAPE '\\'",
+            new { pattern = prefix.Replace("%", "\\%").Replace("_", "\\_") + "%" }).ToList();
+    }
 }
 
 public sealed class ProviderRepository

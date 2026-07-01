@@ -59,6 +59,11 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string PythonToolAllowedPathPrefixesKey = "python_tool_allowed_path_prefixes";
     private const string PythonToolDeniedPathPrefixesKey = "python_tool_denied_path_prefixes";
 
+    // Agent control layer (Claude Code / Codex CLI). Keys mirror DesktopAgentConfigProvider.
+    private const string AgentClaudeCodePathKey = "agent.claudeCodePath";
+    private const string AgentCodexPathKey = "agent.codexPath";
+    private const string AgentPermissionModeKey = "agent.permissionMode";
+
     /// <summary>
     /// Raised whenever the user changes the theme mode in settings (or when
     /// <see cref="ThemeMode"/> is mutated programmatically by the header
@@ -108,6 +113,11 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string? _pythonToolDeniedImports;
     [ObservableProperty] private string? _pythonToolAllowedPathPrefixes;
     [ObservableProperty] private string? _pythonToolDeniedPathPrefixes;
+
+    [ObservableProperty] private string? _agentClaudeCodePath;
+    [ObservableProperty] private string? _agentCodexPath;
+    [ObservableProperty] private MolaGPT.Core.Chat.Agents.AgentPermissionMode _agentPermissionMode
+        = MolaGPT.Core.Chat.Agents.AgentPermissionMode.AcceptEdits;
 
     public ObservableCollection<ProviderEntry> Providers { get; } = new();
     public ObservableCollection<McpServerEntry> McpServers { get; } = new();
@@ -216,6 +226,12 @@ public sealed partial class SettingsViewModel : ObservableObject
             PythonToolDeniedImports = _settingsRepo.Get(PythonToolDeniedImportsKey);
             PythonToolAllowedPathPrefixes = _settingsRepo.Get(PythonToolAllowedPathPrefixesKey);
             PythonToolDeniedPathPrefixes = _settingsRepo.Get(PythonToolDeniedPathPrefixesKey);
+
+            AgentClaudeCodePath = _settingsRepo.Get(AgentClaudeCodePathKey);
+            AgentCodexPath = _settingsRepo.Get(AgentCodexPathKey);
+            if (Enum.TryParse<MolaGPT.Core.Chat.Agents.AgentPermissionMode>(
+                    _settingsRepo.Get(AgentPermissionModeKey), true, out var agentMode))
+                AgentPermissionMode = agentMode;
         }
         finally
         {
@@ -501,6 +517,24 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings) return;
         SetOrRemove(PythonToolDeniedImportsKey, value);
+    }
+
+    partial void OnAgentClaudeCodePathChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(AgentClaudeCodePathKey, value);
+    }
+
+    partial void OnAgentCodexPathChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(AgentCodexPathKey, value);
+    }
+
+    partial void OnAgentPermissionModeChanged(MolaGPT.Core.Chat.Agents.AgentPermissionMode value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(AgentPermissionModeKey, value.ToString());
     }
 
     partial void OnPythonToolAllowedPathPrefixesChanged(string? value)

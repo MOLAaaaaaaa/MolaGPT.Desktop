@@ -18,6 +18,7 @@ using MolaGPT.Core.Models;
 using MolaGPT.Core.Net;
 using MolaGPT.Desktop.Services;
 using MolaGPT.ViewModels;
+using MolaGPT.ViewModels.Agents;
 using MolaGPT.ViewModels.Services;
 
 namespace MolaGPT.Desktop.Views;
@@ -33,6 +34,7 @@ public partial class SettingsWindow : Window
     private readonly PythonRuntimeManager _pythonRuntime;
     private readonly AppStatusService _appStatus;
     private readonly SkillsViewModel _skills;
+    private readonly AgentBridgeStatusViewModel _agentStatus;
     private readonly CloudSyncService _cloudSync;
     private readonly ConversationListViewModel _conversationList;
     private ProviderEntry? _editing;
@@ -146,7 +148,8 @@ public partial class SettingsWindow : Window
         IChatToolHost toolHost,
         PythonRuntimeManager pythonRuntime,
         AppStatusService appStatus,
-        SkillsViewModel skills)
+        SkillsViewModel skills,
+        AgentBridgeStatusViewModel agentStatus)
     {
         InitializeComponent();
         _vm = vm;
@@ -160,6 +163,7 @@ public partial class SettingsWindow : Window
         _pythonRuntime = pythonRuntime;
         _appStatus = appStatus;
         _skills = skills;
+        _agentStatus = agentStatus;
         DataContext = vm;
         SetPresetItemsForPurpose("chat");
         // The persona tab uses _personas as its DataContext so bindings inside
@@ -169,6 +173,7 @@ public partial class SettingsWindow : Window
         PersonaIconPicker.ItemsSource = PersonaIconCatalog.All;
         PersonaList.SelectedItem = _personas.Personas.FirstOrDefault();
         SkillsTabRoot.DataContext = _skills;
+        AgentTabRoot.DataContext = _agentStatus;
         _vm.Reload();
         UpdateAccountUi();
         InitializeWebSearchUi();
@@ -188,6 +193,12 @@ public partial class SettingsWindow : Window
         SettingsTabs.SelectedItem = PersonaTab;
         if (startNewPersona)
             Dispatcher.BeginInvoke(new Action(BeginNewPersonaDraft));
+    }
+
+    public void OpenAgentTab()
+    {
+        SettingsTabs.SelectedItem = LocalAgentTab;
+        _ = _agentStatus.LoadAsync();
     }
 
     private void CloseClick(object sender, RoutedEventArgs e) => Close();
@@ -635,6 +646,29 @@ public partial class SettingsWindow : Window
         return process.ExitCode == 0 && output.StartsWith("Python", StringComparison.OrdinalIgnoreCase)
             ? output
             : null;
+    }
+
+    private void BrowseClaudeCodePathClick(object sender, RoutedEventArgs e)
+    {
+        var picked = PickExecutable("选择 Claude Code 可执行文件 (claude.cmd / claude.exe)");
+        if (picked is not null) _vm.AgentClaudeCodePath = picked;
+    }
+
+    private void BrowseCodexPathClick(object sender, RoutedEventArgs e)
+    {
+        var picked = PickExecutable("选择 Codex 可执行文件 (codex.cmd / codex.exe)");
+        if (picked is not null) _vm.AgentCodexPath = picked;
+    }
+
+    private string? PickExecutable(string title)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = title,
+            Filter = "可执行文件 (*.cmd;*.exe;*.bat)|*.cmd;*.exe;*.bat|所有文件 (*.*)|*.*",
+            CheckFileExists = true
+        };
+        return dialog.ShowDialog(this) == true ? dialog.FileName : null;
     }
 
     private void ClearPythonRuntimeClick(object sender, RoutedEventArgs e)

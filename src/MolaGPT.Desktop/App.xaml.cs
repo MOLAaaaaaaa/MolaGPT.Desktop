@@ -17,6 +17,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Agents;
+using MolaGPT.Core.Chat.Agents.Relay;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
@@ -29,6 +31,7 @@ using MolaGPT.Desktop.Views;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels;
+using MolaGPT.ViewModels.Agents;
 using MolaGPT.ViewModels.Services;
 using AppThemeMode = MolaGPT.ViewModels.ThemeMode;
 
@@ -48,6 +51,8 @@ public partial class App : Application
     private string _currentThemeKey = "Light";
     private AppThemeMode _themePreference = AppThemeMode.System;
     private CancellationTokenSource? _backgroundMemoryTrimCts;
+    private CancellationTokenSource? _agentRelayCts;
+    private Task? _agentRelayTask;
     private static bool s_languageMetadataApplied;
     private static bool s_focusVisualHandlerRegistered;
     private CancellationTokenSource? _cloudStatusHideCts;
@@ -108,6 +113,7 @@ public partial class App : Application
         var registry = Services.GetRequiredService<ProviderRegistry>();
 
         RestoreSavedProviders();
+        RegisterAgentProviders();
         var logoutCoordinator = Services.GetRequiredService<MolaGptLogoutCoordinator>();
 
         // Validate the persisted JWT against the current UA hash. If they
@@ -159,6 +165,18 @@ public partial class App : Application
         SystemEvents.UserPreferenceChanged += OnSystemUserPreferenceChanged;
         mainVm.EnsureConversationDetailAsync = id => cloudSync.FetchConversationToLocalAsync(id);
         composerVm.ConversationCompletedAsync = cloudSync.CompleteConversationTurnAsync;
+        composerVm.PickFolderAsync = () =>
+        {
+            // Modern WPF folder picker (.NET 10, no WinForms dependency).
+            var dlg = new Microsoft.Win32.OpenFolderDialog
+            {
+                Title = "选择 Agent 工作目录",
+                Multiselect = false
+            };
+            var owner = MainWindow;
+            var ok = owner is not null ? dlg.ShowDialog(owner) : dlg.ShowDialog();
+            return Task.FromResult(ok == true ? dlg.FolderName : null);
+        };
         cloudSync.LocalConversationsChanged += (_, _) =>
         {
             _ = Dispatcher.InvokeAsync(
@@ -245,6 +263,13 @@ public partial class App : Application
                 dlg.OpenPersonasTab(settingsRequest.StartNewPersona);
             dlg.ShowDialog();
         };
+        mainVm.AgentStatusRequested = () =>
+        {
+            var dlg = Services.GetRequiredService<SettingsWindow>();
+            dlg.Owner = window;
+            dlg.OpenAgentTab();
+            dlg.ShowDialog();
+        };
         mainVm.WorkSetupRequested = () =>
         {
             var pythonRuntime = Services.GetRequiredService<PythonRuntimeManager>();
@@ -298,12 +323,16 @@ public partial class App : Application
 
         var trayIcon = Services.GetRequiredService<TrayIconService>();
         var backgroundStreams = Services.GetRequiredService<BackgroundStreamService>();
-        trayIcon.Attach(window, () => mainVm.SettingsRequested?.Invoke());
+        trayIcon.Attach(window, () => mainVm.SettingsRequested?.Invoke(), () => mainVm.AgentStatusRequested?.Invoke());
         trayIcon.BackgroundModeChanged += inBackground =>
             ApplyBackgroundPowerMode(inBackground, cloudSync, conversationListVm, mainVm, backgroundStreams, window);
 
         window.DataContext = mainVm;
         window.Show();
+        // Pin the app's main window explicitly. With ShutdownMode=OnMainWindowClose,
+        // WPF would otherwise treat whichever window is active as MainWindow, so
+        // closing a secondary window (e.g. the Agent console) could quit the app.
+        MainWindow = window;
         SingleInstanceGuard.AttachActivator(window);
         SingleInstanceGuard.DeepLinkReceived += url =>
             Dispatcher.InvokeAsync(() => HandleOAuthDeepLinkAsync(url));
@@ -326,6 +355,28 @@ public partial class App : Application
 
         cloudSync.StartPeriodicSync();
         _ = RunStartupCloudSyncAfterFirstPaintAsync(cloudSync, conversationListVm);
+
+        // Start the headless agent bridge's state-publication timer (local only —
+        // owns live Claude Code / Codex sessions, feeds the settings Agent tab).
+        // The cloud relay that mirrors sessions to the phone is OPT-IN: it only
+        // starts if the user has enabled the bridge (and accepted the disclosure).
+        Services.GetRequiredService<AgentBridgeService>().Start();
+
+        var agentConfig = Services.GetRequiredService<DesktopAgentConfigProvider>();
+        var agentBridgeVm = Services.GetRequiredService<AgentBridgeStatusViewModel>();
+        agentBridgeVm.InitializeBridgeEnabled(agentConfig.BridgeEnabled);
+        agentBridgeVm.ConfirmEnableAsync = () =>
+        {
+            var dlg = new BridgePrivacyDialog { Owner = window };
+            return Task.FromResult(dlg.ShowDialog() == true);
+        };
+        agentBridgeVm.ApplyBridgeEnabled = enabled =>
+        {
+            agentConfig.BridgeEnabled = enabled;
+            if (enabled) StartAgentRelay();
+            else _ = StopAgentRelayAsync();
+        };
+        if (agentConfig.BridgeEnabled) StartAgentRelay();
 
         mainVm.UpdateActionRequested = (version, notes, downloadUrl, actionText, installerSha256) =>
         {
@@ -443,9 +494,10 @@ public partial class App : Application
                     typeof(FrameworkElement),
                     new FrameworkPropertyMetadata(zhCn));
             }
-            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+            catch (Exception ex)
             {
                 // Metadata might already be sealed/registered by WPF/designer/bootstrap.
+                DiagnosticLog.Write("App", $"FrameworkElement language metadata skipped: {ex.GetType().Name}: {ex.Message}");
             }
 
             try
@@ -454,9 +506,10 @@ public partial class App : Application
                     typeof(FrameworkContentElement),
                     new FrameworkPropertyMetadata(zhCn));
             }
-            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+            catch (Exception ex)
             {
                 // Metadata might already be sealed/registered by WPF/designer/bootstrap.
+                DiagnosticLog.Write("App", $"FrameworkContentElement language metadata skipped: {ex.GetType().Name}: {ex.Message}");
             }
         }
         finally
@@ -469,15 +522,23 @@ public partial class App : Application
     private static void DisableDefaultFocusVisuals()
     {
         if (s_focusVisualHandlerRegistered) return;
-        EventManager.RegisterClassHandler(
-            typeof(Control),
-            FrameworkElement.LoadedEvent,
-            new RoutedEventHandler((sender, _) =>
-            {
-                if (sender is Control control)
-                    control.FocusVisualStyle = null;
-            }));
-        s_focusVisualHandlerRegistered = true;
+        try
+        {
+            EventManager.RegisterClassHandler(
+                typeof(Control),
+                FrameworkElement.LoadedEvent,
+                new RoutedEventHandler((sender, _) =>
+                {
+                    if (sender is Control control)
+                        control.FocusVisualStyle = null;
+                }));
+            s_focusVisualHandlerRegistered = true;
+        }
+        catch (Exception ex)
+        {
+            s_focusVisualHandlerRegistered = true;
+            DiagnosticLog.Write("App", $"default focus visual handler skipped: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private static void ConfigureServices(IServiceCollection services)
@@ -562,6 +623,34 @@ public partial class App : Application
         services.AddSingleton(sp => new McpHttpClient(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient)));
         services.AddSingleton<McpClientManager>();
+
+        // Agent control layer: Claude Code / Codex CLI backends driven as
+        // persistent subprocesses, surfaced as IChatProviders (kind = Agent).
+        services.AddSingleton<AgentCliResolver>();
+        services.AddSingleton<DesktopAgentConfigProvider>();
+        services.AddSingleton<IAgentConfigProvider>(sp => sp.GetRequiredService<DesktopAgentConfigProvider>());
+        services.AddSingleton<IAgentBackend, ClaudeCodeBackend>();
+        services.AddSingleton<IAgentBackend, CodexBackend>();
+        services.AddSingleton(sp => new AgentSessionManager(
+            sp.GetServices<IAgentBackend>(),
+            sp.GetRequiredService<AgentCliResolver>(),
+            sp.GetRequiredService<IAgentConfigProvider>()));
+        services.AddSingleton<AgentHistoryReader>();
+        // Headless agent bridge: owns live Claude Code / Codex CLI sessions and
+        // exposes serializable session state (no WPF). Drives the status window
+        // and (Phase 2) the cloud relay the phone reads from.
+        services.AddSingleton(sp => new AgentBridgeService(
+            sp.GetRequiredService<AgentSessionManager>(),
+            sp.GetRequiredService<AgentHistoryReader>(),
+            sp.GetRequiredService<IAgentConfigProvider>()));
+        services.AddSingleton<IRelayProducer>(sp => new HttpRelayProducer(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(MolaGptHttpClient),
+            sp.GetRequiredService<MolaGptAuthService>()));
+        services.AddSingleton<AgentRelayClient>();
+        // Minimal Agent status window (session list + phase, no transcript) and
+        // its singleton VM (persists across open/close, subscribes to the bridge).
+        services.AddSingleton<AgentBridgeStatusViewModel>();
+        services.AddTransient<AgentStatusWindow>();
         services.AddSingleton(sp => new VisionProxyTool(
             sp.GetRequiredService<ProviderRegistry>(),
             () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient)));
@@ -595,7 +684,8 @@ public partial class App : Application
             sp.GetRequiredService<SettingsViewModel>(),
             sp.GetRequiredService<PersonaListViewModel>(),
             sp.GetRequiredService<AttachmentStore>(),
-            sp.GetRequiredService<SkillsViewModel>()));
+            sp.GetRequiredService<SkillsViewModel>(),
+            sp.GetRequiredService<IAgentConfigProvider>()));
         services.AddSingleton(sp => new SettingsViewModel(
             sp.GetRequiredService<ProviderRepository>(),
             sp.GetRequiredService<CredentialStore>(),
@@ -670,7 +760,8 @@ public partial class App : Application
                 sp.GetRequiredService<IChatToolHost>(),
                 sp.GetRequiredService<PythonRuntimeManager>(),
                 sp.GetRequiredService<AppStatusService>(),
-                sp.GetRequiredService<SkillsViewModel>());
+                sp.GetRequiredService<SkillsViewModel>(),
+                sp.GetRequiredService<AgentBridgeStatusViewModel>());
         });
         services.AddTransient(sp =>
             new AboutWindow(
@@ -678,9 +769,49 @@ public partial class App : Application
                 sp.GetRequiredService<AutoUpdateService>()));
     }
 
-    private void RestoreSavedProviders()
+    /// <summary>
+    /// Register the local-agent CLI providers (Claude Code / Codex) into the
+    /// provider registry so they appear in the model selector. Registration is
+    /// unconditional — availability of the actual CLI is resolved lazily when a
+    /// session first starts (and surfaces a clear error if missing).
+    /// </summary>
+    private void RegisterAgentProviders()
     {
         try
+        {
+            var registry = Services.GetRequiredService<ProviderRegistry>();
+            var manager = Services.GetRequiredService<AgentSessionManager>();
+
+            registry.Register(new AgentChatProvider(
+                ClaudeCodeBackend.BackendId,
+                providerId: "claude-code",
+                displayName: "Claude Code",
+                models: new[]
+                {
+                    new ProviderModel("default", "Claude Code (default)", SupportsToolCalling: true),
+                    new ProviderModel("opus", "Claude Code · Opus", SupportsToolCalling: true),
+                    new ProviderModel("sonnet", "Claude Code · Sonnet", SupportsToolCalling: true),
+                },
+                manager));
+
+            registry.Register(new AgentChatProvider(
+                CodexBackend.BackendId,
+                providerId: "codex",
+                displayName: "Codex",
+                models: new[]
+                {
+                    new ProviderModel("default", "Codex (default)", SupportsToolCalling: true),
+                },
+                manager));
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"RegisterAgentProviders failed: {ex}");
+        }
+    }
+
+    private void RestoreSavedProviders()
+    {        try
         {
             var repo = Services.GetRequiredService<ProviderRepository>();
             var registry = Services.GetRequiredService<ProviderRegistry>();
@@ -1208,8 +1339,14 @@ public partial class App : Application
         CancelBackgroundMemoryTrim();
         if (Host is not null)
         {
+            await StopAgentRelayAsync();
             Host.Services.GetService<TrayIconService>()?.Dispose();
             Host.Services.GetService<CloudSyncService>()?.StopPeriodicSync();
+            if (_agentRelayTask is not null)
+            {
+                try { await Task.WhenAny(_agentRelayTask, Task.Delay(TimeSpan.FromSeconds(1))); }
+                catch { /* best-effort shutdown */ }
+            }
             await Host.StopAsync(TimeSpan.FromSeconds(2));
             Host.Dispose();
         }
@@ -1228,6 +1365,78 @@ public partial class App : Application
             }
         }
         base.OnExit(e);
+    }
+
+    private void StartAgentRelay()
+    {
+        if (_agentRelayTask is not null) return;
+        _agentRelayCts = new CancellationTokenSource();
+        var token = _agentRelayCts.Token;
+        var relay = Services.GetRequiredService<AgentRelayClient>();
+        _agentRelayTask = Task.Run(async () =>
+        {
+            var attempt = 0;
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    DiagnosticLog.Write("AgentRelay", "starting");
+                    await relay.StartAsync(token).ConfigureAwait(false);
+                    attempt = 0;
+                    if (!token.IsCancellationRequested)
+                        DiagnosticLog.Write("AgentRelay", "command stream ended; reconnecting");
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    // Normal shutdown.
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticLog.Write("AgentRelay", $"disconnected: {ex.GetType().Name}: {ex.Message}");
+                }
+
+                try
+                {
+                    var delay = TimeSpan.FromSeconds(Math.Min(30, 2 + attempt * 2));
+                    attempt++;
+                    await Task.Delay(delay, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    break;
+                }
+            }
+        }, CancellationToken.None);
+    }
+
+    private async Task StopAgentRelayAsync()
+    {
+        // Null the task/cts up front so a later StartAgentRelay (re-enable) isn't
+        // blocked by its `_agentRelayTask is not null` idempotency guard.
+        var cts = _agentRelayCts;
+        var task = _agentRelayTask;
+        _agentRelayTask = null;
+        _agentRelayCts = null;
+
+        try { cts?.Cancel(); } catch { /* best-effort */ }
+        try
+        {
+            var relay = Host?.Services.GetService<AgentRelayClient>();
+            if (relay is not null)
+            {
+                using var offlineCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await relay.StopAsync(offlineCts.Token).ConfigureAwait(false);
+            }
+        }
+        catch { /* best-effort */ }
+
+        if (task is not null)
+        {
+            try { await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(2))).ConfigureAwait(false); }
+            catch { /* best-effort */ }
+        }
+        cts?.Dispose();
     }
 
     private void ScheduleCloudStatusHide(MainViewModel mainVm)

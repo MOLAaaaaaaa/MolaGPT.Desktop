@@ -46,6 +46,9 @@ public sealed partial class MainViewModel : ObservableObject
     /// <summary>Opens the SettingsWindow. Set by App.xaml.cs.</summary>
     public Action? SettingsRequested { get; set; }
 
+    /// <summary>Opens the Agent status window (headless bridge sessions). Set by App.xaml.cs.</summary>
+    public Action? AgentStatusRequested { get; set; }
+
     /// <summary>Opens a BYOK image workbench task. Set by App.xaml.cs.</summary>
     public Action<string?>? ImageWorkbenchRequested { get; set; }
 
@@ -398,6 +401,9 @@ public sealed partial class MainViewModel : ObservableObject
 
     [RelayCommand]
     private void OpenSettings() => SettingsRequested?.Invoke();
+
+    [RelayCommand]
+    private void OpenAgentStatus() => AgentStatusRequested?.Invoke();
 
     [RelayCommand]
     private void OpenAbout() => AboutRequested?.Invoke();

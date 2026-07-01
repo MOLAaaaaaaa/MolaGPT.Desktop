@@ -1864,6 +1864,168 @@
                             </StackPanel>
                         </ScrollViewer>
                     </TabItem>
+                    <TabItem x:Name="LocalAgentTab" Header="本地 Agent">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel x:Name="AgentTabRoot" Margin="32,26" MaxWidth="720" HorizontalAlignment="Left">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0">
+                                        <TextBlock Style="{StaticResource SettingsPageTitle}" Text="本地 Agent" />
+                                        <TextBlock Style="{StaticResource SettingsPageSubtitle}" Text="Bridge 与移动端连接。" />
+                                    </StackPanel>
+                                    <Button Grid.Column="1"
+                                            Style="{StaticResource ToolPlainButton}"
+                                            Padding="12,6"
+                                            Margin="12,0,0,0"
+                                            VerticalAlignment="Top"
+                                            Command="{Binding RefreshCommand}"
+                                            Content="刷新" />
+                                </Grid>
+
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Margin="2,4,2,8" Text="Bridge" />
+                                <Border Style="{StaticResource SettingsCard}" Margin="0,0,0,10">
+                                    <Grid Margin="16,14">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Margin="0,0,14,0">
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Text="远程桥接" />
+                                            <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                       Margin="0,4,0,0"
+                                                       TextWrapping="Wrap"
+                                                       Text="开启后，本机 Agent 会话经云端中转同步到你的手机以供远程查看与控制。默认关闭。" />
+                                        </StackPanel>
+                                        <Button Grid.Column="1"
+                                                VerticalAlignment="Center"
+                                                Style="{StaticResource OutlineButton}"
+                                                Padding="18,7"
+                                                Command="{Binding ToggleBridgeCommand}"
+                                                Content="{Binding BridgeToggleLabel}" />
+                                    </Grid>
+                                </Border>
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <Grid Margin="16,14">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <StackPanel Grid.Column="0">
+                                            <TextBlock Style="{StaticResource SettingsRowHint}" Margin="0" Text="状态" />
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Margin="0,4,0,0" Text="{Binding BridgeStatusText}" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="1">
+                                            <TextBlock Style="{StaticResource SettingsRowHint}" Margin="0" Text="会话" />
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Margin="0,4,0,0" Text="{Binding SessionCount}" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="2">
+                                            <TextBlock Style="{StaticResource SettingsRowHint}" Margin="0" Text="投影" />
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Margin="0,4,0,0" Text="{Binding ProjectedSessionCount}" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="3">
+                                            <TextBlock Style="{StaticResource SettingsRowHint}" Margin="0" Text="队列" />
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Margin="0,4,0,0">
+                                                <TextBlock.Text>
+                                                    <MultiBinding StringFormat="{}{0}+{1}">
+                                                        <Binding Path="ActiveProjectionCount" />
+                                                        <Binding Path="QueuedProjectionCount" />
+                                                    </MultiBinding>
+                                                </TextBlock.Text>
+                                            </TextBlock>
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="移动端" />
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <StackPanel Margin="16,14">
+                                        <Grid Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Text="已连接设备" />
+                                            <TextBlock Grid.Column="1" Style="{StaticResource SettingsRowHint}" Margin="0" Text="{Binding MobileDeviceCount}" />
+                                        </Grid>
+                                        <TextBlock Text="暂无设备">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock" BasedOn="{StaticResource SettingsRowHint}">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding HasMobileDevices}" Value="False">
+                                                            <Setter Property="Visibility" Value="Visible" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                        <ItemsControl ItemsSource="{Binding MobileDevices}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Margin="0,8,0,0">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock Style="{StaticResource SettingsRowTitle}"
+                                                                   Text="{Binding Name, TargetNullValue=移动端}" />
+                                                        <TextBlock Grid.Column="1"
+                                                                   Style="{StaticResource SettingsRowHint}"
+                                                                   Margin="12,0,0,0"
+                                                                   Text="{Binding Id}" />
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </Border>
+
+                                <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="会话" />
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <ListBox ItemsSource="{Binding Sessions}"
+                                             SelectedItem="{Binding SelectedSession, Mode=TwoWay}"
+                                             Background="Transparent"
+                                             BorderThickness="0"
+                                             MaxHeight="260"
+                                             Padding="8">
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Margin="8,6">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Grid.Column="0">
+                                                        <TextBlock Style="{StaticResource SettingsRowTitle}"
+                                                                   Text="{Binding Title}" />
+                                                        <TextBlock Style="{StaticResource SettingsRowHint}">
+                                                            <TextBlock.Text>
+                                                                <MultiBinding StringFormat="{}{0} · {1}">
+                                                                    <Binding Path="BackendId" Converter="{x:Static views:AgentSessionLabelConverter.Instance}" ConverterParameter="backend" />
+                                                                    <Binding Path="WorkingDirectory" />
+                                                                </MultiBinding>
+                                                            </TextBlock.Text>
+                                                        </TextBlock>
+                                                    </StackPanel>
+                                                    <TextBlock Grid.Column="1"
+                                                               Style="{StaticResource SettingsRowHint}"
+                                                               Margin="12,0,0,0"
+                                                               VerticalAlignment="Center"
+                                                               Text="{Binding Phase, Converter={x:Static views:AgentSessionLabelConverter.Instance}}" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
                     <TabItem Header="技能"
                              Visibility="{Binding PythonToolEnabled, Converter={StaticResource BoolVis}}">
                         <DockPanel Margin="24,20">

@@ -149,6 +149,12 @@
                             </ItemsControl>
                         </Border>
 
+                        <TextBlock TextWrapping="Wrap"
+                                   Margin="0,14,0,0"
+                                   FontSize="{DynamicResource Font.Size.Small}"
+                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                   Text="「远程 Agent 控制」的桥接 / 中继架构与 CLI 控制协议设计参考了开源项目 Remodex（Apache-2.0，github.com/Emanuele-web04/remodex），本实现为独立编写，未直接复制其源码，在此一并致谢。" />
+
                         <TextBlock Text="开放源代码协议"
                                    Margin="0,32,0,12"
                                    FontSize="{DynamicResource Font.Size.XSmall}"

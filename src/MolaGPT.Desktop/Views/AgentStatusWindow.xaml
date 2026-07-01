@@ -1,0 +1,160 @@
+<Window x:Class="MolaGPT.Desktop.Views.AgentStatusWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.Desktop.Views"
+        Title="Agent 状态"
+        Width="520" Height="580"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        ResizeMode="CanMinimize"
+        Background="Transparent"
+        FontFamily="{DynamicResource Font.Cjk}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+    <Grid Margin="18">
+        <Border Style="{StaticResource ModalWindowGlow}" />
+        <Border Style="{StaticResource ModalWindowSurface}" Padding="0">
+            <DockPanel LastChildFill="True">
+
+                <!-- Header (draggable) -->
+                <Border DockPanel.Dock="Top"
+                        Padding="20,14"
+                        BorderBrush="{DynamicResource Brush.Divider}"
+                        BorderThickness="0,0,0,1"
+                        MouseLeftButtonDown="HeaderMouseLeftButtonDown">
+                    <Grid>
+                        <TextBlock Text="Agent 状态"
+                                   FontSize="{DynamicResource Font.Size.Title}"
+                                   FontWeight="Bold" />
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button Style="{StaticResource HeaderIconButton}"
+                                    Click="RefreshClick"
+                                    ToolTip="刷新会话">
+                                <TextBlock Text="&#xE72C;" FontFamily="{DynamicResource Font.Icon}" FontSize="14" />
+                            </Button>
+                            <Button Style="{StaticResource HeaderIconButton}"
+                                    Click="CloseClick"
+                                    ToolTip="关闭"
+                                    Margin="6,0,0,0">
+                                <TextBlock Text="&#xE711;" FontFamily="{DynamicResource Font.Icon}" FontSize="14" />
+                            </Button>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- Send / new-session row (docked bottom) -->
+                <Border DockPanel.Dock="Bottom"
+                        Padding="16,12"
+                        BorderBrush="{DynamicResource Brush.Divider}"
+                        BorderThickness="0,1,0,0">
+                    <StackPanel>
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="新建："
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Brush.Text.Muted}" />
+                            <ComboBox Grid.Column="1"
+                                      Margin="8,0"
+                                      ItemsSource="{Binding Backends}"
+                                      SelectedItem="{Binding SelectedBackend}" />
+                            <Button Grid.Column="2"
+                                    Style="{StaticResource OutlineButton}"
+                                    Padding="14,7"
+                                    Command="{Binding NewSessionCommand}"
+                                    Content="选择目录新建" />
+                        </Grid>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0"
+                                      Text="{Binding Input, UpdateSourceTrigger=PropertyChanged}"
+                                      KeyDown="InputKeyDown" />
+                            <Button Grid.Column="1"
+                                    Style="{StaticResource PillPrimaryButton}"
+                                    Padding="14,7"
+                                    Margin="8,0,0,0"
+                                    Command="{Binding SendCommand}"
+                                    Content="发送" />
+                            <Button Grid.Column="2"
+                                    Style="{StaticResource OutlineButton}"
+                                    Padding="14,7"
+                                    Margin="8,0,0,0"
+                                    Command="{Binding InterruptCommand}"
+                                    Content="中断" />
+                        </Grid>
+                        <TextBlock Text="{Binding StatusText}"
+                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                   Margin="0,8,0,0"
+                                   FontSize="{DynamicResource Font.Size.Small}" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Session list (fills remaining space) -->
+                <ListBox x:Name="SessionList"
+                         Margin="8"
+                         ItemsSource="{Binding Sessions}"
+                         SelectedItem="{Binding SelectedSession}"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Border Padding="12,10"
+                                     CornerRadius="{DynamicResource Radius.Md}">
+                                <StackPanel>
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right"
+                                                   Text="●"
+                                                   Foreground="{DynamicResource Brush.Warning}"
+                                                   FontSize="11"
+                                                   Margin="8,0,0,0"
+                                                   VerticalAlignment="Center"
+                                                   ToolTip="待处理"
+                                                   Visibility="{Binding NeedsAttention, Converter={x:Static views:BoolToVisibility.Instance}}" />
+                                        <TextBlock Text="{Binding Title}"
+                                                   FontWeight="SemiBold"
+                                                   TextTrimming="CharacterEllipsis" />
+                                    </DockPanel>
+                                    <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                                        <TextBlock Text="{Binding BackendId, Converter={x:Static views:AgentSessionLabelConverter.Instance}, ConverterParameter=backend}"
+                                                   Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                   FontSize="{DynamicResource Font.Size.Small}" />
+                                        <TextBlock Text=" · "
+                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                   FontSize="{DynamicResource Font.Size.Small}" />
+                                        <TextBlock Text="{Binding Phase, Converter={x:Static views:AgentSessionLabelConverter.Instance}}"
+                                                   Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                   FontSize="{DynamicResource Font.Size.Small}" />
+                                        <TextBlock Text=" · "
+                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                   FontSize="{DynamicResource Font.Size.Small}" />
+                                        <TextBlock Text="{Binding ModeLabel}"
+                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                   FontSize="{DynamicResource Font.Size.Small}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+                                    <TextBlock Text="{Binding WorkingDirectory}"
+                                               Foreground="{DynamicResource Brush.Text.Muted}"
+                                               FontSize="{DynamicResource Font.Size.XSmall}"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="0,2,0,0"
+                                               ToolTip="{Binding WorkingDirectory}" />
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>

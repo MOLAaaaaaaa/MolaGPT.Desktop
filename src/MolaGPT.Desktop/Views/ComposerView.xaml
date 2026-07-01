@@ -418,6 +418,18 @@
                     </Border>
                 </Popup>
 
+                <!-- 工作目录 (Agent working directory) — only for Claude Code / Codex.
+                     Picks the cwd the agent CLI runs in for this conversation. -->
+                <Button Style="{StaticResource ToolPlainButton}"
+                        Command="{Binding PickWorkingDirectoryCommand}"
+                        Visibility="{Binding IsAgentProviderActive, Converter={x:Static views:BoolToVisibility.Instance}}"
+                        ToolTip="{Binding WorkingDirectoryTooltip}">
+                    <StackPanel Style="{StaticResource InlineIconTextPanel}">
+                        <TextBlock Text="&#xE8B7;" Style="{StaticResource InlineIconTextBlock.Small}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="{Binding WorkingDirectoryLabel}" Style="{StaticResource InlineTextBlock.Small}" />
+                    </StackPanel>
+                </Button>
+
                 <!-- 附件 -->
                 <Button Style="{StaticResource ToolPlainButton}"
                         Click="OnAttachClick"

@@ -16,6 +16,7 @@ public sealed class TrayIconService : IDisposable
     private Drawing.Icon? _icon;
     private Window? _window;
     private Action? _openSettingsRequested;
+    private Action? _openAgentStatusRequested;
     private bool _allowExit;
     private bool _hiddenToTray;
     private bool _inBackgroundMode;
@@ -28,13 +29,14 @@ public sealed class TrayIconService : IDisposable
         _settings = settings;
     }
 
-    public void Attach(Window window, Action? openSettingsRequested)
+    public void Attach(Window window, Action? openSettingsRequested, Action? openAgentStatusRequested = null)
     {
         if (_window is not null)
             DetachWindow();
 
         _window = window;
         _openSettingsRequested = openSettingsRequested;
+        _openAgentStatusRequested = openAgentStatusRequested;
         _settings.PropertyChanged += OnSettingsChanged;
         window.Closing += OnWindowClosing;
         window.Closed += OnWindowClosed;
@@ -58,6 +60,7 @@ public sealed class TrayIconService : IDisposable
             ShowMainWindow();
             _openSettingsRequested?.Invoke();
         });
+        _menu.Items.Add("Agent 状态…", null, (_, _) => _openAgentStatusRequested?.Invoke());
         _menu.Items.Add(new Forms.ToolStripSeparator());
         _menu.Items.Add("退出", null, (_, _) => ExitApplication());
 
