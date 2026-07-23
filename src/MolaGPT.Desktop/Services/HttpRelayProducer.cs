@@ -18,7 +18,7 @@ namespace MolaGPT.Desktop.Services;
 /// It reuses the app's <c>MolaGptAuthService</c> long login JWT (UA-bound) — the
 /// relay shares credentials with chat, so no separate auth/ALTCHA flow is needed.
 ///
-///   • PostEventAsync/PostMetaAsync/AckCommandAsync → POST agent_events.php
+///   • PostEventAsync/PostMetaAsync/command lease+result → POST agent_events.php
 ///   • SubscribeCommandsAsync → long-connect SSE to agent_command_stream.php and
 ///     deserialize each <c>data:</c> line back into a <see cref="RelayCommand"/>.
 ///
@@ -37,12 +37,23 @@ public sealed class HttpRelayProducer : IRelayProducer
     private readonly HttpClient _http;
     private readonly MolaGptAuthService _auth;
     private readonly string _base; // e.g. https://chatgpt.wljay.cn/v2
+    private readonly string _machineId;
+    private readonly string _machineName;
 
-    public HttpRelayProducer(HttpClient http, MolaGptAuthService auth, string? baseUrl = null)
+    public HttpRelayProducer(
+        HttpClient http,
+        MolaGptAuthService auth,
+        string? baseUrl = null,
+        string? machineId = null,
+        string? machineName = null)
     {
         _http = http;
         _auth = auth;
         _base = baseUrl ?? "https://chatgpt.wljay.cn/v2";
+        _machineId = (machineId ?? string.Empty).Trim();
+        _machineName = string.IsNullOrWhiteSpace(machineName)
+            ? Environment.MachineName
+            : machineName.Trim();
     }
 
     public async Task<IReadOnlyDictionary<string, RelaySessionCursor>> ListSessionCursorsAsync(CancellationToken ct)
@@ -140,13 +151,49 @@ public sealed class HttpRelayProducer : IRelayProducer
     }
 
     public async Task PostHeartbeatAsync(IReadOnlyList<string> sessionIds, CancellationToken ct)
-        => await PostAsync("/api/auth/agent_events.php", new { kind = "heartbeat", sessionId = "__machine__", sessionIds }, ct).ConfigureAwait(false);
+        => await PostAsync("/api/auth/agent_events.php", new
+        {
+            kind = "heartbeat",
+            sessionId = "__machine__",
+            sessionIds,
+            machineId = string.IsNullOrWhiteSpace(_machineId) ? null : _machineId,
+            machineName = string.IsNullOrWhiteSpace(_machineName) ? null : _machineName,
+        }, ct).ConfigureAwait(false);
 
     public async Task MarkMachineOfflineAsync(CancellationToken ct)
-        => await PostAsync("/api/auth/agent_events.php", new { kind = "offline", sessionId = "__machine__" }, ct).ConfigureAwait(false);
+        => await PostAsync("/api/auth/agent_events.php", new
+        {
+            kind = "offline",
+            sessionId = "__machine__",
+            machineId = string.IsNullOrWhiteSpace(_machineId) ? null : _machineId,
+        }, ct).ConfigureAwait(false);
 
-    public async Task AckCommandAsync(string sessionId, string cmdId, CancellationToken ct)
-        => await PostAsync("/api/auth/agent_events.php", new { kind = "ack", sessionId, cmdId }, ct).ConfigureAwait(false);
+    public Task<RelayCommandLease> LeaseCommandAsync(string sessionId, string cmdId, CancellationToken ct)
+        => UpdateCommandLeaseAsync(sessionId, cmdId, ct);
+
+    public Task<RelayCommandLease> RenewCommandLeaseAsync(string sessionId, string cmdId, CancellationToken ct)
+        => UpdateCommandLeaseAsync(sessionId, cmdId, ct);
+
+    public async Task<bool> CompleteCommandAsync(
+        string sessionId,
+        string cmdId,
+        bool succeeded,
+        string? error,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(_machineId)) return false;
+        using var doc = await PostJsonAsync("/api/auth/agent_events.php", new
+        {
+            kind = "result",
+            sessionId,
+            cmdId,
+            machineId = _machineId,
+            status = succeeded ? "done" : "failed",
+            error = string.IsNullOrWhiteSpace(error) ? null : error,
+        }, ct).ConfigureAwait(false);
+        var root = doc.RootElement;
+        return ReadBool(root, "success") && ReadBool(root, "completed");
+    }
 
     public async IAsyncEnumerable<RelayCommand> SubscribeCommandsAsync(
         [EnumeratorCancellation] CancellationToken ct)
@@ -204,7 +251,10 @@ public sealed class HttpRelayProducer : IRelayProducer
 
     private async Task<Stream?> OpenCommandStreamAsync(CancellationToken ct)
     {
-        var req = new HttpRequestMessage(HttpMethod.Get, _base + "/api/auth/agent_command_stream.php");
+        var url = _base + "/api/auth/agent_command_stream.php";
+        if (!string.IsNullOrWhiteSpace(_machineId))
+            url += "?machine=" + Uri.EscapeDataString(_machineId);
+        var req = new HttpRequestMessage(HttpMethod.Get, url);
         if (!TryAttachAuth(req)) return null;
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
@@ -215,7 +265,31 @@ public sealed class HttpRelayProducer : IRelayProducer
         return await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
     }
 
+    private async Task<RelayCommandLease> UpdateCommandLeaseAsync(
+        string sessionId,
+        string cmdId,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(_machineId)) return new RelayCommandLease(false);
+        using var doc = await PostJsonAsync("/api/auth/agent_events.php", new
+        {
+            kind = "lease",
+            sessionId,
+            cmdId,
+            machineId = _machineId,
+        }, ct).ConfigureAwait(false);
+        var root = doc.RootElement;
+        return new RelayCommandLease(
+            Acquired: ReadBool(root, "success") && ReadBool(root, "leased"),
+            ExpiresAtMs: ReadLong(root, "leaseExpiresAtMs", "lease_expires_at_ms"));
+    }
+
     private async Task PostAsync(string path, object body, CancellationToken ct)
+    {
+        using var _ = await PostJsonAsync(path, body, ct).ConfigureAwait(false);
+    }
+
+    private async Task<JsonDocument> PostJsonAsync(string path, object body, CancellationToken ct)
     {
         var req = new HttpRequestMessage(HttpMethod.Post, _base + path)
         {
@@ -224,6 +298,8 @@ public sealed class HttpRelayProducer : IRelayProducer
         if (!TryAttachAuth(req)) throw new InvalidOperationException("Relay auth is not available.");
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        return await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
     }
 
     private async Task<JsonDocument> GetAgentSessionsRootAsync(CancellationToken ct)
@@ -262,8 +338,13 @@ public sealed class HttpRelayProducer : IRelayProducer
             string? payloadJson = null;
             if (root.TryGetProperty("payloadJson", out var p) && p.ValueKind == JsonValueKind.String)
                 payloadJson = p.GetString();
+            string? machineId = null;
+            if (root.TryGetProperty("machineId", out var mid) && mid.ValueKind == JsonValueKind.String)
+                machineId = mid.GetString();
+            else if (root.TryGetProperty("machine_id", out var midSnake) && midSnake.ValueKind == JsonValueKind.String)
+                machineId = midSnake.GetString();
             if (!Enum.TryParse<RelayCommandOp>(opStr, ignoreCase: true, out var op)) return false;
-            cmd = new RelayCommand(sessionId, cmdId, op, payloadJson);
+            cmd = new RelayCommand(sessionId, cmdId, op, payloadJson, machineId);
             return true;
         }
         catch { return false; }
@@ -295,4 +376,9 @@ public sealed class HttpRelayProducer : IRelayProducer
 
         return 0;
     }
+
+    private static bool ReadBool(JsonElement root, string name)
+        => root.TryGetProperty(name, out var value)
+            && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            && value.GetBoolean();
 }

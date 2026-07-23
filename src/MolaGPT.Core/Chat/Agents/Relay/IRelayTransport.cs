@@ -44,10 +44,26 @@ public interface IRelayProducer
     /// relay also applies a heartbeat TTL for crash/kill cases.</summary>
     Task MarkMachineOfflineAsync(CancellationToken ct);
 
-    /// <summary>Acknowledge a dispatched command so the relay can drop it
-    /// (prevents redelivery on the next command-stream reconnect). Carries the
-    /// sessionId because the relay stores ack state per-session.</summary>
-    Task AckCommandAsync(string sessionId, string cmdId, CancellationToken ct);
+    /// <summary>
+    /// Atomically claim a queued command for this bridge. The relay only delivers
+    /// an unexpired lease to one eligible machine at a time.
+    /// </summary>
+    Task<RelayCommandLease> LeaseCommandAsync(string sessionId, string cmdId, CancellationToken ct);
+
+    /// <summary>Extend a still-owned lease while a long-running command executes.</summary>
+    Task<RelayCommandLease> RenewCommandLeaseAsync(string sessionId, string cmdId, CancellationToken ct);
+
+    /// <summary>
+    /// Record the terminal dispatch result. A completed command is no longer
+    /// delivered; a failed command remains inspectable at the relay instead of
+    /// being silently dropped.
+    /// </summary>
+    Task<bool> CompleteCommandAsync(
+        string sessionId,
+        string cmdId,
+        bool succeeded,
+        string? error,
+        CancellationToken ct);
 
     /// <summary>Long-lived stream of commands addressed to this bridge. Completes
     /// on disconnect; the client reconnects with backoff.</summary>

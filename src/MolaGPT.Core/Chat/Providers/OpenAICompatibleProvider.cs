@@ -31,7 +31,7 @@ namespace MolaGPT.Core.Chat.Providers;
 /// (UI presents them via <see cref="Models"/>). This is the most common BYOK path.
 /// </summary>
 [DebuggerDisplay("{DisplayName} [ApiKey=***]")]
-public sealed class OpenAICompatibleProvider : IChatProvider
+public sealed partial class OpenAICompatibleProvider : IChatProvider
 {
     private const long ToolPreviewMinIntervalMs = 120;
     private const int ToolPreviewMinArgumentDelta = 360;
@@ -57,6 +57,10 @@ public sealed class OpenAICompatibleProvider : IChatProvider
     /// <summary>Falls back to <see cref="DefaultChatPath"/> when no path is configured.</summary>
     public static string ResolveChatPath(string? configured) =>
         string.IsNullOrWhiteSpace(configured) ? DefaultChatPath : configured.Trim();
+
+    /// <summary>User-defined HTTP headers appended (after auth) to every outgoing
+    /// request for this BYOK provider. Null for account-backed providers.</summary>
+    public IReadOnlyList<KeyValuePair<string, string>>? CustomHeaders { get; init; }
 
     private readonly HttpClient _http;
     private readonly IChatToolHost? _toolHost;
@@ -104,6 +108,16 @@ public sealed class OpenAICompatibleProvider : IChatProvider
         ChatRequest request,
         [EnumeratorCancellation] CancellationToken ct)
     {
+        // OpenAI Responses API (/v1/responses) uses a different wire format
+        // (input[] + instructions + reasoning{effort}); dispatch to the dedicated
+        // path in OpenAICompatibleProvider.Responses.cs.
+        if (WireApi == OpenAiWireApi.Responses)
+        {
+            await foreach (var responsesChunk in StreamResponsesAsync(request, ct).ConfigureAwait(false))
+                yield return responsesChunk;
+            yield break;
+        }
+
         var localToolOptions = LocalToolOptions.FromExtraBody(request.ExtraBody);
         localToolOptions = WithConversationWorkspace(localToolOptions, request);
         var modelSupportsTools = SupportsLocalTools(request.ModelId);
@@ -144,6 +158,7 @@ public sealed class OpenAICompatibleProvider : IChatProvider
             using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = JsonContent.Create(body) };
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
             req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+            ApplyCustomHeaders(req);
 
             using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
             if (resp.StatusCode == HttpStatusCode.Unauthorized && UnauthorizedHandler is not null)
@@ -364,12 +379,26 @@ public sealed class OpenAICompatibleProvider : IChatProvider
                      or ThinkingParamKind.GeminiThinkingLevel)
                 body["reasoning_effort"] = "none";
         }
+        ApplyCustomBody(body, request.ModelId);
+
         if (request.ExtraBody is not null)
             foreach (var kv in request.ExtraBody)
                 if (kv.Key != "enabled_tools") body[kv.Key] = kv.Value;
 
         return body;
     }
+
+    /// <summary>Applies the active model's user-defined request-body overrides onto
+    /// <paramref name="body"/>. Protected keys (messages/input/stream) are never
+    /// overridable; tool keys are re-set by the caller when a local-tool loop runs.</summary>
+    private void ApplyCustomBody(Dictionary<string, object?> body, string modelId)
+    {
+        var custom = Models.FirstOrDefault(m => m.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase))?.CustomBody;
+        CustomRequestParams.ApplyBody(body, custom);
+    }
+
+    private void ApplyCustomHeaders(HttpRequestMessage req) =>
+        CustomRequestParams.ApplyHeaders(req, CustomHeaders);
 
     private bool SupportsLocalTools(string modelId) =>
         Models.FirstOrDefault(m => m.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase))?.SupportsToolCalling == true;

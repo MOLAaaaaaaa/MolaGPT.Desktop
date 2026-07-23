@@ -45,7 +45,7 @@ public sealed class ProviderTypeToLabelConverter : IValueConverter
             "openai" or "openai-compat" => "OpenAI 格式",
             "anthropic" => "Claude 格式",
             "gemini" => "Gemini 格式",
-            "openai-response" => "OpenAI Response",
+            "openai-response" => "OpenAI Responses",
             _ => value?.ToString() ?? ""
         };
 

@@ -38,7 +38,7 @@ public sealed partial class AgentHistoryReader
         var toolsById = new Dictionary<string, AgentToolEvent>(StringComparer.Ordinal);
         var inTurn = false;
 
-        foreach (var line in File.ReadLines(path))
+        foreach (var line in ReadAllLinesShared(path))
         {
             ct.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(line)) continue;
@@ -86,7 +86,7 @@ public sealed partial class AgentHistoryReader
             }
         }
 
-        Commit();
+        Commit(openTail: true);
         return turns;
 
         void AppendClaudeAssistantContent(JsonElement content)
@@ -188,15 +188,21 @@ public sealed partial class AgentHistoryReader
             answer.Clear();
         }
 
-        void Commit(bool alreadyTerminated = false)
+        void Commit(bool alreadyTerminated = false, bool openTail = false)
         {
             if (!inTurn) return;
             FlushThinking();
             FlushAnswer();
-            if (!alreadyTerminated && events.LastOrDefault() is not TurnDoneEvent)
+            // A mid-file commit (next user prompt arrived) proves the previous turn
+            // ended, so a missing terminal marker is synthesized. The EOF commit
+            // proves nothing: the CLI may still be appending this turn, and a
+            // synthesized TurnDone here would re-ship a fresh "completed" to the
+            // phone on every re-projection of the growing file.
+            var open = openTail && !alreadyTerminated && events.LastOrDefault() is not TurnDoneEvent;
+            if (!alreadyTerminated && !open && events.LastOrDefault() is not TurnDoneEvent)
                 events.Add(new TurnDoneEvent(null));
             if (events.Count > 0)
-                turns.Add(new AgentHistoryTurn(events.ToArray()));
+                turns.Add(new AgentHistoryTurn(events.ToArray(), open));
             events.Clear();
             answer.Clear();
             thinking.Clear();
@@ -212,7 +218,7 @@ public sealed partial class AgentHistoryReader
         var toolsById = new Dictionary<string, AgentToolEvent>(StringComparer.Ordinal);
         var inTurn = false;
 
-        foreach (var line in File.ReadLines(path))
+        foreach (var line in ReadAllLinesShared(path))
         {
             ct.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(line)) continue;
@@ -239,7 +245,7 @@ public sealed partial class AgentHistoryReader
             }
         }
 
-        Commit();
+        Commit(openTail: true);
         return turns;
 
         void AppendCodexEventMessage(JsonElement payload)
@@ -372,13 +378,16 @@ public sealed partial class AgentHistoryReader
             events.Add(new ToolProgressEvent(merged));
         }
 
-        void Commit(bool alreadyTerminated = false)
+        void Commit(bool alreadyTerminated = false, bool openTail = false)
         {
             if (!inTurn) return;
-            if (!alreadyTerminated && events.LastOrDefault() is not TurnDoneEvent)
+            // Same open-tail rule as the Claude reader: only the EOF commit may
+            // leave a turn open; a mid-file commit synthesizes the terminal.
+            var open = openTail && !alreadyTerminated && events.LastOrDefault() is not TurnDoneEvent;
+            if (!alreadyTerminated && !open && events.LastOrDefault() is not TurnDoneEvent)
                 events.Add(new TurnDoneEvent(null));
             if (events.Count > 0)
-                turns.Add(new AgentHistoryTurn(events.ToArray()));
+                turns.Add(new AgentHistoryTurn(events.ToArray(), open));
             events.Clear();
             toolsById.Clear();
             inTurn = false;
@@ -436,7 +445,10 @@ public sealed partial class AgentHistoryReader
     private static AgentToolEvent? TryMapCodexTool(JsonElement item)
     {
         var itemType = ReadString(item, "type") ?? ReadString(item, "itemType");
-        if (itemType is not ("commandExecution" or "fileChange" or "mcpToolCall" or "command" or "patchApply"))
+        if (string.IsNullOrEmpty(itemType)) return null;
+        // Deny-list to stay in step with the live path (CodexSession.Transport):
+        // an allow-list here silently dropped newer tool types like `webSearch`.
+        if (itemType is "userMessage" or "agentMessage" or "reasoning" or "todoList" or "error")
             return null;
 
         var id = ReadString(item, "id") ?? Guid.NewGuid().ToString("N");

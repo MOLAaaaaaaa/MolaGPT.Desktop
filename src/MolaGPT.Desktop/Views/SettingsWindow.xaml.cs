@@ -100,6 +100,15 @@ public partial class SettingsWindow : Window
             DefaultThinkingKind: ThinkingParamKind.OpenAiReasoningEffort,
             DefaultModels: Array.Empty<ProviderModelEntry>()),
         new(
+            Id: "openai-response",
+            Name: "OpenAI (Responses API)",
+            Type: "openai-response",
+            BaseUrl: OpenAIProvider.DefaultBaseUrl,
+            ModelsPath: "v1/models",
+            DefaultThinkingKind: ThinkingParamKind.OpenAiReasoningEffort,
+            DefaultModels: Array.Empty<ProviderModelEntry>(),
+            ApiPath: "v1/responses"),
+        new(
             Id: "openai-images",
             Name: "OpenAI 图像",
             Type: "openai-compat",
@@ -1078,6 +1087,7 @@ public partial class SettingsWindow : Window
     }
 
     private System.Collections.ObjectModel.ObservableCollection<EditableModelEntry> _editingModels = new();
+    private readonly System.Collections.ObjectModel.ObservableCollection<EditableHeaderRow> _editingHeaders = new();
 
     private void BeginEdit(ProviderEntry entry)
     {
@@ -1102,9 +1112,10 @@ public partial class SettingsWindow : Window
             EditApiKey.Password = entry.ApiKey ?? "";
             _editingModels = new(entry.Models.Select(EditableModelEntry.From));
             ModelCards.ItemsSource = _editingModels;
-            TypePanel.Visibility = (preset is null || preset.Id == "custom-openai")
-                ? Visibility.Visible
-                : Visibility.Collapsed;
+            LoadHeaders(entry.CustomHeaders);
+            // Protocol dropdown stays visible for every BYOK entry so the user can
+            // switch to e.g. OpenAI Responses without needing the custom preset.
+            TypePanel.Visibility = Visibility.Visible;
             EditorMessage.Text = string.Empty;
         }
         finally { _loadingEndpointForm = false; }
@@ -1133,13 +1144,40 @@ public partial class SettingsWindow : Window
             EditImageEditPath.Text = string.IsNullOrWhiteSpace(preset.ImageEditPath) ? "v1/images/edits" : preset.ImageEditPath;
             _editingModels = new(preset.DefaultModels.Select(EditableModelEntry.From));
             ModelCards.ItemsSource = _editingModels;
-            TypePanel.Visibility = preset.Id == "custom-openai"
-                ? Visibility.Visible
-                : Visibility.Collapsed;
+            LoadHeaders(null);
+            // Protocol dropdown stays visible so the user can change protocol even on a preset.
+            TypePanel.Visibility = Visibility.Visible;
             EditorMessage.Text = $"已套用「{preset.Name}」预设。填入 API Key 后点「自动获取」拉取最新模型列表。";
         }
         finally { _loadingEndpointForm = false; }
         UpdateEndpointFields();
+    }
+
+    private void LoadHeaders(IReadOnlyList<CustomHeaderEntry>? headers)
+    {
+        _editingHeaders.Clear();
+        if (headers is not null)
+            foreach (var h in headers)
+                _editingHeaders.Add(new EditableHeaderRow { Name = h.Name, Value = h.Value });
+        CustomHeadersList.ItemsSource = _editingHeaders;
+    }
+
+    private List<CustomHeaderEntry>? CollectHeaders()
+    {
+        var list = _editingHeaders
+            .Where(h => !string.IsNullOrWhiteSpace(h.Name))
+            .Select(h => new CustomHeaderEntry(h.Name.Trim(), h.Value ?? string.Empty))
+            .ToList();
+        return list.Count > 0 ? list : null;
+    }
+
+    private void AddCustomHeaderRow_Click(object sender, RoutedEventArgs e) =>
+        _editingHeaders.Add(new EditableHeaderRow());
+
+    private void RemoveCustomHeaderRow_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is EditableHeaderRow row)
+            _editingHeaders.Remove(row);
     }
 
     private ProviderEntry CollectFromForm()
@@ -1162,7 +1200,8 @@ public partial class SettingsWindow : Window
             ImageEditPath: imageProvider && !chatImage && !string.IsNullOrWhiteSpace(EditImageEditPath.Text)
                 ? EditImageEditPath.Text.Trim()
                 : null,
-            ImageFormat: imageProvider ? SelectedImageFormat() : null);
+            ImageFormat: imageProvider ? SelectedImageFormat() : null,
+            CustomHeaders: CollectHeaders());
     }
 
     private void SaveProviderClick(object sender, RoutedEventArgs e)
@@ -1247,13 +1286,10 @@ public partial class SettingsWindow : Window
     private void ModelCard_Click(object sender, MouseButtonEventArgs e)
     {
         if (sender is not FrameworkElement fe || fe.DataContext is not EditableModelEntry model) return;
-        var preset = ProviderPresetCombo.SelectedItem as ProviderPreset;
-        var isCustom = preset is null || preset.Id == "custom-openai";
         var dialog = new ModelConfigDialog();
         dialog.ShowSingleEdit(
             model,
             this,
-            isCustomProvider: isCustom,
             isImageProvider: SettingsViewModel.IsImagePurpose(CurrentFormPurpose()));
     }
 
@@ -1273,14 +1309,22 @@ public partial class SettingsWindow : Window
 
             using var http = _byokHttpFactory();
             var baseUrl = NetworkSecurity.RequireHttpsBaseUrl(entry.BaseUrl ?? DefaultBaseUrl(entry.Type), $"{entry.Name} 接入地址");
-            var defaultPath = entry.Type == "anthropic" ? "v1/messages" : "v1/chat/completions";
+            var defaultPath = entry.Type switch
+            {
+                "anthropic" => "v1/messages",
+                "openai-response" => "v1/responses",
+                _ => "v1/chat/completions"
+            };
             var url = NetworkSecurity.CombineEndpoint(
                 baseUrl, string.IsNullOrWhiteSpace(entry.ApiPath) ? defaultPath : entry.ApiPath, $"{entry.Name} 接入地址");
 
             using var req = new HttpRequestMessage(HttpMethod.Post, url);
-            object body = entry.Type == "anthropic"
-                ? new { model = entry.Models.FirstOrDefault()?.Id ?? "claude-3-5-haiku-20241022", max_tokens = 8, messages = new[] { new { role = "user", content = "ping" } } }
-                : new { model = entry.Models.FirstOrDefault()?.Id ?? "gpt-4o-mini", messages = new[] { new { role = "user", content = "ping" } }, max_tokens = 4 };
+            object body = entry.Type switch
+            {
+                "anthropic" => new { model = entry.Models.FirstOrDefault()?.Id ?? "claude-3-5-haiku-20241022", max_tokens = 8, messages = new[] { new { role = "user", content = "ping" } } },
+                "openai-response" => new { model = entry.Models.FirstOrDefault()?.Id ?? "gpt-4o-mini", input = "ping", max_output_tokens = 16 },
+                _ => new { model = entry.Models.FirstOrDefault()?.Id ?? "gpt-4o-mini", messages = new[] { new { role = "user", content = "ping" } }, max_tokens = 4 }
+            };
             req.Content = JsonContent.Create(body);
             if (entry.Type == "anthropic")
             {
@@ -1291,6 +1335,7 @@ public partial class SettingsWindow : Window
             {
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", entry.ApiKey ?? "");
             }
+            ApplyEntryCustomHeaders(req, entry);
             using var resp = await http.SendAsync(req);
             if (resp.IsSuccessStatusCode)
                 EditorMessage.Text = "✅ 连接正常";
@@ -1387,6 +1432,7 @@ public partial class SettingsWindow : Window
         {
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", entry.ApiKey);
         }
+        ApplyEntryCustomHeaders(req, entry);
 
         using var resp = await http.SendAsync(req);
         var body = await resp.Content.ReadAsStringAsync();
@@ -1425,16 +1471,37 @@ public partial class SettingsWindow : Window
     {
         var http = _byokHttpFactory();
         var models = entry.Models.Select(ToProviderModel).ToList();
+        var headers = CustomParamConverter.ToHeaderList(entry.CustomHeaders);
         return entry.Type switch
         {
-            "openai" or "openai-compat" or "openai-response" =>
+            "openai-response" =>
                 new OpenAICompatibleProvider(entry.Id, entry.Name, entry.BaseUrl ?? OpenAIProvider.DefaultBaseUrl, entry.ApiKey ?? "", models, http, _toolHost)
-                    { ChatPath = OpenAICompatibleProvider.ResolveChatPath(entry.ApiPath) },
+                {
+                    WireApi = OpenAiWireApi.Responses,
+                    ChatPath = string.IsNullOrWhiteSpace(entry.ApiPath)
+                        ? OpenAICompatibleProvider.DefaultResponsesPath
+                        : entry.ApiPath.Trim(),
+                    CustomHeaders = headers
+                },
+            "openai" or "openai-compat" =>
+                new OpenAICompatibleProvider(entry.Id, entry.Name, entry.BaseUrl ?? OpenAIProvider.DefaultBaseUrl, entry.ApiKey ?? "", models, http, _toolHost)
+                    { ChatPath = OpenAICompatibleProvider.ResolveChatPath(entry.ApiPath), CustomHeaders = headers },
             "anthropic" => new AnthropicProvider(entry.Id, entry.Name, entry.ApiKey ?? "", models, http, entry.BaseUrl)
-                { MessagesPath = string.IsNullOrWhiteSpace(entry.ApiPath) ? "v1/messages" : entry.ApiPath.Trim() },
-            "gemini" => GeminiProvider.Create(entry.Id, entry.Name, entry.ApiKey ?? "", models, http, entry.BaseUrl, entry.ApiPath),
+                { MessagesPath = string.IsNullOrWhiteSpace(entry.ApiPath) ? "v1/messages" : entry.ApiPath.Trim(), CustomHeaders = headers },
+            "gemini" => GeminiProvider.Create(entry.Id, entry.Name, entry.ApiKey ?? "", models, http, entry.BaseUrl, entry.ApiPath, headers),
             _ => null
         };
+    }
+
+    /// <summary>Appends a BYOK entry's custom headers to a raw request (model-list / test),
+    /// mirroring what the provider does for chat requests.</summary>
+    private static void ApplyEntryCustomHeaders(HttpRequestMessage req, ProviderEntry entry)
+    {
+        var headers = CustomParamConverter.ToHeaderList(entry.CustomHeaders);
+        if (headers is null) return;
+        foreach (var (name, value) in headers)
+            if (!string.IsNullOrWhiteSpace(name))
+                req.Headers.TryAddWithoutValidation(name, value);
     }
 
     private bool ValidateProviderBaseUrl(ProviderEntry entry)
@@ -1502,6 +1569,7 @@ public partial class SettingsWindow : Window
             {
                 thinkingConfig = new ThinkingConfig(
                     kind,
+                    EffortLevels: ThinkingEffortLevels.Normalize(entry.EffortLevels) is { Length: > 0 } levels ? levels : null,
                     MinBudget: entry.ThinkingBudgetMin,
                     MaxBudget: entry.ThinkingBudgetMax,
                     DefaultBudget: entry.ThinkingBudgetDefault,
@@ -1517,7 +1585,8 @@ public partial class SettingsWindow : Window
             SupportsReasoningEffort: entry.ReasoningEffort,
             SupportsToolCalling: entry.Tools,
             ContextWindow: entry.ContextWindow,
-            ThinkingConfig: thinkingConfig);
+            ThinkingConfig: thinkingConfig,
+            CustomBody: CustomParamConverter.ToBodyDict(entry.CustomBody));
     }
 
     private static List<ProviderModelEntry> ParseOpenAiCompatibleModels(JsonElement root)
@@ -1830,13 +1899,34 @@ public partial class SettingsWindow : Window
     {
         if (SettingsViewModel.IsImagePurpose(purpose))
             return ImageApiFormat.IsChatImage(imageFormat) ? "v1/chat/completions" : "v1/images/generations";
-        return string.Equals(type, "anthropic", StringComparison.OrdinalIgnoreCase) ? "v1/messages" : "v1/chat/completions";
+        return type?.Trim().ToLowerInvariant() switch
+        {
+            "anthropic" => "v1/messages",
+            "openai-response" => "v1/responses",
+            _ => "v1/chat/completions"
+        };
     }
 
     private void EndpointInputChanged(object sender, TextChangedEventArgs e)
     {
         if (_loadingEndpointForm) return;
         UpdateEndpointPreview();
+    }
+
+    private void ProviderTypeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loadingEndpointForm) return;
+
+        // Re-default the chat path when it still holds one of the known protocol
+        // defaults, so switching protocol doesn't leave a stale path. A genuinely
+        // custom path is preserved. Mirrors ImageFormatChanged's known-defaults guard.
+        var type = (EditType.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "openai-compat";
+        var known = new[] { "v1/chat/completions", "v1/responses", "v1/messages" };
+        var cur = EditApiPath.Text?.Trim() ?? string.Empty;
+        if (cur.Length == 0 || known.Contains(cur, StringComparer.OrdinalIgnoreCase))
+            EditApiPath.Text = DefaultApiPathFor(CurrentFormPurpose(), SelectedImageFormat(), type);
+
+        UpdateEndpointFields();
     }
 
     private void ImageFormatChanged(object sender, SelectionChangedEventArgs e)
@@ -1888,9 +1978,8 @@ public partial class SettingsWindow : Window
 
         if (!SettingsViewModel.IsImagePurpose(CurrentFormPurpose()))
         {
-            var fallback = (EditType.SelectedItem as ComboBoxItem)?.Tag?.ToString() == "anthropic"
-                ? "v1/messages"
-                : "v1/chat/completions";
+            var type = (EditType.SelectedItem as ComboBoxItem)?.Tag?.ToString();
+            var fallback = DefaultApiPathFor(CurrentFormPurpose(), SelectedImageFormat(), type);
             EndpointPreview.Text = $"实际请求地址：{Join(EditApiPath.Text, fallback)}";
             return;
         }
@@ -2129,6 +2218,8 @@ public sealed class EditableModelEntry : System.ComponentModel.INotifyPropertyCh
     private string? _defaultEffort;
     private string? _systemPrompt;
     private bool _imageEdit;
+    private List<CustomBodyEntry> _customBody = new();
+    private List<string> _effortLevels = new();
 
     public string Id { get => _id; set { _id = value; OnPropertyChanged(nameof(Id)); } }
     public string DisplayName { get => _displayName; set { _displayName = value; OnPropertyChanged(nameof(DisplayName)); } }
@@ -2144,6 +2235,8 @@ public sealed class EditableModelEntry : System.ComponentModel.INotifyPropertyCh
     public string? DefaultEffort { get => _defaultEffort; set { _defaultEffort = value; OnPropertyChanged(nameof(DefaultEffort)); } }
     public string? SystemPrompt { get => _systemPrompt; set { _systemPrompt = value; OnPropertyChanged(nameof(SystemPrompt)); } }
     public bool ImageEdit { get => _imageEdit; set { _imageEdit = value; OnPropertyChanged(nameof(ImageEdit)); } }
+    public List<CustomBodyEntry> CustomBody { get => _customBody; set { _customBody = value ?? new(); OnPropertyChanged(nameof(CustomBody)); } }
+    public List<string> EffortLevels { get => _effortLevels; set { _effortLevels = value ?? new(); OnPropertyChanged(nameof(EffortLevels)); } }
 
     public string CapabilityTags
     {
@@ -2183,12 +2276,16 @@ public sealed class EditableModelEntry : System.ComponentModel.INotifyPropertyCh
         Thinking = e.Thinking, ReasoningEffort = e.ReasoningEffort, ContextWindow = e.ContextWindow,
         ThinkingParamKind = e.ThinkingParamKind, ThinkingBudgetMin = e.ThinkingBudgetMin,
         ThinkingBudgetMax = e.ThinkingBudgetMax, ThinkingBudgetDefault = e.ThinkingBudgetDefault,
-        DefaultEffort = e.DefaultEffort, SystemPrompt = e.SystemPrompt, ImageEdit = e.ImageEdit
+        DefaultEffort = e.DefaultEffort, SystemPrompt = e.SystemPrompt, ImageEdit = e.ImageEdit,
+        CustomBody = e.CustomBody?.ToList() ?? new(),
+        EffortLevels = e.EffortLevels?.ToList() ?? new()
     };
 
     public ProviderModelEntry ToRecord() => new(
         Id, DisplayName, Vision, ContextWindow, Thinking, ReasoningEffort, Tools,
-        ThinkingParamKind, ThinkingBudgetMin, ThinkingBudgetMax, ThinkingBudgetDefault, DefaultEffort, SystemPrompt, ImageEdit);
+        ThinkingParamKind, ThinkingBudgetMin, ThinkingBudgetMax, ThinkingBudgetDefault, DefaultEffort, SystemPrompt, ImageEdit,
+        CustomBody.Count > 0 ? CustomBody : null,
+        EffortLevels.Count > 0 ? EffortLevels : null);
 
     private static string NormalizeAutoModelDisplayName(string id, string displayName)
     {
@@ -2214,3 +2311,29 @@ public sealed class EditableModelEntry : System.ComponentModel.INotifyPropertyCh
     }
 }
 public sealed record CapabilityBadge(string Label, string ColorKey);
+
+/// <summary>Mutable UI row for the provider custom-headers editor. Converted to/from
+/// the immutable <see cref="CustomHeaderEntry"/> on load/collect.</summary>
+public sealed class EditableHeaderRow : System.ComponentModel.INotifyPropertyChanged
+{
+    private string _name = "";
+    private string _value = "";
+    public string Name { get => _name; set { _name = value; OnPropertyChanged(nameof(Name)); } }
+    public string Value { get => _value; set { _value = value; OnPropertyChanged(nameof(Value)); } }
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+    private void OnPropertyChanged(string n) => PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(n));
+}
+
+/// <summary>Mutable UI row for the per-model request-body override editor. Converted
+/// to/from the immutable <see cref="CustomBodyEntry"/> on load/save.</summary>
+public sealed class EditableBodyRow : System.ComponentModel.INotifyPropertyChanged
+{
+    private string _key = "";
+    private string _type = "string";
+    private string _value = "";
+    public string Key { get => _key; set { _key = value; OnPropertyChanged(nameof(Key)); } }
+    public string Type { get => _type; set { _type = value; OnPropertyChanged(nameof(Type)); } }
+    public string Value { get => _value; set { _value = value; OnPropertyChanged(nameof(Value)); } }
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+    private void OnPropertyChanged(string n) => PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(n));
+}

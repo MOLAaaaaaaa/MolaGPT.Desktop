@@ -163,7 +163,10 @@ public sealed partial class AgentHistoryReader
             catch { continue; }
             if (id is null) continue;
 
-            if (title is null && titles.TryGetValue(id, out var indexTitle)) title = indexTitle;
+            // Codex owns the semantic thread title.  The first user message is
+            // only a fallback for old/missing index entries; preferring it here
+            // made every bridge session ignore Codex's generated thread_name.
+            if (titles.TryGetValue(id, out var indexTitle)) title = indexTitle;
             yield return new AgentHistoryEntry(
                 CodexBackend.BackendId,
                 id,
@@ -180,7 +183,7 @@ public sealed partial class AgentHistoryReader
         if (!File.Exists(path)) return map;
         try
         {
-            foreach (var line in File.ReadLines(path))
+            foreach (var line in ReadAllLinesShared(path))
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 try
@@ -201,13 +204,32 @@ public sealed partial class AgentHistoryReader
     /// <summary>Read up to <paramref name="max"/> lines without loading the whole file.</summary>
     private static IEnumerable<string> ReadFirstLines(string path, int max)
     {
-        using var reader = new StreamReader(path);
+        using var reader = OpenSharedReader(path);
         for (int i = 0; i < max; i++)
         {
             var line = reader.ReadLine();
             if (line is null) yield break;
             if (line.Length > 0) yield return line;
         }
+    }
+
+    /// <summary>Open a session file for reading even while another process holds it
+    /// open for writing. Codex Desktop / Claude keep their <em>active</em> rollout
+    /// files locked; the default <c>new StreamReader(path)</c> / <c>File.ReadLines</c>
+    /// request a share mode the writer denies, throwing IOException — which made the
+    /// history reader silently skip the very sessions the user is currently using.
+    /// <c>FileShare.ReadWrite</c> lets us read alongside the live writer.</summary>
+    internal static StreamReader OpenSharedReader(string path)
+        => new(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite));
+
+    /// <summary>Enumerate all lines of a file with a writer-tolerant share mode
+    /// (see <see cref="OpenSharedReader"/>). Drop-in for <c>File.ReadLines</c>.</summary>
+    internal static IEnumerable<string> ReadAllLinesShared(string path)
+    {
+        using var reader = OpenSharedReader(path);
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+            yield return line;
     }
 
     private static string? CleanTitle(string? raw)

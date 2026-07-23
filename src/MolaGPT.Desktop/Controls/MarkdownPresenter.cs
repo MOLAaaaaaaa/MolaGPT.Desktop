@@ -1863,10 +1863,15 @@ public sealed partial class MarkdownPresenter : ContentControl
             var protectedSource = ProtectInlineMathForMarkdig(source, out var inlineMath);
             var subDoc = Markdig.Wpf.Markdown.ToFlowDocument(protectedSource, pipeline);
             var blocks = subDoc.Blocks.ToList();
-            foreach (var b in blocks)
+            // Markdig.Wpf drops heading level on the floor (headings arrive as
+            // un-styled paragraphs), so recover it from the AST and pass it in.
+            var headingLevels = TryGetTopLevelHeadingLevels(protectedSource, pipeline, blocks.Count);
+            for (int i = 0; i < blocks.Count; i++)
             {
+                var b = blocks[i];
                 subDoc.Blocks.Remove(b);
-                ApplyMolaMarkdownStyles(b, inlineMath);
+                var level = headingLevels is not null ? headingLevels[i] : 0;
+                ApplyMolaMarkdownStyles(b, inlineMath, level);
                 if (anchorAfter is not null) _doc.Blocks.InsertBefore(anchorAfter, b);
                 else _doc.Blocks.Add(b);
             }
@@ -2973,14 +2978,24 @@ public sealed partial class MarkdownPresenter : ContentControl
     private static string EscapeMarkdownTitle(string? value) =>
         (value ?? string.Empty).Replace("\\", "\\\\").Replace("\"", "\\\"");
 
-    private void ApplyMolaMarkdownStyles(WpfBlock block, IReadOnlyDictionary<string, string>? inlineMath = null)
+    private void ApplyMolaMarkdownStyles(WpfBlock block, IReadOnlyDictionary<string, string>? inlineMath = null, int headingLevel = 0)
     {
         block.FontFamily = _doc.FontFamily;
+        block.Foreground = _doc.Foreground;
+
+        // Headings arrive from Markdig.Wpf as plain paragraphs; give them a real
+        // size/weight ramp so the document has visible structure instead of a
+        // flat wall of body text.
+        if (headingLevel >= 1 && block is Paragraph headingParagraph)
+        {
+            ApplyHeadingTypography(headingParagraph, headingLevel, inlineMath);
+            return;
+        }
+
         block.FontSize = MessageTextFontSize;
         block.LineHeight = MessageTextLineHeight;
         block.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
         block.TextAlignment = TextAlignment.Left;
-        block.Foreground = _doc.Foreground;
         block.Margin = block switch
         {
             Paragraph => new Thickness(0, 0, 0, 8),
@@ -3038,6 +3053,71 @@ public sealed partial class MarkdownPresenter : ContentControl
         // plain text lines.
         if (ContainsInlineMath(paragraph.Inlines))
             paragraph.LineStackingStrategy = LineStackingStrategy.MaxHeight;
+    }
+
+    /// <summary>
+    /// Style a heading paragraph with a size/weight ramp by level (h1 largest).
+    /// Markdig.Wpf loses the heading level, so <see cref="AppendRenderedMarkdown"/>
+    /// recovers it from the AST and routes headings here instead of the flat
+    /// body-text path. Still runs the inline pipeline headings need (links, CJK
+    /// punctuation, web-font fallback, math, citations).
+    /// </summary>
+    private void ApplyHeadingTypography(Paragraph paragraph, int level, IReadOnlyDictionary<string, string>? inlineMath)
+    {
+        var (size, weight, topMargin, bottomMargin) = level switch
+        {
+            1 => (MessageTextFontSize + 9, FontWeights.Bold, 20.0, 10.0),
+            2 => (MessageTextFontSize + 5, FontWeights.Bold, 18.0, 8.0),
+            3 => (MessageTextFontSize + 2.5, FontWeights.SemiBold, 15.0, 6.0),
+            4 => (MessageTextFontSize + 1, FontWeights.SemiBold, 13.0, 5.0),
+            _ => (MessageTextFontSize, FontWeights.SemiBold, 12.0, 4.0),
+        };
+
+        paragraph.FontSize = size;
+        paragraph.FontWeight = weight;
+        paragraph.LineHeight = size * 1.35;
+        paragraph.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+        paragraph.TextAlignment = TextAlignment.Left;
+        paragraph.Margin = new Thickness(0, topMargin, 0, bottomMargin);
+
+        RestoreInlineMathPlaceholders(paragraph.Inlines, inlineMath);
+        ApplyInlineMath(paragraph);
+        ApplyCjkPunctuation(paragraph.Inlines);
+        ApplyWebFontFallback(paragraph.Inlines);
+        WireHyperlinks(paragraph.Inlines);
+        ApplyCitationControls(paragraph.Inlines);
+    }
+
+    /// <summary>
+    /// Parse <paramref name="source"/> and return, per top-level block, its
+    /// heading level (0 = not a heading). Returns <c>null</c> — meaning "don't
+    /// tag headings" — when the AST block count doesn't match the FlowDocument
+    /// block count, so a structural mismatch degrades to the old flat rendering
+    /// rather than mis-tagging the wrong blocks.
+    /// </summary>
+    private static int[]? TryGetTopLevelHeadingLevels(string source, MarkdownPipeline pipeline, int expectedCount)
+    {
+        try
+        {
+            var ast = Markdig.Markdown.Parse(source, pipeline);
+            if (ast.Count != expectedCount) return null;
+
+            var levels = new int[ast.Count];
+            var any = false;
+            for (int i = 0; i < ast.Count; i++)
+            {
+                if (ast[i] is Markdig.Syntax.HeadingBlock heading)
+                {
+                    levels[i] = heading.Level;
+                    any = true;
+                }
+            }
+            return any ? levels : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static bool ContainsInlineMath(InlineCollection inlines)

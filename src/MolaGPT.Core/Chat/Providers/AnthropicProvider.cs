@@ -35,6 +35,9 @@ public sealed class AnthropicProvider : IChatProvider
     /// segment, e.g. "v1/messages"). User-configurable per provider.</summary>
     public string MessagesPath { get; init; } = "v1/messages";
 
+    /// <summary>User-defined HTTP headers appended after auth to every request (BYOK).</summary>
+    public IReadOnlyList<KeyValuePair<string, string>>? CustomHeaders { get; init; }
+
     private readonly HttpClient _http;
     private readonly string _apiKey;
 
@@ -98,6 +101,8 @@ public sealed class AnthropicProvider : IChatProvider
         {
             body["thinking"] = new { type = "disabled" };
         }
+        CustomRequestParams.ApplyBody(body, Models.FirstOrDefault(m => m.Id.Equals(request.ModelId, StringComparison.OrdinalIgnoreCase))?.CustomBody);
+
         if (request.ExtraBody is not null)
             foreach (var kv in request.ExtraBody) body[kv.Key] = kv.Value;
 
@@ -106,6 +111,7 @@ public sealed class AnthropicProvider : IChatProvider
         req.Headers.Add("x-api-key", _apiKey);
         req.Headers.Add("anthropic-version", AnthropicVersion);
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+        CustomRequestParams.ApplyHeaders(req, CustomHeaders);
 
         using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         await ChatApiErrorHelper.EnsureSuccessAsync(resp, DisplayName, ct).ConfigureAwait(false);

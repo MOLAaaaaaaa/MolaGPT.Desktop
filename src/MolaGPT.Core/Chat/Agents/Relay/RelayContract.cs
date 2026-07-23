@@ -45,11 +45,17 @@ public sealed record PermissionPromptEvent(AgentPermissionRequest Permission) : 
 /// <summary>Answer text accumulated so far, shipped at turn end (and optionally at
 /// tool boundaries). SET semantics — the phone REPLACES its current answer text,
 /// not appends — so reconnect replay is idempotent (re-applying the same snapshot
-/// yields the same text, no duplication).</summary>
-public sealed record AnswerSnapshotEvent(string Text) : RelayTranscriptEvent;
+/// yields the same text, no duplication).
+/// <para><see cref="SegmentId"/> identifies one contiguous answer segment within
+/// a turn (segments are delimited by tool calls). The desktop may ship the SAME
+/// segment several times while it streams — each snapshot carrying the segment's
+/// full text so far — and the phone upserts by segment id (replace-in-place,
+/// "pseudo-streaming"). Null on events from older desktops and from history
+/// projection; consumers then fall back to per-event identity (seq).</para></summary>
+public sealed record AnswerSnapshotEvent(string Text, string? SegmentId = null) : RelayTranscriptEvent;
 
-/// <summary>Optional reasoning/thinking snapshot, same SET semantics as the answer.</summary>
-public sealed record ThinkingSnapshotEvent(string Text) : RelayTranscriptEvent;
+/// <summary>Optional reasoning/thinking snapshot, same SET + segment semantics as the answer.</summary>
+public sealed record ThinkingSnapshotEvent(string Text, string? SegmentId = null) : RelayTranscriptEvent;
 
 /// <summary>The turn completed. Carries final usage when known.</summary>
 public sealed record TurnDoneEvent(AgentUsage? Usage) : RelayTranscriptEvent;
@@ -70,6 +76,11 @@ public sealed record RelaySessionCursor(string SessionId, long Seq, long Activit
 
 /// <summary>One mobile client that recently touched the relay session list.</summary>
 public sealed record RelayMobileDevice(string Id, string? Name, long LastSeenAtMs);
+
+/// <summary>One desktop bridge machine that recently heartbeated the relay.
+/// Distinct from <see cref="RelayMobileDevice"/> — phones browse/control;
+/// machines own CLI sessions and receive routed commands.</summary>
+public sealed record RelayMachine(string Id, string? Name, long LastSeenAtMs);
 
 /// <summary>Desktop-side local history projection progress for the settings UI.</summary>
 public sealed record AgentRelayProjectionStatus(int ProjectedSessions, int QueuedProjections, int ActiveProjections);
@@ -97,8 +108,22 @@ public enum RelayCommandOp
     RefreshHistory
 }
 
-/// <summary>A command from the phone, enqueued on the relay for the desktop.</summary>
-public sealed record RelayCommand(string SessionId, string CmdId, RelayCommandOp Op, string? PayloadJson);
+/// <summary>A command from the phone, enqueued on the relay for the desktop.
+/// <see cref="MachineId"/> routes <c>New</c> (and optionally other ops) to a
+/// specific bridge when the account has multiple machines; null/empty means
+/// legacy broadcast / session-meta-derived routing on the relay.</summary>
+public sealed record RelayCommand(
+    string SessionId,
+    string CmdId,
+    RelayCommandOp Op,
+    string? PayloadJson,
+    string? MachineId = null);
+
+/// <summary>
+/// A time-bounded claim on a relay command. The desktop must renew the lease
+/// while a long-running operation is executing, then publish a terminal result.
+/// </summary>
+public sealed record RelayCommandLease(bool Acquired, long ExpiresAtMs = 0);
 
 /// <summary>Point-in-time session state snapshot (no transcript) — phase and
 /// attention are session-level, not transcript-level, so they sync via this
@@ -122,4 +147,8 @@ public sealed record RelaySessionMeta(
     /// <summary>Models this session can switch to, discovered live from the CLI
     /// (Claude initialize.models / Codex model/list). Null/empty when not yet
     /// discovered — the phone then falls back to observed model ids.</summary>
-    IReadOnlyList<AgentModelInfo>? AvailableModels = null);
+    IReadOnlyList<AgentModelInfo>? AvailableModels = null,
+    /// <summary>Owning desktop bridge machine. Null/empty for legacy metas
+    /// written before multi-machine routing.</summary>
+    string? MachineId = null,
+    string? MachineName = null);

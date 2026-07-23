@@ -120,7 +120,7 @@
                                     <ComboBoxItem Content="OpenAI Effort" Tag="OpenAiReasoningEffort" />
                                     <ComboBoxItem Content="Anthropic Adaptive" Tag="AnthropicAdaptive" />
                                     <ComboBoxItem Content="Anthropic Budget" Tag="AnthropicBudget" />
-                                    <ComboBoxItem Content="DeepSeek V4" Tag="DeepSeekV4" />
+                                    <ComboBoxItem Content="DeepSeek" Tag="DeepSeekV4" />
                                     <ComboBoxItem Content="Gemini Level" Tag="GeminiThinkingLevel" />
                                     <ComboBoxItem Content="Gemini Budget" Tag="GeminiBudget" />
                                     <ComboBoxItem Content="Qwen Budget" Tag="QwenThinkingBudget" />
@@ -132,8 +132,58 @@
                                         CornerRadius="{DynamicResource Radius.Sm}"
                                         Padding="12,8" Margin="0,0,0,10">
                                     <TextBox x:Name="EditDefaultEffort"
-                                             Style="{StaticResource InlineTextBox}" />
+                                             Style="{StaticResource InlineTextBox}"
+                                             ToolTip="如 medium / high / max" />
                                 </Border>
+
+                                <TextBlock Text="推理强度档位" Margin="0,0,0,4"
+                                           Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                <ItemsControl x:Name="EffortLevelList" Margin="0,0,0,6">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <WrapPanel Orientation="Horizontal" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Background="{DynamicResource Brush.Bg.Elevated}"
+                                                    BorderBrush="{DynamicResource Brush.Border}"
+                                                    BorderThickness="1"
+                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                    Padding="8,4" Margin="0,0,6,6">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding}"
+                                                               VerticalAlignment="Center"
+                                                               Margin="0,0,6,0" />
+                                                    <Button Style="{StaticResource HeaderIconButton}"
+                                                            Width="22" Height="22"
+                                                            Click="RemoveEffortLevel_Click"
+                                                            ToolTip="移除">
+                                                        <TextBlock Text="&#xE711;" FontFamily="{DynamicResource Font.Icon}" FontSize="10" />
+                                                    </Button>
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                    <Border Background="{DynamicResource Brush.Bg.Elevated}"
+                                            CornerRadius="{DynamicResource Radius.Sm}"
+                                            Padding="10,6" Width="140" Margin="0,0,8,0">
+                                        <TextBox x:Name="EditNewEffortLevel"
+                                                 Style="{StaticResource InlineTextBox}"
+                                                 ToolTip="自定义档位，如 max / ultra" />
+                                    </Border>
+                                    <Button Style="{StaticResource OutlineButton}"
+                                            Content="添加"
+                                            Padding="12,6"
+                                            Margin="0,0,8,0"
+                                            Click="AddEffortLevel_Click" />
+                                    <Button Style="{StaticResource OutlineButton}"
+                                            Content="重置模板"
+                                            Padding="12,6"
+                                            Click="ResetEffortLevels_Click" />
+                                </StackPanel>
 
                                 <StackPanel x:Name="BudgetRangePanel">
                                     <TextBlock Text="Budget 范围 (tokens)" Margin="0,0,0,6"
@@ -195,6 +245,64 @@
                                    FontSize="11"
                                    Foreground="{DynamicResource Brush.Text.Muted}"
                                    Margin="0,4,0,0" />
+                    </StackPanel>
+
+                    <!-- Custom request-body overrides (advanced) -->
+                    <StackPanel x:Name="CustomBodyPanel" Margin="0,16,0,0" Visibility="Collapsed">
+                        <TextBlock Text="参数覆写（高级）"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource Brush.Text.Secondary}"
+                                   Margin="0,0,0,8" />
+                        <ItemsControl x:Name="CustomBodyList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Margin="0,0,0,6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Border Background="{DynamicResource Brush.Bg.Elevated}"
+                                                CornerRadius="{DynamicResource Radius.Sm}"
+                                                Padding="8,6" Margin="0,0,6,0">
+                                            <TextBox Text="{Binding Key, UpdateSourceTrigger=PropertyChanged}"
+                                                     Style="{StaticResource InlineTextBox}"
+                                                     ToolTip="参数名（键）" />
+                                        </Border>
+                                        <ComboBox Grid.Column="1"
+                                                  Style="{StaticResource SettingsComboBox}"
+                                                  Width="92" Margin="0,0,6,0"
+                                                  SelectedValuePath="Content"
+                                                  SelectedValue="{Binding Type, UpdateSourceTrigger=PropertyChanged}">
+                                            <ComboBoxItem Content="string" />
+                                            <ComboBoxItem Content="number" />
+                                            <ComboBoxItem Content="boolean" />
+                                            <ComboBoxItem Content="json" />
+                                        </ComboBox>
+                                        <Border Grid.Column="2"
+                                                Background="{DynamicResource Brush.Bg.Elevated}"
+                                                CornerRadius="{DynamicResource Radius.Sm}"
+                                                Padding="8,6" Margin="0,0,6,0">
+                                            <TextBox Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}"
+                                                     Style="{StaticResource InlineTextBox}"
+                                                     ToolTip="值" />
+                                        </Border>
+                                        <Button Grid.Column="3"
+                                                Style="{StaticResource HeaderIconButton}"
+                                                Click="RemoveCustomBodyRow_Click"
+                                                ToolTip="删除">
+                                            <TextBlock Text="&#xE711;" FontFamily="{DynamicResource Font.Icon}" FontSize="12" />
+                                        </Button>
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <Button Style="{StaticResource OutlineButton}"
+                                Content="+ 添加参数"
+                                HorizontalAlignment="Left"
+                                Margin="0,4,0,0"
+                                Click="AddCustomBodyRow_Click" />
                     </StackPanel>
                 </StackPanel>
                     </ScrollViewer>

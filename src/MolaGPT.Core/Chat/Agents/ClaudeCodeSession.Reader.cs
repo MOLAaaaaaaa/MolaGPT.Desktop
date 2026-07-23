@@ -80,7 +80,17 @@ internal sealed partial class ClaudeCodeSession
                 break;
 
             case "result":
-                yield return AgentEvent.Complete(ExtractUsage(root), raw);
+                // A failed turn still arrives as type=result, and its `subtype`
+                // can literally be "success" while `is_error` is true (e.g. an
+                // auth failure: {"subtype":"success","is_error":true,
+                // "api_error_status":401,"result":"...401 Invalid bearer token"}).
+                // Trusting subtype alone reported API errors as a normal empty
+                // completion — the phone showed a finished turn with no answer
+                // and the relay acked the command as succeeded.
+                if (ExtractResultError(root) is { } resultError)
+                    yield return AgentEvent.Failure(resultError, raw);
+                else
+                    yield return AgentEvent.Complete(ExtractUsage(root), raw);
                 break;
 
             case "system":
@@ -199,6 +209,43 @@ internal sealed partial class ClaudeCodeSession
                     ResultPreview: preview),
                 RawJson: raw);
         }
+    }
+
+    /// <summary>Read a failed <c>result</c> message's error text, or null when the
+    /// turn genuinely succeeded. Checks <c>is_error</c> / <c>api_error_status</c>
+    /// rather than <c>subtype</c>, which stays "success" even for API failures.</summary>
+    internal static string? ExtractResultError(JsonElement root)
+    {
+        var isError = root.TryGetProperty("is_error", out var err)
+            && err.ValueKind is JsonValueKind.True or JsonValueKind.False
+            && err.GetBoolean();
+        var apiStatus = root.TryGetProperty("api_error_status", out var status)
+            && status.ValueKind == JsonValueKind.Number
+            && status.TryGetInt32(out var code)
+            ? code
+            : 0;
+        var subtype = root.TryGetProperty("subtype", out var st) && st.ValueKind == JsonValueKind.String
+            ? st.GetString()
+            : null;
+        var subtypeIsError = subtype is not null
+            && subtype.Contains("error", StringComparison.OrdinalIgnoreCase);
+
+        if (!isError && apiStatus == 0 && !subtypeIsError) return null;
+
+        var text = root.TryGetProperty("result", out var res) && res.ValueKind == JsonValueKind.String
+            ? res.GetString()
+            : null;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            text = root.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String
+                ? e.GetString()
+                : null;
+        }
+        if (string.IsNullOrWhiteSpace(text))
+            text = apiStatus != 0 ? $"Claude Code 请求失败（HTTP {apiStatus}）。" : "Claude Code 回合失败。";
+        return apiStatus != 0 && !text!.Contains(apiStatus.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal)
+            ? $"{text}（HTTP {apiStatus}）"
+            : text;
     }
 
     private static AgentUsage? ExtractUsage(JsonElement root)

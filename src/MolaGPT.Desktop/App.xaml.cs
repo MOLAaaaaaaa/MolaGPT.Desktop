@@ -221,6 +221,17 @@ public partial class App : Application
         };
         conversationListVm.ConversationsDeleted += async (_, ids) =>
         {
+            // Release any live agent CLI process (and its working-directory lock)
+            // bound to a deleted conversation. The AgentSessionManager singleton is
+            // shared by the main chat provider and the bridge, so this covers both.
+            try
+            {
+                var agentSessions = Services.GetRequiredService<AgentSessionManager>();
+                foreach (var id in ids)
+                    await agentSessions.CloseConversationAsync(id);
+            }
+            catch { /* best-effort teardown; never block the delete */ }
+
             try { await cloudSync.PushDeletedConversationsAsync(ids); }
             catch { /* status event carries failures; keep local delete intact */ }
         };
@@ -643,10 +654,19 @@ public partial class App : Application
             sp.GetRequiredService<AgentSessionManager>(),
             sp.GetRequiredService<AgentHistoryReader>(),
             sp.GetRequiredService<IAgentConfigProvider>()));
-        services.AddSingleton<IRelayProducer>(sp => new HttpRelayProducer(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(MolaGptHttpClient),
-            sp.GetRequiredService<MolaGptAuthService>()));
-        services.AddSingleton<AgentRelayClient>();
+        services.AddSingleton<IRelayProducer>(sp =>
+        {
+            var config = sp.GetRequiredService<IAgentConfigProvider>();
+            return new HttpRelayProducer(
+                sp.GetRequiredService<IHttpClientFactory>().CreateClient(MolaGptHttpClient),
+                sp.GetRequiredService<MolaGptAuthService>(),
+                machineId: config.MachineId,
+                machineName: config.MachineName);
+        });
+        services.AddSingleton(sp => new AgentRelayClient(
+            sp.GetRequiredService<AgentBridgeService>(),
+            sp.GetRequiredService<IRelayProducer>(),
+            sp.GetRequiredService<IAgentConfigProvider>()));
         // Minimal Agent status window (session list + phase, no transcript) and
         // its singleton VM (persists across open/close, subscribes to the bridge).
         services.AddSingleton<AgentBridgeStatusViewModel>();
@@ -830,17 +850,28 @@ public partial class App : Application
 
                     var models = TryDeserializeModels(row.Models);
                     var client = http.CreateClient(ByokHttpClient);
+                    var headers = MolaGPT.ViewModels.CustomParamConverter.ToHeaderListFromJson(row.CustomHeaders);
 
                     IChatProvider? prov = row.Type switch
                     {
-                        "openai" => OpenAIProvider.Create(row.Id, row.Name, apiKey, models, client, row.BaseUrl, row.ApiPath),
+                        "openai" => OpenAIProvider.Create(row.Id, row.Name, apiKey, models, client, row.BaseUrl, row.ApiPath, headers),
                         "openai-compat" => new OpenAICompatibleProvider(row.Id, row.Name,
                             row.BaseUrl ?? OpenAIProvider.DefaultBaseUrl, apiKey, models, client,
                             Services.GetService<IChatToolHost>())
-                            { ChatPath = OpenAICompatibleProvider.ResolveChatPath(row.ApiPath) },
+                            { ChatPath = OpenAICompatibleProvider.ResolveChatPath(row.ApiPath), CustomHeaders = headers },
+                        "openai-response" => new OpenAICompatibleProvider(row.Id, row.Name,
+                            row.BaseUrl ?? OpenAIProvider.DefaultBaseUrl, apiKey, models, client,
+                            Services.GetService<IChatToolHost>())
+                            {
+                                WireApi = OpenAiWireApi.Responses,
+                                ChatPath = string.IsNullOrWhiteSpace(row.ApiPath)
+                                    ? OpenAICompatibleProvider.DefaultResponsesPath
+                                    : row.ApiPath.Trim(),
+                                CustomHeaders = headers
+                            },
                         "anthropic" => new AnthropicProvider(row.Id, row.Name, apiKey, models, client, row.BaseUrl)
-                            { MessagesPath = string.IsNullOrWhiteSpace(row.ApiPath) ? "v1/messages" : row.ApiPath.Trim() },
-                        "gemini" => GeminiProvider.Create(row.Id, row.Name, apiKey, models, client, row.BaseUrl, row.ApiPath),
+                            { MessagesPath = string.IsNullOrWhiteSpace(row.ApiPath) ? "v1/messages" : row.ApiPath.Trim(), CustomHeaders = headers },
+                        "gemini" => GeminiProvider.Create(row.Id, row.Name, apiKey, models, client, row.BaseUrl, row.ApiPath, headers),
                         _ => null
                     };
                     if (prov is not null) registry.Register(prov);
@@ -885,6 +916,7 @@ public partial class App : Application
             {
                 thinkingConfig = new MolaGPT.Core.Models.ThinkingConfig(
                     kind,
+                    EffortLevels: MolaGPT.Core.Models.ThinkingEffortLevels.Normalize(entry.EffortLevels) is { Length: > 0 } levels ? levels : null,
                     MinBudget: entry.ThinkingBudgetMin,
                     MaxBudget: entry.ThinkingBudgetMax,
                     DefaultBudget: entry.ThinkingBudgetDefault,
@@ -900,7 +932,8 @@ public partial class App : Application
             SupportsReasoningEffort: entry.ReasoningEffort,
             SupportsToolCalling: entry.Tools,
             ContextWindow: entry.ContextWindow,
-            ThinkingConfig: thinkingConfig);
+            ThinkingConfig: thinkingConfig,
+            CustomBody: MolaGPT.ViewModels.CustomParamConverter.ToBodyDict(entry.CustomBody));
     }
 
     private static string NormalizeAutoModelDisplayName(string id, string displayName)

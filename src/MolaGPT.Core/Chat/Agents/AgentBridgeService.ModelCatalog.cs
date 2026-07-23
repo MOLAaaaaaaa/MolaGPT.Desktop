@@ -18,7 +18,13 @@ public sealed partial class AgentBridgeService
     private readonly ConcurrentDictionary<string, IReadOnlyList<AgentModelInfo>> _modelCatalog =
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _catalogWarming = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _catalogFingerprint = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, long> _catalogStampMs = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _catalogCts = new();
+
+    /// <summary>Re-discover a backend's catalog at least this often even when the
+    /// config fingerprint looks unchanged (covers provider-side model changes).</summary>
+    private static readonly TimeSpan CatalogMaxAge = TimeSpan.FromMinutes(10);
 
     /// <summary>The models to advertise for a session: its own live catalog when the
     /// process is up (also refreshes the per-backend cache), else the cached catalog.</summary>
@@ -26,7 +32,11 @@ public sealed partial class AgentBridgeService
     {
         if (liveModels is { Count: > 0 })
         {
-            _modelCatalog[backendId] = liveModels; // keep the cache fresh from real sessions
+            // A real session's catalog is authoritative AND current — stamp it so
+            // the staleness check doesn't immediately schedule a throwaway re-scan.
+            _modelCatalog[backendId] = liveModels;
+            _catalogFingerprint[backendId] = ComputeConfigFingerprint(backendId);
+            _catalogStampMs[backendId] = NowMs();
             return liveModels;
         }
         return _modelCatalog.TryGetValue(backendId, out var cached) ? cached : Array.Empty<AgentModelInfo>();
@@ -38,14 +48,71 @@ public sealed partial class AgentBridgeService
     private void BeginWarmUpModelCatalog(string backendId)
     {
         if (string.IsNullOrWhiteSpace(backendId)) return;
-        if (_modelCatalog.ContainsKey(backendId)) return;
+        if (_modelCatalog.ContainsKey(backendId) && !IsCatalogStale(backendId)) return;
         if (!_catalogWarming.TryAdd(backendId, 0)) return; // a warm-up is already in flight
         _ = Task.Run(() => WarmUpModelCatalogAsync(backendId));
+    }
+
+    /// <summary>
+    /// True when a cached catalog can no longer be trusted. The cache used to be
+    /// permanent for the process lifetime, so switching the CLI's provider config
+    /// (e.g. CC Switch rewriting <c>~/.claude/settings.json</c>) left the phone's
+    /// model picker showing the OLD provider's models until the desktop restarted.
+    /// Staleness is decided by a cheap config fingerprint plus a coarse max age.
+    /// </summary>
+    private bool IsCatalogStale(string backendId)
+    {
+        if (!_catalogStampMs.TryGetValue(backendId, out var stampedAt)) return true;
+        if (NowMs() - stampedAt > (long)CatalogMaxAge.TotalMilliseconds) return true;
+        var current = ComputeConfigFingerprint(backendId);
+        return !_catalogFingerprint.TryGetValue(backendId, out var cached)
+            || !string.Equals(cached, current, StringComparison.Ordinal);
+    }
+
+    /// <summary>Cheap signature of everything that can change a backend's model
+    /// catalog: the config files a switcher rewrites, plus the env overrides.
+    /// Only stats files (no parsing, no secrets read into the fingerprint).</summary>
+    internal static string ComputeConfigFingerprint(string backendId, string? homeOverride = null)
+    {
+        var sb = new System.Text.StringBuilder();
+        var home = homeOverride ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+        foreach (var relative in backendId == CodexBackend.BackendId
+            ? new[] { Path.Combine(".codex", "config.toml"), Path.Combine(".codex", "auth.json") }
+            : new[] { Path.Combine(".claude", "settings.json"), Path.Combine(".claude", "settings.local.json"), ".claude.json" })
+        {
+            var path = Path.Combine(home, relative);
+            try
+            {
+                var info = new FileInfo(path);
+                sb.Append(relative).Append('=')
+                  .Append(info.Exists ? info.LastWriteTimeUtc.Ticks : 0).Append(':')
+                  .Append(info.Exists ? info.Length : 0).Append(';');
+            }
+            catch { sb.Append(relative).Append("=err;"); }
+        }
+
+        foreach (var name in backendId == CodexBackend.BackendId
+            ? new[] { "OPENAI_BASE_URL", "OPENAI_API_KEY", "CODEX_MODEL" }
+            : new[] { "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL" })
+        {
+            var value = Environment.GetEnvironmentVariable(name);
+            // Hash rather than embed: the fingerprint only needs to CHANGE when the
+            // credential changes, never to carry it.
+            sb.Append(name).Append('=')
+              .Append(string.IsNullOrEmpty(value) ? "0" : value.GetHashCode().ToString(System.Globalization.CultureInfo.InvariantCulture))
+              .Append(';');
+        }
+
+        return sb.ToString();
     }
 
     private async Task WarmUpModelCatalogAsync(string backendId)
     {
         var discoId = $"__models__-{backendId}";
+        // Snapshot the fingerprint BEFORE discovery so a config edit that lands
+        // mid-warm-up isn't recorded as "already covered" (next pass re-runs).
+        var fingerprint = ComputeConfigFingerprint(backendId);
         try
         {
             var cwd = ModelDiscoveryDir();
@@ -66,10 +133,20 @@ public sealed partial class AgentBridgeService
 
             if (disco.AvailableModels.Count > 0)
             {
+                var previous = _modelCatalog.TryGetValue(backendId, out var old) ? old : null;
                 _modelCatalog[backendId] = disco.AvailableModels;
-                foreach (var e in _sessions.Values.Where(e => e.BackendId == backendId))
-                    SessionMetaChanged?.Invoke(StateOf(e));
-                MarkDirty();
+                _catalogFingerprint[backendId] = fingerprint;
+                _catalogStampMs[backendId] = NowMs();
+
+                // Only re-publish metas when the catalog actually changed — the
+                // refresh now runs periodically, and an unchanged list shouldn't
+                // churn every session's meta on the relay.
+                if (previous is null || !previous.Select(m => m.Id).SequenceEqual(disco.AvailableModels.Select(m => m.Id), StringComparer.Ordinal))
+                {
+                    foreach (var e in _sessions.Values.Where(e => e.BackendId == backendId))
+                        SessionMetaChanged?.Invoke(StateOf(e));
+                    MarkDirty();
+                }
             }
         }
         catch { /* best-effort — the phone just falls back to observed ids until a real turn */ }

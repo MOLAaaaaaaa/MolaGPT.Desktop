@@ -124,6 +124,24 @@ public sealed class AgentSessionManager : IAsyncDisposable
         return await backend.StartSessionAsync(options, ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Peek the live session for a conversation without creating one. Returns
+    /// null when none was ever created, creation is still in flight (or failed),
+    /// or the process has died. Lets the bridge see sessions it did not spawn —
+    /// the desktop chat UI shares this manager — before restart-style operations.
+    /// </summary>
+    public IAgentSession? TryGetLive(string backendId, string? conversationId)
+    {
+        var key = $"{backendId}|{conversationId ?? "draft"}";
+        if (!_sessions.TryGetValue(key, out var lazy) || !lazy.IsValueCreated)
+            return null;
+        var task = lazy.Value;
+        if (!task.IsCompletedSuccessfully)
+            return null;
+        var session = task.Result;
+        return session.IsAlive ? session : null;
+    }
+
     /// <summary>Tear down the session for a conversation (e.g. when it is deleted/closed).</summary>
     public async Task CloseAsync(string backendId, string? conversationId)
     {
@@ -132,6 +150,26 @@ public sealed class AgentSessionManager : IAsyncDisposable
         {
             try { await (await lazy.Value.ConfigureAwait(false)).DisposeAsync().ConfigureAwait(false); }
             catch { /* best-effort */ }
+        }
+    }
+
+    /// <summary>
+    /// Tear down every backend's live session for a conversation. Used when a
+    /// conversation is deleted and the caller doesn't know which backend owned
+    /// it (or both did) — releases the CLI process and its working-directory
+    /// lock. Keys are "{backendId}|{conversationId}", so we match on the suffix.
+    /// </summary>
+    public async Task CloseConversationAsync(string? conversationId)
+    {
+        var suffix = $"|{conversationId ?? "draft"}";
+        foreach (var key in _sessions.Keys.ToArray())
+        {
+            if (!key.EndsWith(suffix, StringComparison.Ordinal)) continue;
+            if (_sessions.TryRemove(key, out var lazy) && lazy.IsValueCreated)
+            {
+                try { await (await lazy.Value.ConfigureAwait(false)).DisposeAsync().ConfigureAwait(false); }
+                catch { /* best-effort */ }
+            }
         }
     }
 

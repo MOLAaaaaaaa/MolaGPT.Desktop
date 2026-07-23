@@ -180,6 +180,7 @@ public partial class MainWindow : Window
         {
             oldMainVm.PropertyChanged -= OnVmPropertyChanged;
             oldMainVm.ConversationList.PropertyChanged -= OnConversationListPropertyChanged;
+            oldMainVm.Composer.MessageSubmitted -= OnComposerMessageSubmitted;
         }
         else if (e.OldValue is INotifyPropertyChanged oldVm)
         {
@@ -190,9 +191,18 @@ public partial class MainWindow : Window
         {
             newVm.PropertyChanged += OnVmPropertyChanged;
             newVm.ConversationList.PropertyChanged += OnConversationListPropertyChanged;
+            newVm.Composer.MessageSubmitted += OnComposerMessageSubmitted;
             // Apply initial state without animation so first paint is right.
             ApplySidebarState(newVm.SidebarCollapsed, animate: false);
         }
+    }
+
+    /// <summary>A fresh send re-attaches bottom-follow even if the user had
+    /// scrolled up, so their new message and the reply come into view.</summary>
+    private void OnComposerMessageSubmitted()
+    {
+        _followStreamBottom = true;
+        QueueMessagesScrollToEnd();
     }
 
     private void OnVmPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -683,6 +693,40 @@ public partial class MainWindow : Window
         QueueMessagesViewportUpdate();
     }
 
+    /// <summary>Open the chat model selector programmatically (e.g. from a failed
+    /// turn's "换个模型" recovery button). Anchors the popup to the header pill.</summary>
+    public void OpenChatModelSelector()
+    {
+        if (ModelSelectorPopup.IsOpen) return;
+        ModelSelectorSearchBox.Text = string.Empty;
+        RebuildModelSelector();
+        ModelSelectorPopup.PlacementTarget = ChatModelSelectorButton;
+        ModelSelectorPopup.IsOpen = true;
+        // Move focus into the popup so its Esc handler receives keys (mirrors the
+        // pill-click path). Without this, Esc would go to whatever opened us.
+        Dispatcher.BeginInvoke(new Action(() => ModelSelectorSearchBox.Focus()), DispatcherPriority.Input);
+    }
+
+    /// <summary>Invoke the composer's working-directory picker (used by the agent
+    /// "选择工作目录" recovery button on a missing-cwd error).</summary>
+    public void TriggerPickWorkingDirectory()
+    {
+        if (DataContext is MainViewModel vm
+            && vm.Composer.PickWorkingDirectoryCommand.CanExecute(null))
+            vm.Composer.PickWorkingDirectoryCommand.Execute(null);
+    }
+
+    /// <summary>Esc dismisses the model selector from anywhere inside it
+    /// (search box, list). Without this the popup only closed on outside-click.</summary>
+    private void ModelSelectorPopup_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            ModelSelectorPopup.IsOpen = false;
+            e.Handled = true;
+        }
+    }
+
     private void OpenModelSelector_Click(object sender, RoutedEventArgs e)
     {
         var opening = !ModelSelectorPopup.IsOpen;
@@ -851,6 +895,8 @@ public partial class MainWindow : Window
         var rows = new List<ModelSelectorRow>();
         var query = ModelSelectorSearchBox?.Text?.Trim() ?? string.Empty;
         var currentMode = vm.Chat.CurrentMode;
+        var activeProviderId = vm.Chat.ActiveProvider?.Id;
+        var activeModelId = vm.Chat.ActiveModel?.Id;
 
         var providers = _providers.Providers
             .OrderBy(prov => prov.DisplayName, StringComparer.CurrentCultureIgnoreCase)
@@ -861,7 +907,7 @@ public partial class MainWindow : Window
         // mode's group is listed first so the user's current pick stays on top.
         var topModes = ModesInChatFamily(currentMode);
         foreach (var mode in topModes)
-            AddModelSelectorModeSection(rows, providers.Where(p => p.ToAppMode() == mode), mode, query);
+            AddModelSelectorModeSection(rows, providers.Where(p => p.ToAppMode() == mode), mode, query, activeProviderId, activeModelId);
 
         // Other section = the modes across the Chat boundary; picking one of these
         // starts a new conversation.
@@ -869,7 +915,7 @@ public partial class MainWindow : Window
             .Where(mode => !topModes.Contains(mode));
         var otherRows = new List<ModelSelectorRow>();
         foreach (var mode in otherModes)
-            AddModelSelectorModeSection(otherRows, providers.Where(p => p.ToAppMode() == mode), mode, query);
+            AddModelSelectorModeSection(otherRows, providers.Where(p => p.ToAppMode() == mode), mode, query, activeProviderId, activeModelId);
 
         if (otherRows.Any(row => row.Model is not null))
         {
@@ -903,7 +949,9 @@ public partial class MainWindow : Window
         ICollection<ModelSelectorRow> rows,
         IEnumerable<IChatProvider> providers,
         AppMode mode,
-        string query)
+        string query,
+        string? activeProviderId,
+        string? activeModelId)
     {
         var addedHeader = false;
         foreach (var prov in providers)
@@ -922,7 +970,11 @@ public partial class MainWindow : Window
             }
 
             foreach (var model in models)
-                rows.Add(ModelSelectorRow.ForModel(prov, model));
+            {
+                var isActive = string.Equals(prov.Id, activeProviderId, StringComparison.Ordinal)
+                               && string.Equals(model.Id, activeModelId, StringComparison.Ordinal);
+                rows.Add(ModelSelectorRow.ForModel(prov, model, isActive));
+            }
         }
     }
 
@@ -1105,13 +1157,15 @@ public sealed class ModelSelectorRow
         string? hintText,
         string? emptyText,
         IChatProvider? provider,
-        ProviderModel? model)
+        ProviderModel? model,
+        bool isActive = false)
     {
         HeaderText = headerText;
         HintText = hintText;
         EmptyText = emptyText;
         Provider = provider;
         Model = model;
+        IsActive = isActive;
     }
 
     public string? HeaderText { get; }
@@ -1119,11 +1173,14 @@ public sealed class ModelSelectorRow
     public string? EmptyText { get; }
     public IChatProvider? Provider { get; }
     public ProviderModel? Model { get; }
+    /// <summary>True for the row matching the conversation's current provider+model.</summary>
+    public bool IsActive { get; }
     public string? ModelName => Model?.DisplayName;
     public Visibility HeaderVisibility => HeaderText is null ? Visibility.Collapsed : Visibility.Visible;
     public Visibility HintVisibility => HintText is null ? Visibility.Collapsed : Visibility.Visible;
     public Visibility EmptyVisibility => EmptyText is null ? Visibility.Collapsed : Visibility.Visible;
     public Visibility ModelVisibility => Model is null ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility ActiveGlyphVisibility => IsActive ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ThinkingVisibility => Model?.SupportsThinking == true ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ToolsVisibility => Model?.SupportsToolCalling == true ? Visibility.Visible : Visibility.Collapsed;
     public Visibility VisionVisibility => Model?.SupportsVision == true ? Visibility.Visible : Visibility.Collapsed;
@@ -1131,5 +1188,6 @@ public sealed class ModelSelectorRow
     public static ModelSelectorRow ForHeader(string text) => new(text, null, null, null, null);
     public static ModelSelectorRow ForHint(string text) => new(null, text, null, null, null);
     public static ModelSelectorRow ForEmpty(string text) => new(null, null, text, null, null);
-    public static ModelSelectorRow ForModel(IChatProvider provider, ProviderModel model) => new(null, null, null, provider, model);
+    public static ModelSelectorRow ForModel(IChatProvider provider, ProviderModel model, bool isActive = false) =>
+        new(null, null, null, provider, model, isActive);
 }

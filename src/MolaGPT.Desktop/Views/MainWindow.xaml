@@ -287,7 +287,20 @@
                         Margin="20,4,16,8"
                         Padding="14,8"
                         Background="{DynamicResource Brush.Bg.Tertiary}"
+                        BorderThickness="1"
                         CornerRadius="{DynamicResource Radius.Sm}">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="BorderBrush" Value="Transparent" />
+                            <Style.Triggers>
+                                <!-- Focus-within: brand-tinted border, matching the
+                                     composer's typing affordance. -->
+                                <DataTrigger Binding="{Binding IsKeyboardFocusWithin, RelativeSource={RelativeSource Self}}" Value="True">
+                                    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
                     <DockPanel LastChildFill="True">
                         <TextBlock DockPanel.Dock="Left"
                                    Text="&#xE721;"
@@ -296,6 +309,15 @@
                                    Foreground="{DynamicResource Brush.Text.Muted}"
                                    VerticalAlignment="Center"
                                    Margin="0,0,8,0" />
+                        <Button DockPanel.Dock="Right"
+                                Style="{StaticResource HeaderIconButton}"
+                                Width="20" Height="20"
+                                Margin="6,0,0,0"
+                                Command="{Binding ConversationList.ClearSearchCommand}"
+                                ToolTip="清空搜索"
+                                Visibility="{Binding ConversationList.HasSearchQuery, Converter={x:Static views:BoolToVisibility.Instance}}">
+                            <TextBlock Text="&#xE711;" FontFamily="{DynamicResource Font.Icon}" FontSize="10" />
+                        </Button>
                         <TextBox Style="{StaticResource InlineTextBox}"
                                  Text="{Binding ConversationList.SearchQuery, UpdateSourceTrigger=PropertyChanged}" />
                     </DockPanel>
@@ -327,6 +349,38 @@
                 </Border>
 
 
+                <!-- Undo toast — appears at the sidebar foot for a few seconds
+                     after a delete. Its visibility gates the whole affordance, so
+                     the command needs no CanExecute plumbing. -->
+                <Border DockPanel.Dock="Bottom"
+                        Margin="14,4,12,12"
+                        Padding="12,8"
+                        Background="{DynamicResource Brush.Bg.Elevated}"
+                        BorderBrush="{DynamicResource Brush.Border}"
+                        BorderThickness="1"
+                        CornerRadius="{DynamicResource Radius.Sm}"
+                        Visibility="{Binding ConversationList.HasPendingUndo, Converter={x:Static views:BoolToVisibility.Instance}}">
+                    <!-- Toast is a floating layer → same soft shadow language as popups. -->
+                    <Border.Effect>
+                        <DropShadowEffect Color="#FF000000"
+                                          BlurRadius="16"
+                                          ShadowDepth="3"
+                                          Direction="270"
+                                          Opacity="0.18" />
+                    </Border.Effect>
+                    <DockPanel LastChildFill="True">
+                        <Button DockPanel.Dock="Right"
+                                Style="{StaticResource TextLinkButton}"
+                                Content="撤销"
+                                Command="{Binding ConversationList.UndoDeleteCommand}" />
+                        <TextBlock Text="{Binding ConversationList.PendingUndoMessage}"
+                                   VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource Brush.Text.Secondary}" />
+                    </DockPanel>
+                </Border>
+
                 <!-- ============================================================
                      Grouped conversation list — BYOK on top, MolaGPT below.
                      Both groups individually collapsible; expansion state
@@ -341,13 +395,28 @@
                     <Grid.Resources>
                         <DataTemplate x:Key="ConversationRowTemplate" DataType="{x:Type vm:ConversationListItem}">
                             <DockPanel LastChildFill="True">
+                                <!-- Trash reveals only on row hover/selection so the
+                                     title stays uncluttered and mis-clicks are rarer.
+                                     Hidden (not Collapsed) keeps the layout stable. -->
                                 <Button DockPanel.Dock="Right"
-                                        Style="{StaticResource HeaderIconButton}"
                                         Width="24" Height="24"
                                         Margin="4,0,0,0"
                                         Command="{Binding DataContext.ConversationList.DeleteConversationCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                         CommandParameter="{Binding Id}"
-                                        ToolTip="删除对话">
+                                        ToolTip="删除对话（可撤销）">
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource HeaderIconButton}">
+                                            <Setter Property="Visibility" Value="Hidden" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
                                     <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource Font.Icon}" FontSize="11" />
                                 </Button>
                                 <TextBlock DockPanel.Dock="Right"
@@ -1111,7 +1180,7 @@
                        PlacementTarget="{Binding ElementName=MessagesScroll}"
                        HorizontalOffset="20"
                        VerticalOffset="-8">
-                    <Grid Margin="14">
+                    <Grid Margin="14" PreviewKeyDown="ModelSelectorPopup_PreviewKeyDown">
                         <Border Background="{DynamicResource Brush.Bg.Elevated}"
                                 BorderBrush="{DynamicResource Brush.Border.Subtle}"
                                 BorderThickness="1"
@@ -1119,6 +1188,15 @@
                                 Padding="6"
                                 MinWidth="280"
                                 MaxHeight="420">
+                            <!-- True floating layer → soft shadow (the reserved
+                                 Margin=14 on the wrapper keeps it unclipped). -->
+                            <Border.Effect>
+                                <DropShadowEffect Color="#FF000000"
+                                                  BlurRadius="24"
+                                                  ShadowDepth="4"
+                                                  Direction="270"
+                                                  Opacity="0.22" />
+                            </Border.Effect>
                             <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
@@ -1141,11 +1219,13 @@
                                         <TextBox x:Name="ModelSelectorSearchBox"
                                                  Style="{StaticResource InlineTextBox}"
                                                  ToolTip="搜索模型"
+                                                 PreviewKeyDown="ModelSelectorPopup_PreviewKeyDown"
                                                  TextChanged="ModelSelectorSearchBox_TextChanged" />
                                     </DockPanel>
                                 </Border>
                                 <ListBox Grid.Row="1"
                                          x:Name="ModelSelectorItems"
+                                         PreviewKeyDown="ModelSelectorPopup_PreviewKeyDown"
                                          Background="Transparent"
                                          BorderThickness="0"
                                          ScrollViewer.CanContentScroll="True"
@@ -1245,6 +1325,14 @@
                                                                            Foreground="{DynamicResource Brush.Text.Muted}" />
                                                             </Border>
                                                         </StackPanel>
+                                                        <TextBlock DockPanel.Dock="Left"
+                                                                   Text="&#xE73E;"
+                                                                   FontFamily="{DynamicResource Font.Icon}"
+                                                                   FontSize="12"
+                                                                   Foreground="{DynamicResource Brush.Primary}"
+                                                                   VerticalAlignment="Center"
+                                                                   Margin="0,0,6,0"
+                                                                   Visibility="{Binding ActiveGlyphVisibility}" />
                                                         <TextBlock Text="{Binding ModelName}"
                                                                    FontSize="13"
                                                                    FontWeight="Medium"

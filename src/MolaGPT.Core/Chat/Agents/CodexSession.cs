@@ -43,6 +43,7 @@ internal sealed partial class CodexSession : IAgentSession
 
     public string BackendId => CodexBackend.BackendId;
     public bool IsAlive => _disposed == 0 && !SafeHasExited();
+    public bool IsTurnActive => _turnGate.CurrentCount == 0;
 
     /// <summary>Codex's app-server thread id — stable across resume, so the bridge
     /// can keep tracking the same conversation.</summary>
@@ -57,7 +58,13 @@ internal sealed partial class CodexSession : IAgentSession
         _process.ErrorDataReceived += (_, e) =>
         {
             if (e.Data is not null)
-                lock (_stderr) _stderr.AppendLine(e.Data);
+                lock (_stderr)
+                {
+                    _stderr.AppendLine(e.Data);
+                    // Stderr only feeds BuildExitError; cap it like ClaudeCodeSession.
+                    if (_stderr.Length > 32 * 1024)
+                        _stderr.Remove(0, _stderr.Length - 16 * 1024);
+                }
         };
         _process.BeginErrorReadLine();
     }
@@ -130,6 +137,9 @@ internal sealed partial class CodexSession : IAgentSession
         await _turnGate.WaitAsync(ct).ConfigureAwait(false);
         var channel = Channel.CreateUnbounded<AgentEvent>(new UnboundedChannelOptions { SingleReader = true });
         _turnChannel = channel;
+        // Approval requests from a previous turn are dead once that turn ended
+        // (app-server cancels them); drop them so abandoned prompts don't leak.
+        _pendingApprovals.Clear();
         try
         {
             // Fire turn/start. The response only confirms the turn object; the

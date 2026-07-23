@@ -37,6 +37,10 @@ public sealed partial class ComposerViewModel : ObservableObject
     [ObservableProperty] private bool _isSending;
     [ObservableProperty] private bool _enterToSend = true;
 
+    /// <summary>Raised right after a user turn is committed to the transcript, so
+    /// the chat view can re-take bottom-follow even if the user had scrolled up.</summary>
+    public event Action? MessageSubmitted;
+
     /// <summary>True when the user has tapped the lightbulb button on a
     /// reasoning-capable model. Becomes <c>use_thinking</c> in the request body.</summary>
     [ObservableProperty] private bool _enableThinking;
@@ -349,24 +353,29 @@ public sealed partial class ComposerViewModel : ObservableObject
         "high" => "高",
         "xhigh" => "极高",
         "max" => "最大",
+        "ultra" => "Ultra",
         // Empty/null: blank so the button doesn't lie about an unset value.
         null or "" => string.Empty,
         // Unknown value: surface it verbatim instead of pretending it's "中".
         var other => other
     };
 
-    public IReadOnlyList<string> AvailableEffortLevels => ActiveThinkingKind switch
+    public IReadOnlyList<string> AvailableEffortLevels
     {
-        MolaGPT.Core.Models.ThinkingParamKind.OpenAiReasoningEffort =>
-            new[] { "none", "minimal", "low", "medium", "high", "xhigh" },
-        MolaGPT.Core.Models.ThinkingParamKind.AnthropicAdaptive =>
-            new[] { "low", "medium", "high", "xhigh", "max" },
-        MolaGPT.Core.Models.ThinkingParamKind.DeepSeekV4 =>
-            new[] { "high", "max" },
-        MolaGPT.Core.Models.ThinkingParamKind.GeminiThinkingLevel =>
-            new[] { "minimal", "low", "medium", "high" },
-        _ => new[] { "low", "medium", "high" }
-    };
+        get
+        {
+            var model = _chat.ActiveModel;
+            var kind = ActiveThinkingKind;
+            var resolved = MolaGPT.Core.Models.ThinkingEffortLevels.Resolve(model?.ThinkingConfig, kind);
+            // OpenAI 模板历史上带 none（关）；若模型未自定义档位，保留兼容。
+            if (kind == MolaGPT.Core.Models.ThinkingParamKind.OpenAiReasoningEffort
+                && (model?.ThinkingConfig?.EffortLevels is null or { Length: 0 }))
+            {
+                return new[] { "none" }.Concat(resolved).ToArray();
+            }
+            return resolved;
+        }
+    }
 
     public bool IsEffortComboVisible => ActiveThinkingKind is not (
         MolaGPT.Core.Models.ThinkingParamKind.AnthropicBudget or
@@ -474,6 +483,9 @@ public sealed partial class ComposerViewModel : ObservableObject
         _chat.AppendUserMessage(userText, BuildAttachmentChips(queuedAttachments));
         var userMsg = _chat.Messages.LastOrDefault(m => m.Role == ChatMessage.RoleUser);
         var assistantMsg = _chat.BeginAssistantMessage();
+        // Re-take bottom-follow now that a new turn exists, so a user who had
+        // scrolled up still sees their message and the incoming reply.
+        MessageSubmitted?.Invoke();
         IsSending = true;
         _chat.IsStreaming = true;
         Attachments.Clear();
@@ -659,6 +671,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         catch (Exception ex)
         {
             assistantMsg.AppendDelta($"\n\n> ❌ **错误**: {ex.Message}");
+            ClassifyActionableError(assistantMsg, ex, provider);
         }
         finally
         {
@@ -1292,6 +1305,32 @@ public sealed partial class ComposerViewModel : ObservableObject
             _chat.IsStreaming = false;
             _cts?.Dispose();
             _cts = null;
+        }
+    }
+
+    /// <summary>Map a failed turn to a one-tap recovery when we recognize the
+    /// cause, so the error banner can offer a fix instead of a dead end. Agent
+    /// "no working directory" → folder picker; balance/402 → model selector.</summary>
+    private static void ClassifyActionableError(MessageViewModel assistantMsg, Exception ex, IChatProvider? provider)
+    {
+        var message = ex.Message ?? string.Empty;
+
+        if (provider?.Kind == ProviderKind.Agent
+            && message.Contains("工作目录", StringComparison.Ordinal))
+        {
+            assistantMsg.SetActionableError(
+                MessageErrorAction.PickWorkingDirectory,
+                "该会话还没有工作目录，选择一个项目文件夹后即可继续。");
+            return;
+        }
+
+        if (message.Contains("402", StringComparison.Ordinal)
+            || message.Contains("Insufficient Balance", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("余额", StringComparison.Ordinal))
+        {
+            assistantMsg.SetActionableError(
+                MessageErrorAction.SwitchModel,
+                "当前模型不可用或余额不足，换一个模型再试。");
         }
     }
 

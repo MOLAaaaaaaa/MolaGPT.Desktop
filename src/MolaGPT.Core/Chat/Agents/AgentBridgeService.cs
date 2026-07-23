@@ -78,6 +78,23 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
     /// to resume on first send.</summary>
     public async Task<IReadOnlyList<AgentSessionStateDto>> ListSessionsAsync(CancellationToken ct = default)
     {
+        // Restore durable stubs FIRST. They carry each conversation's CLI-side
+        // resume id, which the history scan below needs in order to recognise a
+        // transcript as already-owned — doing this second let a phantom Codex
+        // conversation register before its owner was known (and it then stuck,
+        // since GetOrAdd won't replace it).
+        try
+        {
+            foreach (var stub in _config.ListPersistedSessions())
+            {
+                if (_sessions.ContainsKey(stub.ConversationId)) continue;
+                var entry = GetOrCreateEntry(stub.ConversationId, stub.BackendId, stub.WorkingDirectory,
+                    stub.Title, resumeId: stub.ResumeSessionId, updatedAtMs: stub.CreatedAtMs, bridgeManaged: true);
+                if (!string.IsNullOrWhiteSpace(stub.Model)) entry.Model = stub.Model;
+            }
+        }
+        catch { /* stubs are best-effort */ }
+
         // Ensure history sessions are registered as idle bridge entries so a
         // later SendAsync can resume them. Cheap; de-dups by conversationId.
         try
@@ -88,36 +105,30 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
                 // Skip the throwaway model-discovery session (warm-up spawns a CLI in a
                 // temp dir just to read the catalog) so it never shows in the phone's list.
                 if (IsModelDiscoveryPath(e.WorkingDirectory)) continue;
+
                 var fileMs = e.LastModified.ToUnixTimeMilliseconds();
+                var owner = FindOwningConversation(e.SessionId);
+                if (owner is not null)
+                {
+                    // The transcript belongs to a conversation the bridge already
+                    // tracks under its own id — either directly (the ordinary case:
+                    // a Claude session's id IS the conversation id) or via its
+                    // CLI-side ResumeId (Codex self-assigns a threadId that differs
+                    // from ours, so its rollout is discovered under THAT id — see
+                    // AdoptCliSessionId). Either way there is nothing new to
+                    // register; just let the on-disk title/mtime backfill onto the
+                    // owning entry instead of spawning a duplicate.
+                    ApplyHistoryTitle(owner, e.Title, fileMs);
+                    continue;
+                }
+
                 var entry = GetOrCreateEntry(e.SessionId, e.BackendId, e.WorkingDirectory, e.Title,
                     resumeId: e.SessionId,
                     updatedAtMs: fileMs);
-                // GetOrCreateEntry's GetOrAdd only sets UpdatedAtMs on first insert, so a
-                // session first discovered mid-write (e.g. before the assistant answer
-                // was flushed) would freeze its timestamp there and never re-project the
-                // finished file. For an entry the bridge has only seen on disk (no live
-                // turn), the .jsonl is the source of truth — refresh it to the current
-                // file mtime + latest title each listing so the relay re-projects on growth.
-                RefreshHistoryEntry(entry, fileMs, e.Title);
+                ApplyHistoryTitle(entry, e.Title, fileMs);
             }
         }
         catch { /* history is best-effort */ }
-
-        // Re-register remotely-created sessions that have no on-disk transcript yet
-        // (created from the phone but never messaged): without this they live only
-        // in the in-memory map and vanish on restart. resumeId stays null — a
-        // never-started session binds a fresh CLI session on its first send.
-        try
-        {
-            foreach (var stub in _config.ListPersistedSessions())
-            {
-                if (_sessions.ContainsKey(stub.ConversationId)) continue;
-                var entry = GetOrCreateEntry(stub.ConversationId, stub.BackendId, stub.WorkingDirectory,
-                    stub.Title, resumeId: null, updatedAtMs: stub.CreatedAtMs);
-                if (!string.IsNullOrWhiteSpace(stub.Model)) entry.Model = stub.Model;
-            }
-        }
-        catch { /* stubs are best-effort */ }
 
         // Warm up each present backend's model catalog (once) so history-loaded
         // sessions — which have no live process until their first turn — still show
@@ -165,14 +176,17 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
     public Task<AgentSessionStateDto> NewSessionAsync(
         string? conversationId, string backendId, string workingDirectory,
         string? model, string? reasoningEffort, AgentPermissionMode? permissionMode, CodexApprovalPolicy? approvalPolicy,
-        string? title = null, CancellationToken ct = default)
+        string? title = null, CancellationToken ct = default, bool requireExistingWorkingDirectory = false)
     {
         conversationId = NormalizeRequestedConversationId(conversationId);
-        workingDirectory = ResolveInitialWorkingDirectory(workingDirectory, title);
+        workingDirectory = ResolveInitialWorkingDirectory(
+            workingDirectory,
+            title,
+            requireExistingWorkingDirectory);
         _config.SetWorkingDirectory(conversationId, workingDirectory);
 
         var entry = GetOrCreateEntry(conversationId, backendId, workingDirectory,
-            title ?? DefaultTitle(backendId), resumeId: null);
+            title ?? DefaultTitle(backendId), resumeId: null, bridgeManaged: true);
         Mutate(entry, e =>
         {
             e.Model = ResolveModel(model);
@@ -186,8 +200,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         // Persist a durable stub so a remotely-created session that is never messaged
         // (in-memory only until its first send spawns the CLI + writes a transcript)
         // survives a desktop restart instead of vanishing.
-        _config.SaveSession(new AgentPersistedSession(
-            conversationId, backendId, entry.Title, workingDirectory, ResolveModel(model), NowMs()));
+        SaveSessionStub(entry);
 
         // Announce the new session so the relay learns of it (the phase didn't
         // change from Idle, so Mutate wouldn't fire — new-session discovery is
@@ -211,11 +224,16 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         return Guid.NewGuid().ToString("D");
     }
 
-    private static string ResolveInitialWorkingDirectory(string? workingDirectory, string? title)
+    private static string ResolveInitialWorkingDirectory(
+        string? workingDirectory,
+        string? title,
+        bool requireExistingWorkingDirectory = false)
     {
         var trimmed = (workingDirectory ?? string.Empty).Trim();
-        if (!string.IsNullOrEmpty(trimmed))
+        if (!string.IsNullOrEmpty(trimmed) && !requireExistingWorkingDirectory)
             return trimmed;
+        if (!string.IsNullOrEmpty(trimmed) && TryResolveExistingLocalDirectory(trimmed, out var localDirectory))
+            return localDirectory;
 
         var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
         var root = string.IsNullOrWhiteSpace(documents)
@@ -226,6 +244,24 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         var path = Path.Combine(root, date, $"{slug}-{Guid.NewGuid().ToString("N")[..8]}");
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static bool TryResolveExistingLocalDirectory(string value, out string directory)
+    {
+        directory = string.Empty;
+        try
+        {
+            var fullPath = Path.GetFullPath(value);
+            if (!Directory.Exists(fullPath)) return false;
+            directory = fullPath;
+            return true;
+        }
+        catch (Exception)
+        {
+            // A path received from another machine can be syntactically invalid on
+            // this OS as well as non-existent. In either case use Quick Chat.
+            return false;
+        }
     }
 
     private static string? SlugForDirectory(string? value)
@@ -279,6 +315,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         MarkDirty();
 
         IAgentSession? live = null;
+        var turnFailed = false;
         try
         {
             // A mid-turn option change deferred the respawn (so it wouldn't kill the
@@ -297,6 +334,15 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
                 entry.Model, entry.ReasoningEffort,
                 entry.PermissionMode, entry.ApprovalPolicy, token).ConfigureAwait(false);
             entry.LiveSession = live;
+            // Adopt the CLI-side session id NOW, before the turn streams. Codex
+            // fixes its threadId during the handshake (already done inside
+            // GetOrCreateAsync), so CurrentSessionId is available here. A turn can
+            // run for minutes and the snapshot loop lists sessions every ~10s; if
+            // ResumeId were still null then, history discovery would see Codex's
+            // rollout file (named after the threadId, not our conversation id) and
+            // register it as a SECOND, phantom conversation that then sticks.
+            // Setting it only in the finally block left that whole window open.
+            AdoptCliSessionId(entry, live.CurrentSessionId);
             Mutate(entry, e => e.Phase = AgentSessionPhase.Running);
             MarkDirty();
 
@@ -315,6 +361,14 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
                 if (ev.Kind == AgentEventKind.PermissionRequest)
                     Mutate(entry, e => { e.Phase = AgentSessionPhase.Waiting; e.NeedsAttention = true; });
 
+                // An in-band failure (API error, CLI error result) ends the turn
+                // through the NORMAL path — no exception — so without this the
+                // session's meta reported Completed while the transcript carried
+                // a TurnFailed. The phone then showed a finished, healthy session
+                // whose last event was an error.
+                if (ev.Kind == AgentEventKind.Error)
+                    turnFailed = true;
+
                 // Batched flush — same cadence idea as the WPF reducer (33ms),
                 // coarsened since headless state publication is timer-driven.
                 var now = Environment.TickCount64;
@@ -328,7 +382,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
 
             reducer.EndTurn();
             LogAndPublish(entry, new TurnFinalized());
-            Mutate(entry, e => e.Phase = AgentSessionPhase.Completed);
+            Mutate(entry, e => e.Phase = turnFailed ? AgentSessionPhase.Failed : AgentSessionPhase.Completed);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -338,22 +392,35 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
             LogAndPublish(entry, new TurnFinalized());
             Mutate(entry, e => e.Phase = e.NeedsAttention ? AgentSessionPhase.Waiting : AgentSessionPhase.Completed);
         }
+        catch (OperationCanceledException)
+        {
+            // The CALLER's token cancelled (relay/app teardown, not a user
+            // interrupt). Record the partial turn locally, then propagate: a
+            // dispatcher that swallowed this used to report the command as
+            // successfully completed while the CLI kept running — three-way
+            // state divergence (bridge Failed / relay done / CLI alive).
+            reducer.EndTurn();
+            LogAndPublish(entry, new TurnFinalized());
+            Mutate(entry, e => e.Phase = e.NeedsAttention ? AgentSessionPhase.Waiting : AgentSessionPhase.Completed);
+            throw;
+        }
         catch (Exception ex)
         {
             var failure = AgentEvent.Failure(ex.Message);
             LogAndPublish(entry, new CliEventAppended(failure));
             reducer.Apply(failure);
             Mutate(entry, e => e.Phase = AgentSessionPhase.Failed);
+            // Propagate so a command dispatcher records a FAILED result at the
+            // relay (the phone surfaces it) instead of acking success.
+            throw;
         }
         finally
         {
-            // Follow the CLI's real session id so a later respawn resumes THIS
-            // conversation. Claude self-assigns an id when started without
-            // --session-id and can rotate it; the bridge keeps conversationId
-            // stable (what the phone subscribes to) but tracks the CLI id for
-            // the next --resume. Codex returns its stable threadId.
-            if (live?.CurrentSessionId is { } realId && !string.IsNullOrWhiteSpace(realId))
-                entry.ResumeId = realId;
+            // Re-adopt at turn end: Claude only reveals its session id via the
+            // system/init message (mid-stream, not at spawn), and can rotate it on
+            // resume — so this is where Claude's ResumeId lands, while Codex's was
+            // already adopted before streaming.
+            AdoptCliSessionId(entry, live?.CurrentSessionId);
             entry.TurnCts = null;
             MarkDirty();
         }
@@ -368,27 +435,32 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         ReplayEventAppended?.Invoke(e.ConversationId, entry);
     }
 
-    /// <summary>Interrupt the in-flight turn for a session (best-effort).</summary>
+    /// <summary>Interrupt the in-flight turn for a session (best-effort). The
+    /// manager is shared with the desktop chat UI, so fall back to its live
+    /// session when the bridge didn't spawn the process itself — a phone Stop
+    /// must also reach a desktop-UI-driven turn.</summary>
     public async Task InterruptAsync(string conversationId, CancellationToken ct = default)
     {
         if (!_sessions.TryGetValue(conversationId, out var entry)) return;
         try { entry.TurnCts?.Cancel(); } catch { /* best-effort */ }
-        if (entry.LiveSession is { } live)
+        var live = entry.LiveSession ?? _manager.TryGetLive(entry.BackendId, conversationId);
+        if (live is not null)
         {
             try { await live.InterruptAsync(ct).ConfigureAwait(false); } catch { /* best-effort */ }
         }
     }
 
     /// <summary>Resolve a pending permission prompt by sending the choice back
-    /// into the live backend protocol.</summary>
+    /// into the live backend protocol (bridge-owned or shared-manager-owned).</summary>
     public async Task ApproveAsync(string conversationId, string permissionId, AgentPermissionChoice choice, CancellationToken ct = default)
     {
         if (!_sessions.TryGetValue(conversationId, out var entry))
             return;
-        if (entry.LiveSession is null)
+        var live = entry.LiveSession ?? _manager.TryGetLive(entry.BackendId, conversationId);
+        if (live is null)
             throw new InvalidOperationException("没有可处理权限回传的活动 CLI 会话。");
 
-        await entry.LiveSession.ApproveAsync(permissionId, choice, ct).ConfigureAwait(false);
+        await live.ApproveAsync(permissionId, choice, ct).ConfigureAwait(false);
 
         Mutate(entry, e =>
         {
@@ -411,8 +483,12 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         if (!_sessions.TryGetValue(conversationId, out var entry)) return;
 
         // Try to switch the model on the RUNNING process first (keeps context).
+        // The manager is shared with the desktop chat UI, so the live process may
+        // exist even when the bridge never spawned it (entry.LiveSession null).
+        var managerLive = _manager.TryGetLive(entry.BackendId, conversationId);
+        var live = entry.LiveSession is { IsAlive: true } bridgeLive ? bridgeLive : managerLive;
         var modelSwitchedLive = false;
-        if (model is not null && entry.LiveSession is { IsAlive: true } live)
+        if (model is not null && live is { IsAlive: true })
         {
             try { modelSwitchedLive = await live.SetModelAsync(ResolveModel(model), ct).ConfigureAwait(false); }
             catch { modelSwitchedLive = false; }
@@ -438,20 +514,31 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         if (needsRespawn)
         {
             // Don't kill an in-flight turn — disposing the live process mid-turn surfaces
-            // on the phone as "Claude Code process ended unexpectedly". If a turn is
-            // running, defer: the NEXT send respawns under the new options at a turn
-            // boundary. Otherwise drop the idle process now. Keep ResumeId either way so
-            // the respawn RESUMES the same conversation (nulling it was an earlier bug).
-            if (entry.TurnCts is not null)
+            // on the phone as "Claude Code process ended unexpectedly". Two owners can
+            // have a turn running: the bridge (entry.TurnCts) and the desktop chat UI,
+            // which drives the SAME manager-held process without the bridge knowing
+            // (IsTurnActive covers both). If either is mid-turn, defer: the NEXT bridge
+            // send respawns under the new options at a turn boundary. Keep ResumeId
+            // either way so the respawn RESUMES the same conversation.
+            if (entry.TurnCts is not null || managerLive is { IsTurnActive: true })
             {
                 entry.PendingRespawn = true;
             }
-            else
+            else if (entry.LiveSession is not null)
             {
                 entry.LiveSession = null;
                 try { await _manager.CloseAsync(entry.BackendId, conversationId).ConfigureAwait(false); }
                 catch { /* best-effort */ }
             }
+            else if (managerLive is not null)
+            {
+                // The manager holds an idle live process the bridge never spawned —
+                // the desktop chat UI owns it. Closing it here would break that UI
+                // conversation (its next turn can't rebind the same --session-id), so
+                // defer to the next bridge turn boundary instead.
+                entry.PendingRespawn = true;
+            }
+            // else: nothing is live anywhere; the next spawn picks up the new options.
         }
         // else: the live model switch was enough — the process stays up, context intact.
 
@@ -474,30 +561,141 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
 
     private BridgeSession GetOrCreateEntry(
         string conversationId, string backendId, string workingDirectory,
-        string title, string? resumeId, long? updatedAtMs = null)
+        string title, string? resumeId, long? updatedAtMs = null, bool bridgeManaged = false)
         => _sessions.GetOrAdd(conversationId, id => new BridgeSession(id, backendId, workingDirectory, title)
         {
             ResumeId = resumeId,
             PermissionMode = _config.PermissionMode,
             ApprovalPolicy = backendId == CodexBackend.BackendId ? CodexApprovalPolicy.OnRequest : null,
             UpdatedAtMs = updatedAtMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            IsBridgeManaged = bridgeManaged,
         });
 
-    /// <summary>Keep a discovered on-disk (history) entry's <c>UpdatedAtMs</c> and
-    /// title in sync with the live file. Only touches entries the bridge has never
-    /// run a live turn on (no <see cref="BridgeSession.LiveSession"/>, empty event
-    /// log) — a bridge-owned live session keeps its own monotonically-bumped
-    /// timestamp. UpdatedAtMs only moves forward. This is what lets the relay's
-    /// history projection re-fire after the underlying .jsonl grows.</summary>
-    private static void RefreshHistoryEntry(BridgeSession entry, long fileMs, string title)
+    /// <summary>Write (or refresh) this conversation's durable stub. Best-effort:
+    /// a settings-store failure must never break a turn.</summary>
+    private void SaveSessionStub(BridgeSession e)
     {
+        try
+        {
+            string title, cwd, resumeId;
+            string? model;
+            long createdAtMs;
+            lock (e.StateLock)
+            {
+                title = e.Title;
+                cwd = e.WorkingDirectory;
+                model = e.Model;
+                createdAtMs = e.UpdatedAtMs;
+                resumeId = e.ResumeId ?? string.Empty;
+            }
+            _config.SaveSession(new AgentPersistedSession(
+                e.ConversationId, e.BackendId, title, cwd, model, createdAtMs,
+                string.IsNullOrWhiteSpace(resumeId) ? null : resumeId));
+        }
+        catch { /* stubs are best-effort */ }
+    }
+
+    /// <summary>Bind the CLI's own session id to this conversation as its
+    /// ResumeId, persist the link, and evict any phantom history entry already
+    /// registered under that id. Codex self-assigns a threadId, so a snapshot that
+    /// ran mid-turn (before this adoption) can register Codex's rollout as a
+    /// duplicate; this both closes the window (called right after spawn) and
+    /// self-heals a phantom that slipped through.</summary>
+    private void AdoptCliSessionId(BridgeSession entry, string? cliSessionId)
+    {
+        if (string.IsNullOrWhiteSpace(cliSessionId)) return;
+
+        var changed = !string.Equals(entry.ResumeId, cliSessionId, StringComparison.Ordinal);
+        entry.ResumeId = cliSessionId;
+
+        // Only Codex diverges (CLI id != conversation id); Claude binds via
+        // --session-id so the entry under that id IS this one (ReferenceEquals) and
+        // nothing is evicted. A phantom is history-only.  Do not infer that
+        // durable ownership from LiveSession/EventLog: both are empty again after
+        // every desktop restart, while IsBridgeManaged survives via the stub.
+        if (!string.Equals(cliSessionId, entry.ConversationId, StringComparison.Ordinal)
+            && _sessions.TryGetValue(cliSessionId, out var phantom)
+            && !ReferenceEquals(phantom, entry)
+            && !phantom.IsBridgeManaged)
+        {
+            if (_sessions.TryRemove(new KeyValuePair<string, BridgeSession>(cliSessionId, phantom)))
+            {
+                _config.ForgetSession(cliSessionId);
+                MarkDirty();
+            }
+        }
+
+        if (changed) SaveSessionStub(entry);
+    }
+
+    /// <summary>
+    /// Find the BridgeSession that owns an on-disk transcript — whether directly
+    /// (its ConversationId matches the transcript's session id: the ordinary case
+    /// for Claude, whose --session-id binds the two together) or via its CLI-side
+    /// ResumeId (Codex self-assigns a threadId different from ours; see
+    /// <see cref="AdoptCliSessionId"/>). Null when no tracked conversation claims
+    /// this transcript yet — the caller should register it as a new entry.
+    /// </summary>
+    private BridgeSession? FindOwningConversation(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId)) return null;
+        foreach (var e in _sessions.Values)
+        {
+            if (string.Equals(e.ConversationId, sessionId, StringComparison.Ordinal)) return e;
+            if (string.Equals(e.ResumeId, sessionId, StringComparison.Ordinal)) return e;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Backfill an on-disk title (and, for a history-only entry, its file mtime)
+    /// onto the BridgeSession that owns this transcript.
+    ///
+    /// History-only entries (<see cref="BridgeSession.IsBridgeManaged"/> false —
+    /// pure disk discoveries: a desktop chat window's own session, or a raw
+    /// terminal run) behave as before: the .jsonl is authoritative, so both title
+    /// and UpdatedAtMs track it fully — that lets the relay's history projection
+    /// re-fire as the file grows.
+    ///
+    /// Bridge-managed entries (the bridge itself created it — phone New, or a
+    /// durable stub restored from one) used to be skipped here entirely, which is
+    /// why a phone-created session was frozen forever at "新 Codex 会话" / "新
+    /// Claude Code 会话": nothing else ever wrote a real title for it. The on-disk
+    /// title now backfills for these too — but ONLY while the title is still that
+    /// generic default, so a name the user set (or Claude's own AI-derived title)
+    /// is never clobbered — and Phase/UpdatedAtMs (bridge-authoritative for these)
+    /// are left untouched.
+    ///
+    /// Deliberately gated on the persisted <see cref="BridgeSession.IsBridgeManaged"/>
+    /// flag rather than "does it currently have a live process or event log" —
+    /// those reset to empty on every desktop restart, which let a restarted
+    /// bridge treat a just-restored, not-yet-turned bridge-managed entry as
+    /// history-only again and clobber its custom title on the very first scan.
+    /// </summary>
+    private void ApplyHistoryTitle(BridgeSession entry, string title, long fileMs)
+    {
+        bool titleChanged;
         lock (entry.StateLock)
         {
-            if (entry.LiveSession is not null || entry.EventLog.Seq > 0) return;
-            if (fileMs > entry.UpdatedAtMs) entry.UpdatedAtMs = fileMs;
-            if (!string.IsNullOrWhiteSpace(title) && title != entry.Title) entry.Title = title;
+            if (!entry.IsBridgeManaged)
+            {
+                if (fileMs > entry.UpdatedAtMs) entry.UpdatedAtMs = fileMs;
+                titleChanged = !string.IsNullOrWhiteSpace(title) && title != entry.Title;
+            }
+            else
+            {
+                titleChanged = !string.IsNullOrWhiteSpace(title)
+                    && title != entry.Title
+                    && IsDefaultTitle(entry.Title, entry.BackendId);
+            }
+            if (titleChanged) entry.Title = title;
         }
+        if (titleChanged) MarkDirty();
     }
+
+    private static bool IsDefaultTitle(string? title, string backendId)
+        => string.IsNullOrWhiteSpace(title)
+           || string.Equals(title, DefaultTitle(backendId), StringComparison.Ordinal);
 
     private static string? ResolveModel(string? model) =>
         string.IsNullOrWhiteSpace(model) || model == DefaultModelLabel ? null : model;
@@ -712,6 +910,19 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         public AsyncSemaphore Gate { get; }
         public IAgentSession? LiveSession { get; set; }
         public CancellationTokenSource? TurnCts { get; set; }
+
+        /// <summary>
+        /// True for a conversation the bridge itself created (phone New, or a
+        /// durable stub restored from one) — as opposed to one purely discovered
+        /// on disk (a desktop chat window's own session, or a raw terminal run).
+        /// Deliberately NOT derived from <see cref="LiveSession"/>/<see cref="EventLog"/>
+        /// (both reset to empty on every process restart): using those as the
+        /// signal let a restarted bridge treat a just-restored, not-yet-turned
+        /// bridge-managed entry as "history-only" again, so the very next history
+        /// scan clobbered its user-chosen title with the raw on-disk first
+        /// message. This flag is set once at creation/restore and never resets.
+        /// </summary>
+        public bool IsBridgeManaged { get; set; }
 
         /// <summary>An option change arrived mid-turn; respawn under the new options
         /// at the next turn boundary instead of killing the running process.</summary>

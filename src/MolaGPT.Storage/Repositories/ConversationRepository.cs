@@ -77,6 +77,23 @@ public sealed class ConversationRepository
     }
 
     /// <summary>
+    /// Reverse a soft-delete by clearing the tombstone. Backs the sidebar's
+    /// "undo delete" affordance. We only touch <c>deleted_at</c> and leave
+    /// <c>updated_at</c> untouched so the row returns to its exact prior
+    /// ordering; cloud sync re-learns the active state on its next pass.
+    /// </summary>
+    public void RestoreMany(IReadOnlyList<string> ids)
+    {
+        if (ids.Count == 0) return;
+        using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
+        foreach (var id in ids)
+            conn.Execute("UPDATE conversations SET deleted_at = NULL WHERE id = @id",
+                new { id }, tx);
+        tx.Commit();
+    }
+
+    /// <summary>
     /// Hard-deletes only the "metadata-only placeholder" conversations of a
     /// provider — active rows (<c>deleted_at IS NULL</c>) that have no rows in
     /// the messages table (i.e. cloud list entries that were never

@@ -22,6 +22,12 @@
                 <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Strong}" />
                 <Setter Property="BorderThickness" Value="1.5" />
                 <Style.Triggers>
+                    <!-- Focus-within: brand-tinted border while typing, so the
+                         active input surface reads at a glance. Image-generation
+                         mode below intentionally wins (full primary border). -->
+                    <DataTrigger Binding="{Binding IsKeyboardFocusWithin, RelativeSource={RelativeSource Self}}" Value="True">
+                        <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+                    </DataTrigger>
                     <DataTrigger Binding="{Binding IsImageGenerationMode}" Value="True">
                         <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
                     </DataTrigger>

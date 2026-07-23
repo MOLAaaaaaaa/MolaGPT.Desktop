@@ -10,6 +10,16 @@ using MolaGPT.Core.Models;
 
 namespace MolaGPT.ViewModels;
 
+/// <summary>A one-tap recovery offered on a failed turn's error banner.</summary>
+public enum MessageErrorAction
+{
+    None = 0,
+    /// <summary>Balance/model failure (e.g. HTTP 402) — open the model selector.</summary>
+    SwitchModel,
+    /// <summary>Agent turn with no working directory — open the folder picker.</summary>
+    PickWorkingDirectory
+}
+
 /// <summary>
 /// One row in the chat scroll viewer. Content is the raw markdown source;
 /// MarkdownPresenter re-renders it on every chunk (throttled).
@@ -79,6 +89,36 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
 
     /// <summary>Wall-clock seconds since reasoning started.</summary>
     [ObservableProperty] private double _thinkingElapsedSeconds;
+
+    /// <summary>When a turn fails with a recoverable cause, the view shows a small
+    /// banner with a one-tap fix (switch model / pick a working directory) instead
+    /// of leaving the user to hunt for the control. <see cref="MessageErrorAction.None"/>
+    /// hides it.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasActionError))]
+    [NotifyPropertyChangedFor(nameof(ActionErrorButtonLabel))]
+    private MessageErrorAction _errorAction = MessageErrorAction.None;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasActionError))]
+    private string? _actionErrorText;
+
+    public bool HasActionError => ErrorAction != MessageErrorAction.None
+                                  && !string.IsNullOrWhiteSpace(ActionErrorText);
+
+    public string ActionErrorButtonLabel => ErrorAction switch
+    {
+        MessageErrorAction.SwitchModel => "换个模型",
+        MessageErrorAction.PickWorkingDirectory => "选择工作目录",
+        _ => string.Empty
+    };
+
+    /// <summary>Attach a recoverable-error banner to this (assistant) message.</summary>
+    public void SetActionableError(MessageErrorAction action, string text)
+    {
+        ActionErrorText = text;
+        ErrorAction = action;
+    }
 
     public bool HasThinking => !string.IsNullOrEmpty(Thinking);
     public bool HasActions => Role == "assistant" && !IsStreaming && !IsPending && !string.IsNullOrWhiteSpace(Content);
@@ -1018,16 +1058,38 @@ public sealed partial class ToolCallViewModel : ObservableObject
     public void Apply(ToolCallDelta delta)
     {
         Status = delta.Status;
-        Label = string.IsNullOrWhiteSpace(delta.Label) ? ToolLabelFor(delta.Name) : delta.Label!;
-        Summary = delta.Summary;
-        Detail = delta.Detail;
-        ArgumentsJson = string.IsNullOrWhiteSpace(delta.ArgumentsJson) && IsSearch
+
+        // Deltas are partial. A tool surfaces across multiple phases: the call
+        // phase carries the name + arguments, while a later result/echo phase may
+        // omit them (Claude Code's tool_result echo has no tool name and sends
+        // "tool" as a placeholder, with no input). Never let a blank or
+        // placeholder value clobber the good value an earlier phase established.
+        if (!string.IsNullOrWhiteSpace(delta.Label))
+            Label = delta.Label!;
+        else if (!string.IsNullOrWhiteSpace(delta.Name) && !IsPlaceholderToolName(delta.Name))
+            Label = ToolLabelFor(delta.Name);
+
+        if (!string.IsNullOrWhiteSpace(delta.Summary)) Summary = delta.Summary;
+        if (!string.IsNullOrWhiteSpace(delta.Detail)) Detail = delta.Detail;
+
+        var incomingArgs = string.IsNullOrWhiteSpace(delta.ArgumentsJson) && IsSearch
             ? BuildSearchArgumentsFromSummary(delta.Summary)
             : delta.ArgumentsJson;
-        ResultPreviewJson = delta.ResultPreviewJson;
-        Provider = delta.Provider;
+        if (!string.IsNullOrWhiteSpace(incomingArgs))
+            ArgumentsJson = incomingArgs;
+
+        if (!string.IsNullOrWhiteSpace(delta.ResultPreviewJson))
+            ResultPreviewJson = delta.ResultPreviewJson;
+
+        if (!string.IsNullOrWhiteSpace(delta.Provider)) Provider = delta.Provider;
         RefreshComputed();
     }
+
+    /// <summary>Placeholder tool names carried by phases that don't actually know
+    /// the tool (Claude Code's tool_result echo sends "tool"). We must not let
+    /// these overwrite the real label captured from the call phase.</summary>
+    private static bool IsPlaceholderToolName(string? name) =>
+        string.IsNullOrWhiteSpace(name) || string.Equals(name, "tool", StringComparison.OrdinalIgnoreCase);
 
     partial void OnStatusChanged(string value) => RefreshComputed();
     partial void OnSummaryChanged(string? value) => OnPropertyChanged(nameof(HasSummary));
@@ -1063,6 +1125,20 @@ public sealed partial class ToolCallViewModel : ObservableObject
         "read_file" => "读取文件",
         "glob_files" => "查找文件",
         "grep_files" => "搜索内容",
+        // Claude Code / Codex agent tools (PascalCase). Friendly labels so the
+        // console cards read naturally instead of bare English tool names.
+        "Read" => "读取文件",
+        "Write" => "写入文件",
+        "Edit" or "MultiEdit" => "编辑文件",
+        "Bash" or "BashOutput" => "命令执行",
+        "Glob" => "查找文件",
+        "Grep" => "搜索内容",
+        "Task" => "子任务",
+        "WebFetch" => "网页阅读",
+        "WebSearch" => "联网搜索",
+        "TodoWrite" => "任务清单",
+        "NotebookEdit" => "编辑笔记本",
+        "apply_patch" => "应用补丁",
         _ => string.IsNullOrWhiteSpace(name) ? "工具调用" : name
     };
 

@@ -24,11 +24,16 @@ internal sealed partial class ClaudeCodeSession : IAgentSession
     private readonly ConcurrentDictionary<string, JsonElement> _pendingApprovals = new(StringComparer.Ordinal);
     private readonly Task _readerTask;
     private readonly StringBuilder _stderr = new();
+    // Stderr is only surfaced by BuildExitError; keep just the newest tail so a
+    // chatty long-lived process cannot grow it without bound.
+    private const int StderrCapChars = 32 * 1024;
+    private const int StderrKeepChars = 16 * 1024;
     private volatile string? _currentSessionId;
     private int _disposed;
 
     public string BackendId => ClaudeCodeBackend.BackendId;
     public bool IsAlive => _disposed == 0 && !SafeHasExited();
+    public bool IsTurnActive => _turnGate.CurrentCount == 0;
 
     /// <summary>Claude's own session id, captured from the <c>system/init</c>
     /// message. The bridge reads this after a turn to resume the right session
@@ -48,7 +53,12 @@ internal sealed partial class ClaudeCodeSession : IAgentSession
         _process.ErrorDataReceived += (_, e) =>
         {
             if (e.Data is not null)
-                lock (_stderr) _stderr.AppendLine(e.Data);
+                lock (_stderr)
+                {
+                    _stderr.AppendLine(e.Data);
+                    if (_stderr.Length > StderrCapChars)
+                        _stderr.Remove(0, _stderr.Length - StderrKeepChars);
+                }
         };
         _process.BeginErrorReadLine();
 
@@ -64,6 +74,20 @@ internal sealed partial class ClaudeCodeSession : IAgentSession
         await _turnGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            // The channel is shared across turns (one persistent reader loop). A
+            // previous turn abandoned mid-stream (interrupt / caller cancellation)
+            // leaves its trailing events buffered here; without this drain the next
+            // turn would misattribute that stale tail as its own opening output.
+            // Anything buffered BEFORE we write the new user message belongs to a
+            // previous turn by construction. (Interrupts also ask the CLI to end
+            // the turn, so the still-flushing window after this drain is small.)
+            while (_channel.Reader.TryRead(out _)) { }
+
+            // Approvals left over from a previous turn can no longer be answered —
+            // the CLI cancels its can_use_tool requests when that turn ends — so
+            // drop them here instead of letting abandoned prompts accumulate.
+            _pendingApprovals.Clear();
+
             await WriteUserMessageAsync(input, ct).ConfigureAwait(false);
 
             while (true)

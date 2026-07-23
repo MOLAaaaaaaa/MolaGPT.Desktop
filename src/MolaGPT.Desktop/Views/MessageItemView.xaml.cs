@@ -79,6 +79,25 @@ public partial class MessageItemView : UserControl
         CopyText(GetCleanMarkdownForCopy(vm.Content));
     }
 
+    /// <summary>The one-tap recovery on a failed turn's error banner. Dispatches
+    /// to the matching control on the owning window so the user can fix and retry
+    /// without hunting for it.</summary>
+    private void ErrorActionButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MessageViewModel vm) return;
+        if (Window.GetWindow(this) is not MainWindow window) return;
+
+        switch (vm.ErrorAction)
+        {
+            case MessageErrorAction.SwitchModel:
+                window.OpenChatModelSelector();
+                break;
+            case MessageErrorAction.PickWorkingDirectory:
+                window.TriggerPickWorkingDirectory();
+                break;
+        }
+    }
+
     private void CopyMessage_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: MessageViewModel vm })

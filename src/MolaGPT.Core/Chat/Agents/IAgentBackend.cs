@@ -108,6 +108,12 @@ public interface IAgentSession : IAsyncDisposable
     /// <summary>True while the underlying process is alive.</summary>
     bool IsAlive { get; }
 
+    /// <summary>True while a turn is being streamed on this session — regardless
+    /// of which owner (bridge command, desktop chat UI) started it. The bridge
+    /// consults this before restart-style operations (e.g. option respawn) so a
+    /// turn it did not dispatch is never killed mid-flight.</summary>
+    bool IsTurnActive => false;
+
     /// <summary>
     /// The CLI's own session/thread id for the live conversation, captured from
     /// the backend handshake (Claude <c>system/init.session_id</c>, Codex

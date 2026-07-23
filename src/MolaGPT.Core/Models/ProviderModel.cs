@@ -1,5 +1,7 @@
 namespace MolaGPT.Core.Models;
 
+using System.Text.Json;
+
 public enum ThinkingParamKind
 {
     None,
@@ -19,6 +21,40 @@ public sealed record ThinkingConfig(
     int? MaxBudget = null,
     int? DefaultBudget = null,
     string? DefaultEffort = null);
+
+public static class ThinkingEffortLevels
+{
+    public static string[] ForKind(ThinkingParamKind kind) => kind switch
+    {
+        ThinkingParamKind.OpenAiReasoningEffort => ["minimal", "low", "medium", "high", "xhigh"],
+        ThinkingParamKind.AnthropicAdaptive => ["low", "medium", "high", "xhigh", "max"],
+        ThinkingParamKind.DeepSeekV4 => ["high", "max"],
+        ThinkingParamKind.GeminiThinkingLevel => ["minimal", "low", "medium", "high"],
+        ThinkingParamKind.AnthropicBudget or ThinkingParamKind.GeminiBudget or ThinkingParamKind.QwenThinkingBudget
+            => ["low", "medium", "high"],
+        _ => ["low", "medium", "high"]
+    };
+
+    public static string[] Resolve(ThinkingConfig? config, ThinkingParamKind kind)
+    {
+        var custom = Normalize(config?.EffortLevels);
+        return custom.Length > 0 ? custom : ForKind(kind);
+    }
+
+    public static string[] Normalize(IEnumerable<string>? levels)
+    {
+        if (levels is null) return [];
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var list = new List<string>();
+        foreach (var raw in levels)
+        {
+            var v = (raw ?? "").Trim().ToLowerInvariant();
+            if (v.Length == 0 || !seen.Add(v)) continue;
+            list.Add(v);
+        }
+        return list.ToArray();
+    }
+}
 
 public static class ThinkingParamKindInference
 {
@@ -66,4 +102,5 @@ public sealed record ProviderModel(
     int? ContextWindow = null,
     int? MaxOutputTokens = null,
     string? Description = null,
-    ThinkingConfig? ThinkingConfig = null);
+    ThinkingConfig? ThinkingConfig = null,
+    IReadOnlyDictionary<string, JsonElement>? CustomBody = null);

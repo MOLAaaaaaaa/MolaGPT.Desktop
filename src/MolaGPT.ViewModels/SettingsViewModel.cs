@@ -150,7 +150,8 @@ public sealed partial class SettingsViewModel : ObservableObject
             if (row.ApiKeyEnc is { Length: > 0 } && _credentialStore is not null)
                 plainKey = _credentialStore.Decrypt(row.ApiKeyEnc);
             var models = TryDeserializeModels(row.Models);
-            Providers.Add(new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat));
+            var customHeaders = TryDeserializeHeaders(row.CustomHeaders);
+            Providers.Add(new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat, customHeaders));
         }
         RefreshVisionProviderModels();
         RefreshImageGenerationProviderModels();
@@ -586,7 +587,10 @@ public sealed partial class SettingsViewModel : ObservableObject
             Purpose: entry.Purpose,
             ApiPath: entry.ApiPath,
             ImageEditPath: entry.ImageEditPath,
-            ImageFormat: entry.ImageFormat));
+            ImageFormat: entry.ImageFormat,
+            CustomHeaders: entry.CustomHeaders is { Count: > 0 }
+                ? JsonSerializer.Serialize(entry.CustomHeaders)
+                : null));
         RefreshVisionProviderModels();
         RefreshImageGenerationProviderModels();
 
@@ -876,6 +880,13 @@ public sealed partial class SettingsViewModel : ObservableObject
         catch (JsonException) { return new(); }
     }
 
+    private static List<CustomHeaderEntry>? TryDeserializeHeaders(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try { return JsonSerializer.Deserialize<List<CustomHeaderEntry>>(json); }
+        catch (JsonException) { return null; }
+    }
+
     public static bool IsImagePurpose(string? purpose) =>
         string.Equals(purpose, "image", StringComparison.OrdinalIgnoreCase);
 
@@ -910,7 +921,8 @@ public sealed record ProviderEntry(
     string Purpose = "chat",                               // 用途: chat|image
     string? ApiPath = null,                                // chat: 对话路径; image: 生成路径 (含版本段)
     string? ImageEditPath = null,                          // image(openai-images): 编辑路径
-    string? ImageFormat = null);                           // image: openai-images|openai-chat-image
+    string? ImageFormat = null,                            // image: openai-images|openai-chat-image
+    List<CustomHeaderEntry>? CustomHeaders = null);        // BYOK: 附加到该服务全部请求的自定义请求头
 
 public sealed record ProviderModelEntry(
     string Id,
@@ -926,7 +938,80 @@ public sealed record ProviderModelEntry(
     int? ThinkingBudgetDefault = null,
     string? DefaultEffort = null,
     string? SystemPrompt = null,
-    bool ImageEdit = false);
+    bool ImageEdit = false,
+    List<CustomBodyEntry>? CustomBody = null,
+    List<string>? EffortLevels = null);             // BYOK: 覆写/追加推理强度档位（如 max、ultra）
+
+/// <summary>A user-defined HTTP header appended to a BYOK provider's requests.</summary>
+public sealed record CustomHeaderEntry(string Name = "", string Value = "");
+
+/// <summary>A user-defined request-body override for a BYOK model. <see cref="Type"/>
+/// is one of string|number|boolean|json and controls how <see cref="Value"/> is parsed.</summary>
+public sealed record CustomBodyEntry(string Key = "", string Type = "string", string Value = "");
+
+/// <summary>Converts persisted <see cref="CustomBodyEntry"/>/<see cref="CustomHeaderEntry"/>
+/// lists into the runtime forms the providers consume.</summary>
+public static class CustomParamConverter
+{
+    public static IReadOnlyDictionary<string, System.Text.Json.JsonElement>? ToBodyDict(IReadOnlyList<CustomBodyEntry>? entries)
+    {
+        if (entries is null || entries.Count == 0) return null;
+        var dict = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.Ordinal);
+        foreach (var e in entries)
+        {
+            if (string.IsNullOrWhiteSpace(e.Key)) continue;
+            dict[e.Key.Trim()] = ConvertValue(e.Type, e.Value);
+        }
+        return dict.Count == 0 ? null : dict;
+    }
+
+    public static IReadOnlyList<KeyValuePair<string, string>>? ToHeaderList(IReadOnlyList<CustomHeaderEntry>? entries)
+    {
+        if (entries is null || entries.Count == 0) return null;
+        var list = entries
+            .Where(h => !string.IsNullOrWhiteSpace(h.Name))
+            .Select(h => new KeyValuePair<string, string>(h.Name.Trim(), h.Value ?? string.Empty))
+            .ToList();
+        return list.Count == 0 ? null : list;
+    }
+
+    /// <summary>Deserializes a persisted <c>custom_headers</c> JSON blob into the runtime
+    /// header list. Tolerant: returns null on missing/invalid JSON.</summary>
+    public static IReadOnlyList<KeyValuePair<string, string>>? ToHeaderListFromJson(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try { return ToHeaderList(System.Text.Json.JsonSerializer.Deserialize<List<CustomHeaderEntry>>(json)); }
+        catch (System.Text.Json.JsonException) { return null; }
+    }
+
+    private static System.Text.Json.JsonElement ConvertValue(string? type, string? value)
+    {
+        value ??= string.Empty;
+        switch (type?.Trim().ToLowerInvariant())
+        {
+            case "number":
+                if (long.TryParse(value, out var l))
+                    return System.Text.Json.JsonSerializer.SerializeToElement(l);
+                if (double.TryParse(value, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d))
+                    return System.Text.Json.JsonSerializer.SerializeToElement(d);
+                return System.Text.Json.JsonSerializer.SerializeToElement(value);
+            case "boolean":
+                return System.Text.Json.JsonSerializer.SerializeToElement(bool.TryParse(value, out var b) && b);
+            case "json":
+                try
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(value);
+                    return doc.RootElement.Clone();
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    return System.Text.Json.JsonSerializer.SerializeToElement(value);
+                }
+            default: // "string"
+                return System.Text.Json.JsonSerializer.SerializeToElement(value);
+        }
+    }
+}
 
 public sealed record McpServerEntry(
     string Id,

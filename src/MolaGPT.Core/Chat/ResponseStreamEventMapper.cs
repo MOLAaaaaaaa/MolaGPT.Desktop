@@ -1,4 +1,5 @@
 using System.Text.Json;
+using MolaGPT.Core.Models;
 
 namespace MolaGPT.Core.Chat;
 
@@ -11,6 +12,42 @@ public sealed class ResponseStreamEventMapper
     private readonly HashSet<string> _outputTextSeen = new(StringComparer.Ordinal);
     private readonly HashSet<string> _reasoningSeen = new(StringComparer.Ordinal);
     private string? _lastReasoningSummaryBlockKey;
+
+    /// <summary>
+    /// Maps the terminal Responses control events into a finish reason, token usage,
+    /// or an error message. Returns true (and leaves text/thinking untouched) only for
+    /// <c>response.completed</c> / <c>response.incomplete</c> / <c>response.failed</c> /
+    /// <c>error</c>; content-delta events return false so the caller falls through to
+    /// <see cref="TryMap"/>. Callers should invoke this BEFORE <see cref="TryMap"/>
+    /// (which returns true for every <c>response.*</c> event).
+    /// </summary>
+    public bool TryMapControl(JsonElement root, out string? finish, out Usage? usage, out string? error)
+    {
+        finish = null;
+        usage = null;
+        error = null;
+
+        var eventType = ReadString(root, "type");
+        if (string.IsNullOrWhiteSpace(eventType)) return false;
+
+        switch (eventType)
+        {
+            case "response.completed":
+                finish = "stop";
+                usage = ExtractUsage(root);
+                return true;
+            case "response.incomplete":
+                finish = "incomplete";
+                usage = ExtractUsage(root);
+                return true;
+            case "response.failed":
+            case "error":
+                error = ExtractResponseError(root) ?? "OpenAI Responses 请求失败";
+                return true;
+            default:
+                return false;
+        }
+    }
 
     public bool TryMap(JsonElement root, out string? text, out string? thinking)
     {
@@ -59,7 +96,45 @@ public sealed class ResponseStreamEventMapper
             return true;
         }
 
+        // Surface refusals as visible text so the user sees why generation stopped.
+        if (eventType == "response.refusal.delta")
+        {
+            text = ReadString(root, "delta");
+            return true;
+        }
+
         return true;
+    }
+
+    private static Usage? ExtractUsage(JsonElement root)
+    {
+        if (!root.TryGetProperty("response", out var response) || response.ValueKind != JsonValueKind.Object)
+            return null;
+        if (!response.TryGetProperty("usage", out var u) || u.ValueKind != JsonValueKind.Object)
+            return null;
+        return new Usage(
+            u.TryGetProperty("input_tokens", out var it) && it.ValueKind == JsonValueKind.Number ? it.GetInt32() : null,
+            u.TryGetProperty("output_tokens", out var ot) && ot.ValueKind == JsonValueKind.Number ? ot.GetInt32() : null,
+            u.TryGetProperty("total_tokens", out var tt) && tt.ValueKind == JsonValueKind.Number ? tt.GetInt32() : null);
+    }
+
+    private static string? ExtractResponseError(JsonElement root)
+    {
+        // response.failed carries response.error.{message}; a bare "error" event
+        // carries message/error at the top level.
+        if (root.TryGetProperty("response", out var response) && response.ValueKind == JsonValueKind.Object
+            && response.TryGetProperty("error", out var nestedError))
+        {
+            if (nestedError.ValueKind == JsonValueKind.String) return nestedError.GetString();
+            if (nestedError.ValueKind == JsonValueKind.Object) return ReadString(nestedError, "message");
+        }
+        if (ReadString(root, "message") is { Length: > 0 } topMessage) return topMessage;
+        if (root.TryGetProperty("error", out var error))
+        {
+            if (error.ValueKind == JsonValueKind.String) return error.GetString();
+            if (error.ValueKind == JsonValueKind.Object) return ReadString(error, "message");
+        }
+        return null;
     }
 
     private string? WithReasoningSeparation(string key, string? value)

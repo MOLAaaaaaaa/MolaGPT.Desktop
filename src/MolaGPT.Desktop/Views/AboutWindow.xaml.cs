@@ -30,6 +30,7 @@ public partial class AboutWindow : Window
         new("CommunityToolkit.Mvvm", "MVVM 框架（ObservableObject / RelayCommand）", "MIT"),
         new("Dapper", "轻量级 ORM", "Apache-2.0"),
         new("Microsoft.Data.Sqlite", "SQLite 数据库驱动", "MIT"),
+        new("SQLitePCLRaw / SQLite", "SQLite 原生库绑定与运行时", "Apache-2.0 / Public Domain"),
         new("Microsoft.Extensions.Hosting", "通用主机 / 依赖注入", "MIT"),
         new("Microsoft.Extensions.Http", "HttpClient 工厂", "MIT"),
         new("Microsoft.Extensions.Logging", "日志抽象与实现", "MIT"),
@@ -37,6 +38,8 @@ public partial class AboutWindow : Window
         new("Microsoft.Win32.SystemEvents", "系统主题变更监听", "MIT"),
         new("System.Security.Cryptography.ProtectedData", "DPAPI 凭据加密", "MIT"),
         new("System.Text.Json", "JSON 序列化", "MIT"),
+        new("Geist", "界面拉丁字体", "OFL-1.1"),
+        new("Font Awesome Free", "部分界面图标字体", "OFL-1.1 / CC-BY-4.0"),
         new("CPython", "可选下载的 MolaGPT 专用 Python 运行时", "PSF-2.0"),
         new("NumPy / pandas / SciPy / Matplotlib / SymPy / openpyxl / Pillow / seaborn", "可选 Python 科学计算与绘图库", "BSD / PSF / MIT / HPND")
     };
@@ -228,6 +231,7 @@ Apache License 2.0
 ================================================================
 适用组件：
   - Dapper  © 2019 Stack Exchange, Inc.
+  - SQLitePCLRaw  © 2014-2026 SourceGear, LLC
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not use
 these files except in compliance with the License. You may obtain a copy of the
@@ -239,14 +243,33 @@ CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 
 ================================================================
+SQLite Public Domain Dedication
+================================================================
+适用组件：
+  - SQLite / SourceGear.sqlite3
+
+SQLite is in the public domain. 详情见：https://sqlite.org/copyright.html
+
+================================================================
 SIL Open Font License 1.1
 ================================================================
 适用组件：
   - WpfMath 内置字体 jlm_msam10.ttf
+  - Geist Variable 字体
+  - Font Awesome Free Webfont
 
 This font is licensed under the SIL Open Font License, Version 1.1.
 该字体依据 SIL 开放字体许可证 1.1 发布，允许自由使用、嵌入、修改与再分发，
 但不得单独出售字体本身，且衍生字体不得使用保留字体名称。
 完整条款见：https://openfontlicense.org
+
+================================================================
+Creative Commons Attribution 4.0
+================================================================
+适用组件：
+  - Font Awesome Free 图标字形
+
+Font Awesome Free 图标依据 CC BY 4.0 发布：
+https://creativecommons.org/licenses/by/4.0/
 """;
 }

@@ -82,7 +82,8 @@
                     <Border x:Name="b"
                             Background="{TemplateBinding Background}"
                             CornerRadius="{DynamicResource Radius.Md}"
-                            Padding="{TemplateBinding Padding}">
+                            Padding="{TemplateBinding Padding}"
+                            RenderTransformOrigin="0.5,0.5">
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Border>
                     <ControlTemplate.Triggers>
@@ -91,6 +92,12 @@
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
                             <Setter TargetName="b" Property="Background" Value="{DynamicResource Brush.Primary.Active}" />
+                            <!-- Barely-there press feedback on the primary CTA only. -->
+                            <Setter TargetName="b" Property="RenderTransform">
+                                <Setter.Value>
+                                    <ScaleTransform ScaleX="0.99" ScaleY="0.99" />
+                                </Setter.Value>
+                            </Setter>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter Property="Opacity" Value="0.55" />
@@ -238,6 +245,35 @@
         </Setter>
     </Style>
 
+    <!-- Text link button — primary-colored label, no chrome. Used by the
+         sidebar undo toast and other inline "撤销 / 重试"-style affordances. -->
+    <Style x:Key="TextLinkButton" TargetType="Button">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Padding" Value="8,3" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="b"
+                            Background="{TemplateBinding Background}"
+                            CornerRadius="6"
+                            Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="b" Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- Send button — rounded square, primary color. -->
     <Style x:Key="SendButton" TargetType="Button">
         <Setter Property="Width" Value="{DynamicResource Size.SendButton}" />
@@ -253,12 +289,22 @@
                 <ControlTemplate TargetType="Button">
                     <Border x:Name="b"
                             Background="{TemplateBinding Background}"
-                            CornerRadius="{DynamicResource Radius.Sm}">
+                            CornerRadius="{DynamicResource Radius.Sm}"
+                            RenderTransformOrigin="0.5,0.5">
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="b" Property="Background" Value="{DynamicResource Brush.Primary.Hover}" />
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="b" Property="Background" Value="{DynamicResource Brush.Primary.Active}" />
+                            <!-- Barely-there press feedback (primary action buttons only). -->
+                            <Setter TargetName="b" Property="RenderTransform">
+                                <Setter.Value>
+                                    <ScaleTransform ScaleX="0.97" ScaleY="0.97" />
+                                </Setter.Value>
+                            </Setter>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="b" Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
@@ -298,43 +344,15 @@
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="{DynamicResource Radius.Md}"
-                            Padding="{TemplateBinding Padding}"
-                            RenderTransformOrigin="0.5,0.5">
-                        <Border.RenderTransform>
-                            <TranslateTransform x:Name="bT" Y="0" />
-                        </Border.RenderTransform>
+                            Padding="{TemplateBinding Padding}">
                         <ContentPresenter VerticalAlignment="Center" HorizontalAlignment="Center" />
                     </Border>
                     <ControlTemplate.Triggers>
+                        <!-- Restraint: hover is color-only (border + text tint),
+                             no lift/shadow motion. -->
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="b" Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
                             <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
-                            <Trigger.EnterActions>
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="bT"
-                                                         Storyboard.TargetProperty="Y"
-                                                         To="-1" Duration="0:0:0.25">
-                                            <DoubleAnimation.EasingFunction>
-                                                <CubicEase EasingMode="EaseOut" />
-                                            </DoubleAnimation.EasingFunction>
-                                        </DoubleAnimation>
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </Trigger.EnterActions>
-                            <Trigger.ExitActions>
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="bT"
-                                                         Storyboard.TargetProperty="Y"
-                                                         To="0" Duration="0:0:0.2">
-                                            <DoubleAnimation.EasingFunction>
-                                                <CubicEase EasingMode="EaseOut" />
-                                            </DoubleAnimation.EasingFunction>
-                                        </DoubleAnimation>
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </Trigger.ExitActions>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>

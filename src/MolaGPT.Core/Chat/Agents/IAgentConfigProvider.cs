@@ -17,6 +17,16 @@ public interface IAgentConfigProvider
     AgentPermissionMode PermissionMode { get; }
 
     /// <summary>
+    /// Stable install-scoped id for this desktop bridge. Used by the cloud relay
+    /// to route phone commands to the correct machine when the same account has
+    /// multiple MolaGPT installs. Empty means legacy single-machine behaviour.
+    /// </summary>
+    string MachineId => string.Empty;
+
+    /// <summary>Human-readable machine label (typically <c>Environment.MachineName</c>).</summary>
+    string MachineName => Environment.MachineName;
+
+    /// <summary>
     /// Resolve the working directory for a conversation. Returns null when the
     /// user has not chosen one yet (the provider then surfaces a clear error).
     /// </summary>
@@ -50,4 +60,11 @@ public sealed record AgentPersistedSession(
     string Title,
     string WorkingDirectory,
     string? Model,
-    long CreatedAtMs);
+    long CreatedAtMs,
+    /// <summary>The CLI's own session id for this conversation, when it differs
+    /// from <see cref="ConversationId"/>. Codex self-assigns a threadId, so its
+    /// on-disk transcript is named after that instead of our id — persisting the
+    /// link keeps a restarted bridge from re-registering that transcript as a
+    /// second, phantom conversation. Null for old stubs and for Claude (bound
+    /// via --session-id, so the two ids are equal).</summary>
+    string? ResumeSessionId = null);

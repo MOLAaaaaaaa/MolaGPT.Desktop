@@ -13,9 +13,11 @@ public partial class ModelConfigDialog : Window
     private EditableModelEntry? _model;
     private ObservableCollection<BatchModelItem>? _batchItems;
     private ICollectionView? _batchView;
-    private bool _isCustomProvider;
     private bool _isImageProvider;
     private bool _updatingSelectAll;
+    private bool _suppressKindChange;
+    private readonly ObservableCollection<EditableBodyRow> _customBody = new();
+    private readonly ObservableCollection<string> _effortLevels = new();
 
     public bool Confirmed { get; private set; }
     public List<ProviderModelEntry>? SelectedModels { get; private set; }
@@ -25,10 +27,9 @@ public partial class ModelConfigDialog : Window
         InitializeComponent();
     }
 
-    public void ShowSingleEdit(EditableModelEntry model, Window owner, bool isCustomProvider = false, bool isImageProvider = false)
+    public void ShowSingleEdit(EditableModelEntry model, Window owner, bool isImageProvider = false)
     {
         _model = model;
-        _isCustomProvider = isCustomProvider;
         _isImageProvider = isImageProvider;
         Owner = owner;
         DialogTitle.Text = "模型配置";
@@ -88,19 +89,40 @@ public partial class ModelConfigDialog : Window
         ChkImageEdit.Visibility = _isImageProvider ? Visibility.Visible : Visibility.Collapsed;
         EditSystemPrompt.Text = m.SystemPrompt ?? "";
 
-        if (_isCustomProvider && m.Thinking)
+        if (m.Thinking)
         {
             ThinkingConfigPanel.Visibility = Visibility.Visible;
-            SetThinkingKind(m.ThinkingParamKind);
-            EditDefaultEffort.Text = m.DefaultEffort ?? "";
-            EditBudgetMin.Text = m.ThinkingBudgetMin?.ToString() ?? "";
-            EditBudgetMax.Text = m.ThinkingBudgetMax?.ToString() ?? "";
-            EditBudgetDefault.Text = m.ThinkingBudgetDefault?.ToString() ?? "";
+            _suppressKindChange = true;
+            try
+            {
+                SetThinkingKind(m.ThinkingParamKind);
+                EditDefaultEffort.Text = m.DefaultEffort ?? "";
+                EditBudgetMin.Text = m.ThinkingBudgetMin?.ToString() ?? "";
+                EditBudgetMax.Text = m.ThinkingBudgetMax?.ToString() ?? "";
+                EditBudgetDefault.Text = m.ThinkingBudgetDefault?.ToString() ?? "";
+                LoadEffortLevels(m);
+                var tag = (ThinkingKindCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "";
+                var isBudgetKind = tag is "AnthropicBudget" or "GeminiBudget" or "QwenThinkingBudget";
+                BudgetRangePanel.Visibility = isBudgetKind ? Visibility.Visible : Visibility.Collapsed;
+            }
+            finally
+            {
+                _suppressKindChange = false;
+            }
         }
         else
         {
             ThinkingConfigPanel.Visibility = Visibility.Collapsed;
         }
+
+        // Custom request-body overrides: available for every BYOK chat model (this
+        // dialog is only ever opened from the BYOK provider editor). Hidden for image
+        // models, whose requests don't currently route through the override path.
+        _customBody.Clear();
+        foreach (var b in m.CustomBody)
+            _customBody.Add(new EditableBodyRow { Key = b.Key, Type = b.Type, Value = b.Value });
+        CustomBodyList.ItemsSource = _customBody;
+        CustomBodyPanel.Visibility = _isImageProvider ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void SaveToModel()
@@ -116,13 +138,14 @@ public partial class ModelConfigDialog : Window
         _model.ImageEdit = _isImageProvider && ChkImageEdit.IsChecked == true;
         _model.SystemPrompt = string.IsNullOrWhiteSpace(EditSystemPrompt.Text) ? null : EditSystemPrompt.Text.Trim();
 
-        if (_isCustomProvider && _model.Thinking)
+        if (_model.Thinking)
         {
             _model.ThinkingParamKind = (ThinkingKindCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString();
             _model.DefaultEffort = string.IsNullOrWhiteSpace(EditDefaultEffort.Text) ? null : EditDefaultEffort.Text.Trim();
             _model.ThinkingBudgetMin = int.TryParse(EditBudgetMin.Text.Trim(), out var min) ? min : null;
             _model.ThinkingBudgetMax = int.TryParse(EditBudgetMax.Text.Trim(), out var max) ? max : null;
             _model.ThinkingBudgetDefault = int.TryParse(EditBudgetDefault.Text.Trim(), out var def) ? def : null;
+            _model.EffortLevels = _effortLevels.ToList();
         }
         else if (!_model.Thinking)
         {
@@ -130,7 +153,25 @@ public partial class ModelConfigDialog : Window
             _model.ThinkingBudgetMin = null;
             _model.ThinkingBudgetMax = null;
             _model.ThinkingBudgetDefault = null;
+            _model.EffortLevels = new();
         }
+
+        _model.CustomBody = _customBody
+            .Where(r => !string.IsNullOrWhiteSpace(r.Key))
+            .Select(r => new CustomBodyEntry(
+                r.Key.Trim(),
+                string.IsNullOrWhiteSpace(r.Type) ? "string" : r.Type,
+                r.Value ?? string.Empty))
+            .ToList();
+    }
+
+    private void AddCustomBodyRow_Click(object sender, RoutedEventArgs e) =>
+        _customBody.Add(new EditableBodyRow { Type = "string" });
+
+    private void RemoveCustomBodyRow_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is EditableBodyRow row)
+            _customBody.Remove(row);
     }
 
     private void SetThinkingKind(string? kind)
@@ -153,21 +194,85 @@ public partial class ModelConfigDialog : Window
 
     private void ChkThinking_Changed(object sender, RoutedEventArgs e)
     {
-        if (!_isCustomProvider)
-        {
-            ThinkingConfigPanel.Visibility = Visibility.Collapsed;
-            return;
-        }
-        ThinkingConfigPanel.Visibility = ChkThinking.IsChecked == true
-            ? Visibility.Visible
-            : Visibility.Collapsed;
+        var on = ChkThinking.IsChecked == true;
+        ThinkingConfigPanel.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        if (on && _effortLevels.Count == 0 && _model is not null)
+            LoadEffortLevels(_model);
     }
 
     private void ThinkingKindCombo_Changed(object sender, SelectionChangedEventArgs e)
     {
+        if (_suppressKindChange) return;
         var tag = (ThinkingKindCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "";
         var isBudgetKind = tag is "AnthropicBudget" or "GeminiBudget" or "QwenThinkingBudget";
-        BudgetRangePanel.Visibility = isBudgetKind ? Visibility.Visible : Visibility.Collapsed;
+        if (BudgetRangePanel is not null)
+            BudgetRangePanel.Visibility = isBudgetKind ? Visibility.Visible : Visibility.Collapsed;
+        ResetEffortLevelsToTemplate(tag);
+    }
+
+    private void LoadEffortLevels(EditableModelEntry m)
+    {
+        _effortLevels.Clear();
+        var seeded = m.EffortLevels.Count > 0
+            ? m.EffortLevels
+            : DefaultEffortLevelsForKind(m.ThinkingParamKind).ToList();
+        foreach (var level in MolaGPT.Core.Models.ThinkingEffortLevels.Normalize(seeded))
+            _effortLevels.Add(level);
+        EffortLevelList.ItemsSource = _effortLevels;
+        EditNewEffortLevel.Text = "";
+    }
+
+    private void AddEffortLevel_Click(object sender, RoutedEventArgs e)
+    {
+        var raw = EditNewEffortLevel.Text?.Trim().ToLowerInvariant() ?? "";
+        if (raw.Length == 0) return;
+        if (_effortLevels.Any(x => string.Equals(x, raw, StringComparison.OrdinalIgnoreCase)))
+        {
+            EditNewEffortLevel.Text = "";
+            return;
+        }
+        _effortLevels.Add(raw);
+        if (string.IsNullOrWhiteSpace(EditDefaultEffort.Text))
+            EditDefaultEffort.Text = raw;
+        EditNewEffortLevel.Text = "";
+    }
+
+    private void RemoveEffortLevel_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement fe || fe.DataContext is not string level) return;
+        if (_effortLevels.Count <= 1) return;
+        _effortLevels.Remove(level);
+        if (string.Equals(EditDefaultEffort.Text?.Trim(), level, StringComparison.OrdinalIgnoreCase))
+            EditDefaultEffort.Text = _effortLevels.FirstOrDefault() ?? "";
+    }
+
+    private void ResetEffortLevels_Click(object sender, RoutedEventArgs e)
+    {
+        var tag = (ThinkingKindCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "";
+        ResetEffortLevelsToTemplate(tag);
+    }
+
+    private void ResetEffortLevelsToTemplate(string? kindTag)
+    {
+        _effortLevels.Clear();
+        foreach (var level in DefaultEffortLevelsForKind(kindTag))
+            _effortLevels.Add(level);
+        EffortLevelList.ItemsSource = _effortLevels;
+        if (_effortLevels.Count > 0 &&
+            (string.IsNullOrWhiteSpace(EditDefaultEffort.Text)
+             || !_effortLevels.Contains(EditDefaultEffort.Text.Trim(), StringComparer.OrdinalIgnoreCase)))
+        {
+            EditDefaultEffort.Text = _effortLevels.Contains("medium", StringComparer.OrdinalIgnoreCase)
+                ? "medium"
+                : _effortLevels[0];
+        }
+    }
+
+    private static IReadOnlyList<string> DefaultEffortLevelsForKind(string? kindTag)
+    {
+        if (Enum.TryParse<MolaGPT.Core.Models.ThinkingParamKind>(kindTag, true, out var kind))
+            return MolaGPT.Core.Models.ThinkingEffortLevels.ForKind(kind);
+        return MolaGPT.Core.Models.ThinkingEffortLevels.ForKind(MolaGPT.Core.Models.ThinkingParamKind.OpenAiReasoningEffort);
     }
 
     private void SelectAll_Changed(object sender, RoutedEventArgs e)

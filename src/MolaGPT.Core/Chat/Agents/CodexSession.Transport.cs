@@ -289,33 +289,85 @@ internal sealed partial class CodexSession
         return string.Empty;
     }
 
-    private static AgentEvent? MapItemLifecycle(JsonElement prms, string raw, AgentToolStatus status)
+    internal static AgentEvent? MapItemLifecycle(JsonElement prms, string raw, AgentToolStatus status)
     {
         if (prms.ValueKind != JsonValueKind.Object || !prms.TryGetProperty("item", out var item))
             return null;
 
         var itemType = item.TryGetProperty("type", out var it) ? it.GetString() : visibleType(item);
-        // Only surface tool-like items (commands, file edits); plain messages/reasoning
-        // already stream as deltas.
-        if (itemType is not ("commandExecution" or "fileChange" or "mcpToolCall" or "command" or "patchApply"))
+        if (string.IsNullOrEmpty(itemType)) return null;
+
+        // Deny-list, not allow-list: plain conversation items already stream as
+        // deltas, and EVERYTHING else app-server reports as an item is a tool the
+        // user should see. An allow-list silently dropped tool types Codex added
+        // later — `webSearch` was invisible on the phone for exactly this reason,
+        // so a turn that searched the web showed the answer with no tool card.
+        if (itemType is "userMessage" or "agentMessage" or "reasoning" or "todoList" or "error")
             return null;
 
         var id = item.TryGetProperty("id", out var iid) ? iid.GetString() : null;
-        var argsJson = item.TryGetProperty("input", out var inp) ? inp.GetRawText()
-            : (item.TryGetProperty("command", out var cmd) ? cmd.GetRawText() : null);
+        var argsJson = ExtractItemArguments(item);
+        var resultPreview = status == AgentToolStatus.Completed ? ExtractItemResult(item) : null;
+        var failed = item.TryGetProperty("status", out var st)
+            && st.ValueKind == JsonValueKind.String
+            && string.Equals(st.GetString(), "failed", StringComparison.OrdinalIgnoreCase);
 
         return new AgentEvent(
             AgentEventKind.ToolCall,
             Tool: new AgentToolEvent(
                 id ?? Guid.NewGuid().ToString("N"),
-                itemType ?? "tool",
-                status,
+                itemType,
+                failed ? AgentToolStatus.Failed : status,
                 Title: itemType,
-                ArgumentsJson: argsJson),
+                ArgumentsJson: argsJson,
+                ResultPreview: resultPreview),
             RawJson: raw);
 
         static string? visibleType(JsonElement item)
             => item.TryGetProperty("itemType", out var x) ? x.GetString() : null;
+    }
+
+    /// <summary>Best-effort "what is this tool doing" payload. Shapes differ per
+    /// item type (commandExecution.command, webSearch.query/action, mcpToolCall.input,
+    /// fileChange.changes…), so probe the known carriers and fall back to the whole
+    /// item minus the noisy/streaming fields.</summary>
+    private static string? ExtractItemArguments(JsonElement item)
+    {
+        foreach (var name in new[] { "input", "command", "arguments", "query", "action", "changes", "args" })
+        {
+            if (!item.TryGetProperty(name, out var value)) continue;
+            if (value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) continue;
+            if (value.ValueKind == JsonValueKind.String)
+            {
+                var text = value.GetString();
+                if (string.IsNullOrWhiteSpace(text)) continue;
+                // Wrap bare strings so the phone's arg renderer sees an object.
+                return JsonSerializer.Serialize(new Dictionary<string, string?> { [name] = text });
+            }
+            return value.GetRawText();
+        }
+        return null;
+    }
+
+    /// <summary>Completed-tool output preview, again shape-dependent.</summary>
+    private static string? ExtractItemResult(JsonElement item)
+    {
+        foreach (var name in new[] { "aggregatedOutput", "output", "result", "resultPreview" })
+        {
+            if (!item.TryGetProperty(name, out var value)) continue;
+            if (value.ValueKind == JsonValueKind.String)
+            {
+                var text = value.GetString();
+                if (!string.IsNullOrWhiteSpace(text)) return Truncate(text!);
+            }
+            else if (value.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
+            {
+                return Truncate(value.GetRawText());
+            }
+        }
+        return null;
+
+        static string Truncate(string s) => s.Length <= 2000 ? s : s[..2000] + "…";
     }
 
     private static AgentUsage? ExtractUsage(JsonElement prms)

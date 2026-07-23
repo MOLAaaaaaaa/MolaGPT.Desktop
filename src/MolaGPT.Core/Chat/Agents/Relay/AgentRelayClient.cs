@@ -10,12 +10,12 @@ namespace MolaGPT.Core.Chat.Agents.Relay;
 /// (tool cards live = progress; answer text once per answer via
 /// <see cref="AnswerSnapshotEvent"/> — not per-token), forwards session-meta
 /// snapshots, and consumes the relay's command stream — dispatching send /
-/// interrupt / switch-options to the bridge and acking each command so the relay
-/// drops it (no redelivery on reconnect).
+/// interrupt / switch-options to the bridge under a renewable lease, then
+/// recording a terminal result so failed commands are not silently dropped.
 ///
-/// Turns are dispatched fire-and-forget: a command is acked as soon as the bridge
-/// has started handling it, not after the (possibly long) turn finishes. The
-/// bridge's per-session gate serializes concurrent sends on the same session.
+/// Turns dispatch concurrently so an interrupt can still reach a running turn.
+/// Each command lease is renewed until its dispatch task has a terminal result;
+/// the bridge's per-session gate serializes concurrent sends on the same session.
 ///
 /// Transport-agnostic, lives in Core (no WPF). The real HTTP producer
 /// (Bearer-JWT + SSE command stream) is a Desktop-layer adapter; tests use an
@@ -26,27 +26,77 @@ public sealed class AgentRelayClient
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan MachineSnapshotInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan MachineHeartbeatInterval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan CommandLeaseRenewInterval = TimeSpan.FromSeconds(30);
     private const int HistoryBackfillMaxTurns = 30;
+
+    /// <summary>How long after the last transcript-file activity an externally
+    /// driven session (open projected tail, never bridge-driven) still reports
+    /// Running. Bounds the "stuck Running" window when a CLI dies mid-turn
+    /// without ever writing its terminal marker.</summary>
+    // How long after a projected transcript's last write we still treat its open
+    // tail as a live turn. Within the window: keep the tail open and report
+    // Running (the phone shows 运行中). Past it: the turn stopped writing without
+    // a terminal marker (finished, interrupted, or — for Claude, whose interactive
+    // ~/.claude/projects transcripts never contain a `result` line — simply done),
+    // so synthesize a TurnDone to close it and fall back to Idle. Kept short so a
+    // completed external turn self-heals quickly instead of hanging on 运行中.
+    internal static TimeSpan ExternalTurnActiveWindow { get; set; } = TimeSpan.FromSeconds(60);
+
+    // Upper bound for the one-time startup re-projection that closes open tails a
+    // previous process left behind. Only sessions active within this window are
+    // swept, so a large idle history isn't re-projected on every launch.
+    private static readonly TimeSpan StartupTailHealWindow = TimeSpan.FromHours(24);
+
+    /// <summary>Minimum time between mid-segment "growing" snapshots of the same
+    /// answer/thinking segment — the pseudo-streaming cadence. Internal-settable
+    /// so tests can shrink it without waiting wall-clock seconds.</summary>
+    internal static TimeSpan StreamFlushInterval { get; set; } = TimeSpan.FromSeconds(2.5);
+
+    /// <summary>Minimum growth (chars) since the last shipped snapshot before a
+    /// mid-segment flush is worth a wire round-trip.</summary>
+    internal static int StreamFlushMinGrowth { get; set; } = 80;
+
+    /// <summary>Stop mid-segment flushing once a segment exceeds this size — each
+    /// growing snapshot re-ships the full segment text, so very large answers
+    /// would otherwise bloat the relay's append-only event store. The segment
+    /// still ships once, complete, at its boundary flush.</summary>
+    private const int StreamFlushMaxSegmentChars = 64_000;
 
     private readonly AgentBridgeService _bridge;
     private readonly IRelayProducer _producer;
+    private readonly string _machineId;
+    private readonly string _machineName;
     private readonly object _gate = new();
     private readonly Dictionary<string, bool> _awaitingTerminal = new(StringComparer.Ordinal);
+    // _nextRelaySeq allocates local envelopes; _lastRelaySeq advances only after
+    // the relay has durably accepted an event or an atomic history replacement.
+    private readonly Dictionary<string, long> _nextRelaySeq = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _lastRelaySeq = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _relayActivityAtMs = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, string> _pendingAnswerText = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, string> _pendingThinkingText = new(StringComparer.Ordinal);
+    // Whether the last history projection of a session ended in an open turn
+    // (transcript still being written by an externally driven CLI process).
+    private readonly Dictionary<string, bool> _projectedTailOpen = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TurnStreamState> _turnStreams = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _historyProjectionQueue = new();
     private readonly ConcurrentDictionary<string, byte> _queuedHistoryProjections = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _executingCommands = new(StringComparer.Ordinal);
     private Task _eventPostTail = Task.CompletedTask;
     private CancellationTokenSource? _cts;
     private int _activeHistoryProjection;
     private bool _relayCursorsSeeded;
+    private const int EventPostRetryBurst = 5;
 
-    public AgentRelayClient(AgentBridgeService bridge, IRelayProducer producer)
+    public AgentRelayClient(
+        AgentBridgeService bridge,
+        IRelayProducer producer,
+        IAgentConfigProvider? config = null)
     {
         _bridge = bridge;
         _producer = producer;
+        _machineId = (config?.MachineId ?? string.Empty).Trim();
+        _machineName = string.IsNullOrWhiteSpace(config?.MachineName)
+            ? Environment.MachineName
+            : config!.MachineName.Trim();
     }
 
     /// <summary>Wire bridge events to the producer and start the command loop.
@@ -172,12 +222,12 @@ public sealed class AgentRelayClient
         switch (ev.Kind)
         {
             case AgentEventKind.ThinkingDelta:
-                AppendThinking(sessionId, ev.Text);
+                AppendThinking(sessionId, ev.Text, seq);
                 return null;
 
             case AgentEventKind.TextDelta:
                 FlushThinking(sessionId, seq);
-                AppendAnswer(sessionId, ev.Text);
+                AppendAnswer(sessionId, ev.Text, seq);
                 return null;
 
             case AgentEventKind.ToolCall when ev.Tool is not null:
@@ -206,19 +256,92 @@ public sealed class AgentRelayClient
         }
     }
 
-    private void AppendThinking(string sessionId, string? text)
+    /// <summary>Per-session accumulation state for the turn currently streaming.
+    /// Answer/thinking deltas buffer here; segments (delimited by tool calls) get
+    /// stable ids so mid-segment growing snapshots replace-in-place on the phone.</summary>
+    private sealed class TurnStreamState
     {
-        if (string.IsNullOrEmpty(text)) return;
-        lock (_gate)
-            _pendingThinkingText[sessionId] = _pendingThinkingText.GetValueOrDefault(sessionId) + text;
+        public string AnswerText = string.Empty;
+        public string ThinkingText = string.Empty;
+        public int AnswerSegment;
+        public int ThinkingSegment;
+        public long AnswerFlushedAtMs;
+        public long ThinkingFlushedAtMs;
+        public int AnswerFlushedLength;
+        public int ThinkingFlushedLength;
     }
 
-    private void AppendAnswer(string sessionId, string? text)
+    private TurnStreamState StreamStateOf(string sessionId)
+    {
+        // Caller holds _gate.
+        if (!_turnStreams.TryGetValue(sessionId, out var state))
+            _turnStreams[sessionId] = state = new TurnStreamState();
+        return state;
+    }
+
+    private void AppendThinking(string sessionId, string? text, long bridgeSeq)
     {
         if (string.IsNullOrEmpty(text)) return;
+        RelayEventEnvelope? growing = null;
         lock (_gate)
-            _pendingAnswerText[sessionId] = _pendingAnswerText.GetValueOrDefault(sessionId) + text;
+        {
+            var s = StreamStateOf(sessionId);
+            s.ThinkingText += text;
+            growing = MaybeGrowingSnapshot(
+                sessionId, bridgeSeq, s.ThinkingText, s.ThinkingSegment, isThinking: true,
+                ref s.ThinkingFlushedAtMs, ref s.ThinkingFlushedLength);
+        }
+        if (growing is not null) Post(growing);
     }
+
+    private void AppendAnswer(string sessionId, string? text, long bridgeSeq)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        RelayEventEnvelope? growing = null;
+        lock (_gate)
+        {
+            var s = StreamStateOf(sessionId);
+            s.AnswerText += text;
+            growing = MaybeGrowingSnapshot(
+                sessionId, bridgeSeq, s.AnswerText, s.AnswerSegment, isThinking: false,
+                ref s.AnswerFlushedAtMs, ref s.AnswerFlushedLength);
+        }
+        if (growing is not null) Post(growing);
+    }
+
+    /// <summary>Pseudo-streaming: while a segment accumulates, periodically ship
+    /// its full text so far under the SAME segment id. The phone upserts by that
+    /// id, so each snapshot replaces the previous one in place — no reliance on
+    /// per-token wire events, and replay stays idempotent (later snapshots simply
+    /// win). Rate-limited by time and growth; disabled for huge segments.</summary>
+    private RelayEventEnvelope? MaybeGrowingSnapshot(
+        string sessionId, long bridgeSeq, string text, int segment, bool isThinking,
+        ref long flushedAtMs, ref int flushedLength)
+    {
+        var nowMs = Environment.TickCount64;
+        if (flushedAtMs == 0)
+        {
+            // Clock starts at the segment's FIRST delta, so the first growing
+            // snapshot lands ~interval after streaming began — not "interval
+            // after the text happened to clear the growth gate", which for fast
+            // generations pushed the first ship past the end of the answer.
+            flushedAtMs = nowMs;
+            return null;
+        }
+        if (text.Length > StreamFlushMaxSegmentChars) return null;
+        if (text.Length - flushedLength < StreamFlushMinGrowth) return null;
+        if (nowMs - flushedAtMs < StreamFlushInterval.TotalMilliseconds) return null;
+
+        flushedAtMs = nowMs;
+        flushedLength = text.Length;
+        RelayTranscriptEvent ev = isThinking
+            ? new ThinkingSnapshotEvent(text, SegmentId(isThinking: true, segment))
+            : new AnswerSnapshotEvent(text, SegmentId(isThinking: false, segment));
+        return Envelope(sessionId, bridgeSeq, ev);
+    }
+
+    private static string SegmentId(bool isThinking, int segment)
+        => (isThinking ? "t" : "a") + segment.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     private void FlushTurnBuffers(string sessionId, long bridgeSeq)
     {
@@ -229,33 +352,44 @@ public sealed class AgentRelayClient
     private void FlushThinking(string sessionId, long bridgeSeq)
     {
         string? text;
+        string segmentId;
         lock (_gate)
         {
-            if (!_pendingThinkingText.TryGetValue(sessionId, out text) || string.IsNullOrWhiteSpace(text))
+            if (!_turnStreams.TryGetValue(sessionId, out var s) || string.IsNullOrWhiteSpace(s.ThinkingText))
                 return;
-            _pendingThinkingText.Remove(sessionId);
+            text = s.ThinkingText;
+            segmentId = SegmentId(isThinking: true, s.ThinkingSegment);
+            s.ThinkingText = string.Empty;
+            s.ThinkingSegment++;
+            s.ThinkingFlushedAtMs = 0;
+            s.ThinkingFlushedLength = 0;
         }
-        Post(Envelope(sessionId, bridgeSeq, new ThinkingSnapshotEvent(text)));
+        Post(Envelope(sessionId, bridgeSeq, new ThinkingSnapshotEvent(text, segmentId)));
     }
 
     private void FlushAnswer(string sessionId, long bridgeSeq)
     {
         string? text;
+        string segmentId;
         lock (_gate)
         {
-            if (!_pendingAnswerText.TryGetValue(sessionId, out text) || string.IsNullOrWhiteSpace(text))
+            if (!_turnStreams.TryGetValue(sessionId, out var s) || string.IsNullOrWhiteSpace(s.AnswerText))
                 return;
-            _pendingAnswerText.Remove(sessionId);
+            text = s.AnswerText;
+            segmentId = SegmentId(isThinking: false, s.AnswerSegment);
+            s.AnswerText = string.Empty;
+            s.AnswerSegment++;
+            s.AnswerFlushedAtMs = 0;
+            s.AnswerFlushedLength = 0;
         }
-        Post(Envelope(sessionId, bridgeSeq, new AnswerSnapshotEvent(text)));
+        Post(Envelope(sessionId, bridgeSeq, new AnswerSnapshotEvent(text, segmentId)));
     }
 
     private void ResetTurnBuffers(string sessionId)
     {
         lock (_gate)
         {
-            _pendingAnswerText.Remove(sessionId);
-            _pendingThinkingText.Remove(sessionId);
+            _turnStreams.Remove(sessionId);
         }
     }
 
@@ -277,7 +411,7 @@ public sealed class AgentRelayClient
     {
         if (NeedsHistoryProjection(s))
         {
-            if (LastRelaySeqOrBridgeSeq(s.ConversationId, s.Seq) > 0)
+            if (LastConfirmedRelaySeq(s.ConversationId) > 0)
                 _ = PostMetaSafeAsync(BuildMeta(s), CancellationToken.None);
             EnqueueHistoryProjection(s.ConversationId);
             return;
@@ -288,7 +422,32 @@ public sealed class AgentRelayClient
 
     private async Task<IReadOnlyList<AgentSessionStateDto>> PublishInitialSessionsAsync(CancellationToken ct)
     {
-        return await PublishMachineSnapshotAsync(ct).ConfigureAwait(false);
+        var sessions = await PublishMachineSnapshotAsync(ct).ConfigureAwait(false);
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // If the relay cursor is behind a local session on reconnect, rebuild its
+        // durable transcript projection before advertising a newer meta.seq. This
+        // closes gaps left by a process stop during an event-post retry.
+        foreach (var session in sessions)
+        {
+            if (NeedsRelayCatchup(session))
+            {
+                EnqueueHistoryProjection(session.ConversationId);
+                continue;
+            }
+            // One-time heal for sessions a PREVIOUS process left with an open tail
+            // on the relay (its in-memory tail-open flag doesn't survive restart).
+            // A history session whose transcript has been idle a while is done, so
+            // re-project it once: the stale-tail branch appends a synthetic TurnDone
+            // if the relay tail is still open, and is a no-op if already closed.
+            // Bounded to recently-active sessions so a large history isn't re-swept.
+            if (IsHistoryProjection(session)
+                && nowMs - session.UpdatedAtMs > (long)ExternalTurnActiveWindow.TotalMilliseconds
+                && nowMs - session.UpdatedAtMs <= (long)StartupTailHealWindow.TotalMilliseconds)
+            {
+                EnqueueHistoryProjection(session.ConversationId);
+            }
+        }
+        return sessions;
     }
 
     private async Task<IReadOnlyList<AgentSessionStateDto>> PublishMachineSnapshotAsync(CancellationToken ct)
@@ -300,9 +459,9 @@ public sealed class AgentRelayClient
         foreach (var s in sessions)
         {
             ct.ThrowIfCancellationRequested();
-            if (NeedsHistoryProjection(s))
+            if (NeedsHistoryProjection(s) || NeedsTailClose(s))
             {
-                if (LastRelaySeqOrBridgeSeq(s.ConversationId, s.Seq) > 0)
+                if (LastConfirmedRelaySeq(s.ConversationId) > 0)
                     await PostMetaSafeAsync(BuildMeta(s), ct).ConfigureAwait(false);
                 EnqueueHistoryProjection(s.ConversationId);
                 continue;
@@ -368,8 +527,10 @@ public sealed class AgentRelayClient
                 .Select(s => s.ConversationId)
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
-            if (ids.Count > 0)
-                await _producer.PostHeartbeatAsync(ids, ct).ConfigureAwait(false);
+            // Always heartbeat — even with zero sessions — so an idle/new machine
+            // still registers in the relay's machines table and can be chosen as
+            // the target for a phone "New" command.
+            await _producer.PostHeartbeatAsync(ids, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch { /* the next heartbeat retries */ }
@@ -385,6 +546,7 @@ public sealed class AgentRelayClient
                 foreach (var cursor in cursors.Values)
                 {
                     _lastRelaySeq[cursor.SessionId] = Math.Max(cursor.Seq, _lastRelaySeq.GetValueOrDefault(cursor.SessionId));
+                    _nextRelaySeq[cursor.SessionId] = Math.Max(cursor.Seq, _nextRelaySeq.GetValueOrDefault(cursor.SessionId));
                     _relayActivityAtMs[cursor.SessionId] = Math.Max(cursor.ActivityAtMs, _relayActivityAtMs.GetValueOrDefault(cursor.SessionId));
                 }
             }
@@ -414,10 +576,26 @@ public sealed class AgentRelayClient
         if (turns.Count == 0)
             return;
 
+        // Freshness decides whether the open tail is a live turn or a finished one.
+        // Claude's interactive transcripts never carry a terminal marker, so their
+        // last turn is ALWAYS open — without this, every completed Claude session
+        // would hang on 运行中 in the phone's detail view forever.
+        var tailOpen = turns[^1].IsOpen;
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var fileFresh = nowMs - state.UpdatedAtMs <= (long)ExternalTurnActiveWindow.TotalMilliseconds;
+        var liveTail = tailOpen && fileFresh;
+        // A stale open tail = the writer stopped without a terminal; close it.
+        var closeStaleTail = tailOpen && !fileFresh;
+
+        // Record BEFORE the meta post below so the phone sees Running while the
+        // external turn's tail is still live, and flips back once it closes.
+        SetProjectedTailOpen(sessionId, liveTail);
+
         await PublishHistoryProjectionAsync(
             state.ConversationId,
             state.UpdatedAtMs,
             turns,
+            closeStaleTail,
             ct).ConfigureAwait(false);
 
         var fresh = _bridge.GetSession(sessionId) ?? state;
@@ -434,6 +612,7 @@ public sealed class AgentRelayClient
         string sessionId,
         long activityAtMs,
         IReadOnlyList<AgentHistoryTurn> turns,
+        bool closeStaleTail,
         CancellationToken ct)
     {
         if (turns.Count == 0)
@@ -458,6 +637,13 @@ public sealed class AgentRelayClient
             }
         }
 
+        // Terminate a stale open tail so the phone's detail view doesn't derive a
+        // perpetual Running from a transcript that stopped mid-turn. The file is no
+        // longer changing, so this synthetic TurnDone lands at a stable seq on every
+        // re-projection — the phone's since-cursor sees it once and does not re-fire.
+        if (closeStaleTail && envelopes.Count > 0 && envelopes[^1].Event is not TurnDoneEvent)
+            envelopes.Add(new RelayEventEnvelope(sessionId, ++seq, new TurnDoneEvent(null)));
+
         await _producer.ReplaceSessionEventsAsync(sessionId, envelopes, ct).ConfigureAwait(false);
 
         // Advance the cursor only AFTER the atomic replace succeeds, so a concurrent
@@ -465,6 +651,7 @@ public sealed class AgentRelayClient
         lock (_gate)
         {
             _lastRelaySeq[sessionId] = seq;
+            _nextRelaySeq[sessionId] = seq;
             _relayActivityAtMs[sessionId] = Math.Max(activityAtMs, _relayActivityAtMs.GetValueOrDefault(sessionId));
         }
     }
@@ -480,17 +667,17 @@ public sealed class AgentRelayClient
     {
         lock (_gate)
         {
-            var previous = _lastRelaySeq.GetValueOrDefault(sessionId);
+            var previous = _nextRelaySeq.GetValueOrDefault(sessionId);
             var relaySeq = Math.Max(bridgeSeq, previous + 1);
-            _lastRelaySeq[sessionId] = relaySeq;
+            _nextRelaySeq[sessionId] = relaySeq;
             return new RelayEventEnvelope(sessionId, relaySeq, ev);
         }
     }
 
-    private long LastRelaySeqOrBridgeSeq(string sessionId, long bridgeSeq)
+    private long LastConfirmedRelaySeq(string sessionId)
     {
         lock (_gate)
-            return Math.Max(bridgeSeq, _lastRelaySeq.GetValueOrDefault(sessionId));
+            return _lastRelaySeq.GetValueOrDefault(sessionId);
     }
 
     private long LastRelayActivity(string sessionId)
@@ -504,6 +691,7 @@ public sealed class AgentRelayClient
         lock (_gate)
         {
             _lastRelaySeq[sessionId] = 0;
+            _nextRelaySeq[sessionId] = 0;
             _relayActivityAtMs[sessionId] = 0;
         }
     }
@@ -515,25 +703,64 @@ public sealed class AgentRelayClient
 
     private bool NeedsHistoryProjection(AgentSessionStateDto s)
         => IsHistoryProjection(s)
-           && (LastRelaySeqOrBridgeSeq(s.ConversationId, s.Seq) <= 0
+           && (LastConfirmedRelaySeq(s.ConversationId) <= 0
                || LastRelayActivity(s.ConversationId) < s.UpdatedAtMs);
 
+    // A projected tail we left OPEN (external turn was live) has since gone stale —
+    // the writer stopped without a terminal. The file is no longer growing, so
+    // NeedsHistoryProjection won't re-fire; enqueue one final projection so the
+    // stale-tail branch can append a synthetic TurnDone and unstick the phone's
+    // detail view from a perpetual 运行中.
+    private bool NeedsTailClose(AgentSessionStateDto s)
+        => IsHistoryProjection(s)
+           && IsProjectedTailOpen(s.ConversationId)
+           && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - s.UpdatedAtMs
+               > (long)ExternalTurnActiveWindow.TotalMilliseconds;
+
     private bool ShouldHeartbeat(AgentSessionStateDto s)
-        => !IsHistoryProjection(s) || LastRelaySeqOrBridgeSeq(s.ConversationId, s.Seq) > 0;
+        => !IsHistoryProjection(s) || LastConfirmedRelaySeq(s.ConversationId) > 0;
+
+    private bool NeedsRelayCatchup(AgentSessionStateDto s)
+        => s.Seq > LastConfirmedRelaySeq(s.ConversationId);
 
     private RelaySessionMeta BuildMeta(AgentSessionStateDto s)
     {
-        var seq = LastRelaySeqOrBridgeSeq(s.ConversationId, s.Seq);
+        var seq = LastConfirmedRelaySeq(s.ConversationId);
         var workspace = WorkspaceOf(s.WorkingDirectory);
         // updatedAtMs is the machine snapshot heartbeat used for online/offline;
         // activityAtMs is the real session activity time used for sorting.
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // An externally driven turn (desktop chat UI or a raw CLI in a terminal)
+        // never passes through the bridge, so bridge phase stays Idle. If the
+        // projected transcript ends in an open turn and the file is still fresh,
+        // surface Running so the phone doesn't show 空闲 mid-turn. Gated on
+        // Seq<=0: once the bridge drives the session live, its phase wins.
+        var phase = s.Phase;
+        if (phase == AgentSessionPhase.Idle
+            && s.Seq <= 0
+            && IsProjectedTailOpen(s.ConversationId)
+            && nowMs - s.UpdatedAtMs <= (long)ExternalTurnActiveWindow.TotalMilliseconds)
+        {
+            phase = AgentSessionPhase.Running;
+        }
         return new RelaySessionMeta(
             s.ConversationId, s.BackendId, s.Title, s.WorkingDirectory,
             workspace.Key, workspace.Name,
             s.Model, s.ReasoningEffort, s.PermissionMode, s.ApprovalPolicy,
-            s.Phase, s.NeedsAttention, seq, nowMs, s.UpdatedAtMs,
-            s.AvailableModels);
+            phase, s.NeedsAttention, seq, nowMs, s.UpdatedAtMs,
+            s.AvailableModels,
+            string.IsNullOrWhiteSpace(_machineId) ? null : _machineId,
+            string.IsNullOrWhiteSpace(_machineName) ? null : _machineName);
+    }
+
+    private void SetProjectedTailOpen(string sessionId, bool open)
+    {
+        lock (_gate) _projectedTailOpen[sessionId] = open;
+    }
+
+    private bool IsProjectedTailOpen(string sessionId)
+    {
+        lock (_gate) return _projectedTailOpen.GetValueOrDefault(sessionId);
     }
 
     private void SetAwaitingTerminal(string sessionId, bool value)
@@ -553,8 +780,45 @@ public sealed class AgentRelayClient
 
     private async Task PostSafeAsync(RelayEventEnvelope envelope)
     {
-        try { await _producer.PostEventAsync(envelope, CancellationToken.None).ConfigureAwait(false); }
-        catch { /* best-effort — relay drops this event; reconnect replay resends from seq */ }
+        var attempt = 0;
+        while (true)
+        {
+            try
+            {
+                await _producer.PostEventAsync(envelope, CancellationToken.None).ConfigureAwait(false);
+                lock (_gate)
+                {
+                    _lastRelaySeq[envelope.SessionId] = Math.Max(
+                        envelope.Seq,
+                        _lastRelaySeq.GetValueOrDefault(envelope.SessionId));
+                }
+
+                // A meta snapshot may have been posted before this event completed.
+                // Refresh it after confirmed delivery so the relay never advances a
+                // list cursor beyond the transcript it actually stores.
+                if (_bridge.GetSession(envelope.SessionId) is { } session)
+                    _ = PostMetaSafeAsync(BuildMeta(session), CancellationToken.None);
+                return;
+            }
+            catch
+            {
+                var stop = _cts;
+                if (stop is null || stop.IsCancellationRequested) return;
+
+                // Keep requests strictly ordered through _eventPostTail. Retry a
+                // short exponential burst, then a bounded 30s cadence until the
+                // bridge reconnects; no envelope is skipped or acknowledged early.
+                var seconds = attempt < EventPostRetryBurst
+                    ? Math.Min(1 << attempt, 16)
+                    : 30;
+                attempt++;
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(seconds), stop.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { return; }
+            }
+        }
     }
 
     private async Task PostMetaSafeAsync(RelaySessionMeta meta, CancellationToken ct = default)
@@ -562,16 +826,6 @@ public sealed class AgentRelayClient
         try
         {
             await _producer.PostMetaAsync(meta, ct).ConfigureAwait(false);
-            lock (_gate)
-            {
-                _lastRelaySeq[meta.ConversationId] = Math.Max(meta.Seq, _lastRelaySeq.GetValueOrDefault(meta.ConversationId));
-                // Deliberately do NOT advance _relayActivityAtMs here. That cursor must
-                // track content we have actually PROJECTED (set only by
-                // PublishHistoryProjectionAsync / seeded from the server). Bumping it on
-                // a mere meta post would mark a history session "up to date" before — or
-                // instead of — its projection, so a pending or failed projection would
-                // never retry and the phone would be stuck on a stale transcript.
-            }
         }
         catch { /* best-effort */ }
     }
@@ -590,62 +844,175 @@ public sealed class AgentRelayClient
     {
         await foreach (var cmd in _producer.SubscribeCommandsAsync(ct).ConfigureAwait(false))
         {
-            // Dispatch on the threadpool and ack immediately — the turn may run
-            // long, and the bridge gate serializes per-session sends.
-            _ = DispatchAsync(cmd, ct);
-            try { await _producer.AckCommandAsync(cmd.SessionId, cmd.CmdId, CancellationToken.None).ConfigureAwait(false); }
-            catch { /* best-effort */ }
+            if (!CanDispatchToThisMachine(cmd)) continue;
+
+            RelayCommandLease lease;
+            try
+            {
+                lease = await _producer.LeaseCommandAsync(
+                    cmd.SessionId, cmd.CmdId, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The command remains queued (or its previous lease expires), so a
+                // subsequent command-stream reconnect can safely retry the claim.
+                continue;
+            }
+
+            if (!lease.Acquired) continue;
+            if (!_executingCommands.TryAdd(cmd.CmdId, 0)) continue;
+
+            // A Send may run for minutes. Keep the command loop free for
+            // Interrupt/Approve while this task renews its lease and later records
+            // an explicit terminal result.
+            _ = ExecuteLeasedCommandAsync(cmd, ct);
         }
+    }
+
+    private bool CanDispatchToThisMachine(RelayCommand cmd)
+    {
+        var target = cmd.MachineId?.Trim();
+        if (cmd.Op == RelayCommandOp.New)
+        {
+            // New commands must always be explicitly routed. This also prevents a
+            // legacy subscriber (which has no machine id) from creating a duplicate
+            // session when another desktop is the intended target.
+            return !string.IsNullOrWhiteSpace(target)
+                && !string.IsNullOrWhiteSpace(_machineId)
+                && string.Equals(target, _machineId, StringComparison.Ordinal);
+        }
+
+        return string.IsNullOrWhiteSpace(target)
+            || (!string.IsNullOrWhiteSpace(_machineId)
+                && string.Equals(target, _machineId, StringComparison.Ordinal));
+    }
+
+    private async Task ExecuteLeasedCommandAsync(RelayCommand cmd, CancellationToken stopCt)
+    {
+        // The renew loop is deliberately NOT linked to the relay lifetime: a Send
+        // turn survives a relay reconnect (see DispatchAsync), and keeping its
+        // lease renewed across that reconnect prevents the relay from offering
+        // the command to another machine while the turn is still running here.
+        using var renewCts = new CancellationTokenSource();
+        var renewTask = RenewCommandLeaseUntilCompleteAsync(cmd, renewCts.Token);
+        try
+        {
+            await DispatchAsync(cmd, stopCt).ConfigureAwait(false);
+            await _producer.CompleteCommandAsync(
+                cmd.SessionId, cmd.CmdId, succeeded: true, error: null, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stopCt.IsCancellationRequested)
+        {
+            // Shutdown is intentionally not terminal: allow the lease to expire so
+            // the command can be recovered by the bridge after it reconnects.
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                await _producer.CompleteCommandAsync(
+                    cmd.SessionId,
+                    cmd.CmdId,
+                    succeeded: false,
+                    error: CommandError(ex),
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Preserve at-least-once delivery: if the result post fails, the
+                // lease expires and the relay will offer the command again.
+            }
+        }
+        finally
+        {
+            try { renewCts.Cancel(); } catch { /* best-effort */ }
+            try { await renewTask.ConfigureAwait(false); } catch { /* best-effort */ }
+            _executingCommands.TryRemove(cmd.CmdId, out _);
+        }
+    }
+
+    private async Task RenewCommandLeaseUntilCompleteAsync(RelayCommand cmd, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try { await Task.Delay(CommandLeaseRenewInterval, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { break; }
+
+            try
+            {
+                var lease = await _producer.RenewCommandLeaseAsync(
+                    cmd.SessionId, cmd.CmdId, CancellationToken.None).ConfigureAwait(false);
+                if (!lease.Acquired) break;
+            }
+            catch
+            {
+                // A transient result/lease failure must not terminate the bridge
+                // task. Retry on the next interval while the original lease lasts.
+            }
+        }
+    }
+
+    private static string CommandError(Exception ex)
+    {
+        var text = ex.Message.Trim();
+        if (text.Length == 0) text = ex.GetType().Name;
+        return text.Length <= 240 ? text : text[..240];
     }
 
     private async Task DispatchAsync(RelayCommand cmd, CancellationToken ct)
     {
-        try
+        switch (cmd.Op)
         {
-            switch (cmd.Op)
-            {
-                case RelayCommandOp.Send:
-                    if (TryParseSend(cmd.PayloadJson, out var text, out var images))
-                        await _bridge.SendAsync(cmd.SessionId, new AgentTurnInput(text, images), CancellationToken.None).ConfigureAwait(false);
-                    break;
-                case RelayCommandOp.Interrupt:
-                    await _bridge.InterruptAsync(cmd.SessionId, CancellationToken.None).ConfigureAwait(false);
-                    break;
-                case RelayCommandOp.SwitchOptions:
-                    if (TryParseSwitchOptions(cmd.PayloadJson, out var sw))
-                        await _bridge.SwitchOptionsAsync(cmd.SessionId,
-                            sw.Model, sw.ReasoningEffort, sw.PermissionMode, sw.ApprovalPolicy,
-                            CancellationToken.None).ConfigureAwait(false);
-                    break;
-                case RelayCommandOp.New:
-                    if (TryParseNew(cmd.PayloadJson, out var nw))
-                        await _bridge.NewSessionAsync(
-                            cmd.SessionId, nw.BackendId, nw.WorkingDirectory,
-                            nw.Model, nw.ReasoningEffort, nw.PermissionMode, nw.ApprovalPolicy,
-                            nw.Title, CancellationToken.None).ConfigureAwait(false);
-                    break;
-                case RelayCommandOp.Close:
-                    await _bridge.CloseAsync(cmd.SessionId, CancellationToken.None).ConfigureAwait(false);
-                    await ResetRelayEventsAsync(cmd.SessionId, CancellationToken.None).ConfigureAwait(false);
-                    break;
-                case RelayCommandOp.RefreshHistory:
-                    await RefreshHistoryAsync(cmd.SessionId, CancellationToken.None).ConfigureAwait(false);
-                    break;
-                case RelayCommandOp.Approve:
-                    if (TryParseApprove(cmd.PayloadJson, out var approval))
-                        await _bridge.ApproveAsync(
-                            cmd.SessionId,
-                            approval.PermissionId,
-                            approval.Choice,
-                            CancellationToken.None).ConfigureAwait(false);
-                    break;
-            }
-        }
-        catch
-        {
-            // The bridge records turn failures as Failed phase + error events,
-            // which the relay already forwards. Swallow so the dispatch task
-            // never surfaces an unobserved exception.
+            case RelayCommandOp.Send:
+                if (!TryParseSend(cmd.PayloadJson, out var text, out var images)
+                    || (string.IsNullOrWhiteSpace(text) && images.Count == 0))
+                    throw new InvalidOperationException("Invalid Send command payload.");
+                // Deliberately NOT the relay-lifetime token: a turn can run for
+                // minutes, and the relay connection restarting (network blip,
+                // bridge toggle, app-level reconnect loop) must not cancel it.
+                // The turn's lifecycle is bounded by an explicit Interrupt
+                // command (bridge TurnCts) and bridge disposal on app exit.
+                await _bridge.SendAsync(cmd.SessionId, new AgentTurnInput(text, images), CancellationToken.None).ConfigureAwait(false);
+                break;
+            case RelayCommandOp.Interrupt:
+                await _bridge.InterruptAsync(cmd.SessionId, ct).ConfigureAwait(false);
+                break;
+            case RelayCommandOp.SwitchOptions:
+                if (!TryParseSwitchOptions(cmd.PayloadJson, out var sw))
+                    throw new InvalidOperationException("Invalid SwitchOptions command payload.");
+                await _bridge.SwitchOptionsAsync(cmd.SessionId,
+                    sw.Model, sw.ReasoningEffort, sw.PermissionMode, sw.ApprovalPolicy,
+                    ct).ConfigureAwait(false);
+                break;
+            case RelayCommandOp.New:
+                if (!CanDispatchToThisMachine(cmd))
+                    throw new InvalidOperationException("New command target does not match this desktop.");
+                if (!TryParseNew(cmd.PayloadJson, out var nw))
+                    throw new InvalidOperationException("Invalid New command payload.");
+                await _bridge.NewSessionAsync(
+                    cmd.SessionId, nw.BackendId, nw.WorkingDirectory,
+                    nw.Model, nw.ReasoningEffort, nw.PermissionMode, nw.ApprovalPolicy,
+                    nw.Title, ct, requireExistingWorkingDirectory: true).ConfigureAwait(false);
+                break;
+            case RelayCommandOp.Close:
+                await _bridge.CloseAsync(cmd.SessionId, ct).ConfigureAwait(false);
+                await ResetRelayEventsAsync(cmd.SessionId, ct).ConfigureAwait(false);
+                break;
+            case RelayCommandOp.RefreshHistory:
+                await RefreshHistoryAsync(cmd.SessionId, ct).ConfigureAwait(false);
+                break;
+            case RelayCommandOp.Approve:
+                if (!TryParseApprove(cmd.PayloadJson, out var approval))
+                    throw new InvalidOperationException("Invalid Approve command payload.");
+                await _bridge.ApproveAsync(
+                    cmd.SessionId,
+                    approval.PermissionId,
+                    approval.Choice,
+                    ct).ConfigureAwait(false);
+                break;
+            default:
+                throw new InvalidOperationException($"Unsupported relay command: {cmd.Op}.");
         }
     }
 

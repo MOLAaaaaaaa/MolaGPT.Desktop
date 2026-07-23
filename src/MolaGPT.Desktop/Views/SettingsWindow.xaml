@@ -607,7 +607,8 @@
                                                Foreground="{DynamicResource Brush.Text.Secondary}" />
                                         <ComboBox x:Name="EditType"
                                                   Style="{StaticResource SettingsComboBox}"
-                                                  Margin="0,0,0,12">
+                                                  Margin="0,0,0,12"
+                                                  SelectionChanged="ProviderTypeChanged">
                                         <ComboBoxItem Content="OpenAI 兼容" Tag="openai-compat" />
                                         <ComboBoxItem Content="Claude" Tag="anthropic" />
                                         <ComboBoxItem Content="Gemini" Tag="gemini" />
@@ -682,6 +683,57 @@
                                             Padding="12,8" Margin="0,0,0,0">
                                         <ctl:RevealableSecretBox x:Name="EditApiKey" />
                                     </Border>
+
+                                    <Expander Header="自定义请求头（高级）"
+                                              Margin="0,14,0,0"
+                                              Foreground="{DynamicResource Brush.Text.Secondary}">
+                                        <StackPanel Margin="0,8,0,0">
+                                            <TextBlock Text="附加到该服务全部请求（对话、模型列表、测试）。用于网关鉴权等场景。"
+                                                       FontSize="{DynamicResource Font.Size.Small}"
+                                                       TextWrapping="Wrap"
+                                                       Foreground="{DynamicResource Brush.Text.Muted}"
+                                                       Margin="0,0,0,8" />
+                                            <ItemsControl x:Name="CustomHeadersList">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Grid Margin="0,0,0,6">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="*" />
+                                                                <ColumnDefinition Width="*" />
+                                                                <ColumnDefinition Width="Auto" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                                    Padding="10,6" Margin="0,0,6,0">
+                                                                <TextBox Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
+                                                                         Style="{StaticResource InlineTextBox}"
+                                                                         ToolTip="Header 名称" />
+                                                            </Border>
+                                                            <Border Grid.Column="1"
+                                                                    Background="{DynamicResource Brush.Bg.Tertiary}"
+                                                                    CornerRadius="{DynamicResource Radius.Sm}"
+                                                                    Padding="10,6" Margin="0,0,6,0">
+                                                                <TextBox Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}"
+                                                                         Style="{StaticResource InlineTextBox}"
+                                                                         ToolTip="Header 值" />
+                                                            </Border>
+                                                            <Button Grid.Column="2"
+                                                                    Style="{StaticResource HeaderIconButton}"
+                                                                    Click="RemoveCustomHeaderRow_Click"
+                                                                    ToolTip="删除">
+                                                                <TextBlock Text="&#xE711;" FontFamily="{DynamicResource Font.Icon}" FontSize="12" />
+                                                            </Button>
+                                                        </Grid>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                            <Button Style="{StaticResource OutlineButton}"
+                                                    Content="+ 添加请求头"
+                                                    HorizontalAlignment="Left"
+                                                    Margin="0,4,0,0"
+                                                    Click="AddCustomHeaderRow_Click" />
+                                        </StackPanel>
+                                    </Expander>
 
                                         </StackPanel>
                                     </Border>
