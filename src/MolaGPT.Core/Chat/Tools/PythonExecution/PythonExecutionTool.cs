@@ -11,12 +11,27 @@ public sealed class PythonExecutionTool
 
     private const string UserScriptFileName = "main.py";
     private const string RunnerScriptFileName = "runner.py";
+
+    /// <summary>Where a run's complete output goes when the inline copy had to be
+    /// cut. Named so the model can find it, and excluded from artifact reporting so
+    /// it does not look like something the user's code produced.</summary>
+    private const string StdoutOverflowFileName = "stdout.full.log";
+    private const string StderrOverflowFileName = "stderr.full.log";
     private const long MaxArtifactBytes = 50L * 1024L * 1024L;
 
     // Timestamp skew applied when deciding which files a run produced. Absorbs
     // filesystem mtime granularity (FAT/exFAT is 2s) plus minor clock jitter so
     // a freshly written artifact is never excluded as "too old".
     private static readonly TimeSpan ArtifactFreshnessSkew = TimeSpan.FromSeconds(2);
+
+    /// <summary>Memory ceiling for one run's whole process tree. Set well above
+    /// what real data work needs — this is here to stop a runaway allocation from
+    /// taking the machine down, not to ration legitimate use.</summary>
+    private const long JobMemoryLimitBytes = 8L * 1024 * 1024 * 1024;
+
+    /// <summary>Process ceiling for one run's tree. Generous enough for code that
+    /// legitimately shells out; low enough that a spawn loop stops early.</summary>
+    private const int JobActiveProcessLimit = 32;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -78,6 +93,11 @@ public sealed class PythonExecutionTool
                         {
                             type = "string",
                             description = descriptionHint
+                        },
+                        timeout_seconds = new
+                        {
+                            type = "integer",
+                            description = "Seconds to allow this run before it is killed (optional). Raise it for work you expect to be slow; the host clamps it to a safe range."
                         }
                     },
                     required = requiresPurpose ? new[] { "code", "description" } : new[] { "code" }
@@ -95,7 +115,7 @@ public sealed class PythonExecutionTool
         if (options?.Enabled != true)
             return Error("Python tool is not enabled.");
 
-        var (code, description) = ParseArguments(argumentsJson);
+        var (code, description, requestedTimeout) = ParseArguments(argumentsJson);
         if (string.IsNullOrWhiteSpace(code))
             return Error("A non-empty Python code string is required.");
 
@@ -109,11 +129,14 @@ public sealed class PythonExecutionTool
         if (!permission.Approved)
         {
             return Error(
-                "Python 执行已被权限策略拒绝：" + permission.Reason,
+                "本次执行未通过权限策略：" + permission.Reason,
                 permission: BuildPermissionMeta(effectiveOptions, risk, "denied"));
         }
 
-        var timeout = TimeSpan.FromSeconds(Math.Clamp(options.TimeoutSeconds, 5, 300));
+        // A per-call request wins over the configured default, but is clamped to the
+        // same range: the model can ask for longer when it knows the job is slow,
+        // and cannot ask for unbounded.
+        var timeout = TimeSpan.FromSeconds(Math.Clamp(requestedTimeout ?? options.TimeoutSeconds, 5, 300));
         var maxOutput = Math.Clamp(options.MaxOutputCharacters, 2000, 100000);
         var sessionDir = ResolveSessionDirectory(conversationId);
 
@@ -171,6 +194,10 @@ public sealed class PythonExecutionTool
                 stderr = run.Stderr,
                 stdout_truncated = run.StdoutTruncated,
                 stderr_truncated = run.StderrTruncated,
+                // Present only when output was cut. Relative to this conversation's
+                // working directory, so read_file / grep_files can open it directly.
+                stdout_full_file = run.StdoutFullFile,
+                stderr_full_file = run.StderrFullFile,
                 exit_code = run.ExitCode,
                 duration_ms = (long)startedAt.Elapsed.TotalMilliseconds,
                 timed_out = run.TimedOut
@@ -196,7 +223,7 @@ public sealed class PythonExecutionTool
 
         // [1] Deny layer: hard-denied code is rejected even under full access.
         if (risk.HardDenied)
-            return new PermissionDecision(false, risk.BlockReason ?? "已被拒绝规则拦截。");
+            return new PermissionDecision(false, risk.BlockReason ?? "已被拒绝规则拦截");
 
         // Package installation always needs a separate, explicit decision. It
         // persists into this conversation's .packages directory and therefore
@@ -204,14 +231,14 @@ public sealed class PythonExecutionTool
         if (risk.Flags.Any(flag => string.Equals(flag.Code, "package_install", StringComparison.Ordinal)))
         {
             if (_approval is null)
-                return new PermissionDecision(false, "Python 包安装需要用户审批，但当前没有可用的审批服务。");
+                return new PermissionDecision(false, "包安装需要审批，但审批服务不可用");
 
             var installDecision = await _approval.RequestApprovalAsync(
                 new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk)),
                 ct).ConfigureAwait(false);
             return installDecision == PythonExecutionApprovalDecision.Approved
-                ? new PermissionDecision(true, "用户已批准将包安装到当前对话环境。")
-                : new PermissionDecision(false, "用户已拒绝 Python 包安装。");
+                ? new PermissionDecision(true, "用户已批准包安装")
+                : new PermissionDecision(false, "用户拒绝了包安装");
         }
 
         // Destructive filesystem operations stay reviewable even when the user
@@ -219,34 +246,34 @@ public sealed class PythonExecutionTool
         if (risk.Flags.Any(flag => string.Equals(flag.Code, "destructive_file", StringComparison.Ordinal)))
         {
             if (_approval is null)
-                return new PermissionDecision(false, "破坏性文件操作需要用户审批，但当前没有可用的审批服务。");
+                return new PermissionDecision(false, "该文件操作需要审批，但审批服务不可用");
 
             var destructiveDecision = await _approval.RequestApprovalAsync(
                 new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk)),
                 ct).ConfigureAwait(false);
             return destructiveDecision == PythonExecutionApprovalDecision.Approved
-                ? new PermissionDecision(true, "用户已批准破坏性文件操作。")
-                : new PermissionDecision(false, "用户已拒绝破坏性文件操作。");
+                ? new PermissionDecision(true, "用户已批准该文件操作")
+                : new PermissionDecision(false, "用户拒绝了该文件操作");
         }
 
         // [2] Full access: trust everything that survived the deny layer.
         if (options.PermissionMode == PythonPermissionMode.FullAccess)
-            return new PermissionDecision(true, "完全权限模式已允许执行。");
+            return new PermissionDecision(true, "完全权限模式已放行");
 
         // [3] Allow layer: nothing risky found -> auto-approve without a prompt.
         if (risk.AutoApprovable)
-            return new PermissionDecision(true, "未发现需要审批的风险，已自动放行。");
+            return new PermissionDecision(true, "未发现需要审批的操作，已自动放行");
 
         // [4] Everything else needs an explicit user decision.
         if (_approval is null)
-            return new PermissionDecision(false, "需要用户审批，但当前没有可用的审批服务。");
+            return new PermissionDecision(false, "需要审批，但审批服务不可用");
 
         var decision = await _approval.RequestApprovalAsync(
             new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk)),
             ct).ConfigureAwait(false);
         return decision == PythonExecutionApprovalDecision.Approved
-            ? new PermissionDecision(true, "用户已批准。")
-            : new PermissionDecision(false, "用户已拒绝。");
+            ? new PermissionDecision(true, "用户已批准本次执行")
+            : new PermissionDecision(false, "用户拒绝了本次执行");
     }
 
     private static PythonExecutionOptions MergeSessionAllowList(
@@ -298,7 +325,7 @@ public sealed class PythonExecutionTool
         }
 
         var detail = failures.Count == 0 ? string.Empty : " " + string.Join(" | ", failures.Take(3));
-        throw new InvalidOperationException("找不到已配置的 Python。请在设置中一键配置 MolaGPT 专用环境，或明确选择一个 python.exe。不会回退到系统 Python。" + detail);
+        throw new InvalidOperationException("未找到可用的 Python 环境，请在设置中完成配置" + detail);
     }
 
     private static IEnumerable<PythonCandidate> BuildPythonCandidates(string? configuredPath)
@@ -350,13 +377,27 @@ public sealed class PythonExecutionTool
         CancellationToken ct)
     {
         using var process = CreateProcess(candidate, new[] { "-I", "-X", "utf8", "-u", runnerScriptPath }, workingDirectory, allowNetwork);
-        var stdout = new BoundedTextCollector(maxOutputCharacters);
-        var stderr = new BoundedTextCollector(maxOutputCharacters);
+        using var stdout = new BoundedTextCollector(
+            maxOutputCharacters, Path.Combine(workingDirectory, StdoutOverflowFileName));
+        using var stderr = new BoundedTextCollector(
+            maxOutputCharacters, Path.Combine(workingDirectory, StderrOverflowFileName));
         process.OutputDataReceived += (_, e) => stdout.AppendLine(e.Data);
         process.ErrorDataReceived += (_, e) => stderr.AppendLine(e.Data);
 
+        // Caps the whole process tree and guarantees its teardown. Disposed at the
+        // end of the run, which is what kills anything still alive.
+        using var job = OperatingSystem.IsWindows()
+            ? WindowsJobObject.TryCreate(JobMemoryLimitBytes, JobActiveProcessLimit)
+            : null;
+
         if (!process.Start())
             throw new InvalidOperationException("Python process failed to start.");
+
+        // Assigned immediately after start. A child spawned in the microseconds
+        // before this lands would escape the job; closing that window needs
+        // CREATE_SUSPENDED, which Process.Start cannot do. Acceptable here because
+        // the job is a resource guard, not a security boundary.
+        job?.TryAssign(process);
 
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
@@ -388,7 +429,9 @@ public sealed class PythonExecutionTool
             stderr.Text,
             stdout.Truncated,
             stderr.Truncated,
-            timedOut);
+            timedOut,
+            stdout.OverflowPath is null ? null : StdoutOverflowFileName,
+            stderr.OverflowPath is null ? null : StderrOverflowFileName);
     }
 
     private static Process CreateProcess(
@@ -563,7 +606,7 @@ public sealed class PythonExecutionTool
     /// <summary>Names of the runtime scaffolding scripts written into the session
     /// directory; artifact scanners exclude these.</summary>
     public static IReadOnlyCollection<string> RuntimeScriptFileNames { get; } =
-        new[] { UserScriptFileName, RunnerScriptFileName };
+        new[] { UserScriptFileName, RunnerScriptFileName, StdoutOverflowFileName, StderrOverflowFileName };
 
     private static string ResolveSessionDirectory(string? conversationId)
     {
@@ -775,19 +818,20 @@ public sealed class PythonExecutionTool
         _ => "application/octet-stream"
     };
 
-    private static (string? Code, string? Description) ParseArguments(string argumentsJson)
+    private static (string? Code, string? Description, int? TimeoutSeconds) ParseArguments(string argumentsJson)
     {
         if (string.IsNullOrWhiteSpace(argumentsJson))
-            return (null, null);
+            return (null, null, null);
 
         using var doc = JsonDocument.Parse(argumentsJson);
         var root = doc.RootElement;
         if (root.ValueKind != JsonValueKind.Object)
-            return (null, null);
+            return (null, null, null);
 
         return (
             ReadString(root, "code") ?? ReadString(root, "python") ?? ReadString(root, "script"),
-            ReadString(root, "description") ?? ReadString(root, "purpose"));
+            ReadString(root, "description") ?? ReadString(root, "purpose"),
+            ReadInt(root, "timeout_seconds") ?? ReadInt(root, "timeout"));
     }
 
     private static string? ReadString(JsonElement obj, string name)
@@ -801,6 +845,19 @@ public sealed class PythonExecutionTool
             }
         }
 
+        return null;
+    }
+
+    private static int? ReadInt(JsonElement obj, string name)
+    {
+        foreach (var prop in obj.EnumerateObject())
+        {
+            if (!string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase)) continue;
+            if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetInt32(out var n)) return n;
+            // Models sometimes send numbers as strings.
+            if (prop.Value.ValueKind == JsonValueKind.String
+                && int.TryParse(prop.Value.GetString(), out var parsed)) return parsed;
+        }
         return null;
     }
 
@@ -843,19 +900,38 @@ public sealed class PythonExecutionTool
         permission
     }, JsonOptions);
 
-    private sealed class BoundedTextCollector
+    /// <summary>
+    /// Collects a stream into a bounded in-memory copy, and — once that bound is
+    /// reached — spills the <em>whole</em> stream to a file.
+    ///
+    /// Without the spill, everything past the limit was simply gone: a script that
+    /// printed more than the cap left the model holding a prefix and a "truncated"
+    /// flag, with no way to reach the rest except running it again differently.
+    /// The file lands in the conversation's working directory, so the existing
+    /// read_file / grep_files tools can go straight at it.
+    ///
+    /// The file is opened lazily, on the first overflow, so runs that stay under
+    /// the cap — nearly all of them — touch the disk not at all.
+    /// </summary>
+    private sealed class BoundedTextCollector : IDisposable
     {
         private readonly int _maxChars;
         private readonly StringBuilder _builder;
+        private readonly string? _overflowPath;
+        private StreamWriter? _overflow;
 
-        public BoundedTextCollector(int maxChars)
+        public BoundedTextCollector(int maxChars, string? overflowPath = null)
         {
             _maxChars = maxChars;
             _builder = new StringBuilder(Math.Min(maxChars, 4096));
+            _overflowPath = overflowPath;
         }
 
         public bool Truncated { get; private set; }
         public string Text => _builder.ToString();
+
+        /// <summary>Path of the complete output, or null when nothing was cut.</summary>
+        public string? OverflowPath { get; private set; }
 
         public void AppendLine(string? line)
         {
@@ -867,24 +943,51 @@ public sealed class PythonExecutionTool
 
         private void Append(string text)
         {
-            if (Truncated || text.Length == 0)
-                return;
+            if (text.Length == 0) return;
 
-            var remaining = _maxChars - _builder.Length;
-            if (remaining <= 0)
+            if (Truncated)
             {
-                Truncated = true;
+                _overflow?.Write(text);
                 return;
             }
 
+            var remaining = _maxChars - _builder.Length;
             if (text.Length <= remaining)
             {
                 _builder.Append(text);
                 return;
             }
 
-            _builder.Append(text.AsSpan(0, remaining));
+            // First overflow: start the file with everything kept so far, so it is
+            // the complete stream rather than only the tail.
             Truncated = true;
+            if (remaining > 0) _builder.Append(text.AsSpan(0, remaining));
+            BeginOverflow();
+            _overflow?.Write(text);
+        }
+
+        private void BeginOverflow()
+        {
+            if (_overflowPath is null) return;
+            try
+            {
+                _overflow = new StreamWriter(_overflowPath, append: false, new UTF8Encoding(false));
+                _overflow.Write(_builder.ToString());
+                OverflowPath = _overflowPath;
+            }
+            catch (IOException)
+            {
+                // A working directory we cannot write to is not worth failing the
+                // run over — the inline copy is still returned.
+                _overflow = null;
+            }
+        }
+
+        public void Dispose()
+        {
+            try { _overflow?.Flush(); _overflow?.Dispose(); }
+            catch { /* best effort */ }
+            _overflow = null;
         }
     }
 
@@ -899,7 +1002,9 @@ public sealed class PythonExecutionTool
         string Stderr,
         bool StdoutTruncated,
         bool StderrTruncated,
-        bool TimedOut);
+        bool TimedOut,
+        string? StdoutFullFile = null,
+        string? StderrFullFile = null);
 
     private sealed record PermissionDecision(bool Approved, string Reason);
 

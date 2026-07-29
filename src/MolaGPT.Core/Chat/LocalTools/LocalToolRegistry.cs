@@ -156,6 +156,8 @@ public static partial class LocalToolRegistry
                             path = new { type = "string", description = "搜索根目录（可选，默认当前对话工作目录；没有工作目录时使用应用当前目录）" },
                             glob = new { type = "string", description = "限定文件名/路径的通配，如 *.cs（可选）" },
                             ignore_case = new { type = "boolean", description = "是否忽略大小写（可选）" },
+                            literal = new { type = "boolean", description = "把 pattern 当作普通文本而非正则（可选）。搜索含 . ( ) [ ] 等符号的字符串时用它，避免转义出错。" },
+                            context = new { type = "integer", description = "每条命中额外返回的上下文行数（可选，最多 10）" },
                             max_matches = new { type = "integer", description = "最多命中条数（可选，默认 100）" }
                         },
                         required = new[] { "pattern" }
@@ -229,7 +231,11 @@ public static partial class LocalToolRegistry
         var glob = ReadArgString(root, "glob");
         var ignoreCase = ReadArgBool(root, "ignore_case");
         var max = ReadArgInt(root, "max_matches");
-        return SerializeToolResult(FileToolset.Grep(pattern, path, glob, ignoreCase, max, options.DeniedPathPrefixList, options.WorkspaceRoot, ct));
+        var literal = ReadArgBool(root, "literal");
+        var context = ReadArgInt(root, "context");
+        return SerializeToolResult(FileToolset.Grep(
+            pattern, path, glob, ignoreCase, max, options.DeniedPathPrefixList, options.WorkspaceRoot, ct,
+            literal, context));
     }
 
     private static JsonDocument? ParseArgs(string argumentsJson)

@@ -76,18 +76,11 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     public Func<string, CancellationToken, Task<string?>>? ConversationCompletedAsync { get; set; }
 
-    /// <summary>
-    /// Platform folder-picker hook, wired by the Desktop layer. Returns the
-    /// chosen absolute directory, or null if the user cancelled.
-    /// </summary>
-    public Func<Task<string?>>? PickFolderAsync { get; set; }
-
     private readonly ChatViewModel _chat;
     private readonly BackgroundStreamService? _backgroundStreams;
     private readonly SettingsViewModel? _settings;
     private readonly PersonaListViewModel? _personas;
     private readonly SkillsViewModel? _skills;
-    private readonly MolaGPT.Core.Chat.Agents.IAgentConfigProvider? _agentConfig;
     private readonly MolaGPT.Storage.AttachmentStore? _attachmentStore;
     private readonly Dictionary<MessageViewModel, List<PythonArtifactMarkdownRewriter.ArtifactContext>> _pythonArtifactContexts = new();
     private CancellationTokenSource? _cts;
@@ -110,27 +103,6 @@ public sealed partial class ComposerViewModel : ObservableObject
     public bool IsPersonaPickerVisible =>
         _chat.ActiveProvider is not null && _chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
 
-    /// <summary>True when the active provider is a local agent CLI (Claude Code /
-    /// Codex) — gates the working-directory chip in the composer toolbar.</summary>
-    public bool IsAgentProviderActive =>
-        _chat.ActiveProvider?.Kind == ProviderKind.Agent;
-
-    /// <summary>Short label for the working-directory chip: the folder name, or a
-    /// prompt to choose one.</summary>
-    public string WorkingDirectoryLabel
-    {
-        get
-        {
-            var dir = _agentConfig?.GetWorkingDirectory(_chat.ConversationId);
-            if (string.IsNullOrEmpty(dir)) return "选择工作目录";
-            var name = Path.GetFileName(dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-            return string.IsNullOrEmpty(name) ? dir : name;
-        }
-    }
-
-    /// <summary>Full working-directory path for the chip tooltip.</summary>
-    public string? WorkingDirectoryTooltip => _agentConfig?.GetWorkingDirectory(_chat.ConversationId);
-
     public ComposerViewModel(ChatViewModel chat, BackgroundStreamService? backgroundStreams = null, SettingsViewModel? settings = null)
         : this(chat, backgroundStreams, settings, null, null) { }
 
@@ -147,8 +119,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         SettingsViewModel? settings,
         PersonaListViewModel? personas,
         MolaGPT.Storage.AttachmentStore? attachmentStore,
-        SkillsViewModel? skills = null,
-        MolaGPT.Core.Chat.Agents.IAgentConfigProvider? agentConfig = null)
+        SkillsViewModel? skills = null)
     {
         _chat = chat;
         _backgroundStreams = backgroundStreams;
@@ -156,14 +127,10 @@ public sealed partial class ComposerViewModel : ObservableObject
         _personas = personas;
         _attachmentStore = attachmentStore;
         _skills = skills;
-        _agentConfig = agentConfig;
         _chat.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(ChatViewModel.ConversationId))
-            {
-                OnPropertyChanged(nameof(WorkingDirectoryLabel));
-                OnPropertyChanged(nameof(WorkingDirectoryTooltip));
-            }
+                PruneOrphanedArtifactContexts();
             if (e.PropertyName is nameof(ChatViewModel.ActiveProvider) or nameof(ChatViewModel.ActiveModel))
             {
                 SendCommand.NotifyCanExecuteChanged();
@@ -179,9 +146,6 @@ public sealed partial class ComposerViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsPersonaPickerVisible));
                 OnPropertyChanged(nameof(IsImageGenerationAvailable));
                 OnPropertyChanged(nameof(IsImageOptionsVisible));
-                OnPropertyChanged(nameof(IsAgentProviderActive));
-                OnPropertyChanged(nameof(WorkingDirectoryLabel));
-                OnPropertyChanged(nameof(WorkingDirectoryTooltip));
 
                 if (!IsThinkingVisible && EnableThinking) EnableThinking = false;
                 if (!AreNetworkToolsEnabled)
@@ -399,27 +363,6 @@ public sealed partial class ComposerViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(hint)) return;
         Text = hint;
-    }
-
-    /// <summary>
-    /// Choose the working directory for the active agent conversation. Ensures a
-    /// conversation id exists first (so the choice can be persisted per-conversation),
-    /// then opens the platform folder picker and stores the result.
-    /// </summary>
-    [RelayCommand]
-    public async Task PickWorkingDirectoryAsync()
-    {
-        if (_agentConfig is null || PickFolderAsync is null) return;
-
-        if (string.IsNullOrEmpty(_chat.ConversationId))
-            _chat.ConversationId = CreateWebCompatibleConversationId();
-
-        var chosen = await PickFolderAsync().ConfigureAwait(true);
-        if (string.IsNullOrWhiteSpace(chosen)) return;
-
-        _agentConfig.SetWorkingDirectory(_chat.ConversationId!, chosen);
-        OnPropertyChanged(nameof(WorkingDirectoryLabel));
-        OnPropertyChanged(nameof(WorkingDirectoryTooltip));
     }
 
     /// <summary>Cycle the reasoning effort low → medium → high → low.</summary>
@@ -671,7 +614,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         catch (Exception ex)
         {
             assistantMsg.AppendDelta($"\n\n> ❌ **错误**: {ex.Message}");
-            ClassifyActionableError(assistantMsg, ex, provider);
+            ClassifyActionableError(assistantMsg, ex);
         }
         finally
         {
@@ -1309,20 +1252,11 @@ public sealed partial class ComposerViewModel : ObservableObject
     }
 
     /// <summary>Map a failed turn to a one-tap recovery when we recognize the
-    /// cause, so the error banner can offer a fix instead of a dead end. Agent
-    /// "no working directory" → folder picker; balance/402 → model selector.</summary>
-    private static void ClassifyActionableError(MessageViewModel assistantMsg, Exception ex, IChatProvider? provider)
+    /// cause, so the error banner can offer a fix instead of a dead end.
+    /// Balance/402 → model selector.</summary>
+    private static void ClassifyActionableError(MessageViewModel assistantMsg, Exception ex)
     {
         var message = ex.Message ?? string.Empty;
-
-        if (provider?.Kind == ProviderKind.Agent
-            && message.Contains("工作目录", StringComparison.Ordinal))
-        {
-            assistantMsg.SetActionableError(
-                MessageErrorAction.PickWorkingDirectory,
-                "该会话还没有工作目录，选择一个项目文件夹后即可继续。");
-            return;
-        }
 
         if (message.Contains("402", StringComparison.Ordinal)
             || message.Contains("Insufficient Balance", StringComparison.OrdinalIgnoreCase)
@@ -1518,6 +1452,32 @@ public sealed partial class ComposerViewModel : ObservableObject
             _pythonArtifactContexts[assistantMsg] = contexts;
         }
         contexts.Add(context);
+    }
+
+    /// <summary>
+    /// Drop artifact contexts whose message no longer belongs to any live stream.
+    /// Streams normally remove their own entry when they finish; this safety net
+    /// (run on conversation switch) catches entries stranded by a stream that
+    /// never terminated or whose completion path threw before the removal.
+    /// Anything foreground-active, background-registered, or still streaming
+    /// (e.g. an in-flight retry, which sets neither) is left alone.
+    /// </summary>
+    private void PruneOrphanedArtifactContexts()
+    {
+        if (_pythonArtifactContexts.Count == 0) return;
+
+        List<MessageViewModel>? stale = null;
+        var background = _backgroundStreams?.ActiveTasks;
+        foreach (var key in _pythonArtifactContexts.Keys)
+        {
+            if (key.IsStreaming) continue;
+            if (ReferenceEquals(key, _activeAssistantMsg)) continue;
+            if (background is not null && background.Any(t => ReferenceEquals(t.AssistantMessage, key))) continue;
+            (stale ??= new List<MessageViewModel>()).Add(key);
+        }
+        if (stale is null) return;
+        foreach (var key in stale)
+            _pythonArtifactContexts.Remove(key);
     }
 
     private void RememberPythonArtifactContext(MessageViewModel assistantMsg, string? resultJson)

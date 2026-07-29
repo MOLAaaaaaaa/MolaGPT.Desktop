@@ -13,13 +13,16 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
 {
     private readonly IPythonSessionAllowList _sessionAllowList;
     private readonly SettingsViewModel _settings;
+    private readonly IToolGrantStore _grants;
 
     public PythonExecutionApprovalService(
         IPythonSessionAllowList sessionAllowList,
-        SettingsViewModel settings)
+        SettingsViewModel settings,
+        IToolGrantStore grants)
     {
         _sessionAllowList = sessionAllowList;
         _settings = settings;
+        _grants = grants;
     }
 
     public async Task<PythonExecutionApprovalDecision> RequestApprovalAsync(
@@ -48,37 +51,30 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         if (!needsPrompt)
             return ToolApprovalDecision.Approved;
 
+        // A previous "don't ask again" for this exact tool. Checked after the
+        // capability gate so a grant can never widen what the mode already allows.
+        if (!request.AlwaysAsk && _grants.IsGranted(request.ToolName))
+            return ToolApprovalDecision.Approved;
+
         var app = Application.Current;
         if (app?.Dispatcher is null)
             return ToolApprovalDecision.Denied;
 
         ct.ThrowIfCancellationRequested();
-        var (approved, alwaysAllow) = await app.Dispatcher.InvokeAsync(() => ShowToolApprovalDialog(request, mode))
+        var (approved, scope) = await app.Dispatcher.InvokeAsync(() => ShowToolApprovalDialog(request, mode))
             .Task.ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
-        if (approved && alwaysAllow)
-            ApplyAlwaysAllow(request.ToolName);
+        if (approved)
+            _grants.Grant(request.ToolName, scope);
         return approved ? ToolApprovalDecision.Approved : ToolApprovalDecision.Denied;
     }
 
-    private void ApplyAlwaysAllow(string toolName)
-    {
-        if (string.Equals(toolName, "generate_image", StringComparison.Ordinal))
-            _settings.ImageGenerationPermissionMode = ToolPermissionMode.FullAccess;
-        else if (string.Equals(toolName, "view_image", StringComparison.Ordinal))
-            _settings.VisionPermissionMode = ToolPermissionMode.FullAccess;
-        else if (string.Equals(toolName, "execute_python_code", StringComparison.Ordinal))
-            _settings.PythonExecutionPermissionMode = ToolPermissionMode.FullAccess;
-        else if (toolName.StartsWith("mcp__", StringComparison.Ordinal))
-            _settings.McpPermissionMode = ToolPermissionMode.FullAccess;
-    }
-
-    private static (bool Approved, bool Always) ShowToolApprovalDialog(ToolApprovalRequest request, ToolPermissionMode mode)
+    private static (bool Approved, ToolGrantScope Scope) ShowToolApprovalDialog(ToolApprovalRequest request, ToolPermissionMode mode)
     {
         var owner = FindOwnerWindow();
         var dialog = new Window
         {
-            Title = "审批工具调用",
+            Title = "工具调用审批",
             Width = 680,
             Height = 500,
             MinWidth = 560,
@@ -108,7 +104,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         heading.Children.Add(new TextBlock
         {
             Text = string.IsNullOrWhiteSpace(request.Description)
-                ? "模型请求调用此工具。"
+                ? "模型请求调用该工具"
                 : request.Description,
             Margin = new Thickness(0, 5, 0, 0),
             TextWrapping = TextWrapping.Wrap,
@@ -118,8 +114,8 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
 
         var capabilityText = new TextBlock
         {
-            Text = $"能力：{FormatCapabilities(request.Capabilities)} · 权限模式：{FormatMode(mode)}"
-                   + (request.AlwaysAsk ? " · 此操作始终需要确认" : string.Empty),
+            Text = $"涉及权限：{FormatCapabilities(request.Capabilities)} · 审批模式：{FormatMode(mode)}"
+                   + (request.AlwaysAsk ? " · 该操作每次均需确认" : string.Empty),
             Padding = new Thickness(12, 9, 12, 9),
             Margin = new Thickness(0, 0, 0, 12),
             TextWrapping = TextWrapping.Wrap,
@@ -151,12 +147,19 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             Margin = new Thickness(0, 14, 0, 0)
         };
         var deny = new Button { Content = "拒绝", Width = 96, Height = 34, Margin = new Thickness(0, 0, 8, 0), IsCancel = true };
+        // Three tiers rather than two. "始终允许" used to be the only way to stop
+        // being asked, which made one hurried click a permanent grant; the session
+        // tier covers the common case ("I'm doing this task now") without leaving
+        // anything behind after the app closes.
+        var sessionAllow = new Button { Content = "本次会话内允许", Width = 120, Height = 34, Margin = new Thickness(0, 0, 8, 0) };
         var alwaysAllow = new Button { Content = "始终允许", Width = 110, Height = 34, Margin = new Thickness(0, 0, 8, 0) };
-        var allow = new Button { Content = "允许本次", Width = 110, Height = 34, IsDefault = true };
+        var allow = new Button { Content = "仅允许本次", Width = 110, Height = 34, IsDefault = true };
         deny.Click += (_, _) => { dialog.Tag = "deny"; dialog.DialogResult = false; dialog.Close(); };
+        sessionAllow.Click += (_, _) => { dialog.Tag = "session"; dialog.DialogResult = true; dialog.Close(); };
         alwaysAllow.Click += (_, _) => { dialog.Tag = "always"; dialog.DialogResult = true; dialog.Close(); };
         allow.Click += (_, _) => { dialog.Tag = "once"; dialog.DialogResult = true; dialog.Close(); };
         buttons.Children.Add(deny);
+        buttons.Children.Add(sessionAllow);
         buttons.Children.Add(alwaysAllow);
         buttons.Children.Add(allow);
         Grid.SetRow(buttons, 3);
@@ -164,7 +167,16 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
 
         dialog.Content = root;
         dialog.ShowDialog();
-        return (dialog.DialogResult == true, dialog.Tag as string == "always");
+
+        // Closing the dialog any other way (Esc, the title-bar X) must read as a
+        // refusal, and an unrecognised tag as the narrowest grant.
+        if (dialog.DialogResult != true) return (false, ToolGrantScope.Once);
+        return (true, (dialog.Tag as string) switch
+        {
+            "always" => ToolGrantScope.Always,
+            "session" => ToolGrantScope.Session,
+            _ => ToolGrantScope.Once,
+        });
     }
 
     private static string FormatCapabilities(ToolCapability capabilities)
@@ -185,7 +197,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         var owner = FindOwnerWindow();
         var dialog = new Window
         {
-            Title = "审批 Python 执行",
+            Title = "Python 执行审批",
             Width = 760,
             Height = 620,
             MinWidth = 620,
@@ -208,16 +220,23 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
 
         var title = new TextBlock
         {
-            Text = "模型请求执行本地 Python",
+            Text = "模型请求在本机执行 Python 代码",
             FontSize = 18,
             FontWeight = FontWeights.SemiBold,
             Margin = new Thickness(0, 0, 0, 12)
         };
         root.Children.Add(title);
 
-        var purposeCard = BuildPurposeCard(request);
-        Grid.SetRow(purposeCard, 1);
-        root.Children.Add(purposeCard);
+        // The two things worth interrupting someone for go above the fold, in their
+        // own colour. Everything else stays in the detail box below, where a flat
+        // list is fine — the failure this avoids is a reader skimming past "writes
+        // to your Desktop" because it looked like "imported os".
+        var headline = new StackPanel();
+        if (BuildAlertBanner(request) is { } banner)
+            headline.Children.Add(banner);
+        headline.Children.Add(BuildPurposeCard(request));
+        Grid.SetRow(headline, 1);
+        root.Children.Add(headline);
 
         var riskBox = new TextBox
         {
@@ -265,7 +284,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             var remember = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
             remember.Children.Add(new TextBlock
             {
-                Text = "勾选要记住的项，下次符合规则的代码将自动放行：",
+                Text = "创建规则并记住：",
                 FontSize = 12,
                 Foreground = TryFindBrush("Brush.Text.Secondary") ?? Brushes.Gray,
                 Margin = new Thickness(0, 0, 0, 6)
@@ -280,20 +299,15 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             }
             foreach (var prefix in pathCandidates)
             {
-                var cb = new CheckBox { Content = $"允许路径 {prefix}", Margin = new Thickness(0, 0, 16, 6), Tag = prefix };
+                var cb = new CheckBox { Content = $"允许访问 {prefix}", Margin = new Thickness(0, 0, 16, 6), Tag = prefix };
                 pathChecks.Add(cb);
                 chips.Children.Add(cb);
             }
             remember.Children.Add(chips);
 
-            remember.Children.Add(new TextBlock
-            {
-                Text = "本次会话：仅本次运行有效，重启应用后失效。永久：写入设置页「高级规则」，长期生效、可在那里查看或删除。",
-                FontSize = 12,
-                TextWrapping = TextWrapping.Wrap,
-                Foreground = TryFindBrush("Brush.Text.Muted") ?? Brushes.Gray,
-                Margin = new Thickness(0, 2, 0, 0)
-            });
+            // The session-vs-permanent choice lives in the button's dropdown, where
+            // each option says which it is. Explaining it again here just gave
+            // people a paragraph to skip past.
 
             Grid.SetRow(remember, 4);
             root.Children.Add(remember);
@@ -325,7 +339,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         };
         var allowButton = new Button
         {
-            Content = "允许本次",
+            Content = "仅允许本次",
             Width = 110,
             Height = 34,
             IsDefault = true
@@ -354,9 +368,9 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         rememberButton.Click += (_, _) =>
         {
             var menu = new ContextMenu();
-            var sessionItem = new MenuItem { Header = "仅本次会话" };
+            var sessionItem = new MenuItem { Header = "本次会话内有效" };
             sessionItem.Click += (_, _) => CommitRemember(toSession: true);
-            var permanentItem = new MenuItem { Header = "之后的所有会话 " };
+            var permanentItem = new MenuItem { Header = "长期有效" };
             permanentItem.Click += (_, _) => CommitRemember(toSession: false);
             menu.Items.Add(sessionItem);
             menu.Items.Add(permanentItem);
@@ -455,7 +469,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         });
         stack.Children.Add(new TextBlock
         {
-            Text = hasPurpose ? request.Description!.Trim() : "模型未说明用途。请在批准前仔细阅读下方代码。",
+            Text = hasPurpose ? request.Description!.Trim() : "模型未说明用途，请先确认下方代码",
             FontSize = 14,
             FontStyle = hasPurpose ? FontStyles.Normal : FontStyles.Italic,
             TextWrapping = TextWrapping.Wrap,
@@ -468,32 +482,97 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         return card;
     }
 
+    /// <summary>
+    /// The loud part: only fires for the two findings that mean "this reaches your
+    /// real files", and names what it will touch.
+    /// </summary>
+    private static Border? BuildAlertBanner(PythonExecutionApprovalRequest request)
+    {
+        var destructive = request.Risk.Flags.Any(f => string.Equals(f.Code, "destructive_file", StringComparison.Ordinal));
+        var outsidePaths = request.Risk.Flags
+            .Where(f => f.Code is "outside_allowed_path" or "absolute_path")
+            .Select(f => f.Subject)
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (!destructive && outsidePaths.Count == 0) return null;
+
+        var lines = new List<string>();
+        if (destructive) lines.Add("此次执行涉及删除、移动或覆盖文件");
+        if (outsidePaths.Count > 0)
+        {
+            lines.Add("此次执行将访问当前会话工作目录以外的位置：");
+            lines.AddRange(outsidePaths.Take(4).Select(p => "　" + p));
+            if (outsidePaths.Count > 4) lines.Add($"　等 {outsidePaths.Count - 4} 项");
+        }
+
+        var text = new TextBlock
+        {
+            Text = string.Join("\n", lines),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = new SolidColorBrush(Color.FromRgb(0x8A, 0x1C, 0x1C)),
+            FontWeight = FontWeights.SemiBold,
+            LineHeight = 20
+        };
+
+        return new Border
+        {
+            Child = text,
+            Background = new SolidColorBrush(Color.FromRgb(0xFD, 0xEC, 0xEC)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(0xE8, 0xB0, 0xB0)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(12, 10, 12, 10),
+            Margin = new Thickness(0, 0, 0, 10)
+        };
+    }
+
     private static string BuildRiskText(PythonExecutionApprovalRequest request)
     {
         var builder = new StringBuilder();
-        builder.Append("权限模式：").AppendLine(request.Options.PermissionMode.ToString());
-        builder.Append("能力标签：").AppendLine(FormatCapabilities(request.Capabilities));
-        builder.Append("风险等级：").AppendLine(request.Risk.Level.ToString());
-        builder.AppendLine("这段代码仍以当前 Windows 用户权限运行，但解释器 PATH 与 Python 环境变量已隔离。");
-        if (request.Risk.Flags.Any(flag => string.Equals(flag.Code, "package_install", StringComparison.Ordinal)))
-            builder.AppendLine("包将安装到当前对话的 .packages 目录，不会写入 MolaGPT 基础运行时或系统 Python。");
 
         if (request.Risk.Imports.Count > 0)
-            builder.Append("导入模块：").AppendLine(string.Join(", ", request.Risk.Imports));
+            builder.Append("涉及模块：").AppendLine(string.Join("、", request.Risk.Imports));
 
-        if (request.Risk.Flags.Count == 0)
-        {
-            builder.AppendLine("未发现明显高风险操作。");
-        }
+        var codes = request.Risk.Flags.Select(f => f.Code).ToHashSet(StringComparer.Ordinal);
+
+        var rest = request.Risk.Flags
+            // Shown in the banner above.
+            .Where(f => f.Code is not ("destructive_file" or "outside_allowed_path" or "absolute_path"))
+            // The analyzer finds the same fact twice when a module import and a
+            // call-site pattern both match — the module-specific line wins, since
+            // it names what to allow.
+            .Where(f => f.Code is not "process_execution" || !codes.Contains("restricted_import"))
+            .Where(f => f.Code is not "network_call" || !codes.Contains("network_import"))
+            .ToList();
+
+        if (rest.Count == 0)
+            builder.AppendLine("未发现其他需要关注的操作");
         else
-        {
-            builder.AppendLine("风险项：");
-            foreach (var flag in request.Risk.Flags)
-                builder.Append(" - ").Append(flag.Severity).Append("：").AppendLine(flag.Message);
-        }
+            foreach (var flag in rest)
+                builder.Append("· ").AppendLine(Describe(flag));
 
         return builder.ToString().Trim();
     }
+
+    /// <summary>Plain-language version of a finding. Falls back to the analyzer's
+    /// own wording for anything not worth a hand-written line.</summary>
+    private static string Describe(PythonRiskFlag flag) => flag.Code switch
+    {
+        "package_install" => "涉及安装或修改 Python 包",
+        "process_execution" => "涉及运行系统程序等敏感操作",
+        "network_call" => "涉及网络访问",
+        "environment_access" => "涉及读取环境变量或用户目录",
+        "dynamic_execution" => "涉及动态执行代码",
+        "restricted_import" => $"涉及 {flag.Subject} 模块，可执行系统程序等敏感操作",
+        "network_import" => $"涉及网络模块 {flag.Subject}",
+        "system_import" => $"涉及系统模块 {flag.Subject}",
+        "unknown_import" => $"涉及非常用模块 {flag.Subject}",
+        "denied_import" => $"涉及已被规则禁用的模块 {flag.Subject}",
+        "denied_path" => $"涉及已被规则禁用的路径 {flag.Subject}",
+        _ => flag.Message,
+    };
 
     private static Window? FindOwnerWindow()
     {

@@ -18,6 +18,7 @@ using Microsoft.Extensions.Hosting;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents;
+using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Agents.Relay;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
@@ -113,7 +114,6 @@ public partial class App : Application
         var registry = Services.GetRequiredService<ProviderRegistry>();
 
         RestoreSavedProviders();
-        RegisterAgentProviders();
         var logoutCoordinator = Services.GetRequiredService<MolaGptLogoutCoordinator>();
 
         // Validate the persisted JWT against the current UA hash. If they
@@ -126,18 +126,8 @@ public partial class App : Application
             auth.Logout();
         }
 
-        if (!string.IsNullOrEmpty(auth.CurrentJwt))
-        {
-            var proxy = Services.GetRequiredService<MolaGptProxyProvider>();
-            try { await proxy.RefreshModelsAsync(); }
-            catch (MolaGptAuthExpiredException) { auth.Logout(); /* will not register proxy */ }
-            catch { /* offline / WAF — defer registration to when the user retries */ }
-
-            if (!string.IsNullOrEmpty(auth.CurrentJwt))
-                registry.Register(proxy);
-            try { await Services.GetRequiredService<MolaGptLocalToolsRegistrar>().RefreshAsync(); }
-            catch { /* optional gateway — keep regular MolaGPT login usable */ }
-        }
+        // The logged-in account warm-up (proxy model refresh + registration)
+        // is deferred to after first paint — see RunStartupAccountRefreshAsync.
 
         if (string.IsNullOrEmpty(auth.CurrentJwt))
             logoutCoordinator.CleanupLoggedOutAccountState("startup-no-jwt");
@@ -165,18 +155,6 @@ public partial class App : Application
         SystemEvents.UserPreferenceChanged += OnSystemUserPreferenceChanged;
         mainVm.EnsureConversationDetailAsync = id => cloudSync.FetchConversationToLocalAsync(id);
         composerVm.ConversationCompletedAsync = cloudSync.CompleteConversationTurnAsync;
-        composerVm.PickFolderAsync = () =>
-        {
-            // Modern WPF folder picker (.NET 10, no WinForms dependency).
-            var dlg = new Microsoft.Win32.OpenFolderDialog
-            {
-                Title = "选择 Agent 工作目录",
-                Multiselect = false
-            };
-            var owner = MainWindow;
-            var ok = owner is not null ? dlg.ShowDialog(owner) : dlg.ShowDialog();
-            return Task.FromResult(ok == true ? dlg.FolderName : null);
-        };
         cloudSync.LocalConversationsChanged += (_, _) =>
         {
             _ = Dispatcher.InvokeAsync(
@@ -363,6 +341,14 @@ public partial class App : Application
         // toast click can activate the window).
         var notificationService = Services.GetRequiredService<NotificationService>();
         _ = notificationService; // keep alive via DI singleton
+
+        // Logged-in account warm-up (proxy models + optional local-tools) runs
+        // after first paint so the window never waits on the network to appear.
+        _ = RunStartupAccountRefreshAsync(auth, registry, logoutCoordinator, settingsVm);
+
+        // Reclaim Pi transcripts left behind by deleted conversations. Startup is
+        // the one moment no sidecar can hold a session file open.
+        _ = Task.Run(SweepOrphanedPiSessions);
 
         cloudSync.StartPeriodicSync();
         _ = RunStartupCloudSyncAfterFirstPaintAsync(cloudSync, conversationListVm);
@@ -628,7 +614,21 @@ public partial class App : Application
                 sp.GetRequiredService<SettingsRepository>());
         });
         services.AddSingleton<MolaGptLogoutCoordinator>();
+        // Opt-in (pi.work.enabled, default off): run Work on the Pi harness instead
+        // of the in-process loop. Off or unavailable → the registrar keeps today's
+        // provider, and no Node process is ever started.
+        services.AddSingleton(sp => new PiSidecarRuntimeManager(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(MolaGptHttpClient)));
+        services.AddSingleton(sp => new PiWorkSidecarLocator(
+            sp.GetRequiredService<SettingsRepository>(),
+            () => sp.GetRequiredService<PiSidecarRuntimeManager>().GetInstalled()));
         services.AddSingleton<MolaGptLocalToolsRegistrar>();
+        services.AddSingleton(sp => new PiByokProviderFactory(
+            sp.GetRequiredService<SettingsRepository>(),
+            sp.GetRequiredService<PiWorkSidecarLocator>(),
+            sp.GetRequiredService<IChatToolHost>(),
+            sp.GetRequiredService<IHttpClientFactory>(),
+            line => DiagnosticLog.Write("pi-byok", line)));
 
         services.AddSingleton<BackgroundStreamService>();
         services.AddSingleton(sp => new McpHttpClient(
@@ -636,7 +636,9 @@ public partial class App : Application
         services.AddSingleton<McpClientManager>();
 
         // Agent control layer: Claude Code / Codex CLI backends driven as
-        // persistent subprocesses, surfaced as IChatProviders (kind = Agent).
+        // persistent subprocesses. Desktop is bridge-only — sessions are owned
+        // by AgentBridgeService and driven from the phone (plus the status
+        // window's one-line verification send); they are NOT chat providers.
         services.AddSingleton<AgentCliResolver>();
         services.AddSingleton<DesktopAgentConfigProvider>();
         services.AddSingleton<IAgentConfigProvider>(sp => sp.GetRequiredService<DesktopAgentConfigProvider>());
@@ -678,6 +680,24 @@ public partial class App : Application
             () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient),
             sp.GetRequiredService<AttachmentStore>().Save));
         services.AddSingleton<IPythonSessionAllowList, PythonSessionAllowList>();
+        // "Don't ask again" answers. Session grants stay in memory; "始终允许"
+        // persists a per-tool entry — a revocable list, rather than the old
+        // behaviour of flipping a whole permission mode to FullAccess (which for
+        // MCP meant one click silently covered every tool on every server).
+        services.AddSingleton<IToolGrantStore>(sp =>
+        {
+            var settings = sp.GetRequiredService<SettingsRepository>();
+            var store = new ToolGrantStore(
+                loadPersisted: () => ToolGrantSettings.Read(settings),
+                savePersisted: names => ToolGrantSettings.Write(settings, names));
+
+            // Revoking in settings must bite immediately: without this the in-memory
+            // session copy would keep the tool approved until the next restart, so
+            // the revoke button would look like it had done nothing.
+            sp.GetRequiredService<SettingsViewModel>().ToolGrantsRevoked +=
+                (_, _) => store.ClearSessionGrants();
+            return store;
+        });
         services.AddSingleton<PythonExecutionApprovalService>();
         services.AddSingleton<IPythonExecutionApprovalService>(sp =>
             sp.GetRequiredService<PythonExecutionApprovalService>());
@@ -704,8 +724,7 @@ public partial class App : Application
             sp.GetRequiredService<SettingsViewModel>(),
             sp.GetRequiredService<PersonaListViewModel>(),
             sp.GetRequiredService<AttachmentStore>(),
-            sp.GetRequiredService<SkillsViewModel>(),
-            sp.GetRequiredService<IAgentConfigProvider>()));
+            sp.GetRequiredService<SkillsViewModel>()));
         services.AddSingleton(sp => new SettingsViewModel(
             sp.GetRequiredService<ProviderRepository>(),
             sp.GetRequiredService<CredentialStore>(),
@@ -790,43 +809,62 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Register the local-agent CLI providers (Claude Code / Codex) into the
-    /// provider registry so they appear in the model selector. Registration is
-    /// unconditional — availability of the actual CLI is resolved lazily when a
-    /// session first starts (and surfaces a clear error if missing).
+    /// Logged-in account warm-up, run fire-and-forget after the window is shown:
+    /// refresh the proxy's model list, register it, then refresh the optional
+    /// local-tools gateway. This used to run before Show(), holding the first
+    /// frame hostage to up to two network round-trips on every logged-in launch.
+    /// Late registration is safe: ChatViewModel reacts to ProviderRegistry.Changed
+    /// (the OAuth login flow already registers the proxy this way at runtime).
+    /// Invoked on the dispatcher without ConfigureAwait(false), so registry
+    /// mutations stay on the UI thread.
     /// </summary>
-    private void RegisterAgentProviders()
+    /// <summary>
+    /// Prune Pi session transcripts for conversations that no longer exist. Cheap,
+    /// best-effort, and off the UI thread; a failure here must never affect startup.
+    /// </summary>
+    private void SweepOrphanedPiSessions()
     {
         try
         {
-            var registry = Services.GetRequiredService<ProviderRegistry>();
-            var manager = Services.GetRequiredService<AgentSessionManager>();
-
-            registry.Register(new AgentChatProvider(
-                ClaudeCodeBackend.BackendId,
-                providerId: "claude-code",
-                displayName: "Claude Code",
-                models: new[]
-                {
-                    new ProviderModel("default", "Claude Code (default)", SupportsToolCalling: true),
-                    new ProviderModel("opus", "Claude Code · Opus", SupportsToolCalling: true),
-                    new ProviderModel("sonnet", "Claude Code · Sonnet", SupportsToolCalling: true),
-                },
-                manager));
-
-            registry.Register(new AgentChatProvider(
-                CodexBackend.BackendId,
-                providerId: "codex",
-                displayName: "Codex",
-                models: new[]
-                {
-                    new ProviderModel("default", "Codex (default)", SupportsToolCalling: true),
-                },
-                manager));
+            var live = Services.GetRequiredService<ConversationRepository>()
+                .ListActive()
+                .Select(c => c.Id)
+                .ToArray();
+            var removed = new PiWorkSessionSweeper(PiWorkSidecarLocator.SessionRoot).Sweep(live);
+            if (removed > 0)
+                DiagnosticLog.Write("pi-work", $"清理了 {removed} 个无主的 Pi 会话文件");
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"RegisterAgentProviders failed: {ex}");
+            DiagnosticLog.Write("pi-work", "清理 Pi 会话文件失败：" + ex.Message);
+        }
+    }
+
+    private async Task RunStartupAccountRefreshAsync(
+        MolaGptAuthService auth,
+        ProviderRegistry registry,
+        MolaGptLogoutCoordinator logoutCoordinator,
+        SettingsViewModel settingsVm)
+    {
+        if (string.IsNullOrEmpty(auth.CurrentJwt)) return;
+
+        var proxy = Services.GetRequiredService<MolaGptProxyProvider>();
+        try { await proxy.RefreshModelsAsync(); }
+        catch (MolaGptAuthExpiredException) { auth.Logout(); /* will not register proxy */ }
+        catch { /* offline / WAF — defer registration to when the user retries */ }
+
+        if (!string.IsNullOrEmpty(auth.CurrentJwt))
+            registry.Register(proxy);
+        try { await Services.GetRequiredService<MolaGptLocalToolsRegistrar>().RefreshAsync(); }
+        catch { /* optional gateway — keep regular MolaGPT login usable */ }
+
+        if (string.IsNullOrEmpty(auth.CurrentJwt))
+        {
+            // Auth expired during the refresh. Pre-paint this fell through to the
+            // "startup-no-jwt" cleanup by line order; replicate that here.
+            settingsVm.IsLoggedIn = false;
+            settingsVm.MolaGptUsername = null;
+            logoutCoordinator.CleanupLoggedOutAccountState("startup-auth-expired");
         }
     }
 
@@ -874,6 +912,13 @@ public partial class App : Application
                         "gemini" => GeminiProvider.Create(row.Id, row.Name, apiKey, models, client, row.BaseUrl, row.ApiPath, headers),
                         _ => null
                     };
+                    // Opt-in (pi.byok.enabled): re-host eligible BYOK providers on
+                    // the Pi harness under the same id. Falls through to the direct
+                    // provider whenever that is not possible.
+                    prov = Services.GetRequiredService<PiByokProviderFactory>()
+                               .TryWrap(row.Type, row.Id, row.Name, row.BaseUrl, row.ApiPath, apiKey, models, headers)
+                           ?? prov;
+
                     if (prov is not null) registry.Register(prov);
                 }
                 catch (Exception ex)

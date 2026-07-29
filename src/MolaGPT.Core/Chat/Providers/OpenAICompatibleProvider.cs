@@ -342,43 +342,7 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
         };
         if (request.Temperature is not null) body["temperature"] = request.Temperature;
         if (request.MaxTokens is not null) body["max_tokens"] = request.MaxTokens;
-        if (request.UseThinking == true)
-        {
-            if (request.ThinkingParamKind == ThinkingParamKind.DeepSeekV4)
-            {
-                body["thinking"] = new { type = "enabled" };
-                body["reasoning_effort"] = request.ReasoningEffort ?? "high";
-            }
-            else if (request.ThinkingParamKind == ThinkingParamKind.QwenThinkingBudget)
-            {
-                body["enable_thinking"] = true;
-                if (request.ThinkingBudgetTokens is { } budget)
-                    body["thinking_budget"] = budget;
-            }
-            else if (request.ThinkingParamKind == ThinkingParamKind.GeminiBudget)
-            {
-                body["reasoning_effort"] = request.ReasoningEffort ?? "medium";
-            }
-            else if (request.ThinkingParamKind == ThinkingParamKind.GeminiThinkingLevel)
-            {
-                body["reasoning_effort"] = request.ReasoningEffort ?? "high";
-            }
-            else if (!string.IsNullOrWhiteSpace(request.ReasoningEffort))
-            {
-                body["reasoning_effort"] = request.ReasoningEffort;
-            }
-        }
-        else if (request.UseThinking == false)
-        {
-            if (request.ThinkingParamKind == ThinkingParamKind.DeepSeekV4)
-                body["thinking"] = new { type = "disabled" };
-            else if (request.ThinkingParamKind == ThinkingParamKind.QwenThinkingBudget)
-                body["enable_thinking"] = false;
-            else if (request.ThinkingParamKind is ThinkingParamKind.OpenAiReasoningEffort
-                     or ThinkingParamKind.GeminiBudget
-                     or ThinkingParamKind.GeminiThinkingLevel)
-                body["reasoning_effort"] = "none";
-        }
+        ThinkingParams.Apply(body, request);
         ApplyCustomBody(body, request.ModelId);
 
         if (request.ExtraBody is not null)
@@ -560,12 +524,31 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
         PendingOpenAiToolCall toolCall,
         LocalToolOptions? options,
         string status,
+        string? resultJson = null) =>
+        BuildToolDelta(
+            toolCall.Id,
+            string.IsNullOrWhiteSpace(toolCall.Name) ? "unknown" : toolCall.Name,
+            toolCall.Arguments.ToString(),
+            options,
+            status,
+            resultJson);
+
+    /// <summary>
+    /// Build the tool card from raw values. Shared with the Pi path so a tool call
+    /// looks the same whichever engine ran it — the labels, the summary, the
+    /// duration and exit code lifted out of the result — rather than each path
+    /// growing its own approximation of the card.
+    /// </summary>
+    internal static ToolCallDelta BuildToolDelta(
+        string id,
+        string name,
+        string args,
+        LocalToolOptions? options,
+        string status,
         string? resultJson = null)
     {
-        var name = string.IsNullOrWhiteSpace(toolCall.Name) ? "unknown" : toolCall.Name;
-        var args = toolCall.Arguments.ToString();
         return new ToolCallDelta(
-            toolCall.Id,
+            id,
             name,
             status,
             LocalToolPendingLabel(name),

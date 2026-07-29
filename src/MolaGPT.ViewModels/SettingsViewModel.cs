@@ -119,6 +119,16 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private MolaGPT.Core.Chat.Agents.AgentPermissionMode _agentPermissionMode
         = MolaGPT.Core.Chat.Agents.AgentPermissionMode.AcceptEdits;
 
+    /// <summary>Tools the user answered "始终允许" for. Surfaced here because a
+    /// standing grant the user cannot see is a standing grant they cannot withdraw.</summary>
+    public ObservableCollection<string> AlwaysAllowedTools { get; } = new();
+
+    public bool HasAlwaysAllowedTools => AlwaysAllowedTools.Count > 0;
+
+    /// <summary>Complement of <see cref="HasAlwaysAllowedTools"/>; the settings page
+    /// has only a forward BooleanToVisibility converter to work with.</summary>
+    public bool HasNoAlwaysAllowedTools => AlwaysAllowedTools.Count == 0;
+
     public ObservableCollection<ProviderEntry> Providers { get; } = new();
     public ObservableCollection<McpServerEntry> McpServers { get; } = new();
     public ObservableCollection<VisionProviderModelOption> VisionProviderModels { get; } = new();
@@ -142,6 +152,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     public void Reload()
     {
         LoadSettings();
+        ReloadToolGrants();
         Providers.Clear();
         if (_repo is null) return;
         foreach (var row in _repo.List())
@@ -898,6 +909,42 @@ public sealed partial class SettingsViewModel : ObservableObject
         return provider?.Models.FirstOrDefault(m =>
             string.Equals(m.Id, modelId, StringComparison.Ordinal))?.SystemPrompt;
     }
+
+    // ---- Standing tool grants ("始终允许") --------------------------------
+
+    /// <summary>Re-read the persisted grant list into <see cref="AlwaysAllowedTools"/>.</summary>
+    public void ReloadToolGrants()
+    {
+        AlwaysAllowedTools.Clear();
+        if (_settingsRepo is not null)
+        {
+            foreach (var name in ToolGrantSettings.Read(_settingsRepo).OrderBy(n => n, StringComparer.Ordinal))
+                AlwaysAllowedTools.Add(name);
+        }
+        OnPropertyChanged(nameof(HasAlwaysAllowedTools));
+        OnPropertyChanged(nameof(HasNoAlwaysAllowedTools));
+    }
+
+    /// <summary>Withdraw one standing grant. The tool goes back to prompting.</summary>
+    public void RevokeToolGrant(string toolName)
+    {
+        if (_settingsRepo is null || string.IsNullOrEmpty(toolName)) return;
+        ToolGrantSettings.Revoke(_settingsRepo, toolName);
+        ToolGrantsRevoked?.Invoke(this, EventArgs.Empty);
+        ReloadToolGrants();
+    }
+
+    public void RevokeAllToolGrants()
+    {
+        if (_settingsRepo is null) return;
+        ToolGrantSettings.RevokeAll(_settingsRepo);
+        ToolGrantsRevoked?.Invoke(this, EventArgs.Empty);
+        ReloadToolGrants();
+    }
+
+    /// <summary>Raised after any revocation so the live grant store can drop its
+    /// session copies — otherwise revoking would appear to do nothing until restart.</summary>
+    public event EventHandler? ToolGrantsRevoked;
 }
 
 public enum ThemeMode { System, Light, Dark }
@@ -1011,6 +1058,7 @@ public static class CustomParamConverter
                 return System.Text.Json.JsonSerializer.SerializeToElement(value);
         }
     }
+
 }
 
 public sealed record McpServerEntry(

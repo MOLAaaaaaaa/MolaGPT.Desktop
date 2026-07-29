@@ -707,15 +707,6 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(new Action(() => ModelSelectorSearchBox.Focus()), DispatcherPriority.Input);
     }
 
-    /// <summary>Invoke the composer's working-directory picker (used by the agent
-    /// "选择工作目录" recovery button on a missing-cwd error).</summary>
-    public void TriggerPickWorkingDirectory()
-    {
-        if (DataContext is MainViewModel vm
-            && vm.Composer.PickWorkingDirectoryCommand.CanExecute(null))
-            vm.Composer.PickWorkingDirectoryCommand.Execute(null);
-    }
-
     /// <summary>Esc dismisses the model selector from anywhere inside it
     /// (search box, list). Without this the popup only closed on outside-click.</summary>
     private void ModelSelectorPopup_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -963,7 +954,15 @@ public partial class MainWindow : Window
             if (models.Count == 0)
                 continue;
 
-            if (!addedHeader)
+            if (mode == AppMode.Byok)
+            {
+                // Mirrors the phone's picker: BYOK gets one group per provider
+                // ("自定义 API · <名称>") so models from different providers don't
+                // blur into one flat list. Chat/Work are single-provider modes
+                // and keep the shared mode header.
+                rows.Add(ModelSelectorRow.ForHeader($"{ModeLabel(mode)} · {prov.DisplayName}"));
+            }
+            else if (!addedHeader)
             {
                 rows.Add(ModelSelectorRow.ForHeader($"{ModeLabel(mode)} 模型"));
                 addedHeader = true;

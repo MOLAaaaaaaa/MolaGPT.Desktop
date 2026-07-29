@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
@@ -445,6 +446,10 @@ public partial class SettingsWindow : Window
 
     private async void UpdatePythonRuntimeStatusHint()
     {
+        // The components and the heading refresh together: to the user this is one
+        // environment, and a stale heading would contradict the rows under it.
+        RefreshPiSidecarStatus();
+        RefreshSandboxStatus();
         var runtime = _pythonRuntime.GetInstalledRuntime();
         var storage = await Task.Run(_pythonRuntime.GetStorageUsage);
         var storageText = $"占用 {FormatBytes(storage.TotalBytes)}  ·  运行时 {FormatBytes(storage.RuntimeBytes)}  ·  会话依赖 {FormatBytes(storage.SessionEnvironmentBytes)}";
@@ -498,11 +503,57 @@ public partial class SettingsWindow : Window
         _vm.PythonToolEnabled = false;
     }
 
-    private async void ConfigurePythonRuntimeClick(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// Install whichever sandbox components are missing or out of date. One button
+    /// because the user is configuring one thing; the components underneath are an
+    /// implementation detail they should only need when something goes wrong.
+    /// </summary>
+    private async void ConfigureSandboxClick(object sender, RoutedEventArgs e)
     {
-        ConfigurePythonRuntimeButton.IsEnabled = false;
+        ConfigureSandboxButton.IsEnabled = false;
         ClearPythonRuntimeButton.IsEnabled = false;
-        ConfigurePythonRuntimeButton.Content = "配置中…";
+        ClearPiSidecarButton.IsEnabled = false;
+        ConfigureSandboxButton.Content = "配置中…";
+        try
+        {
+            await ConfigurePythonRuntimeAsync();
+            await ConfigurePiSidecarAsync();
+        }
+        finally
+        {
+            ConfigureSandboxButton.Content = "一键配置";
+            ConfigureSandboxButton.IsEnabled = true;
+            ClearPythonRuntimeButton.IsEnabled = true;
+            ClearPiSidecarButton.IsEnabled = true;
+            RefreshSandboxStatus();
+        }
+    }
+
+    /// <summary>Roll the two component states into the one line that decides whether
+    /// the user has anything left to do.</summary>
+    private void RefreshSandboxStatus()
+    {
+        var python = _pythonRuntime.GetInstalledRuntime() is not null;
+        var agent = PiSidecar.GetInstalled() is not null;
+
+        SandboxStatusText.Text = (python, agent) switch
+        {
+            (true, true) => "沙箱环境已就绪",
+            (false, false) => "沙箱环境未配置",
+            _ => "沙箱环境部分就绪",
+        };
+        SandboxDetailText.Text = (python, agent) switch
+        {
+            (true, true) => "Python 执行与本地 Agent 均可使用。",
+            (true, false) => "Python 执行可用；本地 Agent 运行环境尚未下载。",
+            (false, true) => "本地 Agent 运行环境可用；Python 执行尚未配置。",
+            _ => "下载后即可在对话中运行 Python 代码，并启用更完善的本地 Agent。",
+        };
+        ConfigureSandboxButton.Content = python && agent ? "检查更新" : "一键配置";
+    }
+
+    private async Task ConfigurePythonRuntimeAsync()
+    {
         PythonRuntimeStatusText.Text = "正在准备 MolaGPT 专用 Python 环境…";
         _appStatus.Publish("Syncing", "正在后台下载 Python 环境");
         try
@@ -527,10 +578,83 @@ public partial class SettingsWindow : Window
         }
         finally
         {
-            ConfigurePythonRuntimeButton.Content = "一键配置";
-            ConfigurePythonRuntimeButton.IsEnabled = true;
             RefreshPythonRuntimeButtons();
         }
+    }
+
+    // ---- Sandbox environment · local agent -------------------------------
+
+    private PiSidecarRuntimeManager PiSidecar => App.Services.GetRequiredService<PiSidecarRuntimeManager>();
+
+    /// <summary>Reflect whether the agent runtime is installed. Deliberately states
+    /// that its absence is not a failure — the local agent still runs on the built-in
+    /// engine, so this is an upgrade rather than a prerequisite.</summary>
+    private void RefreshPiSidecarStatus()
+    {
+        var installed = PiSidecar.GetInstalled();
+        if (installed is null)
+        {
+            PiSidecarStatusText.Text = "本地 Agent 运行环境未配置";
+            PiSidecarDetailText.Text = "约 57 MB，配置后本地 Agent 获得上下文压缩与更完善的循环控制。";
+            ClearPiSidecarButton.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            PiSidecarStatusText.Text = $"本地 Agent 运行环境 · {installed.Version}";
+            PiSidecarDetailText.Text = installed.Directory;
+            ClearPiSidecarButton.Visibility = Visibility.Visible;
+        }
+    }
+
+    private async Task ConfigurePiSidecarAsync()
+    {
+        _appStatus.Publish("Syncing", "正在下载 Agent 运行环境");
+        try
+        {
+            var progress = new Progress<SandboxProgress>(p =>
+            {
+                PiSidecarStatusText.Text = string.IsNullOrWhiteSpace(p.Message)
+                    ? $"正在配置 Agent 运行环境 {p.Fraction:P0}"
+                    : p.Message;
+                _appStatus.Publish("Syncing", p.Message);
+            });
+            var installed = await PiSidecar.DownloadAndInstallAsync(progress, CancellationToken.None);
+            PiSidecarStatusText.Text = $"Agent 运行环境 {installed.Version} 已下载，重启应用后生效";
+            _appStatus.Publish("Success", "Agent 运行环境已下载，重启后生效");
+        }
+        catch (Exception ex)
+        {
+            PiSidecarStatusText.Text = "配置失败：" + ex.Message;
+            _appStatus.Publish("Error", "Agent 运行环境配置失败");
+        }
+        finally
+        {
+            RefreshPiSidecarStatus();
+        }
+    }
+
+    private void ClearPiSidecarClick(object sender, RoutedEventArgs e)
+    {
+        if (MessageBox.Show(
+                this,
+                "移除后本地 Agent 将回到内置引擎运行，可随时重新配置。",
+                "移除 Agent 运行环境",
+                MessageBoxButton.OKCancel,
+                MessageBoxImage.Question) != MessageBoxResult.OK)
+        {
+            return;
+        }
+
+        try
+        {
+            PiSidecar.Delete();
+            _appStatus.Publish("Success", "Agent 运行环境已移除，重启后生效");
+        }
+        catch (Exception ex)
+        {
+            PiSidecarStatusText.Text = "移除失败：" + ex.Message;
+        }
+        RefreshPiSidecarStatus();
     }
 
     private void OpenPythonRuntimeDirectoryClick(object sender, RoutedEventArgs e)
@@ -1055,6 +1179,27 @@ public partial class SettingsWindow : Window
         BeginEdit(entry);
     }
 
+    private void RevokeToolGrant_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string toolName })
+            _vm.RevokeToolGrant(toolName);
+        e.Handled = true;
+    }
+
+    private void RevokeAllToolGrants_Click(object sender, RoutedEventArgs e)
+    {
+        if (MessageBox.Show(
+                this,
+                "撤销后，这些工具下次调用会重新弹出审批。",
+                "撤销全部「始终允许」",
+                MessageBoxButton.OKCancel,
+                MessageBoxImage.Question) == MessageBoxResult.OK)
+        {
+            _vm.RevokeAllToolGrants();
+        }
+        e.Handled = true;
+    }
+
     private void CopyTextMenuItem_Click(object sender, RoutedEventArgs e)
     {
         if (sender is MenuItem { CommandParameter: string text } && !string.IsNullOrWhiteSpace(text))
@@ -1222,7 +1367,19 @@ public partial class SettingsWindow : Window
         _registry.Unregister(entry.Id);
         var prov = BuildProvider(entry);
         if (prov is not null && !SettingsViewModel.IsImagePurpose(entry.Purpose))
+        {
+            // Same opt-in as at startup; also retires the sidecars belonging to the
+            // copy this save replaces.
+            var pi = App.Services.GetService<PiByokProviderFactory>();
+            pi?.Retire(entry.Id);
+            prov = pi?.TryWrap(
+                       entry.Type, entry.Id, entry.Name, entry.BaseUrl,
+                       entry.ApiPath, entry.ApiKey,
+                       entry.Models.Select(ToProviderModel).ToList(),
+                       CustomParamConverter.ToHeaderList(entry.CustomHeaders))
+                   ?? prov;
             _registry.Register(prov);
+        }
         EditorMessage.Text = "设置已保存";
     }
 

@@ -280,6 +280,12 @@ public sealed partial class MarkdownPresenter : ContentControl
 
     private readonly List<CachedUnit> _mixedUnits = new();
     private readonly Dictionary<string, BitmapImage> _markdownImageCache = new(StringComparer.Ordinal);
+    /// <summary>Recency order for <see cref="_markdownImageCache"/> keys (oldest
+    /// first). Containers are recycled by virtualization, so one presenter would
+    /// otherwise accumulate every image it ever rendered (~2-5MB each) until the
+    /// control unloads; the cap bounds that while keeping on-screen images hot.</summary>
+    private readonly List<string> _markdownImageCacheOrder = new();
+    private const int MarkdownImageCacheCapacity = 32;
     private bool _preserveMarkdownImagesDuringThemeRefresh;
 
     private string _lastRenderedSource = string.Empty;
@@ -1013,6 +1019,7 @@ public sealed partial class MarkdownPresenter : ContentControl
         if (!preserveMarkdownImages)
         {
             _markdownImageCache.Clear();
+            _markdownImageCacheOrder.Clear();
         }
     }
 
@@ -2087,11 +2094,26 @@ public sealed partial class MarkdownPresenter : ContentControl
     private BitmapImage? GetOrCreateMarkdownBitmap(string imageUrl, double decodeWidth)
     {
         if (_markdownImageCache.TryGetValue(imageUrl, out var cached))
+        {
+            // Refresh recency so images still being rendered never evict before
+            // ones left over from messages this recycled presenter no longer shows.
+            _markdownImageCacheOrder.Remove(imageUrl);
+            _markdownImageCacheOrder.Add(imageUrl);
             return cached;
+        }
 
         var bitmap = CreateBitmapImage(imageUrl, decodeWidth);
         if (bitmap is not null)
+        {
+            while (_markdownImageCache.Count >= MarkdownImageCacheCapacity && _markdownImageCacheOrder.Count > 0)
+            {
+                var oldest = _markdownImageCacheOrder[0];
+                _markdownImageCacheOrder.RemoveAt(0);
+                _markdownImageCache.Remove(oldest);
+            }
             _markdownImageCache[imageUrl] = bitmap;
+            _markdownImageCacheOrder.Add(imageUrl);
+        }
         return bitmap;
     }
 

@@ -7,8 +7,7 @@ namespace MolaGPT.Core.Chat.Agents;
 /// (backendId, conversationId). Sessions are created lazily on first turn and
 /// reused across turns of the same conversation — mirroring the
 /// <c>McpClientManager</c> lazy-cache pattern. The persistent process retains
-/// context, which is why the stateless <see cref="IChatProvider"/> layer can
-/// map cleanly onto it via the conversation id.
+/// context, so callers (the bridge) send only the newest user turn per request.
 /// </summary>
 public sealed class AgentSessionManager : IAsyncDisposable
 {
@@ -30,25 +29,11 @@ public sealed class AgentSessionManager : IAsyncDisposable
 
     /// <summary>
     /// Get the live session for a (backend, conversation), creating it on first
-    /// use. A dead session is transparently replaced.
-    /// </summary>
-    public Task<IAgentSession> GetOrCreateAsync(string backendId, string? conversationId, CancellationToken ct)
-        => GetOrCreateAsync(backendId, conversationId, null, null, null, null, null, null, ct);
-
-    /// <summary>
-    /// Overload that resumes an existing CLI session and/or pins an explicit
-    /// working directory (used by the console for sessions loaded from history,
-    /// whose cwd comes from the on-disk record rather than per-conversation config).
-    /// </summary>
-    public Task<IAgentSession> GetOrCreateAsync(
-        string backendId, string? conversationId, string? workingDirectory, string? resumeSessionId, CancellationToken ct)
-        => GetOrCreateAsync(backendId, conversationId, workingDirectory, resumeSessionId, null, null, null, null, ct);
-
-    /// <summary>
-    /// Full overload: also pins the model, reasoning effort, permission/sandbox posture,
-    /// and (Codex) approval policy for this session. These are baked into the process at spawn
-    /// time, so the console closes a live session before reusing this with new
-    /// values — the next call rebuilds the process under the new options.
+    /// use; a dead session is transparently replaced. Pins the working directory,
+    /// resume target, model, reasoning effort, permission/sandbox posture, and
+    /// (Codex) approval policy for this session. These are baked into the process
+    /// at spawn time, so the bridge closes a live session before reusing this with
+    /// new values — the next call rebuilds the process under the new options.
     /// </summary>
     public async Task<IAgentSession> GetOrCreateAsync(
         string backendId, string? conversationId, string? workingDirectory, string? resumeSessionId,
@@ -127,8 +112,8 @@ public sealed class AgentSessionManager : IAsyncDisposable
     /// <summary>
     /// Peek the live session for a conversation without creating one. Returns
     /// null when none was ever created, creation is still in flight (or failed),
-    /// or the process has died. Lets the bridge see sessions it did not spawn —
-    /// the desktop chat UI shares this manager — before restart-style operations.
+    /// or the process has died. Lets the bridge check for an existing process
+    /// before restart-style operations without spawning one as a side effect.
     /// </summary>
     public IAgentSession? TryGetLive(string backendId, string? conversationId)
     {

@@ -33,10 +33,7 @@ public enum ProviderKind
     OpenAICompatible,
     Anthropic,
     Gemini,
-    Custom,
-
-    /// <summary>Local agent CLI backend (Claude Code / Codex) driven as a subprocess.</summary>
-    Agent
+    Custom
 }
 
 public static class MolaGptProviderIds

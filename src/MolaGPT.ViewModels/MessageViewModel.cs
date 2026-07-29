@@ -15,9 +15,7 @@ public enum MessageErrorAction
 {
     None = 0,
     /// <summary>Balance/model failure (e.g. HTTP 402) — open the model selector.</summary>
-    SwitchModel,
-    /// <summary>Agent turn with no working directory — open the folder picker.</summary>
-    PickWorkingDirectory
+    SwitchModel
 }
 
 /// <summary>
@@ -91,9 +89,8 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [ObservableProperty] private double _thinkingElapsedSeconds;
 
     /// <summary>When a turn fails with a recoverable cause, the view shows a small
-    /// banner with a one-tap fix (switch model / pick a working directory) instead
-    /// of leaving the user to hunt for the control. <see cref="MessageErrorAction.None"/>
-    /// hides it.</summary>
+    /// banner with a one-tap fix (e.g. switch model) instead of leaving the user
+    /// to hunt for the control. <see cref="MessageErrorAction.None"/> hides it.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasActionError))]
     [NotifyPropertyChangedFor(nameof(ActionErrorButtonLabel))]
@@ -109,7 +106,6 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public string ActionErrorButtonLabel => ErrorAction switch
     {
         MessageErrorAction.SwitchModel => "换个模型",
-        MessageErrorAction.PickWorkingDirectory => "选择工作目录",
         _ => string.Empty
     };
 

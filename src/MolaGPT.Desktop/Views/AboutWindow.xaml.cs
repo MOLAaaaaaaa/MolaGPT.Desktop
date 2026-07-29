@@ -40,6 +40,8 @@ public partial class AboutWindow : Window
         new("System.Text.Json", "JSON 序列化", "MIT"),
         new("Geist", "界面拉丁字体", "OFL-1.1"),
         new("Font Awesome Free", "部分界面图标字体", "OFL-1.1 / CC-BY-4.0"),
+        new("Pi Agent (@earendil-works/pi)", "可选本地 Agent 循环、上下文与会话运行时", "MIT"),
+        new("Node.js", "可选 Pi Agent Sidecar JavaScript 运行时", "MIT / Third-party"),
         new("CPython", "可选下载的 MolaGPT 专用 Python 运行时", "PSF-2.0"),
         new("NumPy / pandas / SciPy / Matplotlib / SymPy / openpyxl / Pillow / seaborn", "可选 Python 科学计算与绘图库", "BSD / PSF / MIT / HPND")
     };
@@ -152,6 +154,14 @@ public partial class AboutWindow : Window
     private const string LicenseNotice = """
 MolaGPT Desktop 使用了以下开源组件，并依据其许可证要求保留相应的版权与许可声明。
 
+可选下载的 Pi Agent 运行环境由 Node.js 与 @earendil-works/pi 组件组成：
+  - Pi Coding Agent / Pi Agent Core / Pi AI / Pi TUI 0.82.1:
+    https://github.com/earendil-works/pi  (MIT)
+  - Node.js: https://nodejs.org/  (MIT 及 Node.js LICENSE 所列第三方许可证)
+  - 其余 npm 依赖保留各自随包分发的 LICENSE / NOTICE 文件。
+
+Pi Agent 运行环境的构建包会保留上述许可证正文与第三方声明。
+
 可选下载的 Python 运行时由 CPython Windows 便携环境与第三方 Python 包组成，
 仅用于 MolaGPT 本地 Python Tool。它们保留各自的上游版权与许可证：
   - CPython: https://www.python.org/  (PSF License)
@@ -181,6 +191,8 @@ MIT License
   - Microsoft.Win32.SystemEvents          © .NET Foundation and Contributors
   - System.Security.Cryptography.ProtectedData  © .NET Foundation and Contributors
   - System.Text.Json       © .NET Foundation and Contributors
+  - Pi Agent 组件          © 2025 Mario Zechner
+  - Node.js                © Node.js contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

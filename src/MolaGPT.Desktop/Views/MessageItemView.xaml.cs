@@ -92,9 +92,6 @@ public partial class MessageItemView : UserControl
             case MessageErrorAction.SwitchModel:
                 window.OpenChatModelSelector();
                 break;
-            case MessageErrorAction.PickWorkingDirectory:
-                window.TriggerPickWorkingDirectory();
-                break;
         }
     }
 

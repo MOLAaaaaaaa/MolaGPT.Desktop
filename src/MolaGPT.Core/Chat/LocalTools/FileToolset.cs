@@ -27,6 +27,12 @@ internal static class FileToolset
     private const int DefaultGrepMatches = 100;
     private const int MaxGrepMatches = 500;
     private const int GrepLineClip = 400;
+
+    /// <summary>Upper bound on requested context lines. Context multiplies the
+    /// payload by (1 + 2n) per hit, so a large value plus a large match cap would
+    /// crowd out the rest of the conversation.</summary>
+    private const int MaxGrepContextLines = 10;
+
     private const int MaxGrepFileBytes = 4 * 1024 * 1024;
 
     // Traversal budget (Glob/Grep). A large scope (e.g. C:\) would otherwise
@@ -35,6 +41,22 @@ internal static class FileToolset
     // (user "stop" / stream cancel) aborts immediately via OperationCanceledException.
     private static readonly TimeSpan TraversalBudget = TimeSpan.FromSeconds(8);
     private const int MaxScannedEntries = 50_000;
+
+    private static string Clip(string line) =>
+        line.Length > GrepLineClip ? line[..GrepLineClip] + "…" : line;
+
+    /// <summary>The lines in [from, to], clamped to the file. Clipped like matches
+    /// are, so one long line of context cannot dwarf the hit it belongs to.</summary>
+    private static string[] Surrounding(string[] lines, int from, int to)
+    {
+        from = Math.Max(from, 0);
+        to = Math.Min(to, lines.Length - 1);
+        if (to < from) return Array.Empty<string>();
+
+        var slice = new string[to - from + 1];
+        for (var i = from; i <= to; i++) slice[i - from] = Clip(lines[i]);
+        return slice;
+    }
 
     private static readonly Regex BinaryProbe = new("\0", RegexOptions.Compiled);
 
@@ -161,6 +183,8 @@ internal static class FileToolset
                 pattern,
                 root,
                 count = Math.Min(ordered.Count, cap),
+                // Known here because everything is enumerated before capping.
+                total = ordered.Count,
                 truncated,
                 timed_out = limiter.Exhausted,
                 note = limiter.Exhausted ? "搜索范围过大，已在限定时间内返回部分结果；请缩小 path 范围或使用更精确的 pattern。" : null,
@@ -173,6 +197,12 @@ internal static class FileToolset
         }
     }
 
+    /// <param name="literal">Match <paramref name="pattern"/> as plain text. Without
+    /// this a search for something containing regex punctuation has to be escaped
+    /// correctly by the caller, and getting it wrong returns wrong results rather
+    /// than an error — the worst failure mode a search tool can have.</param>
+    /// <param name="context">Lines of surrounding context to include per hit, so a
+    /// match can be judged without a follow-up read of every file.</param>
     public static object Grep(
         string? pattern,
         string? path,
@@ -181,22 +211,25 @@ internal static class FileToolset
         int? maxMatches,
         IReadOnlyList<string> deniedPrefixes,
         string? workspaceRoot = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        bool literal = false,
+        int? context = null)
     {
         if (string.IsNullOrWhiteSpace(pattern))
-            return Error("grep_files 需要 pattern 参数（正则）。");
+            return Error("grep_files 需要 pattern 参数。");
 
         var root = ResolveRoot(path, deniedPrefixes, workspaceRoot, out var denyError);
         if (root is null)
             return denyError!;
 
         var cap = maxMatches is { } m && m > 0 ? Math.Min(m, MaxGrepMatches) : DefaultGrepMatches;
+        var contextLines = context is { } c && c > 0 ? Math.Min(c, MaxGrepContextLines) : 0;
         Regex regex;
         try
         {
             var opts = RegexOptions.Compiled | RegexOptions.CultureInvariant;
             if (ignoreCase) opts |= RegexOptions.IgnoreCase;
-            regex = new Regex(pattern!, opts);
+            regex = new Regex(literal ? Regex.Escape(pattern!) : pattern!, opts);
         }
         catch (Exception ex)
         {
@@ -214,10 +247,11 @@ internal static class FileToolset
         {
             var hits = new List<object>();
             var truncated = false;
+            var capHit = false;
             var limiter = new TraversalLimit(ct);
             foreach (var file in EnumerateFilesSafe(root, limiter))
             {
-                if (hits.Count >= cap) { truncated = true; break; }
+                if (hits.Count >= cap) { truncated = true; capHit = true; break; }
                 if (IsDenied(file, deniedPrefixes)) continue;
                 if (fileFilter is not null)
                 {
@@ -242,9 +276,18 @@ internal static class FileToolset
                 for (var i = 0; i < lines.Length; i++)
                 {
                     if (!regex.IsMatch(lines[i])) continue;
-                    var text = lines[i].Length > GrepLineClip ? lines[i][..GrepLineClip] + "…" : lines[i];
-                    hits.Add(new { file, line = i + 1, text });
-                    if (hits.Count >= cap) { truncated = true; break; }
+                    var text = Clip(lines[i]);
+                    hits.Add(contextLines == 0
+                        ? (object)new { file, line = i + 1, text }
+                        : new
+                        {
+                            file,
+                            line = i + 1,
+                            text,
+                            before = Surrounding(lines, i - contextLines, i - 1),
+                            after = Surrounding(lines, i + 1, i + contextLines),
+                        });
+                    if (hits.Count >= cap) { truncated = true; capHit = true; break; }
                 }
             }
 
@@ -257,6 +300,9 @@ internal static class FileToolset
                 root,
                 count = hits.Count,
                 truncated,
+                // The cap that stopped the search, so the model can tell "there is more"
+                // from "that is all of it" and narrow the pattern instead of concluding.
+                limit_reached = capHit ? cap : (int?)null,
                 timed_out = limiter.Exhausted,
                 note = limiter.Exhausted ? "搜索范围过大，已在限定时间内返回部分结果；请缩小 path 范围或加 glob 过滤。" : null,
                 matches = hits.ToArray()

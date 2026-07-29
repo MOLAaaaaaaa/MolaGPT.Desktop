@@ -11,10 +11,13 @@ public enum PythonRiskLevel
     Blocked
 }
 
+/// <param name="Subject">The concrete thing the flag is about — a path, a module
+/// name — so the UI can name it without parsing <paramref name="Message"/>.</param>
 public sealed record PythonRiskFlag(
     string Code,
     string Severity,
-    string Message);
+    string Message,
+    string? Subject = null);
 
 public sealed record PythonExecutionRiskAnalysis(
     PythonRiskLevel Level,
@@ -34,7 +37,7 @@ public sealed record PythonExecutionRiskAnalysis(
 
     public string Summary =>
         Flags.Count == 0
-            ? "未发现明显高风险操作。"
+            ? "未发现需要关注的操作"
             : string.Join("；", Flags.Take(6).Select(f => f.Message));
 }
 
@@ -88,9 +91,9 @@ public static partial class PythonExecutionRiskAnalyzer
         //   critical (block:true) -> hard deny, even under full access
         //   high/medium (ask:true) -> needs approval
         //   low                    -> auto-approvable
-        void Add(string codeValue, string severity, string message, bool ask = true, bool block = false)
+        void Add(string codeValue, string severity, string message, bool ask = true, bool block = false, string? subject = null)
         {
-            flags.Add(new PythonRiskFlag(codeValue, severity, message));
+            flags.Add(new PythonRiskFlag(codeValue, severity, message, subject));
             if (ask)
                 requiresApproval = true;
             if (block && !blocked)
@@ -105,7 +108,7 @@ public static partial class PythonExecutionRiskAnalyzer
             // User denylist is a hard deny in every mode (deny always wins).
             if (MatchesModuleList(module, deniedImports))
             {
-                Add("denied_import", "critical", $"用户规则禁止导入模块 {module}", block: true);
+                Add("denied_import", "critical", $"已被规则禁用的模块：{module}", block: true, subject: module);
                 continue;
             }
 
@@ -114,7 +117,7 @@ public static partial class PythonExecutionRiskAnalyzer
             // allow list, so the switch cannot be bypassed by allowing the module.
             if (!options.AllowNetwork && MatchesModuleList(module, NetworkImports))
             {
-                Add("network_import", "critical", $"当前未允许网络，禁止导入网络模块 {module}", block: true);
+                Add("network_import", "critical", $"网络未启用，禁止使用网络模块：{module}", block: true, subject: module);
                 continue;
             }
 
@@ -129,21 +132,21 @@ public static partial class PythonExecutionRiskAnalyzer
             // put them on the denylist to hard-block.
             if (MatchesModuleList(module, BuiltInRestrictedImports))
             {
-                Add("restricted_import", "high", $"代码导入可操作系统资源的高风险模块 {module}");
+                Add("restricted_import", "high", $"代码导入可操作系统资源的高风险模块 {module}", subject: module);
                 continue;
             }
 
             if (MatchesModuleList(module, NetworkImports))
-                Add("network_import", "high", $"代码导入网络模块 {module}");
+                Add("network_import", "high", $"代码导入网络模块 {module}", subject: module);
             else if (MatchesModuleList(module, SensitiveImports))
-                Add("system_import", "medium", $"代码导入可能访问系统资源的模块 {module}");
+                Add("system_import", "medium", $"代码导入可能访问系统资源的模块 {module}", subject: module);
 
             // Anything outside the known-safe libraries (and not already flagged
             // as network/system above) is surfaced for approval, but not blocked.
             if (!MatchesModuleList(module, SensitiveImports)
                 && !MatchesModuleList(module, NetworkImports))
             {
-                Add("unknown_import", "medium", $"模块 {module} 不在已知安全导入列表中");
+                Add("unknown_import", "medium", $"模块 {module} 不在已知安全导入列表中", subject: module);
             }
         }
 
@@ -154,7 +157,7 @@ public static partial class PythonExecutionRiskAnalyzer
             Add("package_install", "high", "代码可能安装或修改 Python 包");
 
         if (!options.AllowNetwork && NetworkCallPattern().IsMatch(code))
-            Add("network_call", "critical", "当前未允许网络，代码可能访问网络", block: true);
+            Add("network_call", "critical", "网络未启用，代码涉及网络访问", block: true);
 
         if (DestructiveFilePattern().IsMatch(code))
             Add("destructive_file", "high", "代码可能删除、移动或覆盖文件");
@@ -171,7 +174,7 @@ public static partial class PythonExecutionRiskAnalyzer
             // Denylist wins.
             if (PathMatchesAnyPrefix(literalPath, deniedPathPrefixes))
             {
-                Add("denied_path", "critical", $"规则禁止访问路径 {literalPath}", block: true);
+                Add("denied_path", "critical", $"已被规则禁用的路径：{literalPath}", block: true, subject: literalPath);
                 continue;
             }
 
@@ -182,9 +185,9 @@ public static partial class PythonExecutionRiskAnalyzer
 
             // Outside an active allowlist is higher risk than a bare absolute path.
             if (allowedPathPrefixes.Length > 0)
-                Add("outside_allowed_path", "high", $"代码引用了未在允许列表中的路径 {literalPath}");
+                Add("outside_allowed_path", "high", $"代码引用了未在允许列表中的路径 {literalPath}", subject: literalPath);
             else
-                Add("absolute_path", "medium", $"代码引用了本机绝对路径 {literalPath}");
+                Add("absolute_path", "medium", $"代码引用了本机绝对路径 {literalPath}", subject: literalPath);
         }
 
         var level = blocked
