@@ -608,15 +608,21 @@ public sealed partial class SettingsViewModel : ObservableObject
         if (string.Equals(entry.Purpose, "image", StringComparison.OrdinalIgnoreCase))
         {
             ImageGenerationEnabled = true;
-            ImageGenerationProviderId = entry.Id;
-            var firstModel = entry.Models.FirstOrDefault()?.Id;
-            if (!string.IsNullOrWhiteSpace(firstModel))
+            // Only adopt the saved service when nothing is selected yet (e.g. the
+            // first image provider). Editing an existing image provider must not
+            // steal the current pick away from another one in multi-provider setups.
+            if (string.IsNullOrWhiteSpace(ImageGenerationProviderId))
             {
-                ImageGenerationModelId = firstModel;
-                if (string.IsNullOrWhiteSpace(WorkbenchImageGenerationProviderId))
+                ImageGenerationProviderId = entry.Id;
+                var firstModel = entry.Models.FirstOrDefault()?.Id;
+                if (!string.IsNullOrWhiteSpace(firstModel))
                 {
-                    WorkbenchImageGenerationProviderId = entry.Id;
-                    WorkbenchImageGenerationModelId = firstModel;
+                    ImageGenerationModelId = firstModel;
+                    if (string.IsNullOrWhiteSpace(WorkbenchImageGenerationProviderId))
+                    {
+                        WorkbenchImageGenerationProviderId = entry.Id;
+                        WorkbenchImageGenerationModelId = firstModel;
+                    }
                 }
             }
         }

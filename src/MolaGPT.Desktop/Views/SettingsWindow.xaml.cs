@@ -1499,6 +1499,9 @@ public partial class SettingsWindow : Window
         ProviderList.SelectedItem = null;
         _vm.Delete(id);
         _registry.Unregister(id);
+        // The Pi harness may be re-hosting this provider; retire its sidecar so
+        // deleting the row does not leak a background node process / work dir.
+        App.Services.GetService<PiByokProviderFactory>()?.Retire(id);
         _vm.RefreshVisionProviderModels();
         _vm.RefreshImageGenerationProviderModels();
         PopulateVisionCombo();
@@ -1515,11 +1518,17 @@ public partial class SettingsWindow : Window
 
     private void AddModelClick(object sender, RoutedEventArgs e)
     {
+        // The placeholder id must be unique: same-id models saved together make
+        // model lookup by id ambiguous once the provider is registered at runtime.
+        var id = "new-model";
+        var n = 1;
+        while (_editingModels.Any(m => string.Equals(m.Id, id, StringComparison.OrdinalIgnoreCase)))
+            id = "new-model-" + ++n;
         _editingModels.Add(new EditableModelEntry
         {
-            Id = "new-model",
+            Id = id,
             DisplayName = "新模型",
-            ImageEdit = SettingsViewModel.IsImagePurpose(CurrentFormPurpose()) && LooksLikeImageEditModel("new-model")
+            ImageEdit = SettingsViewModel.IsImagePurpose(CurrentFormPurpose()) && LooksLikeImageEditModel(id)
         });
     }
 
