@@ -47,37 +47,39 @@ public static class SseStreamReader
                 continue;
             }
 
-            int colon = line.IndexOf(':');
-            string field;
-            string value;
+            // Slice with spans so each line costs no intermediate field/value
+            // string allocations on the hot data path — only "event"/"id"
+            // values (rare) are materialized.
+            var lineSpan = line.AsSpan();
+            int colon = lineSpan.IndexOf(':');
+            ReadOnlySpan<char> field;
+            ReadOnlySpan<char> value;
             if (colon < 0)
             {
-                field = line;
-                value = string.Empty;
+                field = lineSpan;
+                value = default;
             }
             else
             {
-                field = line[..colon];
-                value = line[(colon + 1)..];
+                field = lineSpan[..colon];
+                value = lineSpan[(colon + 1)..];
                 if (value.Length > 0 && value[0] == ' ') value = value[1..];
             }
 
-            switch (field)
+            if (field.SequenceEqual("data"))
             {
-                case "data":
-                    if (data.Length > 0) data.Append('\n');
-                    data.Append(value);
-                    break;
-                case "event":
-                    eventName = value;
-                    break;
-                case "id":
-                    id = value;
-                    break;
-                case "retry":
-                    // Reconnection time; we don't auto-reconnect at this layer.
-                    break;
+                if (data.Length > 0) data.Append('\n');
+                data.Append(value);
             }
+            else if (field.SequenceEqual("event"))
+            {
+                eventName = value.ToString();
+            }
+            else if (field.SequenceEqual("id"))
+            {
+                id = value.ToString();
+            }
+            // else "retry": reconnection time; we don't auto-reconnect at this layer.
         }
 
         // Flush trailing event without final blank line

@@ -102,6 +102,16 @@ public sealed partial class ConversationListViewModel : ObservableObject
     private bool _bulkUpdatingItems;
     private bool _suspendExpansionPersist;
 
+    // Sidebar search debounce. OnSearchQueryChanged fires once per keystroke
+    // (and per IME composition character); the old path ran a full SQLite read
+    // plus list rebuild on each one and cleared the bulk selection. We wait for
+    // a typing pause, read off the UI thread, then swap the list in one batch.
+    // The CTS is deliberately never disposed: a superseded task may still hold
+    // the token, and disposing would race its CancellationTokenSource.Users —
+    // the object is tiny and GC reclaims it.
+    private const int SearchDebounceMilliseconds = 250;
+    private CancellationTokenSource? _searchDebounceCts;
+
     // --- Undo of the most recent soft-delete ---
     private const int UndoWindowMs = 6000;
     private readonly object _undoGate = new();
@@ -319,6 +329,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
 
     private void ApplyRows(IReadOnlyList<ConversationRow> rows)
     {
+        // A pending debounced search must not overwrite a fresher full reload
+        // with its (now stale) DB snapshot.
+        _searchDebounceCts?.Cancel();
         if (RowsMatchCurrentItems(rows))
             return;
 
@@ -338,6 +351,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
             .Select(group => group.OrderBy(row => row.UpdatedAt).Last())
             .ToDictionary(row => row.Id, StringComparer.Ordinal);
 
+        // A pending debounced search must not overwrite freshly applied cloud
+        // changes with its stale DB snapshot.
+        _searchDebounceCts?.Cancel();
         if (removed.Count == 0 && changed.Count == 0)
             return;
 
@@ -694,21 +710,58 @@ public sealed partial class ConversationListViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(HasSearchQuery));
         if (_repository is null) return;
-        var needle = (value ?? string.Empty).Trim();
-        Items.Clear();
-        SetSelectedIds(Array.Empty<string>());
-        foreach (var row in _repository.ListActive())
+
+        _searchDebounceCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _searchDebounceCts = cts;
+        _ = DebouncedSearchAsync(value ?? string.Empty, cts.Token);
+    }
+
+    private async Task DebouncedSearchAsync(string value, CancellationToken token)
+    {
+        var repository = _repository;
+        if (repository is null) return;
+
+        try
         {
-            var title = string.IsNullOrWhiteSpace(row.Title) ? "新对话" : row.Title;
-            if (needle.Length > 0 && title.IndexOf(needle, StringComparison.OrdinalIgnoreCase) < 0)
-                continue;
-            Items.Add(new ConversationListItem(
-                row.Id,
-                title,
-                DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt),
-                ClassifyGroup(row.ProviderId),
-                _personas?.Find(row.PersonaId)?.Name,
-                IsImageWorkbenchProvider(row.ProviderId)));
+            await Task.Delay(SearchDebounceMilliseconds, token).ConfigureAwait(true);
+            if (token.IsCancellationRequested) return;
+
+            IReadOnlyList<ConversationRow> rows;
+            try
+            {
+                rows = await Task.Run(() => repository.ListActive(), token).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            if (token.IsCancellationRequested) return;
+
+            var needle = value.Trim();
+            var items = new List<ConversationListItem>(rows.Count);
+            foreach (var row in rows)
+            {
+                var title = string.IsNullOrWhiteSpace(row.Title) ? "新对话" : row.Title;
+                if (needle.Length > 0 && title.IndexOf(needle, StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                items.Add(BuildItem(row));
+            }
+            if (token.IsCancellationRequested) return;
+
+            // Preserve the bulk selection for conversations that still match
+            // the query; the old per-keystroke rebuild cleared it
+            // unconditionally. SelectedId (the open conversation) intentionally
+            // stays untouched, matching the previous behavior.
+            ReplaceAllItems(items, clearSelection: false);
+            var visibleIds = items.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+            if (_selectedIds.RemoveWhere(id => !visibleIds.Contains(id)) > 0)
+                RefreshSelectionProperties();
+        }
+        catch (OperationCanceledException)
+        {
+            // Superseded by a newer keystroke or a list reload — that path
+            // owns the list now.
         }
     }
 

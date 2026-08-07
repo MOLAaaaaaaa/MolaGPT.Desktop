@@ -1,4 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
+using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
@@ -38,6 +40,13 @@ public partial class SettingsWindow : Window
     private readonly AgentBridgeStatusViewModel _agentStatus;
     private readonly CloudSyncService _cloudSync;
     private readonly ConversationListViewModel _conversationList;
+    // Unsubscribe targets for the singleton SettingsViewModel events this
+    // transient window subscribes to. Without them the singleton keeps the
+    // window (and its entire visual tree) alive until app exit — every
+    // Settings open leaks the previous window.
+    private readonly PropertyChangedEventHandler _vmPropertyChangedHandler;
+    private readonly NotifyCollectionChangedEventHandler _mcpServersChangedHandler;
+    private bool _closed;
     private ProviderEntry? _editing;
     private PersonaItemViewModel? _editingPersona;
     private bool _editingPersonaIsDraft;
@@ -186,16 +195,20 @@ public partial class SettingsWindow : Window
         AgentTabRoot.DataContext = _agentStatus;
         _vm.Reload();
         UpdateAccountUi();
+        _mcpServersChangedHandler = (_, _) => UpdateMcpEmptyHint();
         InitializeWebSearchUi();
         UpdatePythonRuntimeStatusHint();
         Activated += (_, _) => UpdatePythonRuntimeStatusHint();
         // Keep the browse/open button label in sync when the path is edited by
         // hand (typed, pasted, or cleared) in addition to picker-driven changes.
-        _vm.PropertyChanged += (_, args) =>
+        // _vm is a singleton — unsubscribe on Closed so this window can be GC'd.
+        _vmPropertyChangedHandler = (_, args) =>
         {
             if (args.PropertyName == nameof(SettingsViewModel.PythonToolExecutablePath))
                 RefreshPythonBrowseButton();
         };
+        _vm.PropertyChanged += _vmPropertyChangedHandler;
+        Closed += OnSettingsWindowClosed;
     }
 
     public void OpenPersonasTab(bool startNewPersona)
@@ -213,6 +226,13 @@ public partial class SettingsWindow : Window
 
     private void CloseClick(object sender, RoutedEventArgs e) => Close();
 
+    private void OnSettingsWindowClosed(object? sender, EventArgs e)
+    {
+        _closed = true;
+        _vm.PropertyChanged -= _vmPropertyChangedHandler;
+        _vm.McpServers.CollectionChanged -= _mcpServersChangedHandler;
+    }
+
     private void InitializeWebSearchUi()
     {
         _updatingWebSearchUi = true;
@@ -221,7 +241,7 @@ public partial class SettingsWindow : Window
             SelectWebSearchProvider(_vm.WebSearchProvider);
             WebSearchApiKeyBox.Password = _vm.WebSearchApiKey ?? string.Empty;
             McpServersList.ItemsSource = _vm.McpServers;
-            _vm.McpServers.CollectionChanged += (_, _) => UpdateMcpEmptyHint();
+            _vm.McpServers.CollectionChanged += _mcpServersChangedHandler;
             UpdateMcpEmptyHint();
             PopulateVisionCombo();
             SelectVisionModel();
@@ -848,13 +868,34 @@ public partial class SettingsWindow : Window
 
     private void RefreshPythonRuntimeButtons()
     {
-        // The clear action only makes sense for a one-click downloaded runtime,
-        // so it stays hidden until that runtime exists on disk.
-        ClearPythonRuntimeButton.Visibility = _pythonRuntime.GetInstalledRuntime() is not null
-                                              || _pythonRuntime.GetStorageUsage().TotalBytes > 0
-            ? Visibility.Visible
-            : Visibility.Collapsed;
+        // GetStorageUsage walks every file under the Python tree on disk and
+        // can take hundreds of ms — never run it synchronously on the UI
+        // thread (UpdatePythonRuntimeStatusHint already runs its copy via
+        // Task.Run; this path previously duplicated the walk inline). The
+        // clear button visibility just lags by one async hop.
         RefreshPythonBrowseButton();
+        _ = RefreshClearButtonVisibilityAsync();
+    }
+
+    private async Task RefreshClearButtonVisibilityAsync()
+    {
+        try
+        {
+            var installed = _pythonRuntime.GetInstalledRuntime() is not null;
+            var hasStorage = await Task.Run(() => _pythonRuntime.GetStorageUsage().TotalBytes > 0)
+                .ConfigureAwait(true);
+            if (!_closed)
+            {
+                ClearPythonRuntimeButton.Visibility = installed || hasStorage
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+            }
+        }
+        catch
+        {
+            // The window is closing while the enumeration runs; the next
+            // refresh corrects the button state.
+        }
     }
 
     private void RefreshPythonBrowseButton()
