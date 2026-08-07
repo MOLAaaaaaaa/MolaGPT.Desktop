@@ -1214,7 +1214,7 @@ public partial class SettingsWindow : Window
 
         if (ProviderList.SelectedItem is not ProviderEntry entry)
         {
-            ProviderEditor.IsEnabled = false;
+            ClearProviderEditor();
             return;
         }
         BeginEdit(entry);
@@ -1275,10 +1275,35 @@ public partial class SettingsWindow : Window
     private System.Collections.ObjectModel.ObservableCollection<EditableModelEntry> _editingModels = new();
     private readonly System.Collections.ObjectModel.ObservableCollection<EditableHeaderRow> _editingHeaders = new();
 
+    /// <summary>Resets the provider editor to its empty, disabled state. Used when
+    /// the list has no selection so stale form data never lingers on screen.</summary>
+    private void ClearProviderEditor()
+    {
+        _editing = null;
+        ProviderEditor.IsEnabled = false;
+        ProviderEditor.Visibility = Visibility.Collapsed;
+        _loadingEndpointForm = true;
+        try
+        {
+            EditName.Text = string.Empty;
+            EditBaseUrl.Text = string.Empty;
+            EditApiPath.Text = string.Empty;
+            EditImageEditPath.Text = string.Empty;
+            EditApiKey.Password = string.Empty;
+            _editingModels = new();
+            ModelCards.ItemsSource = _editingModels;
+            LoadHeaders(null);
+            EditorMessage.Text = string.Empty;
+        }
+        finally { _loadingEndpointForm = false; }
+        UpdateEndpointPreview();
+    }
+
     private void BeginEdit(ProviderEntry entry)
     {
         _editing = entry;
         ProviderEditor.IsEnabled = true;
+        ProviderEditor.Visibility = Visibility.Visible;
         _loadingEndpointForm = true;
         try
         {
@@ -1455,14 +1480,37 @@ public partial class SettingsWindow : Window
     private void DeleteProviderClick(object sender, RoutedEventArgs e)
     {
         if (_editing is null) return;
-        _vm.Delete(_editing.Id);
-        _registry.Unregister(_editing.Id);
+        var id = _editing.Id;
+        // Remember where the deleted entry sat so we can select the one before
+        // it afterwards (or what is now first when the deleted entry was first).
+        var index = -1;
+        for (var i = 0; i < _vm.Providers.Count; i++)
+        {
+            if (string.Equals(_vm.Providers[i].Id, id, StringComparison.Ordinal))
+            {
+                index = i;
+                break;
+            }
+        }
+        // Clear the selection before removing the entry: deleting the selected
+        // row makes WPF auto-select a neighbouring provider, which re-enters
+        // BeginEdit and leaves _editing pointing at a stale row that can then
+        // never be deleted. Clearing first keeps _editing and the selection in sync.
+        ProviderList.SelectedItem = null;
+        _vm.Delete(id);
+        _registry.Unregister(id);
         _vm.RefreshVisionProviderModels();
         _vm.RefreshImageGenerationProviderModels();
         PopulateVisionCombo();
         PopulateImageGenerationCombo();
-        _editing = null;
-        ProviderEditor.IsEnabled = false;
+
+        // Jump to the entry that preceded the deleted one; when the deleted
+        // entry was first in the list, select what is now first. No selection
+        // (editor hidden) when the list is now empty.
+        if (_vm.Providers.Count > 0 && index >= 0)
+        {
+            ProviderList.SelectedItem = _vm.Providers[index > 0 ? index - 1 : 0];
+        }
     }
 
     private void AddModelClick(object sender, RoutedEventArgs e)

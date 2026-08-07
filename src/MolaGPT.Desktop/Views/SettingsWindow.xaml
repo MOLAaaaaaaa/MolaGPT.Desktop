@@ -524,6 +524,7 @@
                                          Background="Transparent"
                                          ItemContainerStyle="{StaticResource ConversationListItemStyle}"
                                          SelectionChanged="ProviderList_SelectionChanged"
+                                         IsSynchronizedWithCurrentItem="False"
                                          ItemsSource="{Binding Source={StaticResource GroupedProviders}}">
                                     <ListBox.GroupStyle>
                                         <GroupStyle>
@@ -560,7 +561,7 @@
                             </DockPanel>
 
                             <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto">
-                                <StackPanel x:Name="ProviderEditor" IsEnabled="False">
+                                <StackPanel x:Name="ProviderEditor" IsEnabled="False" Visibility="Collapsed">
                                     <TextBlock Text="自定义模型服务"
                                                FontSize="{DynamicResource Font.Size.Heading}"
                                                FontWeight="SemiBold"
