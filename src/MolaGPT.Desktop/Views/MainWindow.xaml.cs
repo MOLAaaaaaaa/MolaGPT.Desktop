@@ -54,6 +54,7 @@ public partial class MainWindow : Window
     private bool _programmaticScroll;
     private bool _conversationGroupLayoutFocused;
     private bool _clearingOtherConversationGroupSelection;
+    private bool _restoringConversationGroupSelection;
     private readonly DispatcherTimer _conversationGroupLayoutRestoreTimer = new()
     {
         Interval = TimeSpan.FromMilliseconds(ConversationGroupRestoreDelayMs)
@@ -180,6 +181,7 @@ public partial class MainWindow : Window
         {
             oldMainVm.PropertyChanged -= OnVmPropertyChanged;
             oldMainVm.ConversationList.PropertyChanged -= OnConversationListPropertyChanged;
+            oldMainVm.ConversationList.SelectionRestoreRequested -= OnSelectionRestoreRequested;
             oldMainVm.Composer.MessageSubmitted -= OnComposerMessageSubmitted;
         }
         else if (e.OldValue is INotifyPropertyChanged oldVm)
@@ -191,6 +193,7 @@ public partial class MainWindow : Window
         {
             newVm.PropertyChanged += OnVmPropertyChanged;
             newVm.ConversationList.PropertyChanged += OnConversationListPropertyChanged;
+            newVm.ConversationList.SelectionRestoreRequested += OnSelectionRestoreRequested;
             newVm.Composer.MessageSubmitted += OnComposerMessageSubmitted;
             // Apply initial state without animation so first paint is right.
             ApplySidebarState(newVm.SidebarCollapsed, animate: false);
@@ -248,7 +251,7 @@ public partial class MainWindow : Window
 
     private void ConversationListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_clearingOtherConversationGroupSelection) return;
+        if (_clearingOtherConversationGroupSelection || _restoringConversationGroupSelection) return;
         if (DataContext is not MainViewModel vm || sender is not ListBox listBox) return;
 
         // The sidebar is split into two parallel ListBoxes (BYOK / MolaGPT).
@@ -284,6 +287,28 @@ public partial class MainWindow : Window
                 ShowConversationLoadingOverlayNow(vm);
 
             vm.ConversationList.SelectById(clicked.Id);
+        }
+    }
+
+    private void OnSelectionRestoreRequested(object? sender, IReadOnlyList<string> selectedIds)
+    {
+        var selected = selectedIds.ToHashSet(StringComparer.Ordinal);
+        _restoringConversationGroupSelection = true;
+        try
+        {
+            foreach (var listBox in ConversationGroupListBoxes())
+            {
+                listBox.SelectedItems.Clear();
+                foreach (var item in listBox.Items.OfType<ConversationListItem>())
+                {
+                    if (selected.Contains(item.Id))
+                        listBox.SelectedItems.Add(item);
+                }
+            }
+        }
+        finally
+        {
+            _restoringConversationGroupSelection = false;
         }
     }
 

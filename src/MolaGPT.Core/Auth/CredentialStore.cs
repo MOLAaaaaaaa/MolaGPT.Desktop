@@ -61,12 +61,12 @@ public sealed class CredentialStore
     {
         lock (_gate)
         {
-            var map = LoadMapLocked();
-            map[key] = Convert.ToBase64String(Encrypt(plaintext));
-            WriteMap(map);
-            // Keep the cached timestamp in sync so the next read doesn't treat
-            // our own write as an external modification and re-read for nothing.
-            _mapFileWriteTimeUtc = File.GetLastWriteTimeUtc(_filePath);
+            var current = LoadMapLocked();
+            var next = new Dictionary<string, string>(current, current.Comparer)
+            {
+                [key] = Convert.ToBase64String(Encrypt(plaintext))
+            };
+            CommitMapLocked(next);
         }
     }
 
@@ -84,12 +84,12 @@ public sealed class CredentialStore
     {
         lock (_gate)
         {
-            var map = LoadMapLocked();
-            if (map.Remove(key))
-            {
-                WriteMap(map);
-                _mapFileWriteTimeUtc = File.GetLastWriteTimeUtc(_filePath);
-            }
+            var current = LoadMapLocked();
+            if (!current.ContainsKey(key)) return;
+
+            var next = new Dictionary<string, string>(current, current.Comparer);
+            next.Remove(key);
+            CommitMapLocked(next);
         }
     }
 
@@ -115,6 +115,26 @@ public sealed class CredentialStore
         {
             return new();
         }
+    }
+
+    private void CommitMapLocked(Dictionary<string, string> map)
+    {
+        try
+        {
+            WriteMap(map);
+        }
+        catch
+        {
+            // A failed write may still have touched or truncated the file. Drop
+            // the old cache so the next read reflects whatever remains on disk.
+            _map = null;
+            _mapFileWriteTimeUtc = default;
+            throw;
+        }
+
+        // Publish the new in-memory state only after the disk write succeeds.
+        _map = map;
+        _mapFileWriteTimeUtc = File.GetLastWriteTimeUtc(_filePath);
     }
 
     private void WriteMap(Dictionary<string, string> map)
