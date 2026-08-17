@@ -102,6 +102,14 @@ public sealed partial class ConversationListViewModel : ObservableObject
     private bool _bulkUpdatingItems;
     private bool _suspendExpansionPersist;
 
+    // Sidebar search debounce. OnSearchQueryChanged fires once per keystroke
+    // (and per IME composition character); the old path ran a full SQLite read
+    // plus list rebuild on each one and cleared the bulk selection. We wait for
+    // a typing pause, read off the UI thread, then reconcile the visible rows.
+    private const int SearchDebounceMilliseconds = 250;
+    private CancellationTokenSource? _searchDebounceCts;
+    private string _appliedSearchQuery = string.Empty;
+
     // --- Undo of the most recent soft-delete ---
     private const int UndoWindowMs = 6000;
     private readonly object _undoGate = new();
@@ -111,6 +119,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
     /// <summary>Raised whenever the active conversation changes (click, new, programmatic).</summary>
     public event EventHandler<string>? ConversationSelected;
     public event EventHandler<IReadOnlyList<string>>? ConversationsDeleted;
+    public event EventHandler<IReadOnlyList<string>>? SelectionRestoreRequested;
 
     public IRelayCommand DeleteSelectedConversationsCommand { get; }
 
@@ -319,10 +328,10 @@ public sealed partial class ConversationListViewModel : ObservableObject
 
     private void ApplyRows(IReadOnlyList<ConversationRow> rows)
     {
-        if (RowsMatchCurrentItems(rows))
-            return;
-
-        ReplaceAllItems(rows.Select(row => BuildItem(row)).ToList(), clearSelection: true);
+        // The reload already owns a fresh snapshot. Cancel any older search and
+        // render this snapshot using the query that is currently in the box.
+        CancelPendingSearch();
+        ApplyRowsForQuery(rows, SearchQuery);
     }
 
     public void ApplyCloudSyncChanges(
@@ -338,8 +347,16 @@ public sealed partial class ConversationListViewModel : ObservableObject
             .Select(group => group.OrderBy(row => row.UpdatedAt).Last())
             .ToDictionary(row => row.Id, StringComparer.Ordinal);
 
+        // If a query change is waiting in the debounce window, restart it after
+        // applying the cloud delta so it reads a post-sync repository snapshot.
+        var restartPendingSearch = _searchDebounceCts is not null;
+        CancelPendingSearch();
         if (removed.Count == 0 && changed.Count == 0)
+        {
+            if (restartPendingSearch)
+                StartSearch(SearchQuery, debounce: false);
             return;
+        }
 
         var existingById = Items.ToDictionary(item => item.Id, StringComparer.Ordinal);
         var nextItems = new List<ConversationListItem>(Items.Count + changed.Count);
@@ -350,21 +367,20 @@ public sealed partial class ConversationListViewModel : ObservableObject
             nextItems.Add(item);
         }
 
-        foreach (var row in changed.Values)
+        foreach (var row in changed.Values.Where(row => RowMatchesQuery(row, _appliedSearchQuery)))
         {
             existingById.TryGetValue(row.Id, out var existing);
             nextItems.Add(BuildItem(row, existing));
         }
 
         nextItems.Sort(CompareSidebarItems);
-        ReplaceAllItems(nextItems, clearSelection: false);
+        ReplaceAllItems(nextItems);
 
         if (SelectedId is not null && !nextItems.Any(item => item.Id == SelectedId))
             SelectedId = null;
 
-        var visibleIds = nextItems.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
-        if (_selectedIds.RemoveWhere(id => !visibleIds.Contains(id)) > 0)
-            RefreshSelectionProperties();
+        if (restartPendingSearch || !string.Equals(_appliedSearchQuery, SearchQuery, StringComparison.Ordinal))
+            StartSearch(SearchQuery, debounce: false);
     }
 
     private ConversationListItem BuildItem(ConversationRow row, ConversationListItem? existing = null)
@@ -384,19 +400,55 @@ public sealed partial class ConversationListViewModel : ObservableObject
         return item;
     }
 
-    private void ReplaceAllItems(IReadOnlyList<ConversationListItem> items, bool clearSelection)
+    private void ApplyRowsForQuery(IReadOnlyList<ConversationRow> rows, string query)
     {
+        var visibleRows = rows.Where(row => RowMatchesQuery(row, query)).ToList();
+        _appliedSearchQuery = query;
+        if (RowsMatchCurrentItems(visibleRows)) return;
+
+        var existingById = Items.ToDictionary(item => item.Id, StringComparer.Ordinal);
+        var items = new List<ConversationListItem>(visibleRows.Count);
+        foreach (var row in visibleRows)
+        {
+            existingById.TryGetValue(row.Id, out var existing);
+            items.Add(BuildItem(row, existing));
+        }
+        ReplaceAllItems(items);
+    }
+
+    private static bool RowMatchesQuery(ConversationRow row, string query)
+    {
+        var needle = query.Trim();
+        if (needle.Length == 0) return true;
+        var title = string.IsNullOrWhiteSpace(row.Title) ? "新对话" : row.Title;
+        return title.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private void ReplaceAllItems(IReadOnlyList<ConversationListItem> items)
+    {
+        var existingById = Items.ToDictionary(item => item.Id, StringComparer.Ordinal);
+        var reconciled = new List<ConversationListItem>(items.Count);
+        foreach (var candidate in items)
+        {
+            if (existingById.TryGetValue(candidate.Id, out var existing))
+            {
+                existing.UpdateFrom(candidate);
+                reconciled.Add(existing);
+            }
+            else
+            {
+                reconciled.Add(candidate);
+            }
+        }
+
         _bulkUpdatingItems = true;
         try
         {
-            if (clearSelection)
-                SetSelectedIds(Array.Empty<string>());
-
-            _items.ReplaceAll(items);
-            _byokItems.ReplaceAll(items.Where(item => item.Group == AppMode.Byok));
-            _molaGptItems.ReplaceAll(items.Where(item => item.Group == AppMode.Chat));
-            _workItems.ReplaceAll(items.Where(item => item.Group == AppMode.Work));
-            _molaGptConversationItems.ReplaceAll(items.Where(item => item.IsMolaGptAccountConversation));
+            _items.ReplaceAll(reconciled);
+            _byokItems.ReplaceAll(reconciled.Where(item => item.Group == AppMode.Byok));
+            _molaGptItems.ReplaceAll(reconciled.Where(item => item.Group == AppMode.Chat));
+            _workItems.ReplaceAll(reconciled.Where(item => item.Group == AppMode.Work));
+            _molaGptConversationItems.ReplaceAll(reconciled.Where(item => item.IsMolaGptAccountConversation));
         }
         finally
         {
@@ -404,6 +456,10 @@ public sealed partial class ConversationListViewModel : ObservableObject
         }
 
         RaiseGroupCountChanges();
+        var visibleIds = reconciled.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+        if (_selectedIds.RemoveWhere(id => !visibleIds.Contains(id)) > 0)
+            RefreshSelectionProperties();
+        SelectionRestoreRequested?.Invoke(this, _selectedIds.ToArray());
     }
 
     private static int CompareSidebarItems(ConversationListItem left, ConversationListItem right)
@@ -425,8 +481,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
         {
             var row = rows[i];
             var item = Items[i];
+            var title = string.IsNullOrWhiteSpace(row.Title) ? "新对话" : row.Title;
             if (item.Id != row.Id
-                || (!string.IsNullOrWhiteSpace(row.Title) && item.Title != row.Title)
+                || item.Title != title
                 || item.UpdatedAt != DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt)
                 || item.Group != ClassifyGroup(row.ProviderId)
                 || item.IsImageTask != IsImageWorkbenchProvider(row.ProviderId)
@@ -694,21 +751,55 @@ public sealed partial class ConversationListViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(HasSearchQuery));
         if (_repository is null) return;
-        var needle = (value ?? string.Empty).Trim();
-        Items.Clear();
-        SetSelectedIds(Array.Empty<string>());
-        foreach (var row in _repository.ListActive())
+
+        StartSearch(value ?? string.Empty, debounce: true);
+    }
+
+    private void StartSearch(string value, bool debounce)
+    {
+        CancelPendingSearch();
+        var cts = new CancellationTokenSource();
+        _searchDebounceCts = cts;
+        _ = SearchAsync(value, cts, debounce);
+    }
+
+    private void CancelPendingSearch()
+    {
+        var pending = _searchDebounceCts;
+        _searchDebounceCts = null;
+        pending?.Cancel();
+    }
+
+    private async Task SearchAsync(string value, CancellationTokenSource request, bool debounce)
+    {
+        var repository = _repository;
+        if (repository is null)
+            return;
+
+        var token = request.Token;
+
+        try
         {
-            var title = string.IsNullOrWhiteSpace(row.Title) ? "新对话" : row.Title;
-            if (needle.Length > 0 && title.IndexOf(needle, StringComparison.OrdinalIgnoreCase) < 0)
-                continue;
-            Items.Add(new ConversationListItem(
-                row.Id,
-                title,
-                DateTimeOffset.FromUnixTimeMilliseconds(row.UpdatedAt),
-                ClassifyGroup(row.ProviderId),
-                _personas?.Find(row.PersonaId)?.Name,
-                IsImageWorkbenchProvider(row.ProviderId)));
+            if (debounce)
+                await Task.Delay(SearchDebounceMilliseconds, token).ConfigureAwait(true);
+            if (token.IsCancellationRequested) return;
+
+            var rows = await Task.Run(() => repository.ListActive(), token).ConfigureAwait(true);
+            if (token.IsCancellationRequested
+                || !ReferenceEquals(_searchDebounceCts, request)
+                || !string.Equals(SearchQuery, value, StringComparison.Ordinal))
+                return;
+
+            ApplyRowsForQuery(rows, value);
+        }
+        catch (OperationCanceledException)
+        {
+            // Superseded by a newer query or data refresh.
+        }
+        finally
+        {
+            if (ReferenceEquals(_searchDebounceCts, request))
+                _searchDebounceCts = null;
         }
     }
 
@@ -770,16 +861,21 @@ public sealed partial class ConversationListViewModel : ObservableObject
 public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.ObservableObject
 {
     public string Id { get; }
-    public string Title { get; }
-    public DateTimeOffset UpdatedAt { get; }
+    private string _title;
+    public string Title => _title;
+    private DateTimeOffset _updatedAt;
+    public DateTimeOffset UpdatedAt => _updatedAt;
     /// <summary>Three-way sidebar group (Byok / Chat / Work).</summary>
-    public AppMode Group { get; }
+    private AppMode _group;
+    public AppMode Group => _group;
     /// <summary>Back-compat: true for any non-MolaGPT-account conversation (Byok group).</summary>
     public bool IsByok => Group == AppMode.Byok;
     public bool IsWork => Group == AppMode.Work;
     public bool IsMolaGptAccountConversation => Group is AppMode.Chat or AppMode.Work;
-    public bool IsImageTask { get; }
-    public bool Pinned { get; }
+    private bool _isImageTask;
+    public bool IsImageTask => _isImageTask;
+    private bool _pinned;
+    public bool Pinned => _pinned;
     public string IconGlyph => IsImageTask ? "\uE91B" : "\uE8BD";
     public string ModeBadgeLabel => IsWork ? "Work" : string.Empty;
 
@@ -827,12 +923,34 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
         bool pinned = false)
     {
         Id = id;
-        Title = title;
-        UpdatedAt = updatedAt;
-        Group = group;
-        IsImageTask = isImageTask;
-        Pinned = pinned;
+        _title = title;
+        _updatedAt = updatedAt;
+        _group = group;
+        _isImageTask = isImageTask;
+        _pinned = pinned;
         _personaLabel = personaLabel;
+    }
+
+    internal void UpdateFrom(ConversationListItem source)
+    {
+        SetProperty(ref _title, source.Title, nameof(Title));
+        if (SetProperty(ref _updatedAt, source.UpdatedAt, nameof(UpdatedAt)))
+            OnPropertyChanged(nameof(TimeLabel));
+        if (SetProperty(ref _group, source.Group, nameof(Group)))
+        {
+            OnPropertyChanged(nameof(IsByok));
+            OnPropertyChanged(nameof(IsWork));
+            OnPropertyChanged(nameof(IsMolaGptAccountConversation));
+            OnPropertyChanged(nameof(ModeBadgeLabel));
+        }
+        if (SetProperty(ref _isImageTask, source.IsImageTask, nameof(IsImageTask)))
+        {
+            OnPropertyChanged(nameof(IconGlyph));
+            OnPropertyChanged(nameof(BadgeLabel));
+        }
+        SetProperty(ref _pinned, source.Pinned, nameof(Pinned));
+        PersonaLabel = source.PersonaLabel;
+        IsGenerating = source.IsGenerating;
     }
 
     public string TimeLabel => UpdatedAt.ToLocalTime().ToString(
