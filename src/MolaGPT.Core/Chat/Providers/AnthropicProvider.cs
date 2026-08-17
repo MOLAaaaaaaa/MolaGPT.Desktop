@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using MolaGPT.Core.Chat;
 using MolaGPT.Core.Models;
 using MolaGPT.Core.Net;
 using MolaGPT.Core.Sse;
@@ -111,6 +112,7 @@ public sealed class AnthropicProvider : IChatProvider
         req.Headers.Add("x-api-key", _apiKey);
         req.Headers.Add("anthropic-version", AnthropicVersion);
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+        OpenRouterAttribution.Apply(req, BaseUrl, CustomHeaders);
         CustomRequestParams.ApplyHeaders(req, CustomHeaders);
 
         using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);

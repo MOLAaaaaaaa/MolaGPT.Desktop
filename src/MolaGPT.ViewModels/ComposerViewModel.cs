@@ -35,7 +35,12 @@ public sealed partial class ComposerViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsComposerPlaceholderVisible))]
     private string _text = string.Empty;
     [ObservableProperty] private bool _isSending;
-    [ObservableProperty] private bool _enterToSend = true;
+
+    /// <summary>Reads straight through to the settings toggle rather than keeping
+    /// a local copy: a second field here silently drifted from the settings page,
+    /// so flipping "按 Enter 直接发送消息" never reached the input box. Defaults to
+    /// true when no settings VM is wired (design-time / tests).</summary>
+    public bool EnterToSend => _settings?.EnterToSend ?? true;
 
     /// <summary>Raised right after a user turn is committed to the transcript, so
     /// the chat view can re-take bottom-follow even if the user had scrolled up.</summary>
@@ -185,6 +190,9 @@ public sealed partial class ComposerViewModel : ObservableObject
         {
             _settings.PropertyChanged += (_, e) =>
             {
+                if (e.PropertyName is nameof(SettingsViewModel.EnterToSend))
+                    OnPropertyChanged(nameof(EnterToSend));
+
                 if (e.PropertyName is nameof(SettingsViewModel.ImageGenerationEnabled)
                     or nameof(SettingsViewModel.ImageGenerationProviderId)
                     or nameof(SettingsViewModel.ImageGenerationModelId)

@@ -72,13 +72,91 @@ public partial class AccountDialog : Window
         UserBadgeText.Text = status.Unlimited ? "无限制账户" : (status.IsDonor ? "捐赠用户" : "已注册用户");
         StatusText.Text = "";
 
-        BuildModelRows(status);
+        if (status.Credits is { } credits && !status.Unlimited)
+            BuildCreditRows(status, credits);
+        else
+            BuildModelRows(status);
+    }
+
+    /// <summary>
+    /// Credit-pool rendering. There is one shared balance, so the per-model
+    /// progress bars of the legacy panel would be meaningless here — each row
+    /// answers "how many more turns does my remaining balance buy on this
+    /// model" instead, and the single real budget sits in the header.
+    /// </summary>
+    private void BuildCreditRows(MolaGptStatus status, MolaGptCredits credits)
+    {
+        ModelList.Children.Clear();
+        EmptyState.Visibility = Visibility.Collapsed;
+        SectionTitleText.Text = "额度用量";
+
+        // Percentage only — the raw point balance is deliberately not surfaced
+        // anywhere in the client, matching the web panel.
+        TotalRequestsText.Text = $"{credits.RemainingPercent}%";
+        TotalRequestsLabel.Text = "额度剩余";
+
+        // Window scope, not today's — the estimates below are drawn against the
+        // same window and the two figures have to agree.
+        TotalTokensText.Text = FormatTokens(credits.TotalTokens(status.TokensUsage));
+        TotalTokensLabel.Text = credits.IsRolling ? $"近 {credits.WindowDays} 天 Tokens" : "今日 Tokens 用量";
+
+        CreditsBarHost.Content = BuildProgressRow(
+            label: credits.TierLabel,
+            valueText: credits.WindowLabel,
+            ratio: credits.UsedFraction,
+            barBrushKey: "Brush.Primary",
+            showBar: credits.Allowance > 0);
+        CreditsBarHost.Visibility = Visibility.Visible;
+
+        // Only worth a line when it changes what the user can do next.
+        CreditsHintText.Text = $"额度已耗尽，{credits.RecoveryLabel}。";
+        CreditsHintText.Visibility = credits.Exhausted ? Visibility.Visible : Visibility.Collapsed;
+
+        // Cheapest first: the models still worth switching to when the balance
+        // is running low should be the ones at the top.
+        var rows = status.Limits
+            .Where(kv => kv.Value.Enabled)
+            .Select(kv => (Id: kv.Key, Limit: kv.Value,
+                           Status: status.ModelStatus.GetValueOrDefault(kv.Key)))
+            .Where(r => status.IsDonor || r.Status?.Reason != "donor_only")
+            // Unpriced models sort last — they are dead weight, not choices.
+            .OrderBy(r => r.Status?.CreditMultiplier ?? double.MaxValue)
+            .ThenBy(r => r.Limit.DisplayName, StringComparer.CurrentCulture);
+
+        foreach (var r in rows)
+        {
+            ModelList.Children.Add(BuildCreditModelCard(
+                r.Limit,
+                credits.TokensFor(r.Id, status.TokensUsage),
+                r.Status,
+                credits));
+        }
+
+        if (ModelList.Children.Count == 0)
+        {
+            ShowEmpty("当前账户没有可用模型");
+            return;
+        }
+
+        ModelList.Children.Add(new TextBlock
+        {
+            Text = "次数按平均对话长度估算，实际随对话长短浮动。",
+            FontSize = 11,
+            Foreground = (Brush)FindResource("Brush.Text.Muted"),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 2, 0, 12)
+        });
     }
 
     private void BuildModelRows(MolaGptStatus status)
     {
         ModelList.Children.Clear();
         EmptyState.Visibility = Visibility.Collapsed;
+        CreditsBarHost.Visibility = Visibility.Collapsed;
+        CreditsHintText.Visibility = Visibility.Collapsed;
+        SectionTitleText.Text = "今日使用情况";
+        TotalRequestsLabel.Text = "总请求次数";
+        TotalTokensLabel.Text = "总 Tokens 用量";
 
         int totalReq = 0;
         long totalTokens = 0;
@@ -106,6 +184,149 @@ public partial class AccountDialog : Window
 
         TotalRequestsText.Text = totalReq.ToString(CultureInfo.InvariantCulture);
         TotalTokensText.Text = FormatTokens(totalTokens);
+    }
+
+    private FrameworkElement BuildCreditModelCard(
+        MolaGptModelLimit limit,
+        int usedTokens,
+        MolaGptModelStatus? ms,
+        MolaGptCredits credits)
+    {
+        var multiplier = ms?.CreditMultiplier;
+        var uses = credits.EstimatedUses(multiplier);
+
+        string rightText;
+        string rightBrushKey;
+        bool dim = false;
+        if (multiplier is null)
+        {
+            // No price on file. The server refuses these outright rather than
+            // letting them through as an unmetered channel.
+            rightText = "暂不可用";
+            rightBrushKey = "Brush.Error";
+            dim = true;
+        }
+        else if (uses == int.MaxValue)
+        {
+            // Not "不限次数": a zero rate can come from a free-quota pool that
+            // reprices itself once the pool drains, and the per-request size cap
+            // still applies either way.
+            rightText = "不消耗额度";
+            rightBrushKey = "Brush.Success";
+        }
+        else if (uses <= 0)
+        {
+            rightText = "额度不足";
+            rightBrushKey = "Brush.Error";
+            dim = true;
+        }
+        else
+        {
+            rightText = $"约 {uses} 次";
+            rightBrushKey = "Brush.Text.Primary";
+        }
+
+        var border = new Border
+        {
+            Background = (Brush)FindResource("Brush.Bg.Secondary"),
+            CornerRadius = (CornerRadius)FindResource("Radius.Md"),
+            Padding = new Thickness(12, 10, 12, 10),
+            Margin = new Thickness(0, 0, 0, 8),
+            Opacity = dim ? 0.55 : 1.0
+        };
+
+        var stack = new StackPanel();
+        border.Child = stack;
+
+        var head = new Grid();
+        head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        head.Children.Add(new TextBlock
+        {
+            Text = limit.DisplayName,
+            FontWeight = FontWeights.SemiBold,
+            FontSize = 14,
+            Foreground = (Brush)FindResource("Brush.Text.Primary"),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+
+        var symbol = BuildPriceSymbol(ms?.CreditSymbol);
+        if (symbol is not null)
+        {
+            Grid.SetColumn(symbol, 1);
+            head.Children.Add(symbol);
+        }
+
+        var right = new TextBlock
+        {
+            Text = rightText,
+            FontSize = 13,
+            Foreground = (Brush)FindResource(rightBrushKey),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(10, 0, 0, 0)
+        };
+        Grid.SetColumn(right, 2);
+        head.Children.Add(right);
+
+        stack.Children.Add(head);
+
+        if (usedTokens > 0)
+        {
+            stack.Children.Add(new TextBlock
+            {
+                Text = $"{credits.SpentLabel} {FormatTokens(usedTokens)}",
+                FontSize = 11,
+                Foreground = (Brush)FindResource("Brush.Text.Muted"),
+                Margin = new Thickness(0, 3, 0, 0)
+            });
+        }
+
+        return border;
+    }
+
+    /// <summary>Price tier chip. The server owns the thresholds and hands us a
+    /// run of <c>$</c>; empty string means free, null means unpriced.</summary>
+    private FrameworkElement? BuildPriceSymbol(string? symbol)
+    {
+        if (symbol is null) return null;
+
+        if (symbol.Length == 0)
+        {
+            return new TextBlock
+            {
+                // "限免", not "免费" — free-quota pools zero the rate only while
+                // the pool lasts, then hand back the real price.
+                Text = "限免",
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = (Brush)FindResource("Brush.Success"),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(6, 0, 0, 0)
+            };
+        }
+
+        var brushKey = symbol.Length switch
+        {
+            1 => "Brush.Success",
+            2 => "Brush.Text.Secondary",
+            3 => "Brush.Warning",
+            _ => "Brush.Error"
+        };
+
+        return new TextBlock
+        {
+            Text = symbol,
+            FontSize = 12,
+            FontWeight = FontWeights.Bold,
+            FontFamily = (FontFamily)FindResource("Font.Mono"),
+            Foreground = (Brush)FindResource(brushKey),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(6, 0, 0, 0),
+            ToolTip = "消耗档位，$ 越多越贵"
+        };
     }
 
     private FrameworkElement BuildModelCard(
@@ -147,8 +368,8 @@ public partial class AccountDialog : Window
 
         stack.Children.Add(BuildProgressRow(
             label: "请求次数",
-            usedText: used.ToString(CultureInfo.InvariantCulture),
-            limitText: reqUnlimited ? "无限制" : effectiveReq.ToString(CultureInfo.InvariantCulture),
+            valueText: $"{used.ToString(CultureInfo.InvariantCulture)}/" +
+                       (reqUnlimited ? "无限制" : effectiveReq.ToString(CultureInfo.InvariantCulture)),
             ratio: reqUnlimited || effectiveReq <= 0 ? 0 : Math.Min(used / (double)effectiveReq, 1.0),
             barBrushKey: "Brush.Primary",
             showBar: !reqUnlimited && effectiveReq > 0));
@@ -157,8 +378,7 @@ public partial class AccountDialog : Window
 
         stack.Children.Add(BuildProgressRow(
             label: "Tokens 用量",
-            usedText: FormatTokens(usedTokens),
-            limitText: tokUnlimited ? "无限制" : FormatTokens(effectiveTok),
+            valueText: $"{FormatTokens(usedTokens)}/" + (tokUnlimited ? "无限制" : FormatTokens(effectiveTok)),
             ratio: tokUnlimited || effectiveTok <= 0 ? 0 : Math.Min(usedTokens / (double)effectiveTok, 1.0),
             barBrushKey: "Brush.Success",
             showBar: !tokUnlimited && effectiveTok > 0));
@@ -166,10 +386,12 @@ public partial class AccountDialog : Window
         return border;
     }
 
+    /// <param name="valueText">Right-hand side of the header, already composed.
+    /// The legacy rows pass "used/limit"; the credit bar passes the reset hint,
+    /// because the pool is shown as a percentage and never as raw points.</param>
     private FrameworkElement BuildProgressRow(
         string label,
-        string usedText,
-        string limitText,
+        string valueText,
         double ratio,
         string barBrushKey,
         bool showBar)
@@ -188,7 +410,7 @@ public partial class AccountDialog : Window
         });
         var counts = new TextBlock
         {
-            Text = $"{usedText}/{limitText}",
+            Text = valueText,
             Foreground = (Brush)FindResource("Brush.Text.Secondary"),
             FontSize = 12,
             FontFamily = (FontFamily)FindResource("Font.Mono")
@@ -252,6 +474,8 @@ public partial class AccountDialog : Window
     private void ShowEmpty(string message)
     {
         ModelList.Children.Clear();
+        CreditsBarHost.Visibility = Visibility.Collapsed;
+        CreditsHintText.Visibility = Visibility.Collapsed;
         EmptyState.Text = message;
         EmptyState.Visibility = Visibility.Visible;
         ModelList.Children.Add(EmptyState);

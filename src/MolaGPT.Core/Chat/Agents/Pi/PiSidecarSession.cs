@@ -177,9 +177,58 @@ public sealed class PiSidecarSession : IAsyncDisposable
         }
         finally
         {
+            // Stopping has to reach Pi. Cancelling only ends this read loop; the
+            // sidecar would keep running the turn — still calling the model, still
+            // calling tools whose callbacks now have nowhere to go — and keep
+            // writing events. The next turn would then read the abandoned turn's
+            // output, leaving the stream a whole turn out of step and the UI
+            // waiting forever for a reply that already came and went.
+            if (ct.IsCancellationRequested)
+                await AbortAndDrainAsync().ConfigureAwait(false);
+
             _turnGate.Release();
         }
     }
+
+    /// <summary>
+    /// Tell Pi to stop and read until the turn settles, so the stream is back at a
+    /// turn boundary before anyone sends the next prompt. Bounded: if the sidecar
+    /// does not settle, kill it rather than hand out a session in an unknown state —
+    /// the next turn respawns and resumes from the persisted session.
+    /// </summary>
+    private async Task AbortAndDrainAsync()
+    {
+        if (!IsAlive) return;
+
+        try
+        {
+            Send(new { type = "abort" });
+
+            using var cts = new CancellationTokenSource(AbortDrainTimeout);
+            var reader = _stdout!;
+            while (true)
+            {
+                var line = await reader.ReadLineAsync(cts.Token).ConfigureAwait(false);
+                if (line is null) return;                       // process exited
+                if (TryHandleUiRequest(line)) continue;
+                if (IsSettled(line)) return;
+            }
+        }
+        catch (Exception ex)
+        {
+            _log?.Invoke("[pi] 中止后未能在超时内回到空闲，重启 sidecar：" + ex.Message);
+            var proc = _process;
+            _process = null;
+            try { if (proc is { HasExited: false }) proc.Kill(entireProcessTree: true); }
+            catch { /* already gone */ }
+            proc?.Dispose();
+        }
+    }
+
+    /// <summary>How long to wait for Pi to wind down after an abort. Long enough for
+    /// an in-flight tool call to return, short enough that a wedged sidecar does not
+    /// hold the conversation hostage.</summary>
+    private static readonly TimeSpan AbortDrainTimeout = TimeSpan.FromSeconds(10);
 
     private bool TryHandleUiRequest(string line)
     {

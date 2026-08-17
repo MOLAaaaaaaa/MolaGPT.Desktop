@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -175,10 +176,20 @@ public sealed class MolaGptProxyProvider : IChatProvider
     /// <code>
     ///   { user: { logged_in, username, type, unlimited, is_donor,
     ///             usage:{model_id:int}, tokens_usage:{model_id:int},
+    ///             credits:{enabled, enforcing, tier, used, allowance, remaining,
+    ///                      window_days, recovers_at, by_model_tokens,
+    ///                      base_tokens_per_credit} | null,
     ///             limits:{model_id:{daily_limit, daily_tokens_limit, display_name}}},
-    ///     model_status:{model_id:{available, remaining, remaining_tokens,...}},
+    ///     model_status:{model_id:{available, remaining, remaining_tokens,
+    ///                             credit_multiplier, credit_symbol,...}},
     ///     config:{registered_user_limits:{...}} }
     /// </code>
+    /// Since the credit rollout the per-model <c>daily_limit</c> /
+    /// <c>daily_tokens_limit</c> are all <c>-1</c> and <c>remaining</c> is no
+    /// longer emitted at all; the real budget is the shared credit pool under
+    /// <c>user.credits</c>. <c>credits</c> is null when the server has the
+    /// feature switched off, in which case callers fall back to the old
+    /// per-model numbers.
     /// </summary>
     public async Task<MolaGptStatus?> FetchStatusAsync(CancellationToken ct = default)
     {
@@ -212,6 +223,29 @@ public sealed class MolaGptProxyProvider : IChatProvider
         var usage = ParseIntDict(user["usage"]);
         var tokensUsage = ParseIntDict(user["tokens_usage"]);
 
+        // Shared credit pool. Absent / enabled=false means the server is still
+        // on the legacy per-model quotas, so leave this null and let the UI keep
+        // its old rendering.
+        MolaGptCredits? credits = null;
+        if (user["credits"] is JsonObject cr && (cr["enabled"]?.GetValue<bool>() ?? false))
+        {
+            credits = new MolaGptCredits(
+                Enforcing: cr["enforcing"]?.GetValue<bool>() ?? false,
+                Tier: cr["tier"]?.GetValue<string>() ?? "registered",
+                Used: ParseDouble(cr["used"]) ?? 0,
+                Allowance: ParseDouble(cr["allowance"]) ?? 0,
+                Remaining: ParseDouble(cr["remaining"]) ?? 0,
+                BaseTokensPerCredit: (int)(ParseDouble(cr["base_tokens_per_credit"]) ?? 0),
+                // Older builds of status.php omit these three; the defaults keep
+                // the daily-reset wording those builds still imply. The window
+                // breakdown has to stay null when absent rather than collapse to
+                // an empty dict, or the same-day fallback never fires. An empty
+                // object is a different thing — a window with nothing spent in it.
+                WindowDays: (int)(ParseDouble(cr["window_days"]) ?? 1),
+                RecoversAt: cr["recovers_at"]?.GetValue<string>(),
+                ByModelTokens: cr["by_model_tokens"] is JsonObject bmt ? ParseIntDict(bmt) : null);
+        }
+
         // Per-model limits live under user.limits OR config.registered_user_limits
         // depending on the build of status.php; prefer the former, fall back.
         var limitsObj = user["limits"]?.AsObject()
@@ -241,7 +275,11 @@ public sealed class MolaGptProxyProvider : IChatProvider
                     Remaining: s["remaining"] is JsonValue r && r.TryGetValue<int>(out var rv) ? rv : (int?)null,
                     RemainingTokens: s["remaining_tokens"] is JsonValue rt && rt.TryGetValue<int>(out var rtv) ? rtv : (int?)null,
                     Reason: s["reason"]?.GetValue<string>(),
-                    Message: s["message"]?.GetValue<string>());
+                    Message: s["message"]?.GetValue<string>(),
+                    // null multiplier = the model has no price on file, which the
+                    // server treats as unusable rather than free.
+                    CreditMultiplier: ParseDouble(s["credit_multiplier"]),
+                    CreditSymbol: s["credit_symbol"]?.GetValue<string>());
             }
         }
 
@@ -252,8 +290,15 @@ public sealed class MolaGptProxyProvider : IChatProvider
             Usage: usage,
             TokensUsage: tokensUsage,
             Limits: limits,
-            ModelStatus: modelStatus);
+            ModelStatus: modelStatus,
+            Credits: credits);
     }
+
+    /// <summary>Reads a JSON number as a double. PHP emits credit values as
+    /// either ints (<c>4</c>) or floats (<c>0.3</c>) depending on rounding, so
+    /// neither int nor double parsing alone is enough.</summary>
+    private static double? ParseDouble(JsonNode? node)
+        => node is JsonValue jv && jv.TryGetValue<double>(out var d) ? d : (double?)null;
 
     private static Dictionary<string, int> ParseIntDict(JsonNode? node)
     {
@@ -1333,7 +1378,8 @@ public sealed record MolaGptStatus(
     IReadOnlyDictionary<string, int> Usage,
     IReadOnlyDictionary<string, int> TokensUsage,
     IReadOnlyDictionary<string, MolaGptModelLimit> Limits,
-    IReadOnlyDictionary<string, MolaGptModelStatus> ModelStatus);
+    IReadOnlyDictionary<string, MolaGptModelStatus> ModelStatus,
+    MolaGptCredits? Credits = null);
 
 public sealed record MolaGptModelLimit(
     string DisplayName,
@@ -1341,9 +1387,113 @@ public sealed record MolaGptModelLimit(
     int? DailyTokens,
     bool Enabled);
 
+/// <param name="CreditMultiplier">Credits burned per
+/// <c>BaseTokensPerCredit</c> tokens. 0 = free, null = the model has no price
+/// on file, which the server treats as unusable rather than free.</param>
+/// <param name="CreditSymbol">Price tier as a run of <c>$</c>. Empty string =
+/// free, null = unpriced. Rendered verbatim; the server owns the thresholds.</param>
 public sealed record MolaGptModelStatus(
     bool Available,
     int? Remaining,
     int? RemainingTokens,
     string? Reason,
-    string? Message);
+    string? Message,
+    double? CreditMultiplier = null,
+    string? CreditSymbol = null);
+
+/// <summary>
+/// The shared credit pool that replaced the per-model request/token quotas.
+/// Every model draws from the same balance, so switching models does not
+/// restore anything — the only per-model difference is the burn rate
+/// (<see cref="MolaGptModelStatus.CreditMultiplier"/>).
+/// </summary>
+/// <param name="Tier">guest | new | registered | donor.</param>
+/// <param name="Allowance">Already multiplied out over <paramref name="WindowDays"/>,
+/// so it is the whole window's budget, not one day's.</param>
+/// <param name="WindowDays">Rolling settlement window. 1 = the old midnight
+/// reset; above that the balance is "the last N days combined" and nothing is
+/// zeroed at any point in the day.</param>
+/// <param name="RecoversAt"><c>yyyy-MM-dd</c> on which the oldest spend rolls
+/// out of the window, or null when nothing has been spent.</param>
+/// <param name="ByModelTokens">Per-model tokens over the whole window. The
+/// per-model figures shown next to a "约 N 次" estimate must come from here —
+/// <c>user.tokens_usage</c> only covers today and would mix two scopes.</param>
+public sealed record MolaGptCredits(
+    bool Enforcing,
+    string Tier,
+    double Used,
+    double Allowance,
+    double Remaining,
+    int BaseTokensPerCredit,
+    int WindowDays = 1,
+    string? RecoversAt = null,
+    IReadOnlyDictionary<string, int>? ByModelTokens = null)
+{
+    public bool Exhausted => Remaining <= 0;
+
+    /// <summary>True once the pool settles over more than a single day, which
+    /// rules out every "明日 0 点重置" phrasing.</summary>
+    public bool IsRolling => WindowDays > 1;
+
+    /// <summary>Share of the window's allowance already spent, 0..1.</summary>
+    public double UsedFraction => Allowance > 0 ? Math.Clamp(Used / Allowance, 0, 1) : 0;
+
+    /// <summary>Percent of the allowance still available. Rounded up so that a
+    /// sliver of balance never reads as 0% — only a truly empty pool shows 0.</summary>
+    public int RemainingPercent =>
+        Exhausted ? 0 : Math.Clamp((int)Math.Ceiling(100 - UsedFraction * 100), 1, 100);
+
+    /// <summary>Roughly how many more turns this balance buys on a model with
+    /// the given burn rate. null when the model is unpriced, int.MaxValue when
+    /// it is free. Estimated off an average-length turn, same as the web panel.</summary>
+    public int? EstimatedUses(double? multiplier) => multiplier switch
+    {
+        null => null,
+        <= 0 => int.MaxValue,
+        _ => (int)Math.Floor(Remaining / multiplier.Value)
+    };
+
+    /// <summary>Tier wording matches the web panel verbatim. The raw point
+    /// balance is never shown to users on any surface — only this label, the
+    /// remaining percentage, and the per-model "约 N 次" estimate.</summary>
+    public string TierLabel => Tier switch
+    {
+        "donor" => "捐赠者",
+        "new" => "新账号",
+        "guest" => "访客",
+        _ => "注册用户"
+    };
+
+    /// <summary>How the balance settles, for the line next to the tier label.</summary>
+    public string WindowLabel => IsRolling ? $"近 {WindowDays} 天累计" : "明日 0 点重置";
+
+    /// <summary>When an exhausted pool frees up again. A rolling window thaws one
+    /// day at a time, so it never promises a full balance at a given moment.
+    /// No trailing punctuation — callers compose it into their own sentence.</summary>
+    public string RecoveryLabel
+    {
+        get
+        {
+            if (!IsRolling) return "明日 0 点恢复";
+            return DateTime.TryParseExact(RecoversAt, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                       DateTimeStyles.None, out var d)
+                ? $"{d.Month} 月 {d.Day} 日起逐步恢复"
+                : "额度会随时间逐步恢复";
+        }
+    }
+
+    /// <summary>Prefix for a per-model token figure, matching <see cref="WindowLabel"/>'s scope.</summary>
+    public string SpentLabel => IsRolling ? $"近 {WindowDays} 天已用" : "今日已用";
+
+    /// <summary>Tokens spent on one model over the window. Falls back to the
+    /// caller's same-day figure only when the server did not send the window
+    /// breakdown — on those builds the two are the same number anyway.</summary>
+    public int TokensFor(string modelId, IReadOnlyDictionary<string, int> sameDayFallback)
+        => ByModelTokens is { } w
+            ? w.GetValueOrDefault(modelId, 0)
+            : sameDayFallback.GetValueOrDefault(modelId, 0);
+
+    /// <summary>Total tokens over the window, same fallback rule as <see cref="TokensFor"/>.</summary>
+    public long TotalTokens(IReadOnlyDictionary<string, int> sameDayFallback)
+        => (ByModelTokens ?? sameDayFallback).Values.Sum(v => (long)v);
+}

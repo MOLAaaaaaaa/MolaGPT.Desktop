@@ -81,6 +81,21 @@ public sealed partial class MarkdownPresenter : ContentControl
     private const double SelectionAutoScrollMaxStep = 22;
     private const string InlineMathPlaceholderPrefix = "\uE000MolaMath";
     private const string InlineMathPlaceholderSuffix = "\uE001";
+    private static readonly object s_mathElementTag = new();
+    private static readonly Lazy<string> s_mathTextFontName = new(ResolveMathTextFontName);
+    private static readonly string[] s_mathTextFontCandidates =
+    [
+        "Noto Sans CJK SC",
+        "Noto Sans SC",
+        "Microsoft YaHei UI",
+        "Microsoft YaHei",
+        "SimHei",
+        "SimSun",
+        "Yu Gothic UI",
+        "Meiryo UI",
+        "Malgun Gothic",
+        "Arial Unicode MS"
+    ];
 
     public static readonly DependencyProperty MarkdownProperty = DependencyProperty.Register(
         nameof(Markdown), typeof(string), typeof(MarkdownPresenter),
@@ -2450,32 +2465,20 @@ public sealed partial class MarkdownPresenter : ContentControl
             MaxWidth = 900
         };
 
-        if (TryBuildStructuredMathBlock(formula) is { } structured)
+        var prepared = WpfMathFormulaAdapter.Prepare(formula);
+        if (TryBuildStructuredMathBlock(prepared.Formula) is { } structured)
         {
-            border.Child = structured;
+            border.Child = prepared.DrawBox
+                ? WrapBoxedMathElement(structured)
+                : structured;
             return border;
         }
 
-        try
-        {
-            border.Child = new FormulaControl
-            {
-                Formula = formula,
-                Scale = 18,
-                Foreground = ResolveBrush("Brush.Text.Primary", Brushes.Black),
-                HorizontalAlignment = HorizontalAlignment.Center
-            };
-        }
-        catch
-        {
-            border.Child = new TextBlock
-            {
-                Text = "$$" + Environment.NewLine + formula + Environment.NewLine + "$$",
-                TextWrapping = TextWrapping.Wrap,
-                FontFamily = ResolveFont("Font.Mono", new FontFamily("Consolas")),
-                Foreground = ResolveBrush("Brush.Text.Secondary", Brushes.DimGray)
-            };
-        }
+        border.Child = BuildFormulaElement(
+            formula,
+            scale: 18,
+            margin: new Thickness(0),
+            horizontalAlignment: HorizontalAlignment.Center);
 
         return border;
     }
@@ -2642,56 +2645,91 @@ public sealed partial class MarkdownPresenter : ContentControl
             };
         }
 
-        try
-        {
-            return new FormulaControl
-            {
-                Formula = normalized,
-                Scale = 16,
-                Foreground = ResolveBrush("Brush.Text.Primary", Brushes.Black),
-                Margin = margin,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-        }
-        catch
-        {
-            return new TextBlock
-            {
-                Text = StripLatexTextCommands(normalized),
-                Margin = margin,
-                FontFamily = ResolveFont("Font.Mono", new FontFamily("Consolas")),
-                FontSize = 14,
-                Foreground = ResolveBrush("Brush.Text.Secondary", Brushes.DimGray),
-                VerticalAlignment = VerticalAlignment.Center
-            };
-        }
+        return BuildFormulaElement(
+            normalized,
+            scale: 16,
+            margin,
+            horizontalAlignment: HorizontalAlignment.Left);
     }
 
     private FrameworkElement BuildInlineMathElement(string formula, Thickness margin)
     {
-        try
+        return BuildFormulaElement(
+            formula,
+            scale: 16,
+            margin,
+            horizontalAlignment: HorizontalAlignment.Left);
+    }
+
+    private FrameworkElement BuildFormulaElement(
+        string formula,
+        double scale,
+        Thickness margin,
+        HorizontalAlignment horizontalAlignment)
+    {
+        if (WpfMathFormulaAdapter.TryPrepare(formula, out var prepared, out var parseError))
         {
-            return new FormulaControl
+            var control = new FormulaControl
             {
-                Formula = NormalizeStructuredCell(formula),
-                Scale = 16,
+                // WpfMath renders \text{...} with a separate system font. Its
+                // Arial default has no CJK glyphs, so select an installed CJK
+                // font before assigning Formula (which renders immediately).
+                SystemTextFontName = s_mathTextFontName.Value,
+                Scale = scale,
                 Foreground = ResolveBrush("Brush.Text.Primary", Brushes.Black),
-                Margin = margin,
+                HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center
             };
-        }
-        catch
-        {
-            return new TextBlock
+            control.Formula = prepared.Formula;
+
+            // FormulaControl normally consumes parser exceptions internally and
+            // exposes them through HasError. Keep this postcondition check even
+            // after preflight parsing so a renderer-side failure cannot regress
+            // to the collapsed red error template.
+            if (!control.HasError)
             {
-                Text = StripLatexTextCommands(formula),
-                Margin = margin,
-                FontFamily = ResolveFont("Font.Mono", new FontFamily("Consolas")),
-                FontSize = 14,
-                Foreground = ResolveBrush("Brush.Text.Secondary", Brushes.DimGray),
-                VerticalAlignment = VerticalAlignment.Center
-            };
+                FrameworkElement element = prepared.DrawBox
+                    ? WrapBoxedMathElement(control)
+                    : control;
+                element.Margin = margin;
+                element.HorizontalAlignment = horizontalAlignment;
+                element.VerticalAlignment = VerticalAlignment.Center;
+                element.Tag = s_mathElementTag;
+                return element;
+            }
+
+            parseError = string.Join("; ", control.Errors.Select(error => error.Message));
         }
+
+        return new TextBlock
+        {
+            Text = formula.Trim(),
+            TextWrapping = TextWrapping.Wrap,
+            FontFamily = ResolveFont("Font.Mono", new FontFamily("Consolas")),
+            FontSize = 14,
+            Foreground = ResolveBrush("Brush.Text.Secondary", Brushes.DimGray),
+            Margin = margin,
+            HorizontalAlignment = horizontalAlignment,
+            VerticalAlignment = VerticalAlignment.Center,
+            Tag = s_mathElementTag,
+            ToolTip = string.IsNullOrWhiteSpace(parseError)
+                ? "当前数学引擎暂不支持该 LaTeX 语法，已显示原始公式。"
+                : $"当前数学引擎暂不支持该 LaTeX 语法，已显示原始公式。\n{parseError}"
+        };
+    }
+
+    private FrameworkElement WrapBoxedMathElement(UIElement content)
+    {
+        return new Border
+        {
+            Child = content,
+            BorderBrush = ResolveBrush("Brush.Text.Primary", Brushes.Black),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(2),
+            Padding = new Thickness(6, 3, 6, 3),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
     }
 
     private static List<string> SplitMathRows(string body)
@@ -2893,6 +2931,28 @@ public sealed partial class MarkdownPresenter : ContentControl
     {
         try { return TryFindResource(key) as FontFamily ?? fallback; }
         catch { return fallback; }
+    }
+
+    private static string ResolveMathTextFontName()
+    {
+        var installedFamilies = Fonts.SystemFontFamilies.ToArray();
+        foreach (var candidate in s_mathTextFontCandidates)
+        {
+            foreach (var family in installedFamilies)
+            {
+                var localizedName = family.FamilyNames.Values.FirstOrDefault(name =>
+                    string.Equals(name, candidate, StringComparison.OrdinalIgnoreCase));
+                if (localizedName is not null)
+                    return localizedName;
+
+                if (string.Equals(family.Source, candidate, StringComparison.OrdinalIgnoreCase))
+                    return family.ToString();
+            }
+        }
+
+        // Preserve WpfMath's own default on systems without a CJK font. The
+        // readable raw-LaTeX fallback still handles any unsupported glyphs.
+        return "Arial";
     }
 
     private CornerRadius ResolveCornerRadius(string key, CornerRadius fallback)
@@ -3149,6 +3209,9 @@ public sealed partial class MarkdownPresenter : ContentControl
             switch (inline)
             {
                 case InlineUIContainer { Child: FormulaControl }:
+                    return true;
+                case InlineUIContainer { Child: FrameworkElement element }
+                    when ReferenceEquals(element.Tag, s_mathElementTag):
                     return true;
                 case Span span when ContainsInlineMath(span.Inlines):
                     return true;

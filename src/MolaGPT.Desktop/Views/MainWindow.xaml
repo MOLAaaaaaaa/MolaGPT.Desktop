@@ -351,33 +351,81 @@
 
                 <!-- Undo toast — appears at the sidebar foot for a few seconds
                      after a delete. Its visibility gates the whole affordance, so
-                     the command needs no CanExecute plumbing. -->
+                     the command needs no CanExecute plumbing.
+                     Deliberately loud: it is the only thing standing between a
+                     mis-click and a lost conversation, so it borrows the accent
+                     tint of the multi-select bar and fades/slides in — a quiet
+                     grey strip at the sidebar foot went unnoticed, which is what
+                     makes people ask for a confirmation dialog instead. -->
                 <Border DockPanel.Dock="Bottom"
-                        Margin="14,4,12,12"
-                        Padding="12,8"
-                        Background="{DynamicResource Brush.Bg.Elevated}"
-                        BorderBrush="{DynamicResource Brush.Border}"
-                        BorderThickness="1"
+                        Padding="12,10"
+                        Background="{DynamicResource Brush.Primary.Tint}"
+                        BorderBrush="{DynamicResource Brush.Primary.Border}"
+                        BorderThickness="1.5"
                         CornerRadius="{DynamicResource Radius.Sm}"
                         Visibility="{Binding ConversationList.HasPendingUndo, Converter={x:Static views:BoolToVisibility.Instance}}">
                     <!-- Toast is a floating layer → same soft shadow language as popups. -->
                     <Border.Effect>
                         <DropShadowEffect Color="#FF000000"
-                                          BlurRadius="16"
-                                          ShadowDepth="3"
+                                          BlurRadius="20"
+                                          ShadowDepth="4"
                                           Direction="270"
-                                          Opacity="0.18" />
+                                          Opacity="0.24" />
                     </Border.Effect>
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <!-- Animated properties belong to the Border itself, so no
+                                 Storyboard.TargetName is needed (element styles have no
+                                 template namescope to resolve one against). -->
+                            <Setter Property="Opacity" Value="0" />
+                            <Setter Property="Margin" Value="14,4,12,4" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding ConversationList.HasPendingUndo}" Value="True">
+                                    <DataTrigger.EnterActions>
+                                        <BeginStoryboard>
+                                            <Storyboard>
+                                                <!-- From is explicit: an EnterActions storyboard holds its
+                                                     final value after the trigger exits, so without it the
+                                                     second delete would find Opacity already at 1 and play
+                                                     no animation at all. -->
+                                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                                 From="0" To="1" Duration="0:0:0.18" />
+                                                <ThicknessAnimation Storyboard.TargetProperty="Margin"
+                                                                    From="14,4,12,4" To="14,4,12,12" Duration="0:0:0.18">
+                                                    <ThicknessAnimation.EasingFunction>
+                                                        <CubicEase EasingMode="EaseOut" />
+                                                    </ThicknessAnimation.EasingFunction>
+                                                </ThicknessAnimation>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </DataTrigger.EnterActions>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
                     <DockPanel LastChildFill="True">
                         <Button DockPanel.Dock="Right"
-                                Style="{StaticResource TextLinkButton}"
+                                Margin="10,0,0,0"
+                                Padding="14,5"
+                                FontSize="12"
+                                VerticalAlignment="Center"
+                                Style="{StaticResource PillPrimaryButton}"
+                                HorizontalAlignment="Right"
                                 Content="撤销"
                                 Command="{Binding ConversationList.UndoDeleteCommand}" />
+                        <TextBlock DockPanel.Dock="Left"
+                                   Text="&#xE74D;"
+                                   FontFamily="{DynamicResource Font.Icon}"
+                                   FontSize="12"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0"
+                                   Foreground="{DynamicResource Brush.Primary.Hover}" />
                         <TextBlock Text="{Binding ConversationList.PendingUndoMessage}"
                                    VerticalAlignment="Center"
                                    TextTrimming="CharacterEllipsis"
-                                   FontSize="12"
-                                   Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                   FontSize="12.5"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource Brush.Primary.Hover}" />
                     </DockPanel>
                 </Border>
 
@@ -394,7 +442,27 @@
                 <Grid Margin="14,4,12,8">
                     <Grid.Resources>
                         <DataTemplate x:Key="ConversationRowTemplate" DataType="{x:Type vm:ConversationListItem}">
-                            <DockPanel LastChildFill="True">
+                            <DockPanel LastChildFill="True"
+                                       Background="Transparent"
+                                       ContextMenuOpening="ConversationRow_ContextMenuOpening">
+                                <!-- Right-click menu. The hover trash button stays as the
+                                     fast path; this exists because actions the user cannot
+                                     see do not exist, and because "打开本地工作目录" has
+                                     nowhere else to live. Handlers resolve the row through
+                                     ContextMenu.PlacementTarget rather than a binding: the
+                                     menu lives in its own visual tree, so the usual
+                                     AncestorType=Window lookup does not reach the VM. -->
+                                <DockPanel.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Tag="open-folder"
+                                                  Header="打开本地工作目录"
+                                                  Click="OpenConversationFolder_Click" />
+                                        <Separator />
+                                        <MenuItem Tag="delete"
+                                                  Header="删除对话（可撤销）"
+                                                  Click="DeleteConversationMenuItem_Click" />
+                                    </ContextMenu>
+                                </DockPanel.ContextMenu>
                                 <!-- Trash reveals only on row hover/selection so the
                                      title stays uncluttered and mis-clicks are rarer.
                                      Hidden (not Collapsed) keeps the layout stable. -->

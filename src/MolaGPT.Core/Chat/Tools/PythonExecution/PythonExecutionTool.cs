@@ -76,6 +76,7 @@ public sealed class PythonExecutionTool
                     + (requiresPurpose
                         ? "Approval mode is active: always provide the `description` argument, because the user must read it and approve before the code runs. "
                         : string.Empty)
+                    + "Packages installed with pip go into this conversation's own directory and stay available for later calls in the SAME conversation only; a new conversation starts empty. Command-line tools they provide (pyinstaller, black, …) are on PATH, so invoke them by name rather than hunting for the executable. "
                     + (options.AllowNetwork
                         ? "Network access is allowed by the user's tool settings."
                         : "Network access is disabled by default; do not rely on downloading packages or fetching URLs unless the user explicitly enables network."),
@@ -500,6 +501,21 @@ public sealed class PythonExecutionTool
             process.StartInfo.Environment["LOCALAPPDATA"] = localAppDataDirectory;
             process.StartInfo.Environment["PIP_TARGET"] = packageDirectory;
             process.StartInfo.Environment["PIP_CACHE_DIR"] = pipCacheDirectory;
+
+            // `pip install --target` drops console scripts under the target rather
+            // than anywhere on PATH, so a freshly installed tool could be imported
+            // but not run: `pyinstaller ...` and shutil.which("pyinstaller") both
+            // failed while pyinstaller.exe sat in .packages/bin. Put those on PATH.
+            // Added unconditionally — the directories appear only after the first
+            // install, and a PATH entry that does not exist yet costs nothing.
+            process.StartInfo.Environment["PATH"] = string.Join(
+                Path.PathSeparator,
+                new[]
+                {
+                    Path.Combine(packageDirectory, "bin"),      // pip's layout under --target
+                    Path.Combine(packageDirectory, "Scripts"),  // what some versions use on Windows
+                    process.StartInfo.Environment["PATH"],
+                }.Where(p => !string.IsNullOrEmpty(p)));
             process.StartInfo.Environment["UV_CACHE_DIR"] = Path.Combine(workingDirectory, ".uv-cache");
         }
         else

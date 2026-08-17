@@ -2016,7 +2016,7 @@
                             </StackPanel>
                         </ScrollViewer>
                     </TabItem>
-                    <TabItem x:Name="LocalAgentTab" Header="本地 Agent">
+                    <TabItem x:Name="LocalAgentTab" Header="Agent Bridge">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel x:Name="AgentTabRoot" Margin="32,26" MaxWidth="720" HorizontalAlignment="Left">
                                 <Grid>
@@ -2025,7 +2025,7 @@
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0">
-                                        <TextBlock Style="{StaticResource SettingsPageTitle}" Text="本地 Agent" />
+                                        <TextBlock Style="{StaticResource SettingsPageTitle}" Text="Agent Bridge" />
                                         <TextBlock Style="{StaticResource SettingsPageSubtitle}" Text="Bridge 与移动端连接。" />
                                     </StackPanel>
                                     <Button Grid.Column="1"

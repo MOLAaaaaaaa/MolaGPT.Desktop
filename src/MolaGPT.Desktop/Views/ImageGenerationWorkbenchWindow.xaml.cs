@@ -34,6 +34,8 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
     private ItemsControl? _headerModelItems;
     private TextBox? _headerModelSearchBox;
     private TextBlock? _headerModelLabel;
+    private System.ComponentModel.PropertyChangedEventHandler? _settingsChangedHandler;
+    private bool _applyingHeaderSelection;
     private readonly ObservableCollection<ImageGenerationWorkbenchResult> _results = new();
     private readonly ObservableCollection<ImageGenerationWorkbenchResult> _gallery = new();
     private CancellationTokenSource? _cts;
@@ -123,13 +125,27 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         _headerModelLabel = label;
         _headerModelButton.Click += HeaderModelButton_Click;
 
+        // The selected image service can disappear while the workbench is open
+        // (deleted in settings). SettingsViewModel.Delete clears the workbench
+        // ids, but nothing used to refresh this header, so it kept advertising a
+        // model that no longer exists — and the next generate would fail.
+        _settingsChangedHandler = OnSettingsPropertyChanged;
+        _settings.PropertyChanged += _settingsChangedHandler;
+
         RebuildHeaderModelSelector();
         if ((_settings.SelectedWorkbenchImageGenerationModel ?? _settings.ImageGenerationProviderModels.FirstOrDefault()) is { } option)
             SelectImageGenerationModel(option);
+        else
+            SyncHeaderModelLabel();
     }
 
     public void DetachHeaderModelSelector()
     {
+        if (_settingsChangedHandler is not null)
+        {
+            _settings.PropertyChanged -= _settingsChangedHandler;
+            _settingsChangedHandler = null;
+        }
         if (_headerModelButton is not null)
             _headerModelButton.Click -= HeaderModelButton_Click;
         if (_headerModelPopup is not null)
@@ -223,13 +239,50 @@ public partial class ImageGenerationWorkbenchWindow : UserControl
         if (_loading)
             return;
 
-        _settings.WorkbenchImageGenerationProviderId = option.ProviderId;
-        _settings.WorkbenchImageGenerationModelId = option.ModelId;
+        // Writing the two ids raises PropertyChanged twice, and the id pair is
+        // briefly mismatched in between; suppress our own listener so the header
+        // is not repainted from that half-applied state.
+        _applyingHeaderSelection = true;
+        try
+        {
+            _settings.WorkbenchImageGenerationProviderId = option.ProviderId;
+            _settings.WorkbenchImageGenerationModelId = option.ModelId;
+        }
+        finally
+        {
+            _applyingHeaderSelection = false;
+        }
+
         if (_headerModelLabel is not null)
             _headerModelLabel.Text = option.Label;
         ApplyWorkbenchMode();
         UpdateStatus();
         UpdateGenerateButton();
+    }
+
+    private void OnSettingsPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (_applyingHeaderSelection) return;
+        if (e.PropertyName is not (nameof(SettingsViewModel.WorkbenchImageGenerationProviderId)
+            or nameof(SettingsViewModel.WorkbenchImageGenerationModelId)))
+            return;
+
+        Dispatcher.Invoke(() =>
+        {
+            RebuildHeaderModelSelector();
+            SyncHeaderModelLabel();
+            ApplyWorkbenchMode();
+            UpdateStatus();
+            UpdateGenerateButton();
+        });
+    }
+
+    /// <summary>Repaint the header pill from the settings selection, falling back to
+    /// the placeholder when the selected model is gone.</summary>
+    private void SyncHeaderModelLabel()
+    {
+        if (_headerModelLabel is null) return;
+        _headerModelLabel.Text = _settings.SelectedWorkbenchImageGenerationModel?.Label ?? "图像模型";
     }
 
     private void SizePresetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)

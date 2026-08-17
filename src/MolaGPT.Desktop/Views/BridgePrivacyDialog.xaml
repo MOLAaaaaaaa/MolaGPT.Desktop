@@ -43,7 +43,7 @@
                                Margin="0,14,0,0"
                                FontSize="{DynamicResource Font.Size.Small}"
                                Foreground="{DynamicResource Brush.Text.Muted}"
-                               Text="默认关闭。可以随时在「设置 → 本地 Agent → Bridge」中停用。" />
+                               Text="默认关闭。可以随时在「设置 → Agent Bridge」中停用。" />
 
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,22,0,0">
                         <Button Style="{StaticResource OutlineButton}"

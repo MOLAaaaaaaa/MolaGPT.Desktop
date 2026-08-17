@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
@@ -361,8 +362,11 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
         CustomRequestParams.ApplyBody(body, custom);
     }
 
-    private void ApplyCustomHeaders(HttpRequestMessage req) =>
+    private void ApplyCustomHeaders(HttpRequestMessage req)
+    {
+        OpenRouterAttribution.Apply(req, BaseUrl, CustomHeaders);
         CustomRequestParams.ApplyHeaders(req, CustomHeaders);
+    }
 
     private bool SupportsLocalTools(string modelId) =>
         Models.FirstOrDefault(m => m.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase))?.SupportsToolCalling == true;

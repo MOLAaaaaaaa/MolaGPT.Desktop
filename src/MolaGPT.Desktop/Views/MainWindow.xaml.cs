@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -10,6 +11,7 @@ using System.Windows.Threading;
 using System.Runtime.InteropServices;
 using System.Windows.Interop;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Models;
 using MolaGPT.ViewModels;
 
@@ -247,6 +249,84 @@ public partial class MainWindow : Window
         }
 
         ApplyConversationGroupSelection(list.SelectedId);
+    }
+
+    /// <summary>
+    /// Gate the row's context menu just before it opens. "打开本地工作目录" stays
+    /// visible but disabled when there is nothing to open, so the action is
+    /// discoverable on the conversations that lack a folder too — a menu item
+    /// that comes and goes reads as a bug.
+    /// </summary>
+    private void ConversationRow_ContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        if (sender is not FrameworkElement { ContextMenu: { } menu, DataContext: ConversationListItem item }) return;
+
+        var openFolder = menu.Items.OfType<MenuItem>()
+            .FirstOrDefault(m => string.Equals(m.Tag as string, "open-folder", StringComparison.Ordinal));
+        if (openFolder is null) return;
+
+        var folder = ResolveConversationFolder(item);
+        openFolder.IsEnabled = folder is not null;
+        openFolder.ToolTip = folder ?? ExplainMissingConversationFolder(item);
+    }
+
+    /// <summary>Why a conversation has no folder to open. Worth spelling out: the
+    /// three reasons are not interchangeable, and "没有文件" would be a lie for an
+    /// image task that has produced plenty of them.</summary>
+    private static string ExplainMissingConversationFolder(ConversationListItem item) => item switch
+    {
+        { Group: AppMode.Chat } => "MolaGPT 账号对话没有本地工作目录：附件和工具都在服务端运行",
+        { IsImageTask: true } => "图像工作台的图片存放在共享附件库中，没有单独的会话目录",
+        _ => "这个对话还没有产生本地文件"
+    };
+
+    /// <summary>
+    /// The conversation's Python workspace — where attachments are copied and
+    /// where tool runs write their artifacts. Null when the conversation cannot
+    /// have one (MolaGPT proxy chats run everything server-side) or when nothing
+    /// has been written yet. The path itself is derivable for any id, so
+    /// existence is what decides, not the path.
+    /// </summary>
+    private static string? ResolveConversationFolder(ConversationListItem item)
+    {
+        if (item.Group == AppMode.Chat) return null;
+        var dir = PythonExecutionTool.GetSessionDirectory(item.Id);
+        return Directory.Exists(dir) ? dir : null;
+    }
+
+    /// <summary>The row a context-menu click was raised for. The menu sits in its
+    /// own visual tree, so we go through PlacementTarget instead of binding.</summary>
+    private static ConversationListItem? ResolveContextMenuConversation(object sender) =>
+        sender is MenuItem { Parent: ContextMenu menu }
+            ? (menu.PlacementTarget as FrameworkElement)?.DataContext as ConversationListItem
+            : null;
+
+    private void OpenConversationFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (ResolveContextMenuConversation(sender) is not { } item) return;
+        if (ResolveConversationFolder(item) is not { } folder) return;
+
+        try
+        {
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                UseShellExecute = true
+            };
+            startInfo.ArgumentList.Add(folder);
+            System.Diagnostics.Process.Start(startInfo);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Open conversation folder failed: {ex}");
+        }
+    }
+
+    private void DeleteConversationMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        if (ResolveContextMenuConversation(sender) is not { } item) return;
+        vm.ConversationList.DeleteConversationCommand.Execute(item.Id);
     }
 
     private void ConversationListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)

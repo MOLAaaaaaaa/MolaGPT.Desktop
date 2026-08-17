@@ -37,7 +37,7 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty] private string _updateState = "Available";
     [ObservableProperty] private string _updateChipLabel = "发现更新";
     [ObservableProperty] private string _updateChipDetail = string.Empty;
-    [ObservableProperty] private string _quotaText = "账号额度 · 今日";
+    [ObservableProperty] private string _quotaText = "账号额度";
     private string? _updateNotes;
 
     /// <summary>Hooked at app startup; opens the LoginDialog. Set by App.xaml.cs to avoid View dependency here.</summary>
@@ -221,7 +221,7 @@ public sealed partial class MainViewModel : ObservableObject
         var version = ++_quotaRefreshVersion;
         if (!IsQuotaChipVisible || _molaGptProxy is null || Chat.ActiveModel is null)
         {
-            QuotaText = "账号额度 · 今日";
+            QuotaText = "账号额度";
             return;
         }
 
@@ -232,7 +232,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (status is null)
             {
                 Settings.IsLoggedIn = false;
-                QuotaText = "账号额度 · 今日";
+                QuotaText = "账号额度";
                 return;
             }
             QuotaText = BuildQuotaText(status, Chat.ActiveModel.Id);
@@ -246,7 +246,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (version == _quotaRefreshVersion)
             {
                 Settings.IsLoggedIn = false;
-                QuotaText = "账号额度 · 今日";
+                QuotaText = "账号额度";
             }
         }
         catch
@@ -259,11 +259,17 @@ public sealed partial class MainViewModel : ObservableObject
     private static string BuildQuotaText(MolaGptStatus? status, string modelId)
     {
         if (status is null || string.IsNullOrWhiteSpace(modelId))
-            return "账号额度 · 今日";
+            return "账号额度";
 
         var used = status.Usage.GetValueOrDefault(modelId, 0);
         status.Limits.TryGetValue(modelId, out var limit);
         status.ModelStatus.TryGetValue(modelId, out var modelStatus);
+
+        // Credit pool takes precedence: once the server switches it on, every
+        // model's daily_limit is -1 and the legacy branch below would claim
+        // "无限" while the user is one turn away from being blocked.
+        if (status.Credits is { } credits && !status.Unlimited)
+            return BuildCreditQuotaText(credits, modelStatus);
 
         var unlimited = status.Unlimited
             || limit?.DailyRequests == -1
@@ -278,7 +284,31 @@ public sealed partial class MainViewModel : ObservableObject
         if (modelStatus?.Remaining is { } remaining)
             return $"剩余 {remaining} · 账号共用";
 
-        return "账号额度 · 今日";
+        return "账号额度";
+    }
+
+    /// <summary>
+    /// Chip text for the shared credit pool. Leads with "还能用几次" rather than
+    /// a percentage — the chip is next to the composer, where the actionable
+    /// question is whether this next turn will go through.
+    /// </summary>
+    private static string BuildCreditQuotaText(MolaGptCredits credits, MolaGptModelStatus? modelStatus)
+    {
+        if (modelStatus?.CreditMultiplier is null)
+            return modelStatus is null
+                ? $"额度剩余 {credits.RemainingPercent}% · 账号共用"
+                : "该模型暂不可用";
+
+        if (credits.Exhausted)
+            return $"额度已耗尽 · {credits.RecoveryLabel}";
+
+        var uses = credits.EstimatedUses(modelStatus.CreditMultiplier) ?? 0;
+        return uses switch
+        {
+            int.MaxValue => "不消耗额度 · 账号共用",
+            <= 0 => "剩余额度不足以再发一次",
+            _ => $"约 {uses} 次 · 账号共用"
+        };
     }
 
     private static int EffectiveLimit(int? declaredLimit, int? remaining, int used)

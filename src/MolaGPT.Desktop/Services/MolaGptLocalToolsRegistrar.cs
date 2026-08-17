@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net.Http;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
@@ -100,7 +99,7 @@ public sealed class MolaGptLocalToolsRegistrar
         try { assets = _piLocator.TryResolve(); }
         catch (Exception ex)
         {
-            Debug.WriteLine("[pi-work] 定位 sidecar 失败，回退到内置 Work：" + ex.Message);
+            DiagnosticLog.Write("pi-work", "定位 sidecar 失败，回退到内置 Work：" + ex.Message);
             return false;
         }
         if (assets is null) return false;
@@ -131,7 +130,10 @@ public sealed class MolaGptLocalToolsRegistrar
             config,
             _toolHost,
             _httpClientFactory.CreateClient(App.MolaGptHttpClient),
-            log: line => Debug.WriteLine("[pi-work] " + line));
+            // To the diagnostic log, not just the debugger: Work is where sidecar
+            // trouble actually shows up, and a line only a debugger can see is one
+            // nobody can send us from a shipped build.
+            log: line => DiagnosticLog.Write("pi-work", line));
 
         RetireActivePi();
         _activePi = pi;
@@ -148,7 +150,7 @@ public sealed class MolaGptLocalToolsRegistrar
         _ = Task.Run(async () =>
         {
             try { await previous.DisposeAsync(); }
-            catch (Exception ex) { Debug.WriteLine("[pi-work] 释放 sidecar 失败：" + ex.Message); }
+            catch (Exception ex) { DiagnosticLog.Write("pi-work", "释放 sidecar 失败：" + ex.Message); }
         });
     }
 

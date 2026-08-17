@@ -1753,6 +1753,7 @@ public partial class SettingsWindow : Window
     private static void ApplyEntryCustomHeaders(HttpRequestMessage req, ProviderEntry entry)
     {
         var headers = CustomParamConverter.ToHeaderList(entry.CustomHeaders);
+        OpenRouterAttribution.Apply(req, entry.BaseUrl, headers);
         if (headers is null) return;
         foreach (var (name, value) in headers)
             if (!string.IsNullOrWhiteSpace(name))

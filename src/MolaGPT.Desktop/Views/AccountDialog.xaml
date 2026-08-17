@@ -82,9 +82,12 @@
                     </Grid>
                 </Border>
 
-                <!-- Section title "今日使用情况" + total summary card -->
+                <!-- Section title (set in code — the credit pool settles over a
+                     rolling window, so "今日" only holds on the legacy path) +
+                     total summary card -->
                 <StackPanel Grid.Row="1" Margin="20,14,20,8">
-                    <TextBlock Text="今日使用情况"
+                    <TextBlock x:Name="SectionTitleText"
+                               Text="今日使用情况"
                                FontSize="{DynamicResource Font.Size.Small}"
                                FontWeight="SemiBold"
                                Foreground="{DynamicResource Brush.Text.Muted}"
@@ -111,7 +114,8 @@
                                            FontSize="20" FontWeight="SemiBold"
                                            Foreground="White"
                                            HorizontalAlignment="Center" />
-                                <TextBlock Text="总请求次数"
+                                <TextBlock x:Name="TotalRequestsLabel"
+                                           Text="总请求次数"
                                            FontSize="{DynamicResource Font.Size.XSmall}"
                                            Foreground="#E6FFFFFF"
                                            Margin="0,2,0,0"
@@ -123,7 +127,8 @@
                                            FontSize="20" FontWeight="SemiBold"
                                            Foreground="White"
                                            HorizontalAlignment="Center" />
-                                <TextBlock Text="总 Tokens 用量"
+                                <TextBlock x:Name="TotalTokensLabel"
+                                           Text="总 Tokens 用量"
                                            FontSize="{DynamicResource Font.Size.XSmall}"
                                            Foreground="#E6FFFFFF"
                                            Margin="0,2,0,0"
@@ -131,6 +136,20 @@
                             </StackPanel>
                         </Grid>
                     </Border>
+
+                    <!-- Shared credit pool bar. Stays outside the scroll area:
+                         it is the one number that answers "can I keep going",
+                         and it must not scroll away behind the model list. -->
+                    <ContentControl x:Name="CreditsBarHost"
+                                    Margin="0,10,0,0"
+                                    Visibility="Collapsed" />
+                    <TextBlock x:Name="CreditsHintText"
+                               Text=""
+                               FontSize="{DynamicResource Font.Size.XSmall}"
+                               Foreground="{DynamicResource Brush.Text.Muted}"
+                               TextWrapping="Wrap"
+                               Margin="0,6,0,0"
+                               Visibility="Collapsed" />
                 </StackPanel>
 
                 <!-- Per-model usage list -->

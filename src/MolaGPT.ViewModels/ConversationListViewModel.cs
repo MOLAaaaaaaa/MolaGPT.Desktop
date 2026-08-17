@@ -111,7 +111,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
     private string _appliedSearchQuery = string.Empty;
 
     // --- Undo of the most recent soft-delete ---
-    private const int UndoWindowMs = 6000;
+    // 10s, not 6: the toast is the only safety net for a mis-clicked delete, and
+    // 6s was not enough to notice it, read it, and reach for the mouse.
+    private const int UndoWindowMs = 10000;
     private readonly object _undoGate = new();
     private List<string>? _pendingUndoIds;
     private System.Threading.Timer? _undoTimer;

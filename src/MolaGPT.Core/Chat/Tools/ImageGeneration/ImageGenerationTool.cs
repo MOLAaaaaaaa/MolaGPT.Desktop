@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Net;
 
@@ -61,6 +62,7 @@ public sealed class ImageGenerationTool
             Content = JsonContent.Create(BuildRequestBody(options, prompt))
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
+        OpenRouterAttribution.Apply(request, options.BaseUrl);
 
         using var http = _httpFactory();
         using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
@@ -107,6 +109,7 @@ public sealed class ImageGenerationTool
             Content = content
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
+        OpenRouterAttribution.Apply(request, options.BaseUrl);
 
         using var http = _httpFactory();
         using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
@@ -263,6 +266,7 @@ public sealed class ImageGenerationTool
             Content = JsonContent.Create(body)
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
+        OpenRouterAttribution.Apply(request, options.BaseUrl);
 
         using var http = _httpFactory();
         using var response = await http.SendAsync(request, ct).ConfigureAwait(false);

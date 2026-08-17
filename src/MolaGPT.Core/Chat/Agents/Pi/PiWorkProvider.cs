@@ -149,11 +149,12 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
 
         string? errorMessage = null;
         var pendingArgs = new Dictionary<string, string>(StringComparer.Ordinal);
+        var preview = new Dictionary<int, ToolPreviewState>();
         try
         {
             await foreach (var line in holder.Session!.SendTurnAsync(userText, images, ct).ConfigureAwait(false))
             {
-                var chunk = MapLine(line, options, pendingArgs, ref errorMessage);
+                var chunk = MapLine(line, options, pendingArgs, preview, ref errorMessage);
                 if (chunk is not null) yield return chunk;
             }
         }
@@ -233,6 +234,7 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
         string line,
         LocalToolOptions options,
         IDictionary<string, string> pendingArgs,
+        IDictionary<int, ToolPreviewState> preview,
         ref string? errorMessage)
     {
         JsonDocument doc;
@@ -254,6 +256,19 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
                             return new ChatChunk(DeltaText: delta);
                         if (kind == "thinking_delta" && delta is not null)
                             return new ChatChunk(DeltaThinking: delta);
+
+                        // Tool arguments stream in before the call runs. Writing a
+                        // long script can take a while, and without these the UI
+                        // showed nothing at all until execution began — the model
+                        // looked hung when it was busy typing.
+                        if (kind is "toolcall_start" or "toolcall_delta")
+                            return BuildPreparingCard(ev, options, preview, _log);
+
+                        // The finished block is where the call's id is certain to be
+                        // present, whatever order the model streamed it in. It is what
+                        // ties the preview card to the execution events below.
+                        if (kind == "toolcall_end")
+                            NoteFinishedToolCall(ev, preview);
                     }
                     return null;
 
@@ -266,7 +281,7 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
                     // ends, and the finished card needs them — hold on to them.
                     pendingArgs[startId] = startArgs;
                     return new ChatChunk(Tool: OpenAICompatibleProvider.BuildToolDelta(
-                        startId, Str(root, "toolName"), startArgs, options, "running"));
+                        CardIdFor(startId, preview), Str(root, "toolName"), startArgs, options, "running"));
                 }
 
                 case "tool_execution_end":
@@ -280,7 +295,7 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
                     // duration, exit code and permission labels that live inside the
                     // tool's own result reach the card here too.
                     var delta = OpenAICompatibleProvider.BuildToolDelta(
-                        endId,
+                        CardIdFor(endId, preview),
                         Str(root, "toolName"),
                         endArgs ?? "{}",
                         options,
@@ -387,6 +402,123 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
     /// escaped JSON instead of the result: the payload the direct provider puts on
     /// the card is the tool's output string, not the transport wrapper around it.
     /// </summary>
+    /// <summary>
+    /// Per-turn state for the "still writing the call" card. Pi streams tool
+    /// arguments as deltas against a content index; the card is rebuilt from the
+    /// accumulated text, throttled so a long script does not emit a chunk per token.
+    /// </summary>
+    private sealed class ToolPreviewState
+    {
+        /// <summary>The model's own id for the call, once it has sent one.</summary>
+        public string Id = "";
+
+        /// <summary>The id the card is filed under. Equal to <see cref="Id"/> whenever
+        /// the model named the call up front; otherwise minted here and kept, because
+        /// changing a card's key mid-call leaves the abandoned one on screen forever.</summary>
+        public string CardId = "";
+
+        public string Name = "";
+        public readonly System.Text.StringBuilder Arguments = new();
+        public int LastEmittedLength;
+        public long LastEmittedTicks;
+
+        /// <summary>Same shape of throttle the direct provider uses: emit once a
+        /// meaningful amount of new text has arrived, or after a pause.</summary>
+        public bool ShouldEmit(long nowTicks) =>
+            Arguments.Length - LastEmittedLength >= 120
+            || nowTicks - LastEmittedTicks >= TimeSpan.TicksPerMillisecond * 250;
+    }
+
+    private static ChatChunk? BuildPreparingCard(
+        JsonElement ev,
+        LocalToolOptions options,
+        IDictionary<int, ToolPreviewState> preview,
+        Action<string>? log)
+    {
+        if (!ev.TryGetProperty("contentIndex", out var idx) || idx.ValueKind != JsonValueKind.Number)
+            return null;
+        var index = idx.GetInt32();
+
+        if (!preview.TryGetValue(index, out var state))
+            preview[index] = state = new ToolPreviewState();
+
+        if (ev.TryGetProperty("delta", out var d) && d.ValueKind == JsonValueKind.String)
+            state.Arguments.Append(d.GetString());
+
+        // The id and name are on the accumulated message, not on the delta — and not
+        // necessarily on the first one. contentIndex is the block's own position, so
+        // read exactly that block: scanning them all picks up a sibling call's id when
+        // the model makes two in one message.
+        if ((state.Id.Length == 0 || state.Name.Length == 0)
+            && ev.TryGetProperty("partial", out var partial)
+            && partial.TryGetProperty("content", out var content)
+            && content.ValueKind == JsonValueKind.Array
+            && index < content.GetArrayLength())
+        {
+            var block = content[index];
+            if (state.Name.Length == 0
+                && block.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String)
+                state.Name = n.GetString() ?? "";
+            if (state.Id.Length == 0
+                && block.TryGetProperty("id", out var i) && i.ValueKind == JsonValueKind.String)
+                state.Id = i.GetString() ?? "";
+        }
+
+        // A card needs a stable key — not a known name. Waiting for both is what left
+        // the UI blank for the entire time the model spent writing a long script:
+        // some models announce the call before its arguments, others only name it once
+        // the arguments are finished, and in the second case there was nothing on
+        // screen until execution began. Take the real id when it is already there, so
+        // the card is the very one the execution events go on to update; otherwise
+        // mint a key, keep it, and let the label fill itself in when the name lands.
+        if (state.CardId.Length == 0)
+        {
+            state.CardId = state.Id.Length > 0 ? state.Id : "pi-call-" + Guid.NewGuid().ToString("N");
+            // Which shape the model used is worth knowing from a real conversation,
+            // since it decides whether the card can carry its proper label from the
+            // first frame. One line per call, not per delta.
+            if (state.Id.Length == 0)
+                log?.Invoke($"工具调用未在开头带上 id/name（名称：{(state.Name.Length == 0 ? "未知" : state.Name)}），预览卡改用临时标识");
+        }
+
+        var now = DateTime.UtcNow.Ticks;
+        if (!state.ShouldEmit(now)) return null;
+        state.LastEmittedLength = state.Arguments.Length;
+        state.LastEmittedTicks = now;
+
+        return new ChatChunk(Tool: OpenAICompatibleProvider.BuildToolDelta(
+            state.CardId, state.Name, state.Arguments.ToString(), options, "preparing"));
+    }
+
+    /// <summary>Record the id Pi settled on for a finished tool-call block, so the
+    /// execution events can be matched back to the card the preview already put on
+    /// screen even when the model sent the id last.</summary>
+    private static void NoteFinishedToolCall(JsonElement ev, IDictionary<int, ToolPreviewState> preview)
+    {
+        if (!ev.TryGetProperty("contentIndex", out var idx) || idx.ValueKind != JsonValueKind.Number)
+            return;
+        if (!preview.TryGetValue(idx.GetInt32(), out var state)) return;
+        if (!ev.TryGetProperty("toolCall", out var call) || call.ValueKind != JsonValueKind.Object) return;
+
+        if (call.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String)
+            state.Id = id.GetString() ?? state.Id;
+        if (state.Name.Length == 0
+            && call.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String)
+            state.Name = name.GetString() ?? "";
+    }
+
+    /// <summary>The card key for a running/finished call: the preview's key when this
+    /// call already has a card on screen, otherwise Pi's own id. Identical to the id in
+    /// the common case, where the model named the call before streaming its
+    /// arguments.</summary>
+    private static string CardIdFor(string toolCallId, IDictionary<int, ToolPreviewState> preview)
+    {
+        foreach (var state in preview.Values)
+            if (state.CardId.Length > 0 && state.Id == toolCallId)
+                return state.CardId;
+        return toolCallId;
+    }
+
     private static string UnwrapToolResult(JsonElement result)
     {
         if (result.ValueKind == JsonValueKind.Object

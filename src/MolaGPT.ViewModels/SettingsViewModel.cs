@@ -18,6 +18,7 @@ namespace MolaGPT.ViewModels;
 public sealed partial class SettingsViewModel : ObservableObject
 {
     private const string SyncConversationsKey = "sync_conversations";
+    private const string EnterToSendKey = "enter_to_send";
     private const string TracksEnabledKey = "molagpt_tracks_enabled";
     private const string CompletionNotificationKey = "completion_notification";
     private const string ThemeModeKey = "theme_mode";
@@ -176,6 +177,8 @@ public sealed partial class SettingsViewModel : ObservableObject
         {
             if (bool.TryParse(_settingsRepo.Get(SyncConversationsKey), out var syncConversations))
                 SyncConversations = syncConversations;
+            if (bool.TryParse(_settingsRepo.Get(EnterToSendKey), out var enterToSend))
+                EnterToSend = enterToSend;
             if (bool.TryParse(_settingsRepo.Get(TracksEnabledKey), out var tracksEnabled))
                 TracksEnabled = tracksEnabled;
             if (bool.TryParse(_settingsRepo.Get(CompletionNotificationKey), out var completionNotification))
@@ -274,6 +277,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(SyncConversationsKey, value.ToString());
+    }
+
+    partial void OnEnterToSendChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(EnterToSendKey, value.ToString());
     }
 
     partial void OnTracksEnabledChanged(bool value)

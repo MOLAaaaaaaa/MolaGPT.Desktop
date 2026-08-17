@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Net;
 using System.Net.Http;
 using System.Text;
+using MolaGPT.Core.Chat;
 
 namespace MolaGPT.Core.Chat.Agents.Pi;
 
@@ -156,6 +157,7 @@ public sealed class PiWorkLlmShim : IDisposable
                 }
             }
             upstream.Headers.TryAddWithoutValidation("Accept", "text/event-stream");
+            OpenRouterAttribution.Apply(upstream, target.Endpoint, target.Headers);
             CustomRequestParams.ApplyHeaders(upstream, target.Headers);
 
             using var resp = await _http
