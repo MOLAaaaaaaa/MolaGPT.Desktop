@@ -194,6 +194,7 @@ public partial class SettingsWindow : Window
         SkillsTabRoot.DataContext = _skills;
         AgentTabRoot.DataContext = _agentStatus;
         _vm.Reload();
+        ProviderList.SelectedIndex = 0;
         UpdateAccountUi();
         _mcpServersChangedHandler = (_, _) => UpdateMcpEmptyHint();
         InitializeWebSearchUi();
@@ -403,6 +404,9 @@ public partial class SettingsWindow : Window
             }
         }
     }
+
+    private void ManageTitleModelsClick(object sender, RoutedEventArgs e) =>
+        NavigateToTab("模型服务");
 
     private void SelectWebSearchProvider(string provider)
     {
@@ -1422,6 +1426,7 @@ public partial class SettingsWindow : Window
 
         _vm.Save(entry);
         UpsertProviderEntryInPlace(entry);
+        _vm.RefreshTitleProviderModels();
         _vm.RefreshVisionProviderModels();
         _vm.RefreshImageGenerationProviderModels();
         PopulateVisionCombo();
@@ -1502,6 +1507,7 @@ public partial class SettingsWindow : Window
         // The Pi harness may be re-hosting this provider; retire its sidecar so
         // deleting the row does not leak a background node process / work dir.
         App.Services.GetService<PiByokProviderFactory>()?.Retire(id);
+        _vm.RefreshTitleProviderModels();
         _vm.RefreshVisionProviderModels();
         _vm.RefreshImageGenerationProviderModels();
         PopulateVisionCombo();

@@ -155,6 +155,9 @@ public partial class App : Application
         SystemEvents.UserPreferenceChanged += OnSystemUserPreferenceChanged;
         mainVm.EnsureConversationDetailAsync = id => cloudSync.FetchConversationToLocalAsync(id);
         composerVm.ConversationCompletedAsync = cloudSync.CompleteConversationTurnAsync;
+        composerVm.LocalConversationTitleAsync = (conversationId, providerId, modelId, ct) =>
+            Services.GetRequiredService<ConversationTitleService>()
+                .GenerateAsync(conversationId, providerId, modelId, ct);
         cloudSync.LocalConversationsChanged += (_, _) =>
         {
             _ = Dispatcher.InvokeAsync(
@@ -613,6 +616,14 @@ public partial class App : Application
                 sp.GetRequiredService<MessageRepository>(),
                 sp.GetRequiredService<SettingsRepository>());
         });
+        services.AddSingleton(sp => new ConversationTitleService(
+            sp.GetRequiredService<ConversationRepository>(),
+            sp.GetRequiredService<MessageRepository>(),
+            sp.GetRequiredService<ProviderRegistry>(),
+            sp.GetRequiredService<SettingsRepository>(),
+            (userText, assistantText, ct) =>
+                sp.GetRequiredService<CloudSyncService>()
+                    .GenerateMolaGptTitleAsync(userText, assistantText, ct)));
         services.AddSingleton<MolaGptLogoutCoordinator>();
         // Opt-in (pi.work.enabled, default off): run Work on the Pi harness instead
         // of the in-process loop. Off or unavailable → the registrar keeps today's
@@ -1277,7 +1288,12 @@ public partial class App : Application
                 var workingSetBefore = process.WorkingSet64;
 
                 GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
-                GC.Collect(2, GCCollectionMode.Optimized, blocking: true, compacting: true);
+                // Forced, not Optimized: under Optimized the GC is free to decide
+                // this isn't a good moment and skip the collection entirely, which
+                // leaves CompactOnce pending and the LOH uncompacted — the exact
+                // thing this trim exists to do. We already gated on "app is in the
+                // background and idle", so the pause is ours to spend.
+                GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
 
                 if (token.IsCancellationRequested || Dispatcher.HasShutdownStarted)
                     return;

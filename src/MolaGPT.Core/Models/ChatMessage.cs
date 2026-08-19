@@ -8,7 +8,8 @@ public sealed record ChatMessage(
     object Content,
     string? Name = null,
     IReadOnlyList<Attachment>? Attachments = null,
-    string? ReasoningContent = null)
+    string? ReasoningContent = null,
+    string? OpenAiWireHistoryJson = null)
 {
     public const string RoleSystem = "system";
     public const string RoleUser = "user";

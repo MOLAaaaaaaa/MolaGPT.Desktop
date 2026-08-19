@@ -81,6 +81,10 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     public Func<string, CancellationToken, Task<string?>>? ConversationCompletedAsync { get; set; }
 
+    /// <summary>Generates a title for the first successful turn of a local
+    /// BYOK/Work conversation. The desktop host supplies the persistence service.</summary>
+    public Func<string, string?, string?, CancellationToken, Task<string?>>? LocalConversationTitleAsync { get; set; }
+
     private readonly ChatViewModel _chat;
     private readonly BackgroundStreamService? _backgroundStreams;
     private readonly SettingsViewModel? _settings;
@@ -422,6 +426,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             return;
         var isMolaGptImageGenerationSend =
             _chat.ActiveProvider.Kind == ProviderKind.MolaGptProxy && IsImageGenerationMode;
+        var generateLocalTitleOnCompletion =
+            _chat.IsEmpty && _chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
         if (isMolaGptImageGenerationSend && string.IsNullOrWhiteSpace(Text))
             return;
 
@@ -557,7 +563,8 @@ public sealed partial class ComposerViewModel : ObservableObject
                 Attachments: ReferenceEquals(m, userMsg)
                     ? (requestAttachments.Count > 0 ? requestAttachments : null)
                     : (backfillHistory && m.Role == ChatMessage.RoleUser ? BuildHistoryAttachments(m) : null),
-                ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null))
+                ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null,
+                OpenAiWireHistoryJson: m.Role == ChatMessage.RoleAssistant ? m.OpenAiWireHistoryJson : null))
             .ToList();
 
         var systemPrompt = ResolveSystemPrompt();
@@ -583,12 +590,14 @@ public sealed partial class ComposerViewModel : ObservableObject
             ConversationId = conversationId,
             ConversationTitle = conversationTitle,
             ModelLabel = assistantMsg.ModelLabel,
+            ModelId = model.Id,
             ProviderId = provider.Id,
             ProviderKind = provider.Kind,
             AssistantMessage = assistantMsg,
             Cts = cts,
             StreamTask = Task.CompletedTask,
-            SessionId = req.SessionId
+            SessionId = req.SessionId,
+            GenerateTitleOnCompletion = generateLocalTitleOnCompletion
         };
         _activeTask = streamContext;
 
@@ -788,6 +797,9 @@ public sealed partial class ComposerViewModel : ObservableObject
                 trackingTask.ReceivedChunkCount++;
             if (chunk.FinishReason is not null) break;
         }
+
+        if (trackingTask is not null && !cts.IsCancellationRequested)
+            trackingTask.CompletedSuccessfully = true;
     }
 
     private async Task RunResumeStreamLoopAsync(
@@ -1210,7 +1222,8 @@ public sealed partial class ComposerViewModel : ObservableObject
                     Attachments: backfillHistory && m.Role == ChatMessage.RoleUser
                         ? BuildHistoryAttachments(m)
                         : null,
-                    ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null))
+                    ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null,
+                    OpenAiWireHistoryJson: m.Role == ChatMessage.RoleAssistant ? m.OpenAiWireHistoryJson : null))
                 .ToList();
 
             var systemPrompt = ResolveSystemPrompt();
@@ -1340,6 +1353,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             assistantMsg.Sources = chunk.Sources;
         if (chunk.Usage is not null)
             assistantMsg.Usage = chunk.Usage;
+        if (!string.IsNullOrWhiteSpace(chunk.OpenAiWireHistoryJson))
+            assistantMsg.OpenAiWireHistoryJson = chunk.OpenAiWireHistoryJson;
         if (chunk.DeltaText is { Length: > 0 } t)
         {
             t = RewritePythonArtifactMarkdownLinks(t, assistantMsg);
@@ -1545,6 +1560,30 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         if (streamContext.ProviderKind == ProviderKind.MolaGptProxy)
             _ = CompleteConversationTurnAsync(streamContext.ConversationId);
+        else if (streamContext.GenerateTitleOnCompletion
+                 && streamContext.CompletedSuccessfully
+                 && streamContext.TryBeginTitleGeneration())
+            _ = GenerateLocalConversationTitleAsync(streamContext);
+    }
+
+    private async Task GenerateLocalConversationTitleAsync(BackgroundStreamTask streamContext)
+    {
+        if (LocalConversationTitleAsync is null) return;
+
+        try
+        {
+            var title = await LocalConversationTitleAsync(
+                streamContext.ConversationId,
+                streamContext.ProviderId,
+                streamContext.ModelId,
+                CancellationToken.None);
+            if (!string.IsNullOrWhiteSpace(title))
+                _chat.ApplyExternalConversationTitle(streamContext.ConversationId, title);
+        }
+        catch
+        {
+            // Automatic titles are best-effort and must never interrupt chat.
+        }
     }
 
     private async Task CompleteConversationTurnAsync(string conversationId)

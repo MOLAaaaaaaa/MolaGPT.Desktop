@@ -13,6 +13,7 @@ using MolaGPT.Core.Net;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels;
+using MolaGPT.ViewModels.Services;
 
 namespace MolaGPT.Desktop.Services;
 
@@ -521,8 +522,6 @@ public sealed class CloudSyncService
 
     private async Task<string?> TryGenerateAiTitleAsync(string conversationId, CancellationToken ct)
     {
-        var jwt = _auth.CurrentJwt;
-        if (string.IsNullOrWhiteSpace(jwt)) return null;
         if (!string.IsNullOrWhiteSpace(_settings.Get(TitleGeneratedKey(conversationId)))) return null;
 
         var row = _conversations.Get(conversationId);
@@ -537,9 +536,54 @@ public sealed class CloudSyncService
         if (string.IsNullOrWhiteSpace(user?.Content) || string.IsNullOrWhiteSpace(assistant?.Content))
             return null;
 
-        var assistantPreview = assistant.Content.Length <= 1000
-            ? assistant.Content
-            : assistant.Content[..1000];
+        var title = await GenerateMolaGptTitleAsync(user.Content, assistant.Content, ct)
+            .ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(title)) return null;
+
+        // Preserve a manual rename/deletion that happened while the title request
+        // was in flight. This also keeps the local and cloud title paths consistent.
+        var latest = _conversations.Get(conversationId);
+        if (latest is null
+            || latest.DeletedAt is not null
+            || !IsCloudSyncable(latest)
+            || !string.Equals(latest.Title, row.Title, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        _conversations.Upsert(latest with
+        {
+            Title = title,
+            UpdatedAt = Math.Max(latest.UpdatedAt, now)
+        });
+        _settings.Set(TitleGeneratedKey(conversationId), "true");
+        return title;
+    }
+
+    /// <summary>Calls the authenticated MolaGPT title endpoint without changing
+    /// any conversation row. Used by cloud Chat and local account Work alike.</summary>
+    public async Task<string?> GenerateMolaGptTitleAsync(
+        string userText,
+        string assistantText,
+        CancellationToken ct = default)
+    {
+        var jwt = _auth.CurrentJwt;
+        if (string.IsNullOrWhiteSpace(jwt)
+            || string.IsNullOrWhiteSpace(userText)
+            || string.IsNullOrWhiteSpace(assistantText))
+        {
+            return null;
+        }
+
+        userText = MessageViewModel.StripSystemHints(userText);
+        assistantText = MessageViewModel.StripSystemHints(assistantText);
+        if (string.IsNullOrWhiteSpace(userText) || string.IsNullOrWhiteSpace(assistantText))
+            return null;
+
+        var assistantPreview = assistantText.Length <= 1000
+            ? assistantText
+            : assistantText[..1000];
 
         var endpoint = NetworkSecurity.RequireHttps(new Uri(TitleEndpoint), "MolaGPT 标题生成");
         using var req = new HttpRequestMessage(HttpMethod.Post, endpoint)
@@ -556,7 +600,7 @@ public sealed class CloudSyncService
                     new
                     {
                         role = "user",
-                        content = $"用户问题：{user.Content}\n\nAI回答：{assistantPreview}\n\n请为这段对话生成一个简洁的标题（不超过14个字）："
+                        content = $"用户问题：{userText}\n\nAI回答：{assistantPreview}\n\n请为这段对话生成一个简洁的标题（不超过14个字）："
                     }
                 },
                 temperature = 0.2,
@@ -570,18 +614,7 @@ public sealed class CloudSyncService
 
         var result = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: ct).ConfigureAwait(false);
         if (result is null || result["success"]?.GetValue<bool>() == false) return null;
-
-        var title = ExtractGeneratedTitle(result);
-        if (string.IsNullOrWhiteSpace(title)) return null;
-
-        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        _conversations.Upsert(row with
-        {
-            Title = title,
-            UpdatedAt = Math.Max(row.UpdatedAt, now)
-        });
-        _settings.Set(TitleGeneratedKey(conversationId), "true");
-        return title;
+        return ExtractGeneratedTitle(result);
     }
 
     public int CleanupLocalPlaceholdersForLogout()
@@ -944,14 +977,7 @@ public sealed class CloudSyncService
             title = message["content"]?.GetValue<string>();
         }
 
-        if (string.IsNullOrWhiteSpace(title)) return null;
-
-        title = title.Trim();
-        title = Regex.Replace(title, "^[\"'“”‘’「」『』《》]+|[\"'“”‘’「」『』《》]+$", string.Empty);
-        title = Regex.Replace(title, "^标题\\s*[:：]\\s*", string.Empty, RegexOptions.IgnoreCase).Trim();
-        title = title.Trim('。', '，', ',', '.', ':', '：', ';', '；', '!', '！', '?', '？');
-        if (title.Length > 30) title = title[..30].Trim();
-        return string.IsNullOrWhiteSpace(title) ? null : title;
+        return ConversationTitleText.CleanGeneratedTitle(title);
     }
 
     private JsonObject ToCloudMetadata(ConversationRow row)

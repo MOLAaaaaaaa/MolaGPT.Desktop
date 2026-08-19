@@ -12,6 +12,18 @@
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
+  <!-- The cloud sync path serializes whole payloads to multi-MB strings/byte[],
+       which land on the Large Object Heap. The LOH is only swept on gen2
+       collections (rare in an idle desktop app) and is never compacted by
+       default, so dead sync buffers accumulate as committed-but-unused segments
+       — measured at 78 MB of free blocks in a 156 MB LOH after ~6 minutes idle.
+       ConserveMemory makes the GC compact the LOH during full blocking
+       collections and decommit more eagerly, trading some CPU for a flat
+       memory profile. 5 of 9 keeps the pauses unobtrusive. -->
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />
+  </ItemGroup>
+
   <ItemGroup>
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />

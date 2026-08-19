@@ -442,9 +442,44 @@
                 <Grid Margin="14,4,12,8">
                     <Grid.Resources>
                         <DataTemplate x:Key="ConversationRowTemplate" DataType="{x:Type vm:ConversationListItem}">
-                            <DockPanel LastChildFill="True"
-                                       Background="Transparent"
-                                       ContextMenuOpening="ConversationRow_ContextMenuOpening">
+                            <Grid Background="Transparent"
+                                  ContextMenuOpening="ConversationRow_ContextMenuOpening">
+                                <Grid.Resources>
+                                    <!-- Time and delete share one fixed-size slot. Switching
+                                         between them must never change the row's desired size. -->
+                                    <Style x:Key="ConversationTimeText" TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                    <Style x:Key="ConversationDeleteButton"
+                                           TargetType="Button"
+                                           BasedOn="{StaticResource HeaderIconButton}">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Grid.Resources>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
                                 <!-- Right-click menu. The hover trash button stays as the
                                      fast path; this exists because actions the user cannot
                                      see do not exist, and because "打开本地工作目录" has
@@ -452,7 +487,7 @@
                                      ContextMenu.PlacementTarget rather than a binding: the
                                      menu lives in its own visual tree, so the usual
                                      AncestorType=Window lookup does not reach the VM. -->
-                                <DockPanel.ContextMenu>
+                                <Grid.ContextMenu>
                                     <ContextMenu>
                                         <MenuItem Tag="open-folder"
                                                   Header="打开本地工作目录"
@@ -462,102 +497,135 @@
                                                   Header="删除对话（可撤销）"
                                                   Click="DeleteConversationMenuItem_Click" />
                                     </ContextMenu>
-                                </DockPanel.ContextMenu>
-                                <!-- Trash reveals only on row hover/selection so the
-                                     title stays uncluttered and mis-clicks are rarer.
-                                     Hidden (not Collapsed) keeps the layout stable. -->
-                                <Button DockPanel.Dock="Right"
-                                        Width="24" Height="24"
-                                        Margin="4,0,0,0"
-                                        Command="{Binding DataContext.ConversationList.DeleteConversationCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                        CommandParameter="{Binding Id}"
-                                        ToolTip="删除对话（可撤销）">
-                                    <Button.Style>
-                                        <Style TargetType="Button" BasedOn="{StaticResource HeaderIconButton}">
-                                            <Setter Property="Visibility" Value="Hidden" />
-                                            <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-                                                    <Setter Property="Visibility" Value="Visible" />
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-                                                    <Setter Property="Visibility" Value="Visible" />
-                                                </DataTrigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </Button.Style>
-                                    <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource Font.Icon}" FontSize="11" />
-                                </Button>
-                                <TextBlock DockPanel.Dock="Right"
-                                           Text="{Binding TimeLabel}"
-                                           FontSize="{DynamicResource Font.Size.XSmall}"
-                                           Opacity="0.65"
-                                           VerticalAlignment="Center" />
-                                <StackPanel DockPanel.Dock="Right"
-                                            Orientation="Horizontal"
-                                            Margin="6,0,4,0"
-                                            VerticalAlignment="Center"
-                                            Visibility="{Binding IsGenerating, Converter={x:Static views:BoolToVisibility.Instance}}">
-                                    <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Margin="0,0,3,0" Opacity="0.6" />
-                                    <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Margin="0,0,3,0" Opacity="0.6" />
-                                    <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Opacity="0.6" />
-                                </StackPanel>
-                                <Border DockPanel.Dock="Right"
-                                        Margin="6,0,0,0"
-                                        Padding="6,0"
-                                        Height="20"
-                                        MinWidth="32"
-                                        VerticalAlignment="Center"
-                                        Background="{DynamicResource Brush.Bg.Tertiary}"
-                                        BorderBrush="{DynamicResource Brush.Border.Subtle}"
-                                        BorderThickness="1"
-                                        CornerRadius="{DynamicResource Radius.Sm}"
-                                        Visibility="{Binding IsByok, Converter={x:Static views:BoolToVisibility.Instance}}"
-                                        ToolTip="{Binding BadgeLabel}">
-                                    <TextBlock Text="{Binding BadgeLabel}"
-                                               FontSize="{DynamicResource Font.Size.XSmall}"
-                                               FontWeight="SemiBold"
-                                               Foreground="{DynamicResource Brush.Text.Muted}"
-                                               TextAlignment="Center"
-                                               TextTrimming="CharacterEllipsis"
-                                               MaxWidth="80"
-                                               VerticalAlignment="Center"
-                                               LineHeight="12"
-                                               LineStackingStrategy="BlockLineHeight" />
-                                </Border>
-                                <Border DockPanel.Dock="Right"
-                                        Margin="6,0,0,0"
-                                        Padding="6,0"
-                                        Height="20"
-                                        MinWidth="32"
-                                        VerticalAlignment="Center"
-                                        Background="{DynamicResource Brush.Bg.Tertiary}"
-                                        BorderBrush="{DynamicResource Brush.Border}"
-                                        BorderThickness="1"
-                                        CornerRadius="{DynamicResource Radius.Sm}"
-                                        Visibility="{Binding IsWork, Converter={x:Static views:BoolToVisibility.Instance}}"
-                                        ToolTip="MolaGPT Work">
-                                    <TextBlock Text="{Binding ModeBadgeLabel}"
-                                               FontSize="{DynamicResource Font.Size.XSmall}"
-                                               FontWeight="SemiBold"
-                                               Foreground="{DynamicResource Brush.Text.Secondary}"
-                                               TextAlignment="Center"
-                                               VerticalAlignment="Center"
-                                               LineHeight="12"
-                                               LineStackingStrategy="BlockLineHeight" />
-                                </Border>
-                                <TextBlock DockPanel.Dock="Left"
+                                </Grid.ContextMenu>
+
+                                <TextBlock Grid.Column="0"
+                                           Grid.RowSpan="2"
                                            Text="{Binding IconGlyph}"
                                            FontFamily="{DynamicResource Font.Icon}"
                                            FontSize="13"
                                            Opacity="0.7"
                                            VerticalAlignment="Center"
                                            Margin="0,0,10,0" />
-                                <TextBlock Text="{Binding Title}"
-                                           TextTrimming="CharacterEllipsis"
-                                           VerticalAlignment="Center"
-                                           FontSize="13"
-                                           FontWeight="Medium" />
-                            </DockPanel>
+
+                                <!-- Account conversations without a role or Work mode use a
+                                     compact row: the right slot carries time or delete. -->
+                                <Grid Grid.Column="1" Grid.Row="0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               Text="{Binding Title}"
+                                               ToolTip="{Binding Title}"
+                                               TextTrimming="CharacterEllipsis"
+                                               VerticalAlignment="Center"
+                                               FontSize="13"
+                                               FontWeight="Medium" />
+                                    <StackPanel Grid.Column="1"
+                                                Orientation="Horizontal"
+                                                VerticalAlignment="Center">
+                                        <StackPanel.Style>
+                                            <Style TargetType="StackPanel">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding HasSidebarMetadata}" Value="True">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </StackPanel.Style>
+                                        <StackPanel Orientation="Horizontal"
+                                                    Margin="0,0,4,0"
+                                                    VerticalAlignment="Center"
+                                                    Visibility="{Binding IsGenerating, Converter={x:Static views:BoolToVisibility.Instance}}">
+                                            <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Margin="0,0,3,0" Opacity="0.6" />
+                                            <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Margin="0,0,3,0" Opacity="0.6" />
+                                            <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Opacity="0.6" />
+                                        </StackPanel>
+                                        <Grid Width="36" Height="16" VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding TimeLabel}"
+                                                       Style="{StaticResource ConversationTimeText}"
+                                                       FontSize="{DynamicResource Font.Size.XSmall}"
+                                                       Foreground="{DynamicResource Brush.Text.Muted}"
+                                                       HorizontalAlignment="Right"
+                                                       VerticalAlignment="Center" />
+                                            <Button Width="22"
+                                                    Height="16"
+                                                    HorizontalAlignment="Right"
+                                                    Style="{StaticResource ConversationDeleteButton}"
+                                                    Command="{Binding DataContext.ConversationList.DeleteConversationCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                    CommandParameter="{Binding Id}"
+                                                    ToolTip="删除对话（可撤销）">
+                                                <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource Font.Icon}" FontSize="11" />
+                                            </Button>
+                                        </Grid>
+                                    </StackPanel>
+                                </Grid>
+
+                                <!-- BYOK and Work conversations carry meaningful metadata,
+                                     so only they render a second line. -->
+                                <Grid Grid.Column="1"
+                                      Grid.Row="1"
+                                      Height="16"
+                                      Margin="0,2,0,0">
+                                    <Grid.Style>
+                                        <Style TargetType="Grid">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding HasSidebarMetadata}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Grid.Style>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0"
+                                                Orientation="Horizontal"
+                                                VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding BadgeLabel}"
+                                                   ToolTip="{Binding BadgeLabel}"
+                                                   MaxWidth="110"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   FontSize="{DynamicResource Font.Size.XSmall}"
+                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                   Visibility="{Binding IsByok, Converter={x:Static views:BoolToVisibility.Instance}}" />
+                                        <TextBlock Text="{Binding ModeBadgeLabel}"
+                                                   ToolTip="MolaGPT Work"
+                                                   FontSize="{DynamicResource Font.Size.XSmall}"
+                                                   Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                   Visibility="{Binding IsWork, Converter={x:Static views:BoolToVisibility.Instance}}" />
+                                        <StackPanel Orientation="Horizontal"
+                                                    Margin="2,0,0,0"
+                                                    VerticalAlignment="Center"
+                                                    Visibility="{Binding IsGenerating, Converter={x:Static views:BoolToVisibility.Instance}}">
+                                            <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Margin="0,0,3,0" Opacity="0.6" />
+                                            <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Margin="0,0,3,0" Opacity="0.6" />
+                                            <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Opacity="0.6" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <Grid Grid.Column="1" Width="36" Height="16" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding TimeLabel}"
+                                                   Style="{StaticResource ConversationTimeText}"
+                                                   FontSize="{DynamicResource Font.Size.XSmall}"
+                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                   HorizontalAlignment="Right"
+                                                   VerticalAlignment="Center" />
+                                        <Button Width="22"
+                                                Height="16"
+                                                HorizontalAlignment="Right"
+                                                Style="{StaticResource ConversationDeleteButton}"
+                                                Command="{Binding DataContext.ConversationList.DeleteConversationCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                CommandParameter="{Binding Id}"
+                                                ToolTip="删除对话（可撤销）">
+                                            <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource Font.Icon}" FontSize="11" />
+                                        </Button>
+                                    </Grid>
+                                </Grid>
+                            </Grid>
                         </DataTemplate>
                     </Grid.Resources>
 
@@ -766,11 +834,24 @@
                               SizeChanged="MessagesScroll_SizeChanged"
                               ScrollChanged="MessagesScroll_ScrollChanged"
                               PreviewMouseWheel="MessagesScroll_PreviewMouseWheel"
-                              MouseWheel="MessagesScroll_MouseWheel"
                               Visibility="{Binding Chat.IsEmpty, Converter={x:Static views:BoolToVisibilityInverse.Instance}}">
-                    <ItemsControl ItemsSource="{Binding Chat.Messages}"
+                    <!-- UseLayoutRounding pins each message row's position to
+                         the device pixel grid — DPI-aware, unlike rounding the
+                         scroll offset ourselves (an integer DIP is not an
+                         integer device pixel at 125%/150%).
+
+                         Do NOT add TextOptions.TextFormattingMode="Display"
+                         here. It is the standard cure for blurry small text in
+                         WPF, but that advice is written for Latin script: it
+                         snaps glyph positions AND advance widths to whole
+                         pixels, which visibly degrades CJK body copy at 14-15px
+                         by distorting stroke weights. Tried it, it looked
+                         worse, reverted. -->
+                    <ItemsControl x:Name="MessagesItems"
+                                  ItemsSource="{Binding Chat.Messages}"
                                   HorizontalAlignment="Stretch"
                                   Margin="0,8"
+                                  UseLayoutRounding="True"
                                   VirtualizingStackPanel.IsVirtualizing="True"
                                   VirtualizingStackPanel.VirtualizationMode="Recycling"
                                   VirtualizingStackPanel.ScrollUnit="Pixel"

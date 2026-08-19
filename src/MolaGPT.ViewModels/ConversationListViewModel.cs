@@ -874,6 +874,8 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
     public bool IsByok => Group == AppMode.Byok;
     public bool IsWork => Group == AppMode.Work;
     public bool IsMolaGptAccountConversation => Group is AppMode.Chat or AppMode.Work;
+    /// <summary>Whether this sidebar row has a role or mode label that merits a metadata line.</summary>
+    public bool HasSidebarMetadata => IsByok || IsWork;
     private bool _isImageTask;
     public bool IsImageTask => _isImageTask;
     private bool _pinned;
@@ -943,6 +945,7 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
             OnPropertyChanged(nameof(IsByok));
             OnPropertyChanged(nameof(IsWork));
             OnPropertyChanged(nameof(IsMolaGptAccountConversation));
+            OnPropertyChanged(nameof(HasSidebarMetadata));
             OnPropertyChanged(nameof(ModeBadgeLabel));
         }
         if (SetProperty(ref _isImageTask, source.IsImageTask, nameof(IsImageTask)))

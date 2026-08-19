@@ -138,11 +138,24 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
         var imageOrdinal = 0;
         var wireMessages = new List<object>(request.Messages.Count);
         foreach (var m in request.Messages)
-            wireMessages.Add(ToOpenAiWireMessage(m, request, replaceImagesWithText, ref imageOrdinal));
-        const int MaxLocalToolTurns = 64;
-        var maxToolTurns = useLocalTools ? MaxLocalToolTurns : 1;
+        {
+            if (m.Role == ChatMessage.RoleAssistant
+                && OpenAiWireHistory.TryRead(
+                    m.OpenAiWireHistoryJson,
+                    OpenAiWireApi.ChatCompletions,
+                    Id,
+                    request.ModelId,
+                    out var preservedItems))
+            {
+                wireMessages.AddRange(preservedItems.Cast<object>());
+                continue;
+            }
 
-        for (var turn = 0; turn < maxToolTurns; turn++)
+            wireMessages.Add(ToOpenAiWireMessage(m, request, replaceImagesWithText, ref imageOrdinal));
+        }
+        var turnWireMessages = new List<object>();
+
+        while (true)
         {
             var url = NetworkSecurity.CombineEndpoint(BaseUrl, ChatPath, DisplayName);
             var body = BuildRequestBody(request, wireMessages);
@@ -174,6 +187,7 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
             var assistantText = new StringBuilder();
             var assistantReasoning = new StringBuilder();
             string? finishReason = null;
+            var historyEmitted = false;
 
             await foreach (var ev in SseStreamReader.ReadAsync(stream, ct))
             {
@@ -190,10 +204,25 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
                     if (!string.IsNullOrEmpty(tail.Thinking))
                         assistantReasoning.Append(tail.Thinking);
                     if (!string.IsNullOrEmpty(tail.Visible) || !string.IsNullOrEmpty(tail.Thinking))
-                        yield return new ChatChunk(
+                    {
+                        var doneChunk = new ChatChunk(
                             DeltaText: string.IsNullOrEmpty(tail.Visible) ? null : tail.Visible,
                             DeltaThinking: string.IsNullOrEmpty(tail.Thinking) ? null : tail.Thinking,
                             FinishReason: useLocalTools && localToolCalls.Count > 0 ? null : "stop");
+                        if (useLocalTools && doneChunk.FinishReason is not null)
+                        {
+                            doneChunk = doneChunk with
+                            {
+                                OpenAiWireHistoryJson = BuildChatCompletionsWireHistory(
+                                    request,
+                                    turnWireMessages,
+                                    assistantText.ToString(),
+                                    assistantReasoning.ToString())
+                            };
+                            historyEmitted = true;
+                        }
+                        yield return doneChunk;
+                    }
                     break;
                 }
                 if (string.IsNullOrEmpty(ev.Data)) continue;
@@ -235,7 +264,25 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
                         {
                             if (useLocalTools && TryCollectLocalToolCalls(delta, localToolCalls, localToolOptions, out var pending))
                             {
-                                chunk = pending;
+                                var text = ExtractContentText(delta);
+                                var thinking = ReasoningExtractor.Extract(delta);
+                                if (!string.IsNullOrEmpty(text))
+                                {
+                                    var split = thinkSplitter.Feed(text);
+                                    text = string.IsNullOrEmpty(split.Visible) ? null : split.Visible;
+                                    if (!string.IsNullOrEmpty(split.Thinking))
+                                        thinking = string.IsNullOrEmpty(thinking) ? split.Thinking : thinking + split.Thinking;
+                                }
+                                if (!string.IsNullOrEmpty(text)) assistantText.Append(text);
+                                if (!string.IsNullOrEmpty(thinking)) assistantReasoning.Append(thinking);
+
+                                chunk = pending is null && string.IsNullOrEmpty(text) && string.IsNullOrEmpty(thinking)
+                                    ? null
+                                    : new ChatChunk(
+                                        DeltaText: text,
+                                        DeltaThinking: thinking,
+                                        Tool: pending?.Tool,
+                                        RawJson: ev.Data);
                                 handledEvent = true;
                             }
                             else
@@ -289,22 +336,46 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
                 {
                     chunk = new ChatChunk(RawJson: ev.Data);
                 }
+                if (useLocalTools && chunk?.FinishReason is not null)
+                {
+                    chunk = chunk with
+                    {
+                        OpenAiWireHistoryJson = BuildChatCompletionsWireHistory(
+                            request,
+                            turnWireMessages,
+                            assistantText.ToString(),
+                            assistantReasoning.ToString())
+                    };
+                    historyEmitted = true;
+                }
                 if (chunk is not null) yield return chunk;
                 if (handledEvent) continue;
             }
 
             if (!useLocalTools || localToolCalls.Count == 0)
             {
-                if (finishReason is null)
+                if (useLocalTools && !historyEmitted)
+                {
+                    yield return new ChatChunk(
+                        FinishReason: finishReason ?? "stop",
+                        OpenAiWireHistoryJson: BuildChatCompletionsWireHistory(
+                            request,
+                            turnWireMessages,
+                            assistantText.ToString(),
+                            assistantReasoning.ToString()));
+                }
+                else if (!useLocalTools && finishReason is null)
                     yield return new ChatChunk(FinishReason: "stop");
                 yield break;
             }
 
-            wireMessages.Add(BuildAssistantToolCallMessage(
+            var assistantToolMessage = BuildAssistantToolCallMessage(
                 assistantText.ToString(),
                 assistantReasoning.ToString(),
                 request,
-                localToolCalls.Values));
+                localToolCalls.Values);
+            wireMessages.Add(assistantToolMessage);
+            turnWireMessages.Add(assistantToolMessage);
 
             foreach (var toolCall in localToolCalls.Values)
             {
@@ -321,16 +392,16 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
                     localToolOptions,
                     IsToolError(result) ? "error" : "completed",
                     result));
-                wireMessages.Add(new Dictionary<string, object?>
+                var toolResultMessage = new Dictionary<string, object?>
                 {
                     ["role"] = "tool",
                     ["tool_call_id"] = toolCall.Id,
                     ["content"] = result
-                });
+                };
+                wireMessages.Add(toolResultMessage);
+                turnWireMessages.Add(toolResultMessage);
             }
         }
-
-        yield return new ChatChunk(FinishReason: "tool_turn_limit");
     }
 
     private Dictionary<string, object?> BuildRequestBody(ChatRequest request, IReadOnlyList<object> wireMessages)
@@ -398,10 +469,28 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
             : options;
 
     private static bool ShouldPassReasoningContent(ChatRequest request, string role, string? reasoningContent) =>
-        request.UseThinking == true
-        && request.ThinkingParamKind == ThinkingParamKind.DeepSeekV4
+        request.ThinkingParamKind == ThinkingParamKind.DeepSeekV4
         && role == ChatMessage.RoleAssistant
         && !string.IsNullOrWhiteSpace(reasoningContent);
+
+    private string BuildChatCompletionsWireHistory(
+        ChatRequest request,
+        IReadOnlyList<object> precedingItems,
+        string assistantText,
+        string assistantReasoning)
+    {
+        var items = new List<object>(precedingItems.Count + 1);
+        items.AddRange(precedingItems);
+        var finalAssistant = new Dictionary<string, object?>
+        {
+            ["role"] = ChatMessage.RoleAssistant,
+            ["content"] = string.IsNullOrWhiteSpace(assistantText) ? null : assistantText
+        };
+        if (ShouldPassReasoningContent(request, ChatMessage.RoleAssistant, assistantReasoning))
+            finalAssistant["reasoning_content"] = assistantReasoning;
+        items.Add(finalAssistant);
+        return OpenAiWireHistory.Serialize(OpenAiWireApi.ChatCompletions, Id, request.ModelId, items);
+    }
 
     private static object ToOpenAiWireMessage(ChatMessage message, ChatRequest request, bool replaceImagesWithText, ref int imageOrdinal)
     {

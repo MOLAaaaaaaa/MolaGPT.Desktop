@@ -28,17 +28,64 @@ public partial class MainWindow : Window
     private const double SidebarCollapsedWidth = 0;
     private const double SidebarGapWidth = 16;
     private const double SidebarAnimationMs = 220;
-    private const double MessagesWheelDistanceScale = 0.92;
-    private const double MessagesWheelAnimationMs = 170;
+    /// <summary>Pixels per scrolled line. WPF's own pixel-mode ScrollViewer
+    /// uses 16, which at the default 3 lines/notch lands near 48px — short
+    /// enough that each notch reads as its own discrete step. This puts a notch
+    /// at ~96px, in the same range as Chrome's wheel tick.</summary>
+    private const double MessagesWheelLinePixels = 32;
+    /// <summary>Natural frequency (rad/s) of the critically damped spring that
+    /// drives the message list. This is the one knob for scroll feel — raise it
+    /// for snappier, lower it for floatier. Critically damped means it never
+    /// overshoots, so there is no bounce to tune away.
+    ///
+    /// The spring carries velocity as state, which is what the two simpler
+    /// models could not do. A fixed-duration ease resets its clock and start
+    /// point on every notch, so each notch relaunches at the ease's fastest
+    /// frame. An exponential chase has speed proportional to distance left, so
+    /// a notch fired from rest also peaks on its very first frame — a lurch,
+    /// then a crawl. A spring starts from the velocity it already had (zero,
+    /// from rest), accelerates, then decelerates: it eases in as well as out,
+    /// and its peak speed is ~1/e of the chase's for the same frequency, which
+    /// is roughly a third of the motion blur over the same travel.
+    ///
+    /// Tuned against Chrome's wheel scrolling, which spreads a tick over
+    /// roughly 250-300ms. At 30 a notch was visually finished inside ~120ms —
+    /// only a handful of frames — so consecutive notches read as separate
+    /// steps instead of one continuous glide. Note this trades in the helpful
+    /// direction: peak speed is w*distance/e, so softening the spring buys
+    /// back more than lengthening the notch spends.</summary>
+    private const double MessagesScrollSpringFrequency = 20.0;
+    /// <summary>Distance at which the spring snaps to the target and unhooks.
+    /// Below one device pixel at every scale factor we ship, so the snap
+    /// itself is never visible.</summary>
+    private const double MessagesScrollSettleEpsilon = 0.75;
+    /// <summary>Companion to the distance test: near the target the spring is
+    /// barely moving, but checking distance alone could unhook it mid-flight
+    /// while it still had speed to shed (e.g. passing through the target after
+    /// a direction reversal).</summary>
+    private const double MessagesScrollSettleVelocity = 40.0;
+    /// <summary>Ceiling on a single frame's dt, so a GC pause or a dropped
+    /// frame can't be integrated into one large jump.</summary>
+    private const double MessagesScrollMaxFrameSeconds = 0.05;
     private const double MessagesBottomInsetMin = 132;
     private const double MessagesBottomGap = 0;
     private const double MessagesBottomStickTolerance = 48;
+    /// <summary>How close to the top the user has to get before the next slice
+    /// of history is pulled in — roughly a screenful of warning so the content
+    /// is there by the time they reach it.</summary>
+    private const double MessagesOlderLoadTriggerPx = 240;
+    private const int MessagesOlderLoadBatch = 20;
     private const double ConversationGroupDefaultByokMaxHeight = 240;
     private const double ConversationGroupRestoreDelayMs = 1200;
 
-    private double _messagesScrollStartOffset;
+    // The spring integrates its own position rather than reading VerticalOffset
+    // back each frame: ScrollToVerticalOffset doesn't take effect until the
+    // next layout pass, so reading it would feed us a stale value and the
+    // steps would compound short.
+    private double _messagesScrollCurrent;
+    private double _messagesScrollVelocity;
     private double _messagesScrollTargetOffset;
-    private DateTime _messagesScrollAnimationStart;
+    private DateTime _messagesScrollLastFrame;
     private bool _messagesScrollAnimating;
     private bool _scrollToBottomVisible;
 
@@ -54,6 +101,16 @@ public partial class MainWindow : Window
     // Set around our own ScrollToVerticalOffset calls so the resulting
     // ScrollChanged isn't mistaken for a user gesture.
     private bool _programmaticScroll;
+
+    // Set while the message list is being rewritten wholesale — a conversation
+    // load, or an older-history prepend. Both grow the scroll extent, which the
+    // _followStreamBottom path reads as "new content arrived, jump to the
+    // newest". During a load that would drag every message through the viewport
+    // and force it to render on the way past; during a prepend it would throw
+    // the user to the bottom of the conversation they were scrolling up through.
+    private bool _suppressFollowBottom;
+    private bool _loadingOlderMessages;
+    private bool _olderLoadQueued;
     private bool _conversationGroupLayoutFocused;
     private bool _clearingOtherConversationGroupSelection;
     private bool _restoringConversationGroupSelection;
@@ -132,14 +189,12 @@ public partial class MainWindow : Window
     // Close goes through Window.Close() so the existing closing logic (tray / confirm) still runs.
     private void CloseWindow_Click(object sender, RoutedEventArgs e) => Close();
 
-    /// <summary>Keep the maximize/restore glyph in sync and inset the content when
-    /// maximized — a WindowChrome window's client area otherwise overhangs the work
-    /// area by the resize border, clipping the title bar and card edges.</summary>
+    /// <summary>Keep the maximize/restore glyph in sync. The content no longer
+    /// needs an inset when maximized — <see cref="WindowProc"/> clamps the
+    /// maximized rect to the work area, so nothing overhangs it any more.</summary>
     private void MainWindow_StateChanged(object? sender, EventArgs e)
     {
         var maximized = WindowState == WindowState.Maximized;
-        if (RootBorder is not null)
-            RootBorder.Margin = maximized ? new Thickness(8) : new Thickness(0);
         if (MaximizeRestoreGlyph is not null)
             MaximizeRestoreGlyph.Text = maximized ? "" : "";
         if (MaximizeRestoreButton is not null)
@@ -150,6 +205,98 @@ public partial class MainWindow : Window
     {
         base.OnSourceInitialized(e);
         TryEnableModernWindowFrame();
+
+        if (PresentationSource.FromVisual(this) is HwndSource source)
+            source.AddHook(WindowProc);
+    }
+
+    /// <summary>
+    /// Clamp the maximized window to the monitor's work area.
+    /// <para>
+    /// A <c>WindowStyle=None</c> + <c>WindowChrome</c> window maximizes to the
+    /// full monitor bounds inflated by the resize border rather than to the work
+    /// area — measured as a 1934x1094 rect against a 1920x1032 work area, so 55px
+    /// of the window sat behind the taskbar. On a normal window that strip is
+    /// just frame and nobody notices; on a self-drawn one it is content, and the
+    /// composer's bottom edge and the last sidebar row got cut off. Answering
+    /// WM_GETMINMAXINFO with the work area fixes it at the source instead of
+    /// insetting the content to compensate.
+    /// </para>
+    /// </summary>
+    private IntPtr WindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg != WM_GETMINMAXINFO)
+            return IntPtr.Zero;
+
+        // Resolve the work area from the monitor the window is actually on: it
+        // differs per screen (taskbar edge, docked bars), so a cached primary
+        // work area would clip again on a secondary display.
+        var monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if (monitor == IntPtr.Zero)
+            return IntPtr.Zero;
+
+        var info = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+        if (!GetMonitorInfo(monitor, ref info))
+            return IntPtr.Zero;
+
+        // Both structs are in physical pixels, so no DPI conversion here.
+        var mmi = Marshal.PtrToStructure<MINMAXINFO>(lParam);
+        mmi.ptMaxPosition.X = info.rcWork.Left - info.rcMonitor.Left;
+        mmi.ptMaxPosition.Y = info.rcWork.Top - info.rcMonitor.Top;
+        mmi.ptMaxSize.X = info.rcWork.Right - info.rcWork.Left;
+        mmi.ptMaxSize.Y = info.rcWork.Bottom - info.rcWork.Top;
+        // handled=true below skips WPF's own WM_GETMINMAXINFO handling, which is
+        // where MinWidth/MinHeight normally reach the OS — so re-apply them here
+        // or the window becomes draggable down to nothing. These are DIPs, the
+        // struct is physical pixels.
+        var dpi = VisualTreeHelper.GetDpi(this);
+        mmi.ptMinTrackSize.X = (int)Math.Ceiling(MinWidth * dpi.DpiScaleX);
+        mmi.ptMinTrackSize.Y = (int)Math.Ceiling(MinHeight * dpi.DpiScaleY);
+        Marshal.StructureToPtr(mmi, lParam, true);
+
+        handled = true;
+        return IntPtr.Zero;
+    }
+
+    private const int WM_GETMINMAXINFO = 0x0024;
+    private const int MONITOR_DEFAULTTONEAREST = 0x0002;
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, int dwFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left, Top, Right, Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO
+    {
+        public int cbSize;
+        public NativeRect rcMonitor;
+        public NativeRect rcWork;
+        public int dwFlags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X, Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MINMAXINFO
+    {
+        public NativePoint ptReserved;
+        public NativePoint ptMaxSize;
+        public NativePoint ptMaxPosition;
+        public NativePoint ptMinTrackSize;
+        public NativePoint ptMaxTrackSize;
     }
 
     /// <summary>Win11: round the window corners, which also makes DWM draw the
@@ -182,6 +329,7 @@ public partial class MainWindow : Window
         if (e.OldValue is MainViewModel oldMainVm)
         {
             oldMainVm.PropertyChanged -= OnVmPropertyChanged;
+            oldMainVm.Chat.PropertyChanged -= OnChatPropertyChanged;
             oldMainVm.ConversationList.PropertyChanged -= OnConversationListPropertyChanged;
             oldMainVm.ConversationList.SelectionRestoreRequested -= OnSelectionRestoreRequested;
             oldMainVm.Composer.MessageSubmitted -= OnComposerMessageSubmitted;
@@ -194,12 +342,44 @@ public partial class MainWindow : Window
         if (e.NewValue is MainViewModel newVm)
         {
             newVm.PropertyChanged += OnVmPropertyChanged;
+            newVm.Chat.PropertyChanged += OnChatPropertyChanged;
             newVm.ConversationList.PropertyChanged += OnConversationListPropertyChanged;
             newVm.ConversationList.SelectionRestoreRequested += OnSelectionRestoreRequested;
             newVm.Composer.MessageSubmitted += OnComposerMessageSubmitted;
             // Apply initial state without animation so first paint is right.
             ApplySidebarState(newVm.SidebarCollapsed, animate: false);
         }
+    }
+
+    /// <summary>
+    /// Park stream-follow for the duration of a conversation load, then
+    /// re-attach it with a single scroll once the list has settled.
+    /// <para>
+    /// Without this, each message added during the load grows the extent and
+    /// re-triggers follow-bottom, which walks the viewport down through the
+    /// entire history — every message gets realized and fully rendered on its
+    /// way past, then recycled unseen. Suppressing it keeps the load
+    /// proportional to what's actually on screen.
+    /// </para>
+    /// </summary>
+    private void OnChatPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(ChatViewModel.IsConversationLoading)
+            || sender is not ChatViewModel chat)
+            return;
+
+        if (chat.IsConversationLoading)
+        {
+            _suppressFollowBottom = true;
+            return;
+        }
+
+        _suppressFollowBottom = false;
+        // A freshly opened conversation always starts pinned to its newest
+        // message, whatever the user had been reading in the previous one.
+        _followStreamBottom = true;
+        QueueMessagesScrollToEnd();
+        QueueEnsureMessagesFillViewport();
     }
 
     /// <summary>A fresh send re-attaches bottom-follow even if the user had
@@ -858,6 +1038,9 @@ public partial class MainWindow : Window
     {
         UpdateMessagesBottomInset();
         QueueMessagesViewportUpdate();
+        // A taller viewport can outgrow the loaded tail and leave nothing to
+        // scroll, which would strand the rest of the history.
+        QueueEnsureMessagesFillViewport();
     }
 
     private void UpdateMessagesBottomInset()
@@ -904,10 +1087,146 @@ public partial class MainWindow : Window
         // clamps the offset toward the bottom and a geometry test would falsely
         // read "at bottom" and yank a scrolled-up user back down.
         var grew = e.ExtentHeightChange > 0 || e.ViewportHeightChange < 0;
-        if (grew && _followStreamBottom && !_messagesScrollAnimating)
+        if (grew && _followStreamBottom && !_messagesScrollAnimating && !_suppressFollowBottom)
             QueueMessagesScrollToEnd();
 
+        QueueMaybeLoadOlderMessages();
         UpdateScrollToBottomButton();
+    }
+
+    /// <summary>
+    /// Defer the paging check out of the ScrollChanged callback: it runs a
+    /// synchronous UpdateLayout, which is not safe to do from inside the
+    /// layout pass that raised this event. Loaded priority puts it right after
+    /// the current pass, so the new messages land in the same frame.
+    /// </summary>
+    private void QueueMaybeLoadOlderMessages()
+    {
+        if (_olderLoadQueued)
+            return;
+
+        _olderLoadQueued = true;
+        Dispatcher.InvokeAsync(() =>
+        {
+            _olderLoadQueued = false;
+            MaybeLoadOlderMessages();
+        }, DispatcherPriority.Loaded);
+    }
+
+    /// <summary>Pull in the next slice of history once the user scrolls near
+    /// the top. A conversation opens with only its newest messages, so this is
+    /// what makes the rest of it reachable.</summary>
+    private void MaybeLoadOlderMessages()
+    {
+        if (_loadingOlderMessages || _suppressFollowBottom) return;
+        if (MessagesScroll is null || DataContext is not MainViewModel vm) return;
+        if (!vm.Chat.HasOlderMessages) return;
+        // Nothing to scroll yet — that case belongs to EnsureMessagesFillViewport.
+        if (MessagesScroll.ScrollableHeight <= 0) return;
+        if (MessagesScroll.VerticalOffset > MessagesOlderLoadTriggerPx) return;
+
+        LoadOlderMessagesPreservingScroll(vm, MessagesOlderLoadBatch);
+    }
+
+    private void QueueEnsureMessagesFillViewport() =>
+        Dispatcher.InvokeAsync(EnsureMessagesFillViewport, DispatcherPriority.Loaded);
+
+    /// <summary>
+    /// A conversation whose newest messages don't fill the viewport has nothing
+    /// to scroll, so <see cref="MaybeLoadOlderMessages"/> could never fire and
+    /// the remaining history would be unreachable. Top up until there is
+    /// something to scroll, or until we run out of history.
+    /// </summary>
+    private void EnsureMessagesFillViewport()
+    {
+        if (_loadingOlderMessages || _suppressFollowBottom || MessagesScroll is null) return;
+        if (DataContext is not MainViewModel vm) return;
+
+        // Bounded so a run of very short messages can't spin here.
+        for (int pass = 0; pass < 8; pass++)
+        {
+            if (!vm.Chat.HasOlderMessages || MessagesScroll.ScrollableHeight > 0)
+                return;
+            if (LoadOlderMessagesPreservingScroll(vm, MessagesOlderLoadBatch) <= 0)
+                return;
+        }
+    }
+
+    /// <summary>
+    /// Prepend older messages without moving what the user is looking at.
+    /// <para>
+    /// Two passes. First shift by however much the extent grew — close, but
+    /// only an estimate while the panel virtualizes, because the messages that
+    /// were just inserted above the viewport have never been measured. Then,
+    /// with the anchor message back near the viewport and its container
+    /// realized again, correct against its real position. Both passes run
+    /// inside this frame via UpdateLayout, so no intermediate scroll position
+    /// is ever painted.
+    /// </para>
+    /// </summary>
+    /// <returns>How many messages were inserted.</returns>
+    private int LoadOlderMessagesPreservingScroll(MainViewModel vm, int count)
+    {
+        if (MessagesScroll is null) return 0;
+
+        var anchor = vm.Chat.Messages.Count > 0 ? vm.Chat.Messages[0] : null;
+        var anchorBefore = GetMessageViewportOffset(anchor);
+        var oldExtent = MessagesScroll.ExtentHeight;
+        var oldOffset = MessagesScroll.VerticalOffset;
+
+        _loadingOlderMessages = true;
+        var previousSuppress = _suppressFollowBottom;
+        _suppressFollowBottom = true;
+        _programmaticScroll = true;
+        try
+        {
+            var inserted = vm.Chat.LoadOlderMessages(count);
+            if (inserted <= 0)
+                return 0;
+
+            MessagesScroll.UpdateLayout();
+            var delta = MessagesScroll.ExtentHeight - oldExtent;
+            if (delta > 0)
+                MessagesScroll.ScrollToVerticalOffset(oldOffset + delta);
+
+            if (anchorBefore is { } before)
+            {
+                MessagesScroll.UpdateLayout();
+                if (GetMessageViewportOffset(anchor) is { } after)
+                    MessagesScroll.ScrollToVerticalOffset(
+                        MessagesScroll.VerticalOffset + (after - before));
+            }
+
+            return inserted;
+        }
+        finally
+        {
+            _programmaticScroll = false;
+            _suppressFollowBottom = previousSuppress;
+            _loadingOlderMessages = false;
+        }
+    }
+
+    /// <summary>Y position of a message's container relative to the scroller,
+    /// or null when that container isn't realized — in which case the caller
+    /// keeps the extent-delta estimate instead.</summary>
+    private double? GetMessageViewportOffset(object? message)
+    {
+        if (message is null || MessagesItems is null || MessagesScroll is null)
+            return null;
+        if (MessagesItems.ItemContainerGenerator.ContainerFromItem(message) is not FrameworkElement container)
+            return null;
+
+        try
+        {
+            return container.TransformToAncestor(MessagesScroll).Transform(default(Point)).Y;
+        }
+        catch (InvalidOperationException)
+        {
+            // Container was recycled out from under us between realize and
+            // transform; the estimate stands.
+            return null;
+        }
     }
 
     private void UpdateScrollToBottomButton()
@@ -967,11 +1286,7 @@ public partial class MainWindow : Window
             if (MessagesScroll is null)
                 return;
 
-            if (_messagesScrollAnimating)
-            {
-                CompositionTarget.Rendering -= AnimateMessagesScrollFrame;
-                _messagesScrollAnimating = false;
-            }
+            CancelMessagesScrollAnimation();
 
             _programmaticScroll = true;
             try
@@ -1175,24 +1490,26 @@ public partial class MainWindow : Window
         }
     };
 
+    /// <summary>How far one wheel notch travels. Follows the user's Windows
+    /// "scroll this many lines at a time" setting instead of a constant of our
+    /// own, so the chat scrolls the same distance as every other app on the
+    /// machine. A negative value is Windows' "one screen at a time".</summary>
+    private double MessagesWheelNotchDistance =>
+        SystemParameters.WheelScrollLines > 0
+            ? SystemParameters.WheelScrollLines * MessagesWheelLinePixels
+            : MessagesScroll.ViewportHeight;
+
     private void MessagesScroll_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
-    {
-        HandleMessagesMouseWheel(e);
-    }
-
-    private void MessagesScroll_MouseWheel(object sender, MouseWheelEventArgs e)
-    {
-        HandleMessagesMouseWheel(e);
-    }
-
-    private void HandleMessagesMouseWheel(MouseWheelEventArgs e)
     {
         if (e.OriginalSource is DependencyObject source && IsTextInputSurface(source)) return;
         if (MessagesScroll.ScrollableHeight <= 0) return;
 
+        // Stack onto the pending target, not onto the current position: a fast
+        // spin must cover the full distance its notches asked for, otherwise
+        // the notches that land mid-flight get partially swallowed.
         var origin = _messagesScrollAnimating ? _messagesScrollTargetOffset : MessagesScroll.VerticalOffset;
         var next = Math.Clamp(
-            origin - (e.Delta * MessagesWheelDistanceScale),
+            origin - (e.Delta / Mouse.MouseWheelDeltaForOneLine * MessagesWheelNotchDistance),
             0,
             MessagesScroll.ScrollableHeight);
 
@@ -1207,31 +1524,79 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
+    private void CancelMessagesScrollAnimation()
+    {
+        if (!_messagesScrollAnimating) return;
+        CompositionTarget.Rendering -= AnimateMessagesScrollFrame;
+        _messagesScrollAnimating = false;
+        _messagesScrollVelocity = 0;
+    }
+
+    /// <summary>Point the spring at a new offset. Retargeting mid-flight is the
+    /// normal case and deliberately touches nothing else — not the clock, not
+    /// the position, and above all not the velocity — so consecutive notches
+    /// blend into one continuous motion that keeps whatever speed it had built
+    /// up, instead of each notch restarting from scratch.</summary>
     private void AnimateMessagesScrollTo(double targetOffset)
     {
-        _messagesScrollStartOffset = MessagesScroll.VerticalOffset;
         _messagesScrollTargetOffset = targetOffset;
-        _messagesScrollAnimationStart = DateTime.UtcNow;
 
         if (_messagesScrollAnimating) return;
+
+        _messagesScrollCurrent = MessagesScroll.VerticalOffset;
+        _messagesScrollVelocity = 0;
+        _messagesScrollLastFrame = DateTime.UtcNow;
         _messagesScrollAnimating = true;
         CompositionTarget.Rendering += AnimateMessagesScrollFrame;
     }
 
+    /// <summary>Closed-form step of a critically damped spring. Solving it
+    /// analytically rather than integrating numerically keeps it stable at any
+    /// dt — a stiff spring stepped explicitly across a long frame would
+    /// oscillate or blow up, which on screen is a visible stutter.</summary>
     private void AnimateMessagesScrollFrame(object? sender, EventArgs e)
     {
-        var elapsed = (DateTime.UtcNow - _messagesScrollAnimationStart).TotalMilliseconds;
-        var t = Math.Clamp(elapsed / MessagesWheelAnimationMs, 0, 1);
-        var eased = 1 - Math.Pow(1 - t, 3);
-        var offset = _messagesScrollStartOffset + ((_messagesScrollTargetOffset - _messagesScrollStartOffset) * eased);
+        var now = DateTime.UtcNow;
+        var dt = Math.Clamp(
+            (now - _messagesScrollLastFrame).TotalSeconds,
+            0,
+            MessagesScrollMaxFrameSeconds);
+        _messagesScrollLastFrame = now;
 
-        MessagesScroll.ScrollToVerticalOffset(Math.Clamp(offset, 0, MessagesScroll.ScrollableHeight));
+        // Re-clamp every frame: a streaming reply changes ScrollableHeight
+        // underneath us, and a target left dangling past the end would keep
+        // the spring hooked forever.
+        var scrollable = MessagesScroll.ScrollableHeight;
+        var target = Math.Clamp(_messagesScrollTargetOffset, 0, scrollable);
+        var clamped = Math.Clamp(_messagesScrollCurrent, 0, scrollable);
+        if (clamped != _messagesScrollCurrent)
+        {
+            // Ran into an end — drop the velocity rather than let it press on.
+            _messagesScrollCurrent = clamped;
+            _messagesScrollVelocity = 0;
+        }
 
-        if (t < 1 && Math.Abs(MessagesScroll.VerticalOffset - _messagesScrollTargetOffset) > 0.25) return;
+        var offset = _messagesScrollCurrent - target;
+        if (Math.Abs(offset) <= MessagesScrollSettleEpsilon
+            && Math.Abs(_messagesScrollVelocity) <= MessagesScrollSettleVelocity)
+        {
+            _messagesScrollCurrent = target;
+            _messagesScrollVelocity = 0;
+            MessagesScroll.ScrollToVerticalOffset(target);
+            CancelMessagesScrollAnimation();
+            return;
+        }
 
-        MessagesScroll.ScrollToVerticalOffset(Math.Clamp(_messagesScrollTargetOffset, 0, MessagesScroll.ScrollableHeight));
-        CompositionTarget.Rendering -= AnimateMessagesScrollFrame;
-        _messagesScrollAnimating = false;
+        // x(t) = target + (offset + a·t)·e^(-ωt),  a = v + ω·offset
+        // v(t) = (v - ω·a·t)·e^(-ωt)
+        var w = MessagesScrollSpringFrequency;
+        var decay = Math.Exp(-w * dt);
+        var a = _messagesScrollVelocity + (w * offset);
+
+        _messagesScrollCurrent = target + ((offset + (a * dt)) * decay);
+        _messagesScrollVelocity = (_messagesScrollVelocity - (w * a * dt)) * decay;
+
+        MessagesScroll.ScrollToVerticalOffset(_messagesScrollCurrent);
     }
 
     private static bool IsTextInputSurface(DependencyObject source) =>

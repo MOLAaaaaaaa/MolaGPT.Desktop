@@ -6,9 +6,12 @@ namespace MolaGPT.ViewModels.Services;
 
 public sealed class BackgroundStreamTask
 {
+    private int _titleGenerationStarted;
+
     public string ConversationId { get; init; } = default!;
     public string ConversationTitle { get; init; } = "新对话";
     public string? ModelLabel { get; init; }
+    public string? ModelId { get; init; }
     public string? ProviderId { get; init; }
     public ProviderKind ProviderKind { get; init; } = ProviderKind.Custom;
     public MessageViewModel AssistantMessage { get; init; } = default!;
@@ -16,12 +19,17 @@ public sealed class BackgroundStreamTask
     public Task StreamTask { get; set; } = default!;
     public bool IsDetached { get; set; }
     public bool IsCompleted { get; set; }
+    public bool GenerateTitleOnCompletion { get; init; }
+    public bool CompletedSuccessfully { get; set; }
 
     public string? SessionId { get; init; }
     public string? ApiUrl { get; set; }
     public int ReceivedChunkCount { get; set; }
     public int MissedStatusPolls { get; set; }
     internal CancellationTokenSource? PollCts { get; set; }
+
+    public bool TryBeginTitleGeneration() =>
+        Interlocked.Exchange(ref _titleGenerationStarted, 1) == 0;
 }
 
 public sealed class BackgroundStreamCompletedEventArgs : EventArgs

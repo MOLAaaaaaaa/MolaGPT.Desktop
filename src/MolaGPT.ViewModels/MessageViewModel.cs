@@ -70,6 +70,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [ObservableProperty] private IReadOnlyList<SourceReference>? _sources;
     [ObservableProperty] private IReadOnlyList<AttachmentChip>? _attachments;
     [ObservableProperty] private string? _contentPartsJson;
+    [ObservableProperty] private string? _openAiWireHistoryJson;
     [ObservableProperty] private IReadOnlyList<MessageAttempt>? _retryAttempts;
     [ObservableProperty] private int _retryCurrentIndex;
     [ObservableProperty] private bool _isLatestAssistant;
@@ -331,10 +332,11 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     {
         var attempts = RetryAttempts?.ToList() ?? new List<MessageAttempt>();
         if (attempts.Count == 0)
-            attempts.Add(new MessageAttempt(Content, ModelLabel, Usage, Sources));
+            attempts.Add(new MessageAttempt(Content, ModelLabel, Usage, Sources, OpenAiWireHistoryJson));
 
         Content = string.Empty;
         Thinking = null;
+        OpenAiWireHistoryJson = null;
         ThinkingSegments.Clear();
         ToolCalls.Clear();
         DisplayBlocks.Clear();
@@ -350,7 +352,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public void CommitRetryAttempt()
     {
         var attempts = RetryAttempts?.ToList() ?? new List<MessageAttempt>();
-        attempts.Add(new MessageAttempt(Content, ModelLabel, Usage, Sources));
+        attempts.Add(new MessageAttempt(Content, ModelLabel, Usage, Sources, OpenAiWireHistoryJson));
         RetryAttempts = attempts;
         RetryCurrentIndex = attempts.Count - 1;
     }
@@ -382,6 +384,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         ModelLabel = attempt.ModelLabel;
         Usage = attempt.Usage;
         Sources = attempt.Sources;
+        OpenAiWireHistoryJson = attempt.OpenAiWireHistoryJson;
         RetryCurrentIndex = index;
     }
 
@@ -711,7 +714,12 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     }
 }
 
-public sealed record MessageAttempt(string Content, string? ModelLabel, Usage? Usage, IReadOnlyList<SourceReference>? Sources);
+public sealed record MessageAttempt(
+    string Content,
+    string? ModelLabel,
+    Usage? Usage,
+    IReadOnlyList<SourceReference>? Sources,
+    string? OpenAiWireHistoryJson = null);
 /// <summary>
 /// Lightweight representation of a sent attachment, kept on the message
 /// view-model after the original <see cref="MolaGPT.Core.Models.Attachment"/>

@@ -39,8 +39,6 @@ public sealed partial class OpenAICompatibleProvider
     /// BYOK entries typed "openai-response" set this to <see cref="OpenAiWireApi.Responses"/>.</summary>
     public OpenAiWireApi WireApi { get; init; } = OpenAiWireApi.ChatCompletions;
 
-    private const int MaxResponsesToolTurns = 64;
-
     private async IAsyncEnumerable<ChatChunk> StreamResponsesAsync(
         ChatRequest request,
         [EnumeratorCancellation] CancellationToken ct)
@@ -70,53 +68,82 @@ public sealed partial class OpenAICompatibleProvider
         foreach (var m in request.Messages)
         {
             if (m.Role == ChatMessage.RoleSystem) continue;
+            if (m.Role == ChatMessage.RoleAssistant
+                && OpenAiWireHistory.TryRead(
+                    m.OpenAiWireHistoryJson,
+                    OpenAiWireApi.Responses,
+                    Id,
+                    request.ModelId,
+                    out var preservedItems))
+            {
+                inputItems.AddRange(preservedItems.Cast<object>());
+                continue;
+            }
             inputItems.Add(ToResponsesInputItem(m, replaceImagesWithText, ref imageOrdinal));
         }
+        var turnInputItems = new List<object>();
 
-        // Non-streaming tool rounds until the model stops calling tools, then a
-        // streaming final turn. This mirrors the Mobile path. NOTE: when tools are
-        // enabled, the final (no-tool-call) turn is generated once non-streamed and
-        // discarded, then re-streamed — a known cost trade-off; a future optimization
-        // can parse function_call items from the stream directly.
+        // Non-streaming tool rounds until the model stops calling tools. The first
+        // no-call response is already the final answer, so surface it directly rather
+        // than discarding it and paying for a duplicate streaming request.
         if (useLocalTools)
         {
-            for (var turn = 0; turn < MaxResponsesToolTurns; turn++)
+            while (true)
             {
                 var batch = await FetchResponsesToolCallsAsync(
                     request, inputItems, instructions, responsesToolDefinitions, ct).ConfigureAwait(false);
-                if (batch is null) break;
+                if (batch is null)
+                    throw new InvalidOperationException("Responses API 响应缺少 output 数组。");
 
                 foreach (var preamble in batch.Preamble)
                     yield return preamble;
 
+                foreach (var outputItem in batch.OutputItems)
+                {
+                    inputItems.Add(outputItem);
+                    turnInputItems.Add(outputItem);
+                }
+
+                if (batch.Calls.Count == 0)
+                {
+                    yield return new ChatChunk(
+                        FinishReason: "stop",
+                        Usage: batch.Usage,
+                        OpenAiWireHistoryJson: OpenAiWireHistory.Serialize(
+                            OpenAiWireApi.Responses,
+                            Id,
+                            request.ModelId,
+                            turnInputItems));
+                    yield break;
+                }
+
                 foreach (var call in batch.Calls)
                 {
                     var name = string.IsNullOrWhiteSpace(call.Name) ? "unknown" : call.Name;
-                    inputItems.Add(new Dictionary<string, object?>
-                    {
-                        ["type"] = "function_call",
-                        ["call_id"] = call.Id,
-                        ["name"] = name,
-                        ["arguments"] = call.Arguments.ToString()
-                    });
-
                     yield return new ChatChunk(Tool: BuildToolDelta(call, localToolOptions, "running"));
                     var result = await ExecuteToolAsync(
                         name, call.Arguments.ToString(), toolContext, localToolOptions, ct).ConfigureAwait(false);
                     yield return new ChatChunk(Tool: BuildToolDelta(
                         call, localToolOptions, IsToolError(result) ? "error" : "completed", result));
 
-                    inputItems.Add(new Dictionary<string, object?>
+                    var functionOutput = new Dictionary<string, object?>
                     {
                         ["type"] = "function_call_output",
                         ["call_id"] = call.Id,
                         ["output"] = result
-                    });
+                    };
+                    inputItems.Add(functionOutput);
+                    turnInputItems.Add(functionOutput);
                 }
             }
         }
 
-        await foreach (var chunk in StreamResponsesFinalAsync(request, inputItems, instructions, ct).ConfigureAwait(false))
+        await foreach (var chunk in StreamResponsesFinalAsync(
+            request,
+            inputItems,
+            turnInputItems,
+            instructions,
+            ct).ConfigureAwait(false))
             yield return chunk;
     }
 
@@ -125,6 +152,7 @@ public sealed partial class OpenAICompatibleProvider
     private async IAsyncEnumerable<ChatChunk> StreamResponsesFinalAsync(
         ChatRequest request,
         IReadOnlyList<object> inputItems,
+        IReadOnlyList<object> precedingTurnItems,
         string? instructions,
         [EnumeratorCancellation] CancellationToken ct)
     {
@@ -148,6 +176,10 @@ public sealed partial class OpenAICompatibleProvider
         var mapper = new ResponseStreamEventMapper();
         var thinkSplitter = new InlineThinkSplitter();
         string? finishReason = null;
+        Usage? finalUsage = null;
+        string? finishRawJson = null;
+        var finalOutputItems = new List<object>();
+        var assistantText = new StringBuilder();
 
         await foreach (var ev in SseStreamReader.ReadAsync(stream, ct))
         {
@@ -162,14 +194,22 @@ public sealed partial class OpenAICompatibleProvider
                 var root = doc.RootElement;
                 if (ChatApiErrorHelper.TryExtractStreamingError(root, out var streamError))
                     throw new InvalidOperationException(streamError);
+                CollectResponsesOutputItems(root, finalOutputItems);
 
                 if (mapper.TryMapControl(root, out var controlFinish, out var usage, out var controlError))
                 {
                     if (!string.IsNullOrEmpty(controlError))
                         throw new InvalidOperationException(controlError);
-                    if (!string.IsNullOrEmpty(controlFinish)) finishReason = controlFinish;
-                    if (!string.IsNullOrEmpty(controlFinish) || usage is not null)
-                        chunk = new ChatChunk(FinishReason: controlFinish, Usage: usage, RawJson: ev.Data);
+                    if (!string.IsNullOrEmpty(controlFinish))
+                    {
+                        finishReason = controlFinish;
+                        finishRawJson = ev.Data;
+                    }
+                    if (usage is not null)
+                    {
+                        finalUsage = usage;
+                        chunk = new ChatChunk(Usage: usage, RawJson: ev.Data);
+                    }
                 }
                 else if (mapper.TryMap(root, out var text, out var thinking))
                 {
@@ -180,6 +220,7 @@ public sealed partial class OpenAICompatibleProvider
                         if (!string.IsNullOrEmpty(split.Thinking))
                             thinking = string.IsNullOrEmpty(thinking) ? split.Thinking : thinking + split.Thinking;
                     }
+                    if (!string.IsNullOrEmpty(text)) assistantText.Append(text);
                     chunk = string.IsNullOrEmpty(text) && string.IsNullOrEmpty(thinking)
                         ? null
                         : new ChatChunk(DeltaText: text, DeltaThinking: thinking, RawJson: ev.Data);
@@ -193,18 +234,86 @@ public sealed partial class OpenAICompatibleProvider
         }
 
         var tail = thinkSplitter.Flush();
+        if (!string.IsNullOrEmpty(tail.Visible)) assistantText.Append(tail.Visible);
         if (!string.IsNullOrEmpty(tail.Visible) || !string.IsNullOrEmpty(tail.Thinking))
             yield return new ChatChunk(
                 DeltaText: string.IsNullOrEmpty(tail.Visible) ? null : tail.Visible,
                 DeltaThinking: string.IsNullOrEmpty(tail.Thinking) ? null : tail.Thinking);
 
-        // EOF without response.completed (e.g. a proxy that dropped it) still finalizes.
-        if (finishReason is null)
-            yield return new ChatChunk(FinishReason: "stop");
+        if (!finalOutputItems.Any(IsResponsesMessageItem) && assistantText.Length > 0)
+            finalOutputItems.Add(BuildSyntheticResponsesMessage(assistantText.ToString()));
+
+        var turnItems = new List<object>(precedingTurnItems.Count + finalOutputItems.Count);
+        turnItems.AddRange(precedingTurnItems);
+        turnItems.AddRange(finalOutputItems);
+
+        // Defer the terminal chunk until every output item and inline-thinking tail
+        // has been captured. Callers stop enumerating as soon as FinishReason arrives.
+        yield return new ChatChunk(
+            FinishReason: finishReason ?? "stop",
+            Usage: finalUsage,
+            RawJson: finishRawJson,
+            OpenAiWireHistoryJson: OpenAiWireHistory.Serialize(
+                OpenAiWireApi.Responses,
+                Id,
+                request.ModelId,
+                turnItems));
     }
 
-    /// <summary>Non-streaming tool round: returns the model's tool calls plus any
-    /// assistant preamble text/reasoning, or null when the model made no tool calls.</summary>
+    private static void CollectResponsesOutputItems(JsonElement root, List<object> outputItems)
+    {
+        var type = ReadString(root, "type");
+        if (string.Equals(type, "response.output_item.done", StringComparison.Ordinal)
+            && root.TryGetProperty("item", out var item)
+            && item.ValueKind == JsonValueKind.Object)
+        {
+            outputItems.Add(item.Clone());
+            return;
+        }
+
+        if (type is not ("response.completed" or "response.incomplete")) return;
+        if (!root.TryGetProperty("response", out var response)
+            || response.ValueKind != JsonValueKind.Object
+            || !response.TryGetProperty("output", out var output)
+            || output.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        // The terminal response.output is authoritative and avoids duplicates when
+        // output_item.done events were also present. Some compatible proxies send
+        // an empty terminal array, so retain already completed items in that case.
+        var authoritative = output.EnumerateArray()
+            .Where(item => item.ValueKind == JsonValueKind.Object)
+            .Select(item => (object)item.Clone())
+            .ToArray();
+        if (authoritative.Length == 0 && outputItems.Count > 0) return;
+        outputItems.Clear();
+        outputItems.AddRange(authoritative);
+    }
+
+    private static bool IsResponsesMessageItem(object item) =>
+        item is JsonElement element
+        && element.ValueKind == JsonValueKind.Object
+        && string.Equals(ReadString(element, "type"), "message", StringComparison.Ordinal);
+
+    private static object BuildSyntheticResponsesMessage(string text) =>
+        new Dictionary<string, object?>
+        {
+            ["type"] = "message",
+            ["role"] = ChatMessage.RoleAssistant,
+            ["content"] = new object[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "output_text",
+                    ["text"] = text
+                }
+            }
+        };
+
+    /// <summary>Non-streaming tool round: returns the raw output items, tool calls,
+    /// assistant preamble text/reasoning, and usage reported by the response.</summary>
     private async Task<ResponsesToolCallBatch?> FetchResponsesToolCallsAsync(
         ChatRequest request,
         IReadOnlyList<object> inputItems,
@@ -233,6 +342,10 @@ public sealed partial class OpenAICompatibleProvider
         if (!root.TryGetProperty("output", out var output) || output.ValueKind != JsonValueKind.Array)
             return null;
 
+        var outputItems = output.EnumerateArray()
+            .Where(item => item.ValueKind == JsonValueKind.Object)
+            .Select(item => (object)item.Clone())
+            .ToArray();
         var calls = new List<PendingOpenAiToolCall>();
         var messageText = new StringBuilder();
         var reasoningText = new StringBuilder();
@@ -272,16 +385,35 @@ public sealed partial class OpenAICompatibleProvider
             }
         }
 
-        if (calls.Count == 0)
-            return null;
-
         var preamble = new List<ChatChunk>(2);
         if (reasoningText.Length > 0)
             preamble.Add(new ChatChunk(DeltaThinking: reasoningText.ToString()));
         if (messageText.Length > 0)
             preamble.Add(new ChatChunk(DeltaText: messageText.ToString()));
 
-        return new ResponsesToolCallBatch(preamble, calls);
+        return new ResponsesToolCallBatch(
+            preamble,
+            calls,
+            outputItems,
+            ParseResponsesUsage(root));
+    }
+
+    private static Usage? ParseResponsesUsage(JsonElement root)
+    {
+        if (!root.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
+            return null;
+        var input = usage.TryGetProperty("input_tokens", out var inputNode) && inputNode.ValueKind == JsonValueKind.Number
+            ? inputNode.GetInt32()
+            : (int?)null;
+        var output = usage.TryGetProperty("output_tokens", out var outputNode) && outputNode.ValueKind == JsonValueKind.Number
+            ? outputNode.GetInt32()
+            : (int?)null;
+        var total = usage.TryGetProperty("total_tokens", out var totalNode) && totalNode.ValueKind == JsonValueKind.Number
+            ? totalNode.GetInt32()
+            : (int?)null;
+        return input is null && output is null && total is null
+            ? null
+            : new Usage(input, output, total);
     }
 
     private Dictionary<string, object?> BuildResponsesRequestBody(
@@ -423,7 +555,9 @@ public sealed partial class OpenAICompatibleProvider
 
     private sealed record ResponsesToolCallBatch(
         IReadOnlyList<ChatChunk> Preamble,
-        IReadOnlyList<PendingOpenAiToolCall> Calls);
+        IReadOnlyList<PendingOpenAiToolCall> Calls,
+        IReadOnlyList<object> OutputItems,
+        Usage? Usage);
 }
 
 /// <summary>OpenAI-protocol wire format for <see cref="OpenAICompatibleProvider"/>.</summary>

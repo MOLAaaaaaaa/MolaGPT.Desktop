@@ -16,7 +16,8 @@ public sealed record ChatChunk(
     IReadOnlyList<SourceReference>? Sources = null,
     PendingStatusDelta? Pending = null,
     ToolCallDelta? Tool = null,
-    string? RawJson = null);
+    string? RawJson = null,
+    string? OpenAiWireHistoryJson = null);
 
 public sealed record PendingStatusDelta(
     string Label,

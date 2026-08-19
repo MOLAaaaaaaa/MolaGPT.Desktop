@@ -182,6 +182,24 @@ public sealed partial class ChatViewModel : ObservableObject
     private readonly SettingsRepository? _settingsRepo;
     private int _messageLoadVersion;
 
+    /// <summary>How many of the newest messages a conversation opens with —
+    /// enough to overfill a maximized viewport so the user lands on the latest
+    /// reply rather than a half-empty screen.</summary>
+    private const int TailBatch = 15;
+
+    /// <summary>
+    /// The rest of the conversation: read from SQLite but deliberately not
+    /// materialized into <see cref="Messages"/>. Kept in chronological order;
+    /// the view pulls from the tail of this list as the user scrolls up
+    /// (see <see cref="LoadOlderMessages"/>).
+    /// </summary>
+    private readonly List<PreparedMessage> _pendingOlderMessages = [];
+
+    /// <summary>True while part of this conversation's history is still parked
+    /// in <see cref="_pendingOlderMessages"/>. Drives the view's scroll-up
+    /// paging.</summary>
+    public bool HasOlderMessages => _pendingOlderMessages.Count > 0;
+
     /// <summary>
     /// Raised whenever a conversation row was created or its title / updated_at
     /// moved. <see cref="ConversationListViewModel"/> subscribes so the sidebar
@@ -420,6 +438,7 @@ public sealed partial class ChatViewModel : ObservableObject
         _messageLoadVersion++;
         foreach (var existing in Messages) existing.Dispose();
         Messages.Clear();
+        _pendingOlderMessages.Clear();
         ConversationId = null;
         ConversationTitle = "新对话";
         ConversationSystemPrompt = null;
@@ -466,6 +485,7 @@ public sealed partial class ChatViewModel : ObservableObject
             // before clearing the collection.
             foreach (var existing in Messages) existing.Dispose();
             Messages.Clear();
+            _pendingOlderMessages.Clear();
 
             ConversationRow? conversationRow = null;
             if (_messageRepo is not null)
@@ -483,16 +503,27 @@ public sealed partial class ChatViewModel : ObservableObject
                 conversationRow = snapshot.conversation;
                 var prepared = snapshot.messages;
 
-                // First batch: enough to fill the visible scroll area (~10 items);
-                // remaining batches are queued back to the dispatcher so input
-                // and animation get chances to breathe while they trickle in.
-                const int firstBatch = 10;
-                const int batchSize = 8;
-                int taken = loadAllMessagesImmediately ? prepared.Count : Math.Min(firstBatch, prepared.Count);
-                for (int i = 0; i < taken; i++) Messages.Add(CreateMessageViewModel(prepared[i]));
-
-                if (taken < prepared.Count)
-                    EnqueueRemainingMessages(prepared, taken, batchSize, loadVersion);
+                // Open at the END of the conversation. The newest messages are
+                // what the user clicked to see, and materializing only those
+                // keeps the cost of opening a 500-message conversation
+                // proportional to the viewport instead of to the history —
+                // every message we build here is a full markdown parse and
+                // FlowDocument, on the UI thread. The rest waits in
+                // _pendingOlderMessages until the user scrolls up.
+                if (loadAllMessagesImmediately)
+                {
+                    foreach (var message in prepared)
+                        Messages.Add(CreateMessageViewModel(message));
+                }
+                else
+                {
+                    var tailStart = Math.Max(0, prepared.Count - TailBatch);
+                    for (int i = tailStart; i < prepared.Count; i++)
+                        Messages.Add(CreateMessageViewModel(prepared[i]));
+                    if (tailStart > 0)
+                        _pendingOlderMessages.AddRange(prepared.GetRange(0, tailStart));
+                }
+                OnPropertyChanged(nameof(HasOlderMessages));
                 UpdateLatestAssistantFlags();
             }
 
@@ -544,6 +575,7 @@ public sealed partial class ChatViewModel : ObservableObject
             IReadOnlyList<MessageAttempt>? retryAttempts = null;
             IReadOnlyList<ToolCallDelta>? toolCalls = null;
             IReadOnlyList<ThinkingSegmentDelta>? thinkingSegments = null;
+            string? openAiWireHistoryJson = null;
             var retryCurrent = 0;
             if (!string.IsNullOrEmpty(row.Meta))
             {
@@ -564,6 +596,7 @@ public sealed partial class ChatViewModel : ObservableObject
                     sources = ParseSources(doc.RootElement);
                     attachments = ParseAttachments(doc.RootElement);
                     contentPartsJson = ParseContentPartsJson(doc.RootElement);
+                    openAiWireHistoryJson = ParseJsonObjectProperty(doc.RootElement, "openai_wire_history");
                     (retryAttempts, retryCurrent) = ParseRetry(doc.RootElement);
                     toolCalls = ParseToolCalls(doc.RootElement);
                     thinkingSegments = ParseThinkingSegments(doc.RootElement);
@@ -608,7 +641,8 @@ public sealed partial class ChatViewModel : ObservableObject
                 retryAttempts,
                 retryCurrent,
                 toolCalls,
-                thinkingSegments));
+                thinkingSegments,
+                openAiWireHistoryJson));
         }
 
         return prepared;
@@ -625,6 +659,7 @@ public sealed partial class ChatViewModel : ObservableObject
             Sources = prepared.Sources,
             Attachments = prepared.Attachments,
             ContentPartsJson = prepared.ContentPartsJson,
+            OpenAiWireHistoryJson = prepared.OpenAiWireHistoryJson,
             RetryAttempts = prepared.RetryAttempts,
             RetryCurrentIndex = prepared.RetryCurrentIndex
         };
@@ -660,40 +695,35 @@ public sealed partial class ChatViewModel : ObservableObject
         IReadOnlyList<MessageAttempt>? RetryAttempts,
         int RetryCurrentIndex,
         IReadOnlyList<ToolCallDelta>? ToolCalls,
-        IReadOnlyList<ThinkingSegmentDelta>? ThinkingSegments);
+        IReadOnlyList<ThinkingSegmentDelta>? ThinkingSegments,
+        string? OpenAiWireHistoryJson);
 
     /// <summary>
-    /// Trickle remaining message VMs into the ObservableCollection. We use
-    /// SynchronizationContext (UI-agnostic) so this VM stays in the
-    /// net8.0 ViewModels project; on WPF the captured context is the
-    /// dispatcher and Post() runs at Normal priority — fast enough to feel
-    /// instant but not so fast it monopolizes the UI thread.
+    /// Materialize up to <paramref name="count"/> more of the history parked by
+    /// <see cref="LoadConversationAsync"/>, prepending it to <see cref="Messages"/>
+    /// in chronological order. Returns how many messages were actually inserted
+    /// (0 once the whole conversation is loaded).
     /// </summary>
-    private void EnqueueRemainingMessages(IReadOnlyList<PreparedMessage> prepared, int startIndex, int batchSize, int loadVersion)
+    /// <remarks>
+    /// Callers own the scroll position. Prepending grows the scroll extent
+    /// above the viewport, so without compensation the content the user is
+    /// reading gets shoved down the screen by however tall the new messages
+    /// turn out to be.
+    /// </remarks>
+    public int LoadOlderMessages(int count)
     {
-        var ctx = SynchronizationContext.Current;
-        if (ctx is null)
-        {
-            // Fallback: no UI context (testing / headless). Add inline.
-            for (int i = startIndex; i < prepared.Count; i++) Messages.Add(CreateMessageViewModel(prepared[i]));
-            return;
-        }
-        int idx = startIndex;
-        void PostBatch()
-        {
-            if (loadVersion != _messageLoadVersion) return;
-            int end = Math.Min(idx + batchSize, prepared.Count);
-            for (; idx < end; idx++) Messages.Add(CreateMessageViewModel(prepared[idx]));
-            if (idx < prepared.Count)
-            {
-                _ = Task.Delay(1).ContinueWith(
-                    _ => ctx.Post(_ => PostBatch(), null),
-                    CancellationToken.None,
-                    TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default);
-            }
-        }
-        ctx.Post(_ => PostBatch(), null);
+        if (count <= 0 || _pendingOlderMessages.Count == 0) return 0;
+
+        // Take from the tail: _pendingOlderMessages is chronological, so its
+        // last entries are the ones immediately preceding Messages[0].
+        var take = Math.Min(count, _pendingOlderMessages.Count);
+        var start = _pendingOlderMessages.Count - take;
+        for (int i = 0; i < take; i++)
+            Messages.Insert(i, CreateMessageViewModel(_pendingOlderMessages[start + i]));
+        _pendingOlderMessages.RemoveRange(start, take);
+
+        OnPropertyChanged(nameof(HasOlderMessages));
+        return take;
     }
 
     public void AppendUserMessage(
@@ -869,6 +899,15 @@ public sealed partial class ChatViewModel : ObservableObject
             }
             catch (JsonException) { }
         }
+        if (!string.IsNullOrWhiteSpace(vm.OpenAiWireHistoryJson))
+        {
+            try
+            {
+                if (JsonNode.Parse(vm.OpenAiWireHistoryJson!) is JsonObject history)
+                    meta["openai_wire_history"] = history;
+            }
+            catch (JsonException) { }
+        }
         if (vm.RetryAttempts is { Count: > 1 })
         {
             meta["retry"] = new JsonObject
@@ -880,7 +919,8 @@ public sealed partial class ChatViewModel : ObservableObject
                         ["content"] = a.Content,
                         ["model_label"] = a.ModelLabel,
                         ["response_stats"] = a.Usage is null ? (JsonNode?)null : BuildUsageJson(a.Usage),
-                        ["sources"] = a.Sources is null ? (JsonNode?)null : BuildSourcesJson(a.Sources)
+                        ["sources"] = a.Sources is null ? (JsonNode?)null : BuildSourcesJson(a.Sources),
+                        ["openai_wire_history"] = ParseJsonObjectNode(a.OpenAiWireHistoryJson)
                     })
                     .Cast<JsonNode?>()
                     .ToArray())
@@ -1182,6 +1222,26 @@ public sealed partial class ChatViewModel : ObservableObject
         return node.GetRawText();
     }
 
+    private static string? ParseJsonObjectProperty(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var node) || node.ValueKind != JsonValueKind.Object)
+            return null;
+        return node.GetRawText();
+    }
+
+    private static JsonNode? ParseJsonObjectNode(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            return JsonNode.Parse(json) is JsonObject obj ? obj : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     private static Usage? ParseUsage(JsonElement root, string propertyName)
     {
         if (!root.TryGetProperty(propertyName, out var node) || node.ValueKind != JsonValueKind.Object)
@@ -1217,7 +1277,12 @@ public sealed partial class ChatViewModel : ObservableObject
             var modelLabel = item.TryGetProperty("model_label", out var modelNode) && modelNode.ValueKind == JsonValueKind.String
                 ? modelNode.GetString()
                 : null;
-            attempts.Add(new MessageAttempt(NormalizeRetryAttemptContent(content), modelLabel, ParseUsage(item, "response_stats"), ParseSources(item)));
+            attempts.Add(new MessageAttempt(
+                NormalizeRetryAttemptContent(content),
+                modelLabel,
+                ParseUsage(item, "response_stats"),
+                ParseSources(item),
+                ParseJsonObjectProperty(item, "openai_wire_history")));
         }
 
         var current = ReadInt(retry, "current") ?? Math.Max(0, attempts.Count - 1);

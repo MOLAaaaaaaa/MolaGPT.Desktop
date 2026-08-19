@@ -7,6 +7,7 @@ using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
 using MolaGPT.Storage.Repositories;
+using MolaGPT.ViewModels.Services;
 
 namespace MolaGPT.ViewModels;
 
@@ -87,6 +88,8 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string? _webSearchApiKey;
     [ObservableProperty] private int _webSearchMaxResults = 6;
     [ObservableProperty] private int _webPageMaxCharacters = 12000;
+    [ObservableProperty] private bool _autoTitleEnabled = true;
+    [ObservableProperty] private TitleProviderModelOption? _selectedTitleProviderModel;
     [ObservableProperty] private bool _visionProxyEnabled;
     [ObservableProperty] private string? _visionProxyProviderId;
     [ObservableProperty] private string? _visionProxyModelId;
@@ -132,6 +135,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public ObservableCollection<ProviderEntry> Providers { get; } = new();
     public ObservableCollection<McpServerEntry> McpServers { get; } = new();
+    public ObservableCollection<TitleProviderModelOption> TitleProviderModels { get; } = new();
     public ObservableCollection<VisionProviderModelOption> VisionProviderModels { get; } = new();
     public ObservableCollection<ImageGenerationProviderModelOption> ImageGenerationProviderModels { get; } = new();
 
@@ -139,6 +143,8 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly CredentialStore? _credentialStore;
     private readonly SettingsRepository? _settingsRepo;
     private bool _loadingSettings;
+    private string? _titleProviderId;
+    private string? _titleModelId;
 
     public SettingsViewModel() { }
 
@@ -165,6 +171,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             var customHeaders = TryDeserializeHeaders(row.CustomHeaders);
             Providers.Add(new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat, customHeaders));
         }
+        RefreshTitleProviderModels();
         RefreshVisionProviderModels();
         RefreshImageGenerationProviderModels();
     }
@@ -200,6 +207,11 @@ public sealed partial class SettingsViewModel : ObservableObject
                 WebSearchMaxResults = Math.Clamp(maxResults, 1, 10);
             if (int.TryParse(_settingsRepo.Get(WebPageMaxCharactersKey), out var maxChars))
                 WebPageMaxCharacters = Math.Clamp(maxChars, 1000, 30000);
+            AutoTitleEnabled = !bool.TryParse(
+                _settingsRepo.Get(ConversationTitleService.AutoTitleEnabledKey),
+                out var autoTitleEnabled) || autoTitleEnabled;
+            _titleProviderId = _settingsRepo.Get(ConversationTitleService.TitleProviderIdKey);
+            _titleModelId = _settingsRepo.Get(ConversationTitleService.TitleModelIdKey);
             WebSearchApiKey = _credentialStore?.LoadSecret(WebSearchSecretPrefix + WebSearchProvider);
             LoadMcpServers();
             VisionProxyEnabled = bool.TryParse(_settingsRepo.Get(VisionProxyEnabledKey), out var visionEnabled) && visionEnabled;
@@ -360,6 +372,21 @@ public sealed partial class SettingsViewModel : ObservableObject
         if (_loadingSettings || _settingsRepo is null) return;
         WebPageMaxCharacters = Math.Clamp(value, 1000, 30000);
         _settingsRepo.Set(WebPageMaxCharactersKey, WebPageMaxCharacters.ToString());
+    }
+
+    partial void OnAutoTitleEnabledChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(ConversationTitleService.AutoTitleEnabledKey, value.ToString());
+    }
+
+    partial void OnSelectedTitleProviderModelChanged(TitleProviderModelOption? value)
+    {
+        _titleProviderId = value?.ProviderId;
+        _titleModelId = value?.ModelId;
+        if (_loadingSettings) return;
+        SetOrRemove(ConversationTitleService.TitleProviderIdKey, _titleProviderId);
+        SetOrRemove(ConversationTitleService.TitleModelIdKey, _titleModelId);
     }
 
     partial void OnVisionProxyEnabledChanged(bool value)
@@ -612,6 +639,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 ? JsonSerializer.Serialize(entry.CustomHeaders)
                 : null));
         RefreshVisionProviderModels();
+        RefreshTitleProviderModels();
         RefreshImageGenerationProviderModels();
 
         if (string.Equals(entry.Purpose, "image", StringComparison.OrdinalIgnoreCase))
@@ -811,6 +839,47 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
     }
 
+    public void RefreshTitleProviderModels()
+    {
+        TitleProviderModels.Clear();
+        var followCurrent = new TitleProviderModelOption(null, null, "跟随当前对话模型");
+        TitleProviderModels.Add(followCurrent);
+
+        foreach (var provider in Providers.Where(p => p.Enabled && !IsImagePurpose(p.Purpose)))
+        {
+            foreach (var model in provider.Models)
+            {
+                TitleProviderModels.Add(new TitleProviderModelOption(
+                    provider.Id,
+                    model.Id,
+                    $"{provider.Name} / {model.DisplayName}"));
+            }
+        }
+
+        var selected = TitleProviderModels.FirstOrDefault(option =>
+            string.Equals(option.ProviderId, _titleProviderId, StringComparison.Ordinal)
+            && string.Equals(option.ModelId, _titleModelId, StringComparison.Ordinal));
+        if (selected is null
+            && (!string.IsNullOrWhiteSpace(_titleProviderId)
+                || !string.IsNullOrWhiteSpace(_titleModelId)))
+        {
+            _settingsRepo?.Remove(ConversationTitleService.TitleProviderIdKey);
+            _settingsRepo?.Remove(ConversationTitleService.TitleModelIdKey);
+        }
+        selected ??= followCurrent;
+
+        var wasLoading = _loadingSettings;
+        _loadingSettings = true;
+        try
+        {
+            SelectedTitleProviderModel = selected;
+        }
+        finally
+        {
+            _loadingSettings = wasLoading;
+        }
+    }
+
     public void RefreshImageGenerationProviderModels()
     {
         ImageGenerationProviderModels.Clear();
@@ -885,6 +954,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _repo.Delete(id);
         var existing = Providers.FirstOrDefault(p => p.Id == id);
         if (existing is not null) Providers.Remove(existing);
+        RefreshTitleProviderModels();
         RefreshImageGenerationProviderModels();
 
         if (string.Equals(ImageGenerationProviderId, id, StringComparison.Ordinal))
@@ -1088,6 +1158,11 @@ public sealed record McpServerEntry(
 public sealed record VisionProviderModelOption(
     string ProviderId,
     string ModelId,
+    string Label);
+
+public sealed record TitleProviderModelOption(
+    string? ProviderId,
+    string? ModelId,
     string Label);
 
 public sealed record ImageGenerationProviderModelOption(

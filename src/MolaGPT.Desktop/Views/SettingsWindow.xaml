@@ -1311,6 +1311,71 @@
                             </StackPanel>
                         </ScrollViewer>
                     </TabItem>
+                    <TabItem Header="会话标题">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="32,26" MaxWidth="640" HorizontalAlignment="Left">
+                                <TextBlock Style="{StaticResource SettingsPageTitle}" Text="会话标题" />
+                                <TextBlock Style="{StaticResource SettingsPageSubtitle}"
+                                           Text="为本地 BYOK 与 Work 对话自动生成简短标题。" />
+
+                                <Border Style="{StaticResource SettingsCard}">
+                                    <Grid Margin="16,13">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                                            <TextBlock Style="{StaticResource SettingsRowTitle}" Text="自动生成标题" />
+                                            <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                       Text="首轮回答成功后基于对话内容自动生成一个简短的对话标题。" />
+                                        </StackPanel>
+                                        <ToggleButton Grid.Column="1"
+                                                      x:Name="AutoTitleEnabledToggle"
+                                                      Style="{StaticResource SettingsToggle}"
+                                                      IsChecked="{Binding AutoTitleEnabled, Mode=TwoWay}" />
+                                    </Grid>
+                                </Border>
+
+                                <StackPanel IsEnabled="{Binding IsChecked, ElementName=AutoTitleEnabledToggle}">
+                                    <TextBlock Style="{StaticResource SettingsSectionLabel}" Text="标题生成使用模型" />
+                                    <Border Style="{StaticResource SettingsCard}">
+                                        <StackPanel Margin="16,14">
+                                            <TextBlock Style="{StaticResource SettingsFieldLabel}" Text="模型" />
+                                            <Grid Margin="0,0,0,12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="12" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <Border Grid.Column="0"
+                                                        Background="{DynamicResource Brush.Bg.Secondary}"
+                                                        BorderBrush="{DynamicResource Brush.Border}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="{DynamicResource Radius.Sm}"
+                                                        Padding="12,2">
+                                                    <ComboBox Style="{StaticResource SettingsComboBox}"
+                                                              Background="Transparent"
+                                                              BorderThickness="0"
+                                                              Padding="0,6"
+                                                              ItemsSource="{Binding TitleProviderModels}"
+                                                              DisplayMemberPath="Label"
+                                                              SelectedItem="{Binding SelectedTitleProviderModel, Mode=TwoWay}" />
+                                                </Border>
+                                                <Button Grid.Column="2"
+                                                        Style="{StaticResource OutlineButton}"
+                                                        Content="模型管理..."
+                                                        Width="112"
+                                                        Click="ManageTitleModelsClick" />
+                                            </Grid>
+                                            <TextBlock Style="{StaticResource SettingsRowHint}"
+                                                       TextWrapping="Wrap"
+                                                       Text="默认使用当前对话所使用的模型，每个新对话最多额外请求一次。" />
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
                     <TabItem Header="图像生成">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="32,26" MaxWidth="640" HorizontalAlignment="Left">
