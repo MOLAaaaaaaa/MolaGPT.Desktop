@@ -78,6 +78,7 @@
                                            Text="&#xE99A;"
                                            FontFamily="{DynamicResource Font.Icon}"
                                            FontSize="22"
+                                           Foreground="{DynamicResource Brush.Text.Primary}"
                                            VerticalAlignment="Center"
                                            Margin="0,0,12,0" />
                                 <StackPanel Grid.Column="1" VerticalAlignment="Center">

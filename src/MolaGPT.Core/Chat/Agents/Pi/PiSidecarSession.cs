@@ -120,9 +120,20 @@ public sealed class PiSidecarSession : IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// JSONL commands go over a UTF-8 (no BOM) stdin pipe, so there is no reason to
+    /// escape non-ASCII: the default encoder turns every Chinese character into
+    /// <c>\uXXXX</c> and inflates a prompt carrying attachment text roughly sixfold,
+    /// which is what pushes it past the pipe buffer in the first place.
+    /// </summary>
+    private static readonly JsonSerializerOptions CommandJsonOptions = new()
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
     private void Send(object command)
     {
-        var json = JsonSerializer.Serialize(command);
+        var json = JsonSerializer.Serialize(command, CommandJsonOptions);
         lock (_stdinLock)
         {
             _stdin!.WriteLine(json);
@@ -145,19 +156,29 @@ public sealed class PiSidecarSession : IAsyncDisposable
         await _turnGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            EnsureStarted();
-            if (!_modelSet)
+            // Spawn + prompt run off the caller's thread on purpose. Writing to the
+            // sidecar's stdin is a synchronous pipe write, and a prompt carrying an
+            // attachment's extracted text easily exceeds the pipe buffer — the write
+            // then blocks until Node drains it, which on a cold sidecar means
+            // waiting out the whole ~1.3s Node boot. Callers reach this from an
+            // `await foreach`, whose iterator body runs on the caller's thread until
+            // the first real suspension, so doing this inline froze the UI.
+            await Task.Run(() =>
             {
-                Send(new { type = "set_model", provider = PiWorkProvider.SidecarProviderId, modelId = _launch.Model });
-                _modelSet = true;
-            }
-            // Images ride on the prompt command rather than being flattened into
-            // text: dropping them would silently cost vision, which the direct
-            // provider supports.
-            if (images.Count > 0)
-                Send(new { type = "prompt", message = userText, images });
-            else
-                Send(new { type = "prompt", message = userText });
+                EnsureStarted();
+                if (!_modelSet)
+                {
+                    Send(new { type = "set_model", provider = PiWorkProvider.SidecarProviderId, modelId = _launch.Model });
+                    _modelSet = true;
+                }
+                // Images ride on the prompt command rather than being flattened into
+                // text: dropping them would silently cost vision, which the direct
+                // provider supports.
+                if (images.Count > 0)
+                    Send(new { type = "prompt", message = userText, images });
+                else
+                    Send(new { type = "prompt", message = userText });
+            }, ct).ConfigureAwait(false);
 
             var reader = _stdout!;
             while (!ct.IsCancellationRequested)

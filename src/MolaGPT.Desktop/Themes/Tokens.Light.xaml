@@ -38,6 +38,13 @@
     <Color x:Key="Color.Error">#FFC62828</Color>
     <Color x:Key="Color.Info">#FF1976D2</Color>
 
+    <Color x:Key="Color.Danger.Surface">#FFFDECEC</Color>
+    <Color x:Key="Color.Danger.Border">#FFE8B0B0</Color>
+    <Color x:Key="Color.Danger.Foreground">#FF8A1C1C</Color>
+    <Color x:Key="Color.Warning.Surface">#FFFFF6E5</Color>
+    <Color x:Key="Color.Warning.Border">#FFE8CE9A</Color>
+    <Color x:Key="Color.Warning.Foreground">#FF7A510C</Color>
+
     <!-- Shadow color tokens kept for future non-effect treatments. -->
     <Color x:Key="Color.Shadow.Soft">#0A000000</Color>
     <Color x:Key="Color.Shadow.Medium">#1F000000</Color>
@@ -68,6 +75,12 @@
     <SolidColorBrush x:Key="Brush.Warning" Color="{StaticResource Color.Warning}" />
     <SolidColorBrush x:Key="Brush.Error" Color="{StaticResource Color.Error}" />
     <SolidColorBrush x:Key="Brush.Info" Color="{StaticResource Color.Info}" />
+    <SolidColorBrush x:Key="Brush.Danger.Surface" Color="{StaticResource Color.Danger.Surface}" />
+    <SolidColorBrush x:Key="Brush.Danger.Border" Color="{StaticResource Color.Danger.Border}" />
+    <SolidColorBrush x:Key="Brush.Danger.Foreground" Color="{StaticResource Color.Danger.Foreground}" />
+    <SolidColorBrush x:Key="Brush.Warning.Surface" Color="{StaticResource Color.Warning.Surface}" />
+    <SolidColorBrush x:Key="Brush.Warning.Border" Color="{StaticResource Color.Warning.Border}" />
+    <SolidColorBrush x:Key="Brush.Warning.Foreground" Color="{StaticResource Color.Warning.Foreground}" />
 
     <SolidColorBrush x:Key="Brush.Workbench.SkeletonBadge" Color="#CCFFFFFF" />
     <SolidColorBrush x:Key="Brush.Workbench.SkeletonHint" Color="#F2FFFFFF" />

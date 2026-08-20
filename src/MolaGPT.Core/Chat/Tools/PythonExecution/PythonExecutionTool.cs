@@ -40,13 +40,16 @@ public sealed class PythonExecutionTool
 
     private readonly IPythonExecutionApprovalService? _approval;
     private readonly IPythonSessionAllowList? _sessionAllowList;
+    private readonly IToolGrantStore? _grants;
 
     public PythonExecutionTool(
         IPythonExecutionApprovalService? approval = null,
-        IPythonSessionAllowList? sessionAllowList = null)
+        IPythonSessionAllowList? sessionAllowList = null,
+        IToolGrantStore? grants = null)
     {
         _approval = approval;
         _sessionAllowList = sessionAllowList;
+        _grants = grants;
     }
 
     public static object BuildOpenAiToolDefinition(PythonExecutionOptions options)
@@ -123,9 +126,12 @@ public sealed class PythonExecutionTool
         // Fold any session-scoped allow rules (granted earlier in this run via
         // the approval dialog) into the options BEFORE analysis, so the analyzer
         // sees the allowed modules/paths as known-safe and auto-approves them.
-        var effectiveOptions = MergeSessionAllowList(options, _sessionAllowList);
+        var effectiveOptions = MergeSessionAllowList(options, _sessionAllowList, _grants);
 
-        var risk = PythonExecutionRiskAnalyzer.Analyze(code!, effectiveOptions);
+        // The analyzer needs the working directory to tell "writes a chart next to
+        // its own script" from "writes into the user's Documents folder".
+        var workspaceRoot = ResolveSessionDirectory(conversationId);
+        var risk = PythonExecutionRiskAnalyzer.Analyze(code!, effectiveOptions, workspaceRoot);
         var permission = await ResolvePermissionAsync(code!, description, effectiveOptions, risk, ct).ConfigureAwait(false);
         if (!permission.Approved)
         {
@@ -139,7 +145,7 @@ public sealed class PythonExecutionTool
         // and cannot ask for unbounded.
         var timeout = TimeSpan.FromSeconds(Math.Clamp(requestedTimeout ?? options.TimeoutSeconds, 5, 300));
         var maxOutput = Math.Clamp(options.MaxOutputCharacters, 2000, 100000);
-        var sessionDir = ResolveSessionDirectory(conversationId);
+        var sessionDir = workspaceRoot;
 
         try
         {
@@ -277,22 +283,33 @@ public sealed class PythonExecutionTool
             : new PermissionDecision(false, "用户拒绝了本次执行");
     }
 
+    /// <summary>
+    /// Folds the rules granted outside the settings page into the options the
+    /// analyzer sees: imports allowed for this session, and folders the user chose
+    /// to remember from the approval dialog.
+    ///
+    /// Doing it here rather than teaching the analyzer about grants keeps one
+    /// notion of "allowed prefix" — the analyzer already treats those as
+    /// unremarkable, so a remembered folder simply stops producing prompts.
+    /// </summary>
     private static PythonExecutionOptions MergeSessionAllowList(
         PythonExecutionOptions options,
-        IPythonSessionAllowList? sessionAllowList)
+        IPythonSessionAllowList? sessionAllowList,
+        IToolGrantStore? grants)
     {
-        if (sessionAllowList is null)
-            return options;
+        var imports = sessionAllowList?.Imports ?? Array.Empty<string>();
 
-        var imports = sessionAllowList.Imports;
-        var pathPrefixes = sessionAllowList.PathPrefixes;
-        if (imports.Count == 0 && pathPrefixes.Count == 0)
+        // Only read-write grants count. A folder the user let read_file look at is
+        // not a folder they let Python write to.
+        var granted = grants?.WritablePathPrefixes ?? Array.Empty<string>();
+
+        if (imports.Count == 0 && granted.Count == 0)
             return options;
 
         return options with
         {
             AllowedImports = AppendList(options.AllowedImports, imports),
-            AllowedPathPrefixes = AppendList(options.AllowedPathPrefixes, pathPrefixes)
+            AllowedPathPrefixes = AppendList(options.AllowedPathPrefixes, granted)
         };
     }
 

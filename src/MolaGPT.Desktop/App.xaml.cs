@@ -18,6 +18,7 @@ using Microsoft.Extensions.Hosting;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents;
+using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Agents.Relay;
 using MolaGPT.Core.Chat.Providers;
@@ -353,6 +354,10 @@ public partial class App : Application
         // the one moment no sidecar can hold a session file open.
         _ = Task.Run(SweepOrphanedPiSessions);
 
+        // Same idea for attachment blobs: conversation deletion is a soft delete
+        // with an undo window, so the store can only be reclaimed later.
+        _ = Task.Run(SweepOrphanedAttachments);
+
         cloudSync.StartPeriodicSync();
         _ = RunStartupCloudSyncAfterFirstPaintAsync(cloudSync, conversationListVm);
 
@@ -687,6 +692,18 @@ public partial class App : Application
         services.AddSingleton(sp => new VisionProxyTool(
             sp.GetRequiredService<ProviderRegistry>(),
             () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient)));
+        // The normaliser is injected because decoding an image needs WPF's
+        // imaging stack, which Core cannot reference. Same pass user uploads get:
+        // EXIF orientation, 2000px cap, JPEG fallback when the bytes are too big.
+        services.AddSingleton(sp => new ImageAnalysisTool(
+            sp.GetRequiredService<ProviderRegistry>(),
+            (bytes, mime, name) =>
+            {
+                var processed = ImageAttachmentProcessor.Process(bytes, mime, name);
+                return processed.Error is not null
+                    ? NormalizedImage.Rejected(processed.Error)
+                    : new NormalizedImage(processed.Bytes, processed.MimeType);
+            }));
         services.AddSingleton(sp => new ImageGenerationTool(
             () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(ByokHttpClient),
             sp.GetRequiredService<AttachmentStore>().Save));
@@ -848,6 +865,27 @@ public partial class App : Application
         catch (Exception ex)
         {
             DiagnosticLog.Write("pi-work", "清理 Pi 会话文件失败：" + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Drops attachment blobs no surviving message references. Everything in the
+    /// store is a copy of a file the user still has on disk, so the worst case of
+    /// an over-eager sweep is a re-attach.
+    /// </summary>
+    private void SweepOrphanedAttachments()
+    {
+        try
+        {
+            var removed = AttachmentStoreSweeper.Sweep(
+                Services.GetRequiredService<AttachmentStore>(),
+                Services.GetRequiredService<MessageRepository>());
+            if (removed > 0)
+                DiagnosticLog.Write("attachments", $"清理了 {removed} 个无引用的附件文件");
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write("attachments", "清理附件文件失败：" + ex.Message);
         }
     }
 

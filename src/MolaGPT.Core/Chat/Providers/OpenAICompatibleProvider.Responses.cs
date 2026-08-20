@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
@@ -62,25 +63,33 @@ public sealed partial class OpenAICompatibleProvider
             : Array.Empty<object>();
 
         var replaceImagesWithText = !modelSupportsVision && localToolOptions.Vision?.Enabled == true;
-        var imageOrdinal = 0;
+        var attachmentOptions = AttachmentPromptOptions.From(localToolOptions, modelSupportsTools);
         var instructions = BuildInstructions(request);
-        var inputItems = new List<object>(request.Messages.Count);
-        foreach (var m in request.Messages)
+        // Off the calling thread for the same reason as the chat-completions path:
+        // the iterator body runs on the UI thread until the first real suspension,
+        // and base64-encoding history images is not free.
+        var inputItems = await Task.Run(() =>
         {
-            if (m.Role == ChatMessage.RoleSystem) continue;
-            if (m.Role == ChatMessage.RoleAssistant
-                && OpenAiWireHistory.TryRead(
-                    m.OpenAiWireHistoryJson,
-                    OpenAiWireApi.Responses,
-                    Id,
-                    request.ModelId,
-                    out var preservedItems))
+            var imageOrdinal = 0;
+            var built = new List<object>(request.Messages.Count);
+            foreach (var m in request.Messages)
             {
-                inputItems.AddRange(preservedItems.Cast<object>());
-                continue;
+                if (m.Role == ChatMessage.RoleSystem) continue;
+                if (m.Role == ChatMessage.RoleAssistant
+                    && OpenAiWireHistory.TryRead(
+                        m.OpenAiWireHistoryJson,
+                        OpenAiWireApi.Responses,
+                        Id,
+                        request.ModelId,
+                        out var preservedItems))
+                {
+                    built.AddRange(preservedItems.Cast<object>());
+                    continue;
+                }
+                built.Add(ToResponsesInputItem(m, replaceImagesWithText, ref imageOrdinal, attachmentOptions));
             }
-            inputItems.Add(ToResponsesInputItem(m, replaceImagesWithText, ref imageOrdinal));
-        }
+            return built;
+        }, ct).ConfigureAwait(false);
         var turnInputItems = new List<object>();
 
         // Non-streaming tool rounds until the model stops calling tools. The first
@@ -465,7 +474,11 @@ public sealed partial class OpenAICompatibleProvider
 
     /// <summary>Builds one Responses <c>input</c> item. Assistant history uses
     /// <c>output_text</c>; user/system use <c>input_text</c>/<c>input_image</c>.</summary>
-    private static object ToResponsesInputItem(ChatMessage message, bool replaceImagesWithText, ref int imageOrdinal)
+    private static object ToResponsesInputItem(
+        ChatMessage message,
+        bool replaceImagesWithText,
+        ref int imageOrdinal,
+        AttachmentPromptOptions attachmentOptions)
     {
         var textType = message.Role == ChatMessage.RoleAssistant ? "output_text" : "input_text";
 
@@ -485,27 +498,40 @@ public sealed partial class OpenAICompatibleProvider
 
         foreach (var attachment in message.Attachments)
         {
-            if (attachment.Kind == AttachmentKind.Image)
-            {
-                imageOrdinal++;
-                if (replaceImagesWithText)
-                {
-                    var label = string.IsNullOrWhiteSpace(attachment.FileName)
-                        ? $"[图片#{imageOrdinal}]"
-                        : $"[图片#{imageOrdinal}: {attachment.FileName}]";
-                    parts.Add(new { type = textType, text = label });
-                    continue;
-                }
+            if (attachment.Kind != AttachmentKind.Image) continue;
 
-                var url = !string.IsNullOrWhiteSpace(attachment.RemoteUrl)
-                    ? attachment.RemoteUrl!
-                    : $"data:{attachment.MimeType};base64,{Convert.ToBase64String(attachment.Bytes)}";
-                parts.Add(new { type = "input_image", image_url = url });
+            imageOrdinal++;
+            if (attachment.IsUnavailable)
+            {
+                parts.Add(new
+                {
+                    type = textType,
+                    text = OpenAiMessageContentBuilder.UnavailableImageNote(attachment, imageOrdinal)
+                });
                 continue;
             }
 
-            parts.Add(new { type = textType, text = OpenAiMessageContentBuilder.BuildFileTextPart(attachment) });
+            if (replaceImagesWithText)
+            {
+                parts.Add(new
+                {
+                    type = textType,
+                    text = OpenAiMessageContentBuilder.ImagePlaceholder(attachment, imageOrdinal)
+                });
+                continue;
+            }
+
+            var url = !string.IsNullOrWhiteSpace(attachment.RemoteUrl)
+                ? attachment.RemoteUrl!
+                : $"data:{attachment.MimeType};base64,{Convert.ToBase64String(attachment.Bytes)}";
+            parts.Add(new { type = "input_image", image_url = url });
         }
+
+        var fileSection = AttachedFilePrompt.Build(
+            message.Attachments.Where(a => a.Kind == AttachmentKind.File).ToList(),
+            attachmentOptions);
+        if (!string.IsNullOrWhiteSpace(fileSection))
+            parts.Add(new { type = textType, text = fileSection });
 
         return new Dictionary<string, object?>
         {

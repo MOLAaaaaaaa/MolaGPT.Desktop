@@ -202,6 +202,17 @@ public static partial class LocalToolRegistry
         }
     }
 
+    /// <summary>
+    /// Where a file-tool call will land on disk, for the permission layer to judge
+    /// before the call runs. Null for tools that do not take a path.
+    /// </summary>
+    public static string? ResolveApprovalTarget(string toolName, string argumentsJson, LocalToolOptions options)
+    {
+        using var doc = ParseArgs(argumentsJson);
+        return FileToolset.ResolveApprovalTarget(
+            toolName, ReadArgString(doc?.RootElement, "path"), options.WorkspaceRoot);
+    }
+
     private static string ExecuteReadFile(string argumentsJson, LocalToolOptions options, CancellationToken ct)
     {
         using var doc = ParseArgs(argumentsJson);

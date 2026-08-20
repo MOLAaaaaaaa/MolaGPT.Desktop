@@ -76,6 +76,13 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _isLatestAssistant;
     [ObservableProperty] private bool _isPending;
     [ObservableProperty] private bool _isRoutesPending;
+
+    /// <summary>
+    /// The user stopped this turn. Persisted so the bubble still explains itself
+    /// after a reload, and so a turn that was stopped before producing anything
+    /// keeps its action bar instead of collapsing to a blank gap.
+    /// </summary>
+    [ObservableProperty] private bool _wasStopped;
     [ObservableProperty] private string _pendingLabel = "回复处理中";
     [ObservableProperty] private string? _pendingDetail;
     public ObservableCollection<ToolCallViewModel> ToolCalls { get; } = new();
@@ -118,7 +125,21 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     }
 
     public bool HasThinking => !string.IsNullOrEmpty(Thinking);
-    public bool HasActions => Role == "assistant" && !IsStreaming && !IsPending && !string.IsNullOrWhiteSpace(Content);
+
+    /// <summary>
+    /// Whether the action bar (version switcher / retry / copy / stats) shows.
+    /// Deliberately independent of whether the turn produced any text: an empty
+    /// finished turn is exactly the one that needs a retry button, and because the
+    /// version switcher lives inside this bar, hiding it on an empty attempt also
+    /// strands the user with no way back to a non-empty one.
+    /// </summary>
+    public bool HasActions => Role == "assistant" && !IsStreaming && !IsPending;
+    /// <summary>Shows the "已停止" marker. Only when the turn produced nothing —
+    /// with partial content the text itself already shows where it stopped, and a
+    /// banner would just be noise.</summary>
+    public bool ShowStoppedNotice =>
+        WasStopped && !IsStreaming && string.IsNullOrWhiteSpace(Content) && !HasToolCalls;
+
     public bool HasResponseStats => Usage is not null || !string.IsNullOrWhiteSpace(ModelLabel);
     public bool HasAttachments => Attachments is { Count: > 0 };
     public bool HasToolCalls => ToolCalls.Count > 0;
@@ -332,10 +353,11 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     {
         var attempts = RetryAttempts?.ToList() ?? new List<MessageAttempt>();
         if (attempts.Count == 0)
-            attempts.Add(new MessageAttempt(Content, ModelLabel, Usage, Sources, OpenAiWireHistoryJson));
+            attempts.Add(new MessageAttempt(Content, ModelLabel, Usage, Sources, OpenAiWireHistoryJson, WasStopped));
 
         Content = string.Empty;
         Thinking = null;
+        WasStopped = false;
         OpenAiWireHistoryJson = null;
         ThinkingSegments.Clear();
         ToolCalls.Clear();
@@ -352,7 +374,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public void CommitRetryAttempt()
     {
         var attempts = RetryAttempts?.ToList() ?? new List<MessageAttempt>();
-        attempts.Add(new MessageAttempt(Content, ModelLabel, Usage, Sources, OpenAiWireHistoryJson));
+        attempts.Add(new MessageAttempt(Content, ModelLabel, Usage, Sources, OpenAiWireHistoryJson, WasStopped));
         RetryAttempts = attempts;
         RetryCurrentIndex = attempts.Count - 1;
     }
@@ -385,6 +407,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         Usage = attempt.Usage;
         Sources = attempt.Sources;
         OpenAiWireHistoryJson = attempt.OpenAiWireHistoryJson;
+        WasStopped = attempt.WasStopped;
         RetryCurrentIndex = index;
     }
 
@@ -393,11 +416,22 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         if (_disposed) return;
         IsRoutesPending = routes;
         _pendingStartedAt = DateTimeOffset.UtcNow;
+        _explicitStatusUntil = null;
         IsPending = true;
         UpdatePendingCopy();
         _pendingTimer ??= new System.Threading.Timer(_ => PostUpdatePendingCopy(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         _pendingTimer.Change(TimeSpan.FromMilliseconds(650), TimeSpan.FromMilliseconds(650));
     }
+
+    /// <summary>
+    /// How long an explicitly set status holds before the generic rotation takes
+    /// over again. Without this the rotation timer overwrites it within 650ms, so
+    /// "上传附件" / "启动 Agent 运行时" would flash by unread; with it the phase
+    /// stays legible, and a phase that outlives the window still falls back to
+    /// reassuring copy instead of a stale label.
+    /// </summary>
+    private static readonly TimeSpan ExplicitStatusHold = TimeSpan.FromSeconds(4);
+    private DateTimeOffset? _explicitStatusUntil;
 
     public void SetPendingStatus(string label, string? detail = null, bool? routes = null)
     {
@@ -405,6 +439,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         if (routes is { } value) IsRoutesPending = value;
         PendingLabel = label;
         PendingDetail = detail;
+        _explicitStatusUntil = DateTimeOffset.UtcNow + ExplicitStatusHold;
         if (IsPending) return;
 
         _pendingStartedAt = DateTimeOffset.UtcNow;
@@ -438,6 +473,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         if (!IsPending && _pendingTimer is null) return;
         IsPending = false;
         _pendingStartedAt = null;
+        _explicitStatusUntil = null;
         _pendingTimer?.Dispose();
         _pendingTimer = null;
     }
@@ -452,7 +488,10 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     private void UpdatePendingCopy()
     {
         if (_disposed || !IsPending || _pendingStartedAt is null) return;
-        var elapsed = DateTimeOffset.UtcNow - _pendingStartedAt.Value;
+        var now = DateTimeOffset.UtcNow;
+        if (_explicitStatusUntil is { } until && now < until) return;
+        _explicitStatusUntil = null;
+        var elapsed = now - _pendingStartedAt.Value;
 
         if (IsRoutesPending)
         {
@@ -519,6 +558,11 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     }
     partial void OnIsStreamingChanged(bool value) => OnActionStateChanged();
     partial void OnIsPendingChanged(bool value) => OnActionStateChanged();
+    partial void OnWasStoppedChanged(bool value)
+    {
+        OnPropertyChanged(nameof(ShowStoppedNotice));
+        OnActionStateChanged();
+    }
     partial void OnAttachmentsChanged(IReadOnlyList<AttachmentChip>? value) => OnPropertyChanged(nameof(HasAttachments));
     partial void OnUsageChanged(Usage? value)
     {
@@ -548,6 +592,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     private void OnActionStateChanged()
     {
         OnPropertyChanged(nameof(HasActions));
+        OnPropertyChanged(nameof(ShowStoppedNotice));
     }
 
     private void RebuildDisplayBlocks()
@@ -714,12 +759,18 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     }
 }
 
+/// <summary>One saved version of an assistant turn, cycled through by the
+/// version switcher.</summary>
+/// <param name="WasStopped">Whether the user cut this version short. Travels with
+/// the attempt so switching back to it still explains why it is empty, instead of
+/// showing a blank bubble.</param>
 public sealed record MessageAttempt(
     string Content,
     string? ModelLabel,
     Usage? Usage,
     IReadOnlyList<SourceReference>? Sources,
-    string? OpenAiWireHistoryJson = null);
+    string? OpenAiWireHistoryJson = null,
+    bool WasStopped = false);
 /// <summary>
 /// Lightweight representation of a sent attachment, kept on the message
 /// view-model after the original <see cref="MolaGPT.Core.Models.Attachment"/>
@@ -737,7 +788,7 @@ public sealed record AttachmentChip(string FileName, string Label, string? Thumb
 {
     public byte[]? Bytes { get; init; }
 
-    /// <summary>Relative file name in the local AttachmentStore (BYOK images).
+    /// <summary>Relative file name in the local AttachmentStore (BYOK attachments).
     /// Null for MolaGPT-account images (which use <see cref="ThumbnailUrl"/>).</summary>
     public string? LocalName { get; init; }
 
@@ -745,16 +796,43 @@ public sealed record AttachmentChip(string FileName, string Label, string? Thumb
     /// data URL for the wire without re-sniffing.</summary>
     public string? MimeType { get; init; }
 
-    public bool IsImage =>
-        Bytes is { Length: > 0 }
-        || !string.IsNullOrEmpty(LocalName)
-        || !string.IsNullOrEmpty(ThumbnailUrl)
-        || string.Equals(Label, "图片", StringComparison.Ordinal);
+    /// <summary>Explicit kind. Null on chips persisted before this field existed,
+    /// where <see cref="IsImage"/> falls back to inference. Files carry a
+    /// LocalName too now, so the old "has a local copy ⇒ image" rule cannot be
+    /// used any more.</summary>
+    public AttachmentKind? Kind { get; init; }
+
+    /// <summary>Workspace-relative path of the BYOK file copy, so later turns
+    /// keep pointing the model at the same file instead of copying it again.</summary>
+    public string? WorkspacePath { get; init; }
+
+    /// <summary>Workspace-relative path of the extracted-text sidecar written for
+    /// documents too large to inline whole.</summary>
+    public string? ExtractedTextPath { get; init; }
+
+    /// <summary>Runtime-only: the bytes could not be loaded when building the last
+    /// request. Surfaced in the chip so the user sees the same gap the model was
+    /// told about. Not persisted — it is re-derived on every send.</summary>
+    public bool IsUnavailable { get; init; }
+
+    /// <summary>Secondary chip line. Carries the unavailable state so a lost
+    /// attachment is visible in the bubble, not only in the request.</summary>
+    public string StatusLabel => IsUnavailable ? $"{Label} · 不可用" : Label;
+
+    public bool IsImage => Kind switch
+    {
+        AttachmentKind.Image => true,
+        AttachmentKind.File => false,
+        _ => Bytes is { Length: > 0 }
+             || !string.IsNullOrEmpty(ThumbnailUrl)
+             || string.Equals(Label, "图片", StringComparison.Ordinal)
+    };
 
     public bool HasInlinePreview =>
-        Bytes is { Length: > 0 }
-        || !string.IsNullOrEmpty(LocalName)
-        || !string.IsNullOrEmpty(ThumbnailUrl);
+        IsImage
+        && (Bytes is { Length: > 0 }
+            || !string.IsNullOrEmpty(LocalName)
+            || !string.IsNullOrEmpty(ThumbnailUrl));
 }
 public sealed record ThinkingSegmentDelta(string Source, int ContentOffset, double ElapsedSeconds = 0, int? TimelineIndex = null);
 
@@ -970,7 +1048,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
         "search_web" or "web_search" => true,
         "web_fetch" or "steel_browser" => true,
         "execute_python_code" => true,
-        "view_image" => true,
+        "view_image" or "analyze_image" => true,
         "generate_image" => true,
         "read_file" => true,
         "glob_files" => true,
@@ -1129,6 +1207,9 @@ public sealed partial class ToolCallViewModel : ObservableObject
         "read_file" => "读取文件",
         "glob_files" => "查找文件",
         "grep_files" => "搜索内容",
+        "view_image" => "查看图片",
+        "analyze_image" => "图片分析",
+        "generate_image" => "生成图片",
         // Claude Code / Codex agent tools (PascalCase). Friendly labels so the
         // console cards read naturally instead of bare English tool names.
         "Read" => "读取文件",

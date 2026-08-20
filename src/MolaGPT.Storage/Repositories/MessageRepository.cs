@@ -31,6 +31,18 @@ public sealed class MessageRepository
             new { p = providerId }).ToList();
     }
 
+    /// <summary>
+    /// Every message meta blob that mentions a stored attachment, across all
+    /// conversations including soft-deleted ones — a conversation sitting in the
+    /// undo window must not have its attachments swept out from under it.
+    /// </summary>
+    public IReadOnlyList<string> ListAttachmentMetas()
+    {
+        using var conn = _db.Open();
+        return conn.Query<string>(
+            "SELECT meta FROM messages WHERE meta LIKE '%localName%'").ToList();
+    }
+
     public void Insert(MessageRow row)
     {
         using var conn = _db.Open();

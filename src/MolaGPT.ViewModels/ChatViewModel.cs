@@ -577,6 +577,7 @@ public sealed partial class ChatViewModel : ObservableObject
             IReadOnlyList<ThinkingSegmentDelta>? thinkingSegments = null;
             string? openAiWireHistoryJson = null;
             var retryCurrent = 0;
+            var wasStopped = false;
             if (!string.IsNullOrEmpty(row.Meta))
             {
                 try
@@ -601,6 +602,8 @@ public sealed partial class ChatViewModel : ObservableObject
                     toolCalls = ParseToolCalls(doc.RootElement);
                     thinkingSegments = ParseThinkingSegments(doc.RootElement);
                     (toolCalls, thinkingSegments) = InferMissingTimelineIndexes(toolCalls, thinkingSegments);
+                    wasStopped = doc.RootElement.TryGetProperty("stopped", out var st)
+                                 && st.ValueKind == JsonValueKind.True;
                 }
                 catch (JsonException) { }
             }
@@ -642,7 +645,8 @@ public sealed partial class ChatViewModel : ObservableObject
                 retryCurrent,
                 toolCalls,
                 thinkingSegments,
-                openAiWireHistoryJson));
+                openAiWireHistoryJson,
+                wasStopped));
         }
 
         return prepared;
@@ -661,7 +665,8 @@ public sealed partial class ChatViewModel : ObservableObject
             ContentPartsJson = prepared.ContentPartsJson,
             OpenAiWireHistoryJson = prepared.OpenAiWireHistoryJson,
             RetryAttempts = prepared.RetryAttempts,
-            RetryCurrentIndex = prepared.RetryCurrentIndex
+            RetryCurrentIndex = prepared.RetryCurrentIndex,
+            WasStopped = prepared.WasStopped
         };
         if (prepared.ToolCalls is { Count: > 0 })
         {
@@ -696,7 +701,8 @@ public sealed partial class ChatViewModel : ObservableObject
         int RetryCurrentIndex,
         IReadOnlyList<ToolCallDelta>? ToolCalls,
         IReadOnlyList<ThinkingSegmentDelta>? ThinkingSegments,
-        string? OpenAiWireHistoryJson);
+        string? OpenAiWireHistoryJson,
+        bool WasStopped);
 
     /// <summary>
     /// Materialize up to <paramref name="count"/> more of the history parked by
@@ -853,6 +859,7 @@ public sealed partial class ChatViewModel : ObservableObject
         if (!string.IsNullOrWhiteSpace(vm.ModelLabel)) meta["model"] = vm.ModelLabel;
         if (!string.IsNullOrWhiteSpace(vm.ProviderLabel)) meta["provider"] = vm.ProviderLabel;
         if (!string.IsNullOrWhiteSpace(vm.Thinking)) meta["thinking"] = vm.Thinking;
+        if (vm.WasStopped) meta["stopped"] = true;
         if (vm.Usage is not null)
         {
             meta["response_stats"] = BuildUsageJson(vm.Usage);
@@ -885,6 +892,12 @@ public sealed partial class ChatViewModel : ObservableObject
                         obj["localName"] = a.LocalName;
                     if (!string.IsNullOrWhiteSpace(a.MimeType))
                         obj["mime"] = a.MimeType;
+                    if (a.Kind is { } kind)
+                        obj["kind"] = kind == AttachmentKind.Image ? "image" : "file";
+                    if (!string.IsNullOrWhiteSpace(a.WorkspacePath))
+                        obj["workspacePath"] = a.WorkspacePath;
+                    if (!string.IsNullOrWhiteSpace(a.ExtractedTextPath))
+                        obj["textPath"] = a.ExtractedTextPath;
                     return obj;
                 })
                 .Cast<JsonNode?>()
@@ -920,7 +933,8 @@ public sealed partial class ChatViewModel : ObservableObject
                         ["model_label"] = a.ModelLabel,
                         ["response_stats"] = a.Usage is null ? (JsonNode?)null : BuildUsageJson(a.Usage),
                         ["sources"] = a.Sources is null ? (JsonNode?)null : BuildSourcesJson(a.Sources),
-                        ["openai_wire_history"] = ParseJsonObjectNode(a.OpenAiWireHistoryJson)
+                        ["openai_wire_history"] = ParseJsonObjectNode(a.OpenAiWireHistoryJson),
+                        ["stopped"] = a.WasStopped ? true : (JsonNode?)null
                     })
                     .Cast<JsonNode?>()
                     .ToArray())
@@ -1205,15 +1219,31 @@ public sealed partial class ChatViewModel : ObservableObject
                        && mimeNode.ValueKind == JsonValueKind.String
                 ? mimeNode.GetString()
                 : null;
+            var kind = item.TryGetProperty("kind", out var kindNode) && kindNode.ValueKind == JsonValueKind.String
+                ? kindNode.GetString() switch
+                {
+                    "image" => AttachmentKind.Image,
+                    "file" => AttachmentKind.File,
+                    _ => (AttachmentKind?)null
+                }
+                : null;
             list.Add(new AttachmentChip(filename!, string.IsNullOrWhiteSpace(label) ? "附件" : label!, thumbnailUrl)
             {
                 LocalName = localName,
-                MimeType = mime
+                MimeType = mime,
+                Kind = kind,
+                WorkspacePath = ReadOptionalString(item, "workspacePath"),
+                ExtractedTextPath = ReadOptionalString(item, "textPath")
             });
         }
 
         return list.Count == 0 ? null : list;
     }
+
+    private static string? ReadOptionalString(JsonElement owner, string propertyName) =>
+        owner.TryGetProperty(propertyName, out var node) && node.ValueKind == JsonValueKind.String
+            ? node.GetString()
+            : null;
 
     private static string? ParseContentPartsJson(JsonElement root)
     {
@@ -1282,7 +1312,8 @@ public sealed partial class ChatViewModel : ObservableObject
                 modelLabel,
                 ParseUsage(item, "response_stats"),
                 ParseSources(item),
-                ParseJsonObjectProperty(item, "openai_wire_history")));
+                ParseJsonObjectProperty(item, "openai_wire_history"),
+                item.TryGetProperty("stopped", out var stoppedNode) && stoppedNode.ValueKind == JsonValueKind.True));
         }
 
         var current = ReadInt(retry, "current") ?? Math.Max(0, attempts.Count - 1);

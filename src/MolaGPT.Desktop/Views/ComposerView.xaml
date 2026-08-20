@@ -7,7 +7,10 @@
              xmlns:views="clr-namespace:MolaGPT.Desktop.Views"
              d:DataContext="{d:DesignInstance vm:ComposerViewModel}"
              mc:Ignorable="d"
-             Background="Transparent">
+             Background="Transparent"
+             AllowDrop="True"
+             DragOver="OnComposerDragOver"
+             Drop="OnComposerDrop">
 
     <!-- Floating composer card. The layout uses a compact five-row grid:
          row 0 = attachment chips +
@@ -286,6 +289,7 @@
                                                        Text="&#xE91B;"
                                                        FontFamily="{DynamicResource Font.Icon}"
                                                        FontSize="16"
+                                                       Foreground="{DynamicResource Brush.Text.Secondary}"
                                                        Width="28"
                                                        VerticalAlignment="Center"
                                                        TextAlignment="Center" />
@@ -296,7 +300,7 @@
                                                            Foreground="{DynamicResource Brush.Text.Primary}" />
                                                 <TextBlock Text="打开图像工作台，继续生成和管理作品。"
                                                            FontSize="11"
-                                                           Foreground="{DynamicResource Brush.Text.Muted}"
+                                                           Foreground="{DynamicResource Brush.Text.Secondary}"
                                                            TextTrimming="CharacterEllipsis"
                                                            Margin="0,2,0,0" />
                                             </StackPanel>
@@ -350,6 +354,7 @@
                                                                Text="{Binding DisplayAvatar}"
                                                                FontFamily="{DynamicResource Font.Icon}"
                                                                FontSize="16"
+                                                               Foreground="{DynamicResource Brush.Text.Secondary}"
                                                                Width="28"
                                                                VerticalAlignment="Center"
                                                                TextAlignment="Center" />
@@ -361,7 +366,7 @@
                                                                    TextTrimming="CharacterEllipsis" />
                                                         <TextBlock Text="{Binding Preview}"
                                                                    FontSize="11"
-                                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                                   Foreground="{DynamicResource Brush.Text.Secondary}"
                                                                    TextTrimming="CharacterEllipsis"
                                                                    Margin="0,2,0,0" />
                                                     </StackPanel>

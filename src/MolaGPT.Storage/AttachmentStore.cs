@@ -75,6 +75,28 @@ public sealed class AttachmentStore
         return true;
     }
 
+    /// <summary>Relative names of every stored blob. Used by the orphan sweep to
+    /// diff what is on disk against what messages still reference.</summary>
+    public IReadOnlyList<string> EnumerateStoredNames()
+    {
+        try
+        {
+            return Directory.EnumerateFiles(_root)
+                .Select(Path.GetFileName)
+                .Where(name => !string.IsNullOrEmpty(name))
+                .Select(name => name!)
+                .ToList();
+        }
+        catch (IOException)
+        {
+            return Array.Empty<string>();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Array.Empty<string>();
+        }
+    }
+
     /// <summary>Best-effort delete. Missing/locked files are ignored; callers
     /// pass the relative names harvested from message meta.</summary>
     public void Delete(IEnumerable<string?> relativeNames)

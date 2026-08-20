@@ -1,12 +1,14 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
@@ -29,8 +31,6 @@ namespace MolaGPT.ViewModels;
 /// </summary>
 public sealed partial class ComposerViewModel : ObservableObject
 {
-    private const string SystemHintDelimiter = "✝";
-
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsComposerPlaceholderVisible))]
     private string _text = string.Empty;
@@ -149,7 +149,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsAttachVisible));
                 OnPropertyChanged(nameof(CanAcceptImageAttachments));
                 OnPropertyChanged(nameof(CanAcceptFileAttachments));
-                OnPropertyChanged(nameof(CanProcessNonTextFiles));
+                OnPropertyChanged(nameof(CanProcessOpaqueFiles));
                 OnPropertyChanged(nameof(AreNetworkToolsEnabled));
                 OnPropertyChanged(nameof(IsPythonToolVisible));
                 OnPropertyChanged(nameof(IsPersonaPickerVisible));
@@ -223,7 +223,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                     or nameof(SettingsViewModel.PythonToolDeniedPathPrefixes))
                 {
                     OnPropertyChanged(nameof(IsPythonToolVisible));
-                    OnPropertyChanged(nameof(CanProcessNonTextFiles));
+                    OnPropertyChanged(nameof(CanProcessOpaqueFiles));
                 }
             };
         }
@@ -250,18 +250,15 @@ public sealed partial class ComposerViewModel : ObservableObject
         _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy
         || _chat.ActiveModel?.SupportsVision == true
         || _settings?.IsVisionProxyAvailableFor(_chat.ActiveProvider?.Kind, _chat.ActiveModel) == true;
-    /// <summary>BYOK 现已支持文档附件：可直接抽文本的文件（md/txt/html/代码/
-    /// json 等）以隔离的 content part 注入上下文；其余需处理的文件（PDF/DOCX/
-    /// 二进制等）在 Python 工具可用时复制到会话工作目录，由模型按需读取。仅当
-    /// 既非文本类、Python 又不可用时，才在入口拦截。该属性用于"附件按钮整体是否
-    /// 可用"，细粒度判定见 <see cref="CanAcceptFileKind"/>。</summary>
-    public bool CanAcceptFileAttachments =>
-        _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy
-        || true; // 文本类恒可；二进制由 CanProcessNonTextFiles 决定，入口逐个校验
+    /// <summary>附件按钮整体是否可用。文本、PDF、Office 文档在任何模式下都能直接
+    /// 抽成文字注入上下文，因此恒为真；只有既抽不出文字、又没有 Python 工具可以
+    /// 处理的二进制文件才在入口逐个拦截，见 <see cref="CanProcessOpaqueFiles"/>。</summary>
+    public bool CanAcceptFileAttachments => true;
 
-    /// <summary>BYOK 下能否处理非文本（需 Python 工具）文件。MolaGPT 代理模式走
-    /// 沙箱上传，不受此限制。</summary>
-    public bool CanProcessNonTextFiles =>
+    /// <summary>BYOK 下能否接收抽不出文字的二进制文件（压缩包、可执行文件、
+    /// 音视频等）——只有 Python 工具可用时它们才有意义。MolaGPT 代理模式走沙箱
+    /// 上传，不受此限制。</summary>
+    public bool CanProcessOpaqueFiles =>
         _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy
         || CanUseByokPythonTool;
     public bool AreNetworkToolsEnabled =>
@@ -521,28 +518,63 @@ public sealed partial class ComposerViewModel : ObservableObject
             _chat.UpdatePersistedMessage(userMsg);
         }
 
-        // BYOK file attachments: text-like files are inlined as isolated content
-        // parts (handled later by the content builder); everything else is copied
-        // into the per-conversation Python workspace and surfaced to the model via
-        // a hidden system hint so it can read them with the python tool. The chips
-        // the user sees are unchanged — only the model-visible payload differs.
+        // BYOK file attachments: extract their text up front and drop a copy in
+        // the per-conversation Python workspace. The text reaches the model
+        // inline (so a weak or tool-less model still sees the content) while the
+        // original stays reachable by path for tables, page operations and
+        // embedded images. The chips the user sees are unchanged — only the
+        // model-visible payload differs.
         if (provider.Kind != ProviderKind.MolaGptProxy
             && outgoingAttachments.Any(a => a.Kind == AttachmentKind.File))
         {
-            var (preparedAttachments, fileHint) = PrepareByokFileAttachments(
-                outgoingAttachments, conversationId, cts.Token);
-            outgoingAttachments = preparedAttachments;
-            if (!string.IsNullOrWhiteSpace(fileHint))
+            assistantMsg.SetPendingStatus("处理附件", "提取文档文本");
+            var pending = outgoingAttachments;
+            try
             {
-                outgoingUserText = AppendHiddenSystemHint(outgoingUserText, fileHint!);
+                // Parsing a large PDF takes about a second; off the UI thread so
+                // the message bubble the user just posted stays responsive.
+                outgoingAttachments = await Task.Run(
+                    () => PrepareByokFileAttachments(pending, conversationId, cts.Token), cts.Token);
+
                 if (userMsg is not null)
                 {
-                    userMsg.Content = outgoingUserText;
+                    // Re-chip so the workspace/sidecar paths persist with the
+                    // message and later turns reuse them instead of copying the
+                    // file again.
+                    userMsg.Attachments = BuildAttachmentChips(outgoingAttachments);
                     _chat.UpdatePersistedMessage(userMsg);
                 }
                 // Uploaded files now live in the working directory — reflect them
                 // in the artifact panel right away.
                 _chat.RefreshArtifacts();
+            }
+            catch (OperationCanceledException)
+            {
+                // User pressed stop while the documents were being parsed.
+                assistantMsg.WasStopped = true;
+                assistantMsg.IsStreaming = false;
+                assistantMsg.StopThinking();
+                _chat.FinalizeAssistantMessage(conversationId, assistantMsg);
+                IsSending = false;
+                _chat.IsStreaming = false;
+                _activeStreamTask = null;
+                _activeAssistantMsg = null;
+                _activeTask = null;
+                _cts = null;
+                cts.Dispose();
+                return;
+            }
+            catch (Exception ex)
+            {
+                // Per-file failures are already absorbed inside the preparation
+                // step, so reaching here means something systemic. Send the text
+                // anyway rather than losing the user's message, and say what was
+                // lost instead of silently dropping the attachments.
+                assistantMsg.AppendDelta($"\n\n> ⚠️ **附件处理失败**: {ex.Message}（本轮仅发送了文字部分）");
+                assistantMsg.FlushPendingDelta();
+                outgoingAttachments = outgoingAttachments
+                    .Where(a => a.Kind != AttachmentKind.File)
+                    .ToList();
             }
         }
 
@@ -613,6 +645,9 @@ public sealed partial class ComposerViewModel : ObservableObject
         catch (OperationCanceledException)
         {
             wasCancelled = true;
+            // Marks the bubble as stopped rather than merely empty, so it keeps its
+            // action bar (retry) and says why there is nothing there.
+            assistantMsg.WasStopped = true;
         }
         catch (MolaGptAuthExpiredException ex)
         {
@@ -845,22 +880,29 @@ public sealed partial class ComposerViewModel : ObservableObject
             enabledTools["vision"] = _settings?.BuildVisionProxyOptions();
             if (CanUseByokImageGenerationTool)
                 enabledTools["image_generation"] = _settings!.BuildImageGenerationOptions();
+            // The skill folders of whatever skills are switched on this turn. The
+            // model gets a catalogue of these in its system prompt, so every tool
+            // that might follow it there has to be able to — one list, so Python
+            // and the file tools cannot end up disagreeing about which skills are
+            // readable.
+            var skillRoots = _skills is { HasEnabledSkills: true }
+                ? _skills.AllowedReadRoots()
+                : Array.Empty<string>();
+
             if (CanUseByokPythonTool)
             {
                 var pythonOptions = _settings!.BuildPythonExecutionOptions() with { Enabled = true };
                 // Let the Python tool read enabled skills' SKILL.md / scripts
                 // without tripping path approval.
-                if (_skills is not null && _skills.HasEnabledSkills)
+                if (skillRoots.Count > 0)
                 {
-                    var roots = _skills.AllowedReadRoots();
-                    if (roots.Count > 0)
+                    pythonOptions = pythonOptions with
                     {
-                        var merged = string.Join(",",
+                        AllowedPathPrefixes = string.Join(",",
                             new[] { pythonOptions.AllowedPathPrefixes }
-                                .Concat(roots)
-                                .Where(s => !string.IsNullOrWhiteSpace(s)));
-                        pythonOptions = pythonOptions with { AllowedPathPrefixes = merged };
-                    }
+                                .Concat(skillRoots)
+                                .Where(s => !string.IsNullOrWhiteSpace(s)))
+                    };
                 }
                 enabledTools["python"] = pythonOptions;
             }
@@ -873,6 +915,11 @@ public sealed partial class ComposerViewModel : ObservableObject
                 var denied = _settings?.PythonToolDeniedPathPrefixes;
                 if (!string.IsNullOrWhiteSpace(denied))
                     enabledTools["fileToolsDeniedPaths"] = denied;
+
+                // Same skill folders, so "读一下 pdf 技能" does not raise an approval
+                // dialog for a file the app itself just told the model to read.
+                if (skillRoots.Count > 0)
+                    enabledTools["fileToolsReadableRoots"] = string.Join(",", skillRoots);
             }
         }
 
@@ -904,30 +951,94 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     /// <summary>
     /// Rebuild the wire <see cref="Attachment"/> list for a history user message
-    /// so multi-turn follow-ups still carry earlier images. BYOK image bytes are
-    /// re-read from the local <see cref="MolaGPT.Storage.AttachmentStore"/> by
-    /// <see cref="AttachmentChip.LocalName"/>; in-memory <see cref="AttachmentChip.Bytes"/>
-    /// (the just-sent turn) is preferred to skip a disk round-trip. Returns null
-    /// when the message has no rehydratable image (e.g. MolaGPT-account images,
-    /// which travel via ContentPartsJson instead).
+    /// so multi-turn follow-ups still carry earlier images <em>and files</em>.
+    /// Bytes are re-read from the local <see cref="MolaGPT.Storage.AttachmentStore"/>
+    /// by <see cref="AttachmentChip.LocalName"/>; in-memory
+    /// <see cref="AttachmentChip.Bytes"/> (the just-sent turn) is preferred to skip
+    /// a disk round-trip.
+    ///
+    /// An attachment whose bytes are gone is rebuilt as an explicitly unavailable
+    /// one rather than dropped: dropping it would leave the user staring at a chip
+    /// the model never received, and would renumber every later <c>[图片#N]</c>.
+    /// Returns null when the message has nothing to rehydrate (e.g. MolaGPT-account
+    /// images, which travel via ContentPartsJson instead).
     /// </summary>
     private IReadOnlyList<Attachment>? BuildHistoryAttachments(MessageViewModel message)
     {
         if (message.Attachments is null || message.Attachments.Count == 0) return null;
+
         var rebuilt = new List<Attachment>();
-        foreach (var chip in message.Attachments)
+        var restatedChips = new List<AttachmentChip>(message.Attachments.Count);
+        var chipsChanged = false;
+
+        foreach (var originalChip in message.Attachments)
         {
-            if (!chip.IsImage) continue;
+            var chip = originalChip;
             var bytes = chip.Bytes;
             if (bytes is not { Length: > 0 } && _attachmentStore is not null)
                 bytes = _attachmentStore.Load(chip.LocalName);
-            if (bytes is not { Length: > 0 }) continue;
-            rebuilt.Add(new Attachment(
-                AttachmentKind.Image,
-                string.IsNullOrWhiteSpace(chip.MimeType) ? "image/png" : chip.MimeType!,
-                bytes,
-                FileName: chip.FileName));
+
+            var available = bytes is { Length: > 0 };
+            void MarkUnavailable()
+            {
+                if (chip.IsUnavailable) return;
+                chip = chip with { IsUnavailable = true };
+                chipsChanged = true;
+            }
+
+            if (chip.IsImage)
+            {
+                var mime = string.IsNullOrWhiteSpace(chip.MimeType) ? "image/png" : chip.MimeType!;
+                if (available)
+                {
+                    rebuilt.Add(new Attachment(AttachmentKind.Image, mime, bytes!, FileName: chip.FileName));
+                }
+                else if (!string.IsNullOrEmpty(chip.LocalName))
+                {
+                    // Had a local copy once, so this is a real loss worth
+                    // reporting. A legacy chip that never had one is skipped.
+                    MarkUnavailable();
+                    rebuilt.Add(new Attachment(
+                        AttachmentKind.Image, mime, Array.Empty<byte>(), FileName: chip.FileName,
+                        UnavailableReason: "本地副本已丢失，无法重新发送这张图片。"));
+                }
+            }
+            else if (string.IsNullOrEmpty(chip.LocalName) && !available)
+            {
+                // Legacy file chip: nothing was ever stored to rebuild from.
+            }
+            else
+            {
+                var fileMime = string.IsNullOrWhiteSpace(chip.MimeType) ? "application/octet-stream" : chip.MimeType!;
+                if (available)
+                {
+                    // Extraction is memoised on the content hash, so re-feeding the
+                    // same document every turn costs a lookup, not a re-parse.
+                    var extraction = DocumentTextExtractor.Extract(bytes, fileMime, chip.FileName);
+                    rebuilt.Add(new Attachment(
+                        AttachmentKind.File, fileMime, bytes!, FileName: chip.FileName,
+                        WorkspaceRelativePath: chip.WorkspacePath,
+                        Text: new AttachmentText(
+                            extraction.Text, extraction.PageCount, extraction.Note, chip.ExtractedTextPath)));
+                }
+                else
+                {
+                    MarkUnavailable();
+                    rebuilt.Add(new Attachment(
+                        AttachmentKind.File, fileMime, Array.Empty<byte>(), FileName: chip.FileName,
+                        WorkspaceRelativePath: chip.WorkspacePath,
+                        UnavailableReason: "本地副本已丢失，无法重新读取该文件内容。"));
+                }
+            }
+
+            restatedChips.Add(chip);
         }
+
+        // Reassigning the collection is what refreshes the bubble; mutating the
+        // records in place would leave the UI showing an attachment the model was
+        // just told it cannot see.
+        if (chipsChanged) message.Attachments = restatedChips;
+
         return rebuilt.Count == 0 ? null : rebuilt;
     }
 
@@ -937,27 +1048,39 @@ public sealed partial class ComposerViewModel : ObservableObject
         return attachments
             .Select(attachment =>
             {
-                var isImage = attachment.Kind == AttachmentKind.Image && attachment.Bytes is { Length: > 0 };
-                // BYOK images (no server RemoteUrl) are content-addressed into
-                // the local AttachmentStore so they survive app restart and can
-                // be re-fed to the vision proxy on later turns. MolaGPT-account
-                // images already have a durable RemoteUrl/ThumbnailUrl.
+                var isImage = attachment.Kind == AttachmentKind.Image;
+                var hasBytes = attachment.Bytes is { Length: > 0 };
+
+                // BYOK attachments are content-addressed into the local
+                // AttachmentStore so they survive app restart and can be re-fed
+                // on later turns. MolaGPT-account uploads already live on the
+                // server (RemoteUrl for images, SandboxPath for files) and are
+                // never rehydrated locally, so storing them would be dead weight.
                 string? localName = null;
-                if (isImage && string.IsNullOrWhiteSpace(attachment.RemoteUrl) && _attachmentStore is not null)
+                if (hasBytes
+                    && string.IsNullOrWhiteSpace(attachment.RemoteUrl)
+                    && string.IsNullOrWhiteSpace(attachment.SandboxPath)
+                    && _attachmentStore is not null)
+                {
                     localName = _attachmentStore.Save(attachment.Bytes, attachment.MimeType, attachment.FileName);
+                }
 
                 return new AttachmentChip(
-                    string.IsNullOrWhiteSpace(attachment.FileName) ? "附件" : attachment.FileName!,
-                    attachment.Kind == AttachmentKind.Image ? "图片" : LabelForFile(attachment),
+                    attachment.DisplayName,
+                    isImage ? "图片" : AttachmentMime.ChipLabel(attachment.FileName),
                     string.IsNullOrWhiteSpace(attachment.RemoteUrl) ? null : attachment.RemoteUrl)
                 {
                     // Keep image bytes in memory so the user can re-open the
                     // preview right after sending (no disk round-trip). On reload
                     // the preview falls back to LocalName → AttachmentStore, or
                     // ThumbnailUrl for MolaGPT-account images.
-                    Bytes = isImage ? attachment.Bytes : null,
+                    Bytes = isImage && hasBytes ? attachment.Bytes : null,
                     LocalName = localName,
-                    MimeType = isImage ? attachment.MimeType : null
+                    MimeType = attachment.MimeType,
+                    Kind = attachment.Kind,
+                    WorkspacePath = attachment.WorkspaceRelativePath,
+                    ExtractedTextPath = attachment.Text?.TextFileRelativePath,
+                    IsUnavailable = attachment.IsUnavailable
                 };
             })
             .ToList();
@@ -969,17 +1092,11 @@ public sealed partial class ComposerViewModel : ObservableObject
         IReadOnlyList<Attachment> attachments)
     {
         if (attachments.Count == 0) return Array.Empty<Attachment>();
+
+        // BYOK: everything travels in the content parts — images as base64, files
+        // as extracted text plus a workspace path.
         if (provider.Kind != ProviderKind.MolaGptProxy)
-        {
-            // Workspace files are announced to the model via a hidden system hint
-            // (model-visible, user-hidden) and read on demand through the python
-            // tool, so we drop them from the content-part payload to avoid sending
-            // raw/binary bytes or duplicating the reference. Inline text files and
-            // images stay so the content builder can emit them.
-            return attachments.Any(a => a.IsWorkspaceFile)
-                ? attachments.Where(a => !a.IsWorkspaceFile).ToList()
-                : attachments;
-        }
+            return attachments;
 
         if (!model.SupportsVision)
             return Array.Empty<Attachment>();
@@ -1022,87 +1139,89 @@ public sealed partial class ComposerViewModel : ObservableObject
         return parts.ToJsonString();
     }
 
-    private static string LabelForFile(Attachment attachment)
-    {
-        var name = attachment.FileName ?? string.Empty;
-        var ext = Path.GetExtension(name).TrimStart('.').ToUpperInvariant();
-        return string.IsNullOrWhiteSpace(ext) ? "文件" : ext;
-    }
-
     /// <summary>
-    /// BYOK file routing. Splits queued file attachments into two lanes:
-    /// <list type="bullet">
-    /// <item>Small text-like files stay as-is and are inlined as content parts by
-    /// <see cref="OpenAiMessageContentBuilder"/> (model sees the text, the UI only
-    /// shows the chip).</item>
-    /// <item>Binary files and oversized text are copied into the conversation's
-    /// Python workspace; their <see cref="Attachment.WorkspaceRelativePath"/> is
-    /// set and a single hidden system hint enumerating them is returned so the
-    /// model knows to read them with <c>execute_python_code</c>.</item>
-    /// </list>
-    /// Image attachments pass through untouched. The returned hint is empty when
-    /// nothing was copied. Copy failures fall back to leaving the attachment as a
-    /// plain metadata note (no workspace path), never throwing.
+    /// BYOK file routing. Every file gets the same treatment: its text is
+    /// extracted for inlining, and a copy lands in the conversation's Python
+    /// workspace so <c>read_file</c> / <c>execute_python_code</c> can reach the
+    /// original by name. Neither step is allowed to fail the send — a failed copy
+    /// still leaves the extracted text, and a failed extraction still leaves the
+    /// path plus a model-visible note.
+    ///
+    /// Image attachments pass through untouched.
     /// </summary>
-    private List<Attachment> PrepareByokFileAttachmentsInner(
+    private static List<Attachment> PrepareByokFileAttachments(
         IReadOnlyList<Attachment> attachments,
         string conversationId,
-        List<string> copiedNotes,
         CancellationToken ct)
     {
         var result = new List<Attachment>(attachments.Count);
         foreach (var attachment in attachments)
         {
-            if (attachment.Kind != AttachmentKind.File)
-            {
-                result.Add(attachment);
-                continue;
-            }
-
-            var name = string.IsNullOrWhiteSpace(attachment.FileName) ? "附件" : attachment.FileName!;
-            var isText = OpenAiMessageContentBuilder.IsTextLike(attachment.MimeType, name);
-            var fitsInline = attachment.Bytes.Length <= OpenAiMessageContentBuilder.MaxInlineTextBytes;
-            if (isText && fitsInline)
-            {
-                // Small text file: inline directly, no workspace copy needed.
-                result.Add(attachment);
-                continue;
-            }
-
-            try
-            {
-                var relativePath = PythonExecutionTool.CopyAttachmentToSession(
-                    conversationId, name, attachment.Bytes, ct);
-                result.Add(attachment with { WorkspaceRelativePath = relativePath });
-                copiedNotes.Add($"- {name}（{attachment.MimeType}，{attachment.Bytes.Length} bytes）→ {relativePath}");
-            }
-            catch (Exception)
-            {
-                // Copy failed: keep the attachment as a bare metadata note so the
-                // model is at least aware a file was attached.
-                result.Add(attachment);
-            }
+            result.Add(attachment.Kind == AttachmentKind.File
+                ? PrepareByokFile(attachment, conversationId, ct)
+                : attachment);
         }
         return result;
     }
 
-    private (List<Attachment> Attachments, string? Hint) PrepareByokFileAttachments(
-        IReadOnlyList<Attachment> attachments,
+    private static Attachment PrepareByokFile(Attachment attachment, string conversationId, CancellationToken ct)
+    {
+        var name = attachment.DisplayName;
+        var extraction = DocumentTextExtractor.Extract(attachment.Bytes, attachment.MimeType, name);
+
+        string? workspacePath = null;
+        try
+        {
+            workspacePath = PythonExecutionTool.CopyAttachmentToSession(conversationId, name, attachment.Bytes, ct);
+        }
+        catch (Exception)
+        {
+            // The extracted text still reaches the model; it just loses the
+            // ability to open the original with a tool.
+        }
+
+        return attachment with
+        {
+            WorkspaceRelativePath = workspacePath,
+            Text = new AttachmentText(
+                extraction.Text,
+                extraction.PageCount,
+                extraction.Note,
+                TryWriteExtractedTextSidecar(attachment, extraction, conversationId, workspacePath, ct))
+        };
+    }
+
+    /// <summary>
+    /// Writes the full extracted text next to the original when it is too large
+    /// to inline, so the model has something <c>read_file</c> can actually page
+    /// through — a truncated PDF or DOCX is unreadable through the original,
+    /// which is binary. Plain-text sources need no sidecar: their own path works.
+    /// </summary>
+    private static string? TryWriteExtractedTextSidecar(
+        Attachment attachment,
+        DocumentExtraction extraction,
         string conversationId,
+        string? workspacePath,
         CancellationToken ct)
     {
-        var copiedNotes = new List<string>();
-        var prepared = PrepareByokFileAttachmentsInner(attachments, conversationId, copiedNotes, ct);
-        if (copiedNotes.Count == 0)
-            return (prepared, null);
+        if (workspacePath is null || !extraction.HasText) return null;
+        if (extraction.TotalChars <= AttachedFilePrompt.DefaultInlineCharsPerFile) return null;
+        if (AttachmentMime.ClassifyDocument(attachment.MimeType, attachment.FileName, attachment.Bytes)
+            == AttachmentDocumentKind.Text) return null;
 
-        var hint = BuildHiddenSystemHint(
-            "[附件提示：用户随消息上传了以下文件，已复制到当前 Python 工作目录"
-            + "（execute_python_code 工具每次运行的工作目录）。如需查看或处理这些文件，"
-            + "请调用 execute_python_code 并用给出的相对路径 open() 读取：\n"
-            + string.Join("\n", copiedNotes)
-            + "\n请根据用户意图主动读取相关文件，不要假设其内容。]");
-        return (prepared, hint);
+        try
+        {
+            var sidecarName = Path.GetFileNameWithoutExtension(workspacePath) + ".extracted.txt";
+            return PythonExecutionTool.CopyAttachmentToSession(
+                conversationId,
+                sidecarName,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(extraction.Text!),
+                ct);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     private static string AppendHiddenSystemHint(string text, string hint)
@@ -1111,8 +1230,13 @@ public sealed partial class ComposerViewModel : ObservableObject
         return text.TrimEnd() + "\n\n" + hint;
     }
 
-    private static string BuildHiddenSystemHint(string hint) =>
-        $"{SystemHintDelimiter}{hint}{SystemHintDelimiter}";
+    /// <summary>Wraps a hint in the delimiter MessageViewModel strips before
+    /// display, so it reaches the model without showing up in the user's bubble.
+    /// Used by the MolaGPT-account image and sandbox paths; BYOK file content
+    /// travels as its own content part and needs no wrapper.</summary>
+    private static string BuildHiddenSystemHint(string hint) => $"{SystemHintDelimiter}{hint}{SystemHintDelimiter}";
+
+    private const string SystemHintDelimiter = "✝";
 
     private string? ResolveSystemPrompt()
     {
@@ -1250,7 +1374,12 @@ public sealed partial class ComposerViewModel : ObservableObject
                 if (chunk.FinishReason is not null) break;
             }
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException)
+        {
+            // Same as the first-send path: a stopped retry keeps its action bar
+            // and says why it is empty, instead of becoming a blank version.
+            assistantMsg.WasStopped = true;
+        }
         catch (Exception ex)
         {
             assistantMsg.AppendDelta($"\n\n> ❌ **错误**: {ex.Message}");
@@ -1404,7 +1533,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             {
                 Bytes = bytes,
                 LocalName = localName,
-                MimeType = mime ?? "image/png"
+                MimeType = mime ?? "image/png",
+                Kind = AttachmentKind.Image
             });
         }
 

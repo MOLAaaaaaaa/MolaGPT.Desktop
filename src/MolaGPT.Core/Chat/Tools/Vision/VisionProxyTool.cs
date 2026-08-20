@@ -9,12 +9,12 @@ public sealed class VisionProxyTool
     public const string ToolName = "view_image";
     private const int MaxVisionAnswerChineseChars = 300;
 
-    private readonly ProviderRegistry _registry;
+    private readonly VisionBackend _backend;
     private readonly Func<HttpClient> _httpFactory;
 
     public VisionProxyTool(ProviderRegistry registry, Func<HttpClient> httpFactory)
     {
-        _registry = registry;
+        _backend = new VisionBackend(registry);
         _httpFactory = httpFactory;
     }
 
@@ -26,7 +26,9 @@ public sealed class VisionProxyTool
             name = ToolName,
             description = "Inspect a user-attached image through a configured vision model. "
                 + "Images are numbered globally across the whole conversation in upload order, "
-                + "matching the [图片#N] markers shown inline in the messages.",
+                + "matching the [图片#N] markers shown inline in the messages. "
+                + "For an image file sitting in the working directory rather than attached to a "
+                + "message, use analyze_image instead.",
             parameters = new
             {
                 type = "object",
@@ -66,68 +68,32 @@ public sealed class VisionProxyTool
 
         var (index, query) = ParseArguments(argumentsJson, images.Count);
         var image = images[index];
+        // Unavailable images stay in the list so every picture keeps the ordinal
+        // the prompt showed. Selecting one has to fail loudly rather than ship
+        // zero bytes to the vision model.
+        if (image.IsUnavailable)
+            return Error($"图片#{index + 1}（{image.DisplayName}）不可用：{image.UnavailableReason}");
         var prompt = string.IsNullOrWhiteSpace(query)
             ? $"请识别图片内容，并用不超过 {MaxVisionAnswerChineseChars} 个中文字符回答。"
             : $"请回答这个图片问题：{query!.Trim()}\n\n要求：只基于图片内容作答，不超过 {MaxVisionAnswerChineseChars} 个中文字符。";
 
-        try
+        var answer = await _backend.AskAsync(
+            options,
+            image,
+            $"你是一个快速图片识别工具。只基于图片内容回答，答案必须简短，不超过 {MaxVisionAnswerChineseChars} 个中文字符。不要展开推理，不要补充无关背景。",
+            prompt,
+            ct).ConfigureAwait(false);
+
+        if (answer.Error is not null)
+            return Error(answer.Error);
+
+        return JsonSerializer.Serialize(new
         {
-            var provider = ResolveProvider(options);
-            if (provider is null)
-                return Error("No usable vision backend is configured.");
-
-            var resolvedProvider = provider.Value;
-            var request = new ChatRequest(
-                ModelId: resolvedProvider.Model.Id,
-                Messages:
-                [
-                    new ChatMessage(ChatMessage.RoleSystem, $"你是一个快速图片识别工具。只基于图片内容回答，答案必须简短，不超过 {MaxVisionAnswerChineseChars} 个中文字符。不要展开推理，不要补充无关背景。"),
-                    new ChatMessage(ChatMessage.RoleUser, prompt, Attachments: [image])
-                ],
-                UseThinking: false,
-                ThinkingParamKind: ResolveThinkingKind(resolvedProvider.Model));
-
-            var text = await CollectAsync(resolvedProvider.Provider, request, ct).ConfigureAwait(false);
-            return JsonSerializer.Serialize(new
-            {
-                success = true,
-                source = "vision_proxy",
-                image_index = index + 1,
-                result = string.IsNullOrWhiteSpace(text) ? "(empty vision response)" : text
-            });
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return Error(ex.Message);
-        }
-    }
-
-    private (IChatProvider Provider, ProviderModel Model)? ResolveProvider(VisionProxyOptions options)
-    {
-        if (string.IsNullOrWhiteSpace(options.ProviderId) || string.IsNullOrWhiteSpace(options.ModelId))
-            return null;
-
-        var resolved = _registry.FindModel(options.ProviderId!, options.ModelId!);
-        return resolved is null ? null : (resolved.Value.Provider, resolved.Value.Model);
-    }
-
-    private static ThinkingParamKind? ResolveThinkingKind(ProviderModel model)
-    {
-        var kind = model.ThinkingConfig?.Kind ?? ThinkingParamKindInference.InferFromModelId(model.Id);
-        return kind == ThinkingParamKind.None ? null : kind;
-    }
-
-    private static async Task<string> CollectAsync(IChatProvider provider, ChatRequest request, CancellationToken ct)
-    {
-        var parts = new List<string>();
-        await foreach (var chunk in provider.StreamChatAsync(request, ct).WithCancellation(ct))
-        {
-            if (!string.IsNullOrEmpty(chunk.DeltaText))
-                parts.Add(chunk.DeltaText);
-            if (chunk.FinishReason is not null)
-                break;
-        }
-        return string.Concat(parts).Trim();
+            success = true,
+            source = "vision_proxy",
+            image_index = index + 1,
+            result = string.IsNullOrWhiteSpace(answer.Text) ? "(empty vision response)" : answer.Text
+        });
     }
 
     private static (int Index, string? Query) ParseArguments(string argumentsJson, int imageCount)

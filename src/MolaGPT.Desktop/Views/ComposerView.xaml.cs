@@ -5,6 +5,7 @@ using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using Microsoft.Win32;
 using MolaGPT.Core.Models;
+using MolaGPT.Desktop.Services;
 using MolaGPT.ViewModels;
 
 namespace MolaGPT.Desktop.Views;
@@ -80,62 +81,32 @@ public partial class ComposerView : UserControl
     }
 
     /// <summary>
-    /// Read one file from disk and queue it as an attachment, applying the same
-    /// per-kind support checks as the file picker. Shared by the attach button
-    /// and clipboard paste (file-drop-list) paths. Bad files surface a dialog
-    /// and are skipped; the caller keeps going with the rest.
+    /// Read one file from disk and queue it as an attachment. Shared by the
+    /// attach button, clipboard paste and drag-and-drop so all three enforce the
+    /// same limits. A refused file surfaces a dialog and is skipped; the caller
+    /// keeps going with the rest.
     /// </summary>
-    private void AddFileFromPath(ComposerViewModel vm, string path)
+    private void AddFileFromPath(ComposerViewModel vm, string path) =>
+        Queue(vm, AttachmentIntake.FromFile(path, Capabilities(vm)));
+
+    private void Queue(ComposerViewModel vm, AttachmentIntakeResult result)
     {
-        try
+        if (result.Attachment is { } attachment)
         {
-            var bytes = File.ReadAllBytes(path);
-            var ext = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
-            var (mime, kind) = GuessKind(ext);
-            if (kind == AttachmentKind.Image && !vm.CanAcceptImageAttachments)
-            {
-                MessageBox.Show(
-                    Window.GetWindow(this),
-                    "当前模型不支持图片识别。请在模型配置中开启“视觉”，或切换到支持多模态的模型。",
-                    "模型不支持图片",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
-                return;
-            }
-            if (kind == AttachmentKind.File && !vm.CanProcessNonTextFiles)
-            {
-                // BYOK without the Python tool: text-like files can still be
-                // inlined, but binary/needs-processing files have nowhere to go.
-                var isTextLike = MolaGPT.Core.Chat.OpenAiMessageContentBuilder
-                    .IsTextLike(mime, Path.GetFileName(path));
-                if (!isTextLike)
-                {
-                    MessageBox.Show(
-                        Window.GetWindow(this),
-                        "该文件需要开启「Python 代码执行」工具才能处理。请在设置中开启 Python 工具，" +
-                        "或登录 MolaGPT 账号使用沙箱上传。文本类文件（txt/md/html/代码等）可直接上传。",
-                        "需要 Python 工具",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Information);
-                    return;
-                }
-            }
-            vm.Attachments.Add(new Attachment(
-                Kind: kind,
-                MimeType: mime,
-                Bytes: bytes,
-                FileName: Path.GetFileName(path)));
+            vm.Attachments.Add(attachment);
+            return;
         }
-        catch (Exception ex)
-        {
-            MessageBox.Show(
-                Window.GetWindow(this),
-                $"无法读取 {path}：{ex.Message}",
-                "附件错误",
-                MessageBoxButton.OK,
-                MessageBoxImage.Warning);
-        }
+
+        MessageBox.Show(
+            Window.GetWindow(this),
+            result.Error ?? "无法添加该附件。",
+            "附件",
+            MessageBoxButton.OK,
+            MessageBoxImage.Information);
     }
+
+    private static AttachmentIntakeCapabilities Capabilities(ComposerViewModel vm) =>
+        new(vm.CanAcceptImageAttachments, vm.CanProcessOpaqueFiles);
 
     /// <summary>
     /// Ctrl+V handler: queue clipboard files (copied in Explorer) or a bitmap
@@ -182,23 +153,45 @@ public partial class ComposerView : UserControl
         }
     }
 
-    private void AddPastedImage(ComposerViewModel vm, byte[] pngBytes)
+    private void AddPastedImage(ComposerViewModel vm, byte[] pngBytes) =>
+        Queue(vm, AttachmentIntake.FromBytes(
+            pngBytes,
+            $"粘贴图片_{DateTime.Now:HHmmss}.png",
+            Capabilities(vm)));
+
+    /// <summary>
+    /// Drag-and-drop. Only file drops are taken; dragged text falls through to
+    /// the TextBox, which handles it natively.
+    /// </summary>
+    private void OnComposerDragOver(object sender, DragEventArgs e)
     {
-        if (!vm.CanAcceptImageAttachments)
+        var isFileDrop = e.Data.GetDataPresent(DataFormats.FileDrop);
+        e.Effects = isFileDrop ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Handled = isFileDrop;
+    }
+
+    private void OnComposerDrop(object sender, DragEventArgs e)
+    {
+        if (DataContext is not ComposerViewModel vm) return;
+        if (e.Data.GetData(DataFormats.FileDrop) is not string[] paths) return;
+
+        e.Handled = true;
+        foreach (var path in paths)
         {
-            MessageBox.Show(
-                Window.GetWindow(this),
-                "当前模型不支持图片识别。请在模型配置中开启“视觉”，或切换到支持多模态的模型。",
-                "模型不支持图片",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
-            return;
+            // Dropping a folder is a common mis-drop; say so instead of failing
+            // with a bare read error.
+            if (Directory.Exists(path))
+            {
+                MessageBox.Show(
+                    Window.GetWindow(this),
+                    $"{Path.GetFileName(path)} 是文件夹，请拖入具体的文件。",
+                    "附件",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                continue;
+            }
+            AddFileFromPath(vm, path);
         }
-        vm.Attachments.Add(new Attachment(
-            Kind: AttachmentKind.Image,
-            MimeType: "image/png",
-            Bytes: pngBytes,
-            FileName: $"粘贴图片_{DateTime.Now:HHmmss}.png"));
     }
 
     /// <summary>Extract the clipboard image as PNG bytes. Prefers a real "PNG"
@@ -253,20 +246,6 @@ public partial class ComposerView : UserControl
         ImagePreviewWindow.Show(Window.GetWindow(this), att.Bytes, att.FileName);
         e.Handled = true;
     }
-
-    private static (string mime, AttachmentKind kind) GuessKind(string ext) => ext switch
-    {
-        "png" => ("image/png", AttachmentKind.Image),
-        "jpg" or "jpeg" => ("image/jpeg", AttachmentKind.Image),
-        "gif" => ("image/gif", AttachmentKind.Image),
-        "webp" => ("image/webp", AttachmentKind.Image),
-        "bmp" => ("image/bmp", AttachmentKind.Image),
-        "pdf" => ("application/pdf", AttachmentKind.File),
-        "docx" => ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", AttachmentKind.File),
-        "txt" or "md" => ("text/plain", AttachmentKind.File),
-        "json" => ("application/json", AttachmentKind.File),
-        _ => ("application/octet-stream", AttachmentKind.File)
-    };
 
     /// <summary>Reset the conversation persona to the built-in default. The popup auto-closes
     /// because the picker ToggleButton flips IsChecked on lost focus.</summary>

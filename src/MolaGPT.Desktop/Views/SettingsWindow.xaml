@@ -962,6 +962,7 @@
                                                                Text="{Binding DisplayAvatar}"
                                                                FontFamily="{DynamicResource Font.Icon}"
                                                                FontSize="16"
+                                                               Foreground="{DynamicResource Brush.Text.Secondary}"
                                                                Width="28"
                                                                TextAlignment="Center"
                                                                VerticalAlignment="Center" />
@@ -973,7 +974,7 @@
                                                                    TextTrimming="CharacterEllipsis" />
                                                         <TextBlock Text="{Binding Preview}"
                                                                    FontSize="11"
-                                                                   Foreground="{DynamicResource Brush.Text.Muted}"
+                                                                   Foreground="{DynamicResource Brush.Text.Secondary}"
                                                                    TextTrimming="CharacterEllipsis" />
                                                     </StackPanel>
                                                     <!-- Lock icon for built-in personas -->
@@ -1757,7 +1758,7 @@
                                             </StackPanel>
                                         </Border>
                                         <TextBlock Style="{StaticResource SettingsRowHint}"
-                                                   Text="读取工具自动放行；写入、外部副作用和破坏性操作进入统一审批。完全权限可跳过普通写入审批，但破坏性操作和 Python 包安装仍需确认。" />
+                                                   Text="写入工具限制在本次对话的工作目录内；只读工具在工作目录内自动放行，读取目录以外的文件时逐次询问，可按文件夹或磁盘记住。完全权限可跳过普通写入审批，但破坏性操作和 Python 包安装仍需确认。" />
                                     </StackPanel>
                                 </Border>
 
@@ -1777,7 +1778,7 @@
                                                     Visibility="{Binding HasAlwaysAllowedTools, Converter={StaticResource BoolVis}}" />
                                         </Grid>
                                         <TextBlock Style="{StaticResource SettingsRowHint}"
-                                                   Text="在审批对话框中选择「始终允许」的工具将在此列出，撤销后恢复审批。" />
+                                                   Text="在审批对话框中选择「始终允许」的工具，以及允许只读工具永久读取的文件夹或磁盘，都会在此列出，撤销后恢复审批。" />
                                         <TextBlock Style="{StaticResource SettingsRowHint}"
                                                    Margin="0,6,0,0"
                                                    Text="暂无始终允许的工具"
@@ -1790,14 +1791,15 @@
                                                             <ColumnDefinition Width="*" />
                                                             <ColumnDefinition Width="Auto" />
                                                         </Grid.ColumnDefinitions>
-                                                        <TextBlock Text="{Binding}"
+                                                        <TextBlock Text="{Binding Display}"
                                                                    VerticalAlignment="Center"
                                                                    TextTrimming="CharacterEllipsis"
+                                                                   ToolTip="{Binding Display}"
                                                                    FontFamily="Cascadia Mono, Consolas" />
                                                         <Button Grid.Column="1"
                                                                 Content="撤销"
                                                                 Padding="10,3"
-                                                                Tag="{Binding}"
+                                                                Tag="{Binding Key}"
                                                                 Click="RevokeToolGrant_Click" />
                                                     </Grid>
                                                 </DataTemplate>

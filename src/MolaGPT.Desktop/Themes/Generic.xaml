@@ -50,16 +50,199 @@
         <Setter Property="LineHeight" Value="14" />
     </Style>
 
+    <!-- Default CheckBox / RadioButton chrome uses SystemColors, which stay
+         near-black when Windows is in light mode even if the app is dark.
+         These templates paint the glyph and label from theme tokens. -->
     <Style TargetType="CheckBox">
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Cursor" Value="Hand" />
         <Setter Property="UseLayoutRounding" Value="True" />
         <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="CheckBox">
+                    <StackPanel Orientation="Horizontal">
+                        <Border x:Name="box"
+                                Width="16" Height="16"
+                                Margin="0,0,8,0"
+                                VerticalAlignment="Center"
+                                Background="Transparent"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1.5"
+                                CornerRadius="3">
+                            <TextBlock x:Name="mark"
+                                       Text="&#xE73E;"
+                                       FontFamily="{DynamicResource Font.Icon}"
+                                       FontSize="10"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Brush.Text.OnPrimary}"
+                                       Visibility="Collapsed" />
+                        </Border>
+                        <ContentPresenter VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          RecognizesAccessKey="True" />
+                    </StackPanel>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="box" Property="Background" Value="{DynamicResource Brush.Primary}" />
+                            <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+                            <Setter TargetName="mark" Property="Visibility" Value="Visible" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Brush.Primary.Hover}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.5" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <Style TargetType="RadioButton">
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Cursor" Value="Hand" />
         <Setter Property="UseLayoutRounding" Value="True" />
         <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <StackPanel Orientation="Horizontal">
+                        <Grid Width="16" Height="16" Margin="0,0,8,0" VerticalAlignment="Center">
+                            <Ellipse x:Name="outer"
+                                     Stroke="{TemplateBinding BorderBrush}"
+                                     StrokeThickness="1.5"
+                                     Fill="Transparent" />
+                            <Ellipse x:Name="inner"
+                                     Width="8" Height="8"
+                                     Fill="{DynamicResource Brush.Primary}"
+                                     Visibility="Collapsed"
+                                     HorizontalAlignment="Center"
+                                     VerticalAlignment="Center" />
+                        </Grid>
+                        <ContentPresenter VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          RecognizesAccessKey="True" />
+                    </StackPanel>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="inner" Property="Visibility" Value="Visible" />
+                            <Setter TargetName="outer" Property="Stroke" Value="{DynamicResource Brush.Primary}" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="outer" Property="Stroke" Value="{DynamicResource Brush.Primary.Hover}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.5" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="Expander">
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+
+    <!-- Default MenuItem chrome draws a light icon column (SystemColors)
+         that stays white in dark mode. These templates drop that gutter. -->
+    <Style TargetType="ContextMenu">
+        <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="6" />
+        <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
+        <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+        <Setter Property="HasDropShadow" Value="False" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ContextMenu">
+                    <Border Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="{DynamicResource Radius.Sm}"
+                            Padding="{TemplateBinding Padding}">
+                        <Border.Effect>
+                            <DropShadowEffect Color="#66000000" BlurRadius="16" ShadowDepth="4" Opacity="0.45" />
+                        </Border.Effect>
+                        <StackPanel IsItemsHost="True"
+                                    KeyboardNavigation.DirectionalNavigation="Cycle" />
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="{x:Static MenuItem.SeparatorStyleKey}" TargetType="Separator">
+        <Setter Property="Margin" Value="4,4" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Separator">
+                    <Border Height="1" Background="{DynamicResource Brush.Divider}" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="MenuItem">
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Padding" Value="10,7" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="MenuItem">
+                    <Border x:Name="Bd"
+                            Background="{TemplateBinding Background}"
+                            CornerRadius="4"
+                            Padding="{TemplateBinding Padding}">
+                        <DockPanel>
+                            <ContentPresenter x:Name="Icon"
+                                              DockPanel.Dock="Left"
+                                              ContentSource="Icon"
+                                              Width="16"
+                                              Height="16"
+                                              Margin="0,0,8,0"
+                                              VerticalAlignment="Center" />
+                            <TextBlock x:Name="Gesture"
+                                       DockPanel.Dock="Right"
+                                       Text="{TemplateBinding InputGestureText}"
+                                       Margin="16,0,0,0"
+                                       Opacity="0.65"
+                                       VerticalAlignment="Center" />
+                            <ContentPresenter ContentSource="Header"
+                                              RecognizesAccessKey="True"
+                                              VerticalAlignment="Center" />
+                        </DockPanel>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="Icon" Value="{x:Null}">
+                            <Setter TargetName="Icon" Property="Visibility" Value="Collapsed" />
+                        </Trigger>
+                        <Trigger Property="InputGestureText" Value="">
+                            <Setter TargetName="Gesture" Property="Visibility" Value="Collapsed" />
+                        </Trigger>
+                        <Trigger Property="InputGestureText" Value="{x:Null}">
+                            <Setter TargetName="Gesture" Property="Visibility" Value="Collapsed" />
+                        </Trigger>
+                        <Trigger Property="IsHighlighted" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.45" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <!-- =============================================================
@@ -495,6 +678,16 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+    </Style>
+
+    <Style x:Key="ThemedCodeBox" TargetType="TextBox">
+        <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CaretBrush" Value="{DynamicResource Brush.Primary}" />
+        <Setter Property="SelectionBrush" Value="{DynamicResource Brush.Primary.Soft}" />
+        <Setter Property="Padding" Value="10" />
     </Style>
 
     <Style x:Key="SettingsTextBox" TargetType="TextBox">

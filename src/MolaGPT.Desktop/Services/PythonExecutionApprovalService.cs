@@ -1,7 +1,9 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Interop;
 using System.Windows.Media;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
@@ -44,16 +46,27 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         ToolPermissionMode mode,
         CancellationToken ct)
     {
+        var outsideWorkspace = request.Capabilities.HasFlag(ToolCapability.OutsideWorkspace);
         var needsPrompt = request.AlwaysAsk
                           || request.Capabilities.HasFlag(ToolCapability.Destructive)
                           || (mode == ToolPermissionMode.Approval
-                              && request.Capabilities.HasFlag(ToolCapability.Write));
+                              && (request.Capabilities.HasFlag(ToolCapability.Write) || outsideWorkspace));
         if (!needsPrompt)
             return ToolApprovalDecision.Approved;
 
+        // A remembered folder or drive covers this read without asking again.
+        if (outsideWorkspace
+            && request.ResolvedPath is { Length: > 0 } resolved
+            && _grants.IsPathGranted(resolved))
+            return ToolApprovalDecision.Approved;
+
         // A previous "don't ask again" for this exact tool. Checked after the
-        // capability gate so a grant can never widen what the mode already allows.
-        if (!request.AlwaysAsk && _grants.IsGranted(request.ToolName))
+        // capability gate so a grant can never widen what the mode already allows —
+        // and never for a path outside the workspace, because that grant was
+        // answered about the tool, not about the user's disk. Letting it apply
+        // would turn one click on "始终允许 read_file" into standing permission to
+        // read every file on the machine, which is not what the dialog offered.
+        if (!request.AlwaysAsk && !outsideWorkspace && _grants.IsGranted(request.ToolName))
             return ToolApprovalDecision.Approved;
 
         var app = Application.Current;
@@ -61,20 +74,35 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             return ToolApprovalDecision.Denied;
 
         ct.ThrowIfCancellationRequested();
-        var (approved, scope) = await app.Dispatcher.InvokeAsync(() => ShowToolApprovalDialog(request, mode))
+        var outcome = await app.Dispatcher.InvokeAsync(() => ShowToolApprovalDialog(request, mode))
             .Task.ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
-        if (approved)
-            _grants.Grant(request.ToolName, scope);
-        return approved ? ToolApprovalDecision.Approved : ToolApprovalDecision.Denied;
+
+        if (outcome.Approved)
+        {
+            if (outcome.PathPrefix is { Length: > 0 } prefix)
+                _grants.GrantPath(prefix, outcome.Scope);
+            else if (!outsideWorkspace)
+                _grants.Grant(request.ToolName, outcome.Scope);
+        }
+
+        return outcome.Approved ? ToolApprovalDecision.Approved : ToolApprovalDecision.Denied;
     }
 
-    private static (bool Approved, ToolGrantScope Scope) ShowToolApprovalDialog(ToolApprovalRequest request, ToolPermissionMode mode)
+    /// <param name="PathPrefix">Set when the user chose to remember a folder or a
+    /// drive rather than the tool itself.</param>
+    private sealed record ToolApprovalOutcome(
+        bool Approved,
+        ToolGrantScope Scope = ToolGrantScope.Once,
+        string? PathPrefix = null);
+
+    private static ToolApprovalOutcome ShowToolApprovalDialog(ToolApprovalRequest request, ToolPermissionMode mode)
     {
+        var outsideWorkspace = request.Capabilities.HasFlag(ToolCapability.OutsideWorkspace);
         var owner = FindOwnerWindow();
         var dialog = new Window
         {
-            Title = "工具调用审批",
+            Title = outsideWorkspace ? "读取工作目录以外的文件" : "工具调用审批",
             Width = 680,
             Height = 500,
             MinWidth = 560,
@@ -82,10 +110,10 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             WindowStartupLocation = owner is null ? WindowStartupLocation.CenterScreen : WindowStartupLocation.CenterOwner,
             Owner = owner,
             ResizeMode = ResizeMode.CanResize,
-            Background = TryFindBrush("Brush.Bg.Primary") ?? Brushes.White,
             FontFamily = TryFindFont("Font.Cjk") ?? new FontFamily("Microsoft YaHei UI, Segoe UI"),
             FontSize = 13
         };
+        ApplyDialogChrome(dialog);
 
         var root = new Grid { Margin = new Thickness(20) };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -112,18 +140,21 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         });
         root.Children.Add(heading);
 
-        var capabilityText = new TextBlock
+        var details = new StackPanel();
+        if (outsideWorkspace)
+            details.Children.Add(BuildOutsideWorkspaceBanner(request));
+        details.Children.Add(new TextBlock
         {
             Text = $"涉及权限：{FormatCapabilities(request.Capabilities)} · 审批模式：{FormatMode(mode)}"
                    + (request.AlwaysAsk ? " · 该操作每次均需确认" : string.Empty),
             Padding = new Thickness(12, 9, 12, 9),
             Margin = new Thickness(0, 0, 0, 12),
             TextWrapping = TextWrapping.Wrap,
-            Background = TryFindBrush("Brush.Primary.Blockquote") ?? new SolidColorBrush(Color.FromRgb(0xEE, 0xF4, 0xFF)),
+            Background = TryFindBrush("Brush.Bg.Tertiary") ?? new SolidColorBrush(Color.FromRgb(0xEE, 0xF4, 0xFF)),
             Foreground = TryFindBrush("Brush.Text.Primary") ?? Brushes.Black
-        };
-        Grid.SetRow(capabilityText, 1);
-        root.Children.Add(capabilityText);
+        });
+        Grid.SetRow(details, 1);
+        root.Children.Add(details);
 
         var argsBox = new TextBox
         {
@@ -134,9 +165,9 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             FontFamily = new FontFamily("Cascadia Mono, Consolas"),
-            FontSize = 12,
-            Padding = new Thickness(10)
+            FontSize = 12
         };
+        ApplyCodeBoxStyle(argsBox);
         Grid.SetRow(argsBox, 2);
         root.Children.Add(argsBox);
 
@@ -146,37 +177,151 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             HorizontalAlignment = HorizontalAlignment.Right,
             Margin = new Thickness(0, 14, 0, 0)
         };
+
+        // Whatever the user picks lands here; the default stands for every way of
+        // leaving the dialog that is not a button (Esc, the title-bar X), all of
+        // which must read as a refusal.
+        var outcome = new ToolApprovalOutcome(false);
+        void Finish(ToolApprovalOutcome value)
+        {
+            outcome = value;
+            dialog.DialogResult = value.Approved;
+            dialog.Close();
+        }
+
         var deny = new Button { Content = "拒绝", Width = 96, Height = 34, Margin = new Thickness(0, 0, 8, 0), IsCancel = true };
-        // Three tiers rather than two. "始终允许" used to be the only way to stop
-        // being asked, which made one hurried click a permanent grant; the session
-        // tier covers the common case ("I'm doing this task now") without leaving
-        // anything behind after the app closes.
-        var sessionAllow = new Button { Content = "本次会话内允许", Width = 120, Height = 34, Margin = new Thickness(0, 0, 8, 0) };
-        var alwaysAllow = new Button { Content = "始终允许", Width = 110, Height = 34, Margin = new Thickness(0, 0, 8, 0) };
-        var allow = new Button { Content = "仅允许本次", Width = 110, Height = 34, IsDefault = true };
-        deny.Click += (_, _) => { dialog.Tag = "deny"; dialog.DialogResult = false; dialog.Close(); };
-        sessionAllow.Click += (_, _) => { dialog.Tag = "session"; dialog.DialogResult = true; dialog.Close(); };
-        alwaysAllow.Click += (_, _) => { dialog.Tag = "always"; dialog.DialogResult = true; dialog.Close(); };
-        allow.Click += (_, _) => { dialog.Tag = "once"; dialog.DialogResult = true; dialog.Close(); };
+        ApplySecondaryButtonStyle(deny);
+        deny.Click += (_, _) => Finish(new ToolApprovalOutcome(false));
         buttons.Children.Add(deny);
-        buttons.Children.Add(sessionAllow);
-        buttons.Children.Add(alwaysAllow);
+
+        if (outsideWorkspace)
+        {
+            // What is being answered here is "may this app read that place", not
+            // "is read_file trustworthy". So the only thing worth remembering is a
+            // location, and the widest one on offer is a drive the user names —
+            // never "this tool, everywhere", which is what the generic branch
+            // below would record.
+            var grantOptions = BuildPathGrantOptions(request.ResolvedPath);
+            var remember = new Button
+            {
+                Content = "允许并记住 ▾",
+                Width = 132,
+                Height = 34,
+                Margin = new Thickness(0, 0, 8, 0),
+                // Nothing to offer when the path would not resolve; "仅允许本次"
+                // is still available, so the call is not stuck.
+                IsEnabled = grantOptions.Count > 0
+            };
+            ApplySecondaryButtonStyle(remember);
+            remember.Click += (_, _) =>
+            {
+                var menu = CreateThemedMenu();
+                menu.PlacementTarget = remember;
+                menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Top;
+                foreach (var (header, scope, prefix) in grantOptions)
+                {
+                    var entry = new MenuItem { Header = header };
+                    entry.Click += (_, _) => Finish(new ToolApprovalOutcome(true, scope, prefix));
+                    menu.Items.Add(entry);
+                }
+                menu.IsOpen = true;
+            };
+            buttons.Children.Add(remember);
+        }
+        else
+        {
+            // Three tiers rather than two. "始终允许" used to be the only way to stop
+            // being asked, which made one hurried click a permanent grant; the session
+            // tier covers the common case ("I'm doing this task now") without leaving
+            // anything behind after the app closes.
+            var sessionAllow = new Button { Content = "本次会话内允许", Width = 120, Height = 34, Margin = new Thickness(0, 0, 8, 0) };
+            var alwaysAllow = new Button { Content = "始终允许", Width = 110, Height = 34, Margin = new Thickness(0, 0, 8, 0) };
+            ApplySecondaryButtonStyle(sessionAllow);
+            ApplySecondaryButtonStyle(alwaysAllow);
+            sessionAllow.Click += (_, _) => Finish(new ToolApprovalOutcome(true, ToolGrantScope.Session));
+            alwaysAllow.Click += (_, _) => Finish(new ToolApprovalOutcome(true, ToolGrantScope.Always));
+            buttons.Children.Add(sessionAllow);
+            buttons.Children.Add(alwaysAllow);
+        }
+
+        var allow = new Button { Content = "仅允许本次", Width = 110, Height = 34, IsDefault = true };
+        ApplyPrimaryButtonStyle(allow);
+        allow.Click += (_, _) => Finish(new ToolApprovalOutcome(true, ToolGrantScope.Once));
         buttons.Children.Add(allow);
+
         Grid.SetRow(buttons, 3);
         root.Children.Add(buttons);
 
         dialog.Content = root;
-        dialog.ShowDialog();
+        return ShowApprovalModal(dialog, owner) ? outcome : new ToolApprovalOutcome(false);
+    }
 
-        // Closing the dialog any other way (Esc, the title-bar X) must read as a
-        // refusal, and an unrecognised tag as the narrowest grant.
-        if (dialog.DialogResult != true) return (false, ToolGrantScope.Once);
-        return (true, (dialog.Tag as string) switch
+    /// <summary>
+    /// The folder and the drive holding <paramref name="resolvedPath"/>, each
+    /// offered for this session or for good. Named in full in the menu, because
+    /// "记住" is worthless as a choice if the user cannot see what it covers.
+    /// </summary>
+    private static IReadOnlyList<(string Header, ToolGrantScope Scope, string Prefix)> BuildPathGrantOptions(string? resolvedPath)
+    {
+        var options = new List<(string, ToolGrantScope, string)>();
+        if (string.IsNullOrWhiteSpace(resolvedPath)) return options;
+
+        var folder = WorkspaceScope.FolderPrefix(resolvedPath);
+        var drive = WorkspaceScope.DrivePrefix(resolvedPath);
+
+        if (folder is not null)
         {
-            "always" => ToolGrantScope.Always,
-            "session" => ToolGrantScope.Session,
-            _ => ToolGrantScope.Once,
+            options.Add(($"此文件夹（{folder}）· 仅本次会话", ToolGrantScope.Session, folder));
+            options.Add(($"此文件夹（{folder}）· 永久", ToolGrantScope.Always, folder));
+        }
+
+        // Skipped when the folder already is the drive root, and for UNC paths,
+        // where there is no drive to grant.
+        if (drive is not null && !string.Equals(drive, folder, StringComparison.OrdinalIgnoreCase))
+        {
+            options.Add(($"整个磁盘（{drive}）· 仅本次会话", ToolGrantScope.Session, drive));
+            options.Add(($"整个磁盘（{drive}）· 永久", ToolGrantScope.Always, drive));
+        }
+
+        return options;
+    }
+
+    private static Border BuildOutsideWorkspaceBanner(ToolApprovalRequest request)
+    {
+        var stack = new StackPanel();
+        stack.Children.Add(new TextBlock
+        {
+            Text = "此次调用将读取本次对话工作目录以外的位置：",
+            TextWrapping = TextWrapping.Wrap,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = TryFindBrush("Brush.Danger.Foreground")
+                         ?? new SolidColorBrush(Color.FromRgb(0x8A, 0x1C, 0x1C))
         });
+        stack.Children.Add(new TextBlock
+        {
+            // The resolved path, not the argument the model wrote: "notes.txt" and
+            // "..\..\.ssh\id_rsa" are the same shape in a tool call.
+            Text = request.ResolvedPath ?? "（未能解析出具体路径）",
+            Margin = new Thickness(0, 6, 0, 0),
+            TextWrapping = TextWrapping.Wrap,
+            FontFamily = new FontFamily("Cascadia Mono, Consolas"),
+            FontSize = 12,
+            Foreground = TryFindBrush("Brush.Danger.Foreground")
+                         ?? new SolidColorBrush(Color.FromRgb(0x8A, 0x1C, 0x1C))
+        });
+
+        return new Border
+        {
+            Child = stack,
+            Background = TryFindBrush("Brush.Danger.Surface")
+                         ?? new SolidColorBrush(Color.FromRgb(0xFD, 0xEC, 0xEC)),
+            BorderBrush = TryFindBrush("Brush.Danger.Border")
+                          ?? new SolidColorBrush(Color.FromRgb(0xE8, 0xB0, 0xB0)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(12, 10, 12, 10),
+            Margin = new Thickness(0, 0, 0, 10)
+        };
     }
 
     private static string FormatCapabilities(ToolCapability capabilities)
@@ -186,6 +331,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         if (capabilities.HasFlag(ToolCapability.Write)) labels.Add("写入");
         if (capabilities.HasFlag(ToolCapability.External)) labels.Add("外部服务");
         if (capabilities.HasFlag(ToolCapability.Destructive)) labels.Add("破坏性");
+        if (capabilities.HasFlag(ToolCapability.OutsideWorkspace)) labels.Add("工作目录以外");
         return labels.Count == 0 ? "未声明" : string.Join(" / ", labels);
     }
 
@@ -205,10 +351,10 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             WindowStartupLocation = owner is null ? WindowStartupLocation.CenterScreen : WindowStartupLocation.CenterOwner,
             Owner = owner,
             ResizeMode = ResizeMode.CanResize,
-            Background = Brushes.White,
             FontFamily = TryFindFont("Font.Cjk") ?? new FontFamily("Microsoft YaHei UI, Segoe UI"),
             FontSize = 13
         };
+        ApplyDialogChrome(dialog);
 
         var root = new Grid { Margin = new Thickness(18) };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 0 title
@@ -223,6 +369,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             Text = "模型请求在本机执行 Python 代码",
             FontSize = 18,
             FontWeight = FontWeights.SemiBold,
+            Foreground = TryFindBrush("Brush.Text.Primary") ?? Brushes.Black,
             Margin = new Thickness(0, 0, 0, 12)
         };
         root.Children.Add(title);
@@ -232,7 +379,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         // list is fine — the failure this avoids is a reader skimming past "writes
         // to your Desktop" because it looked like "imported os".
         var headline = new StackPanel();
-        if (BuildAlertBanner(request) is { } banner)
+        foreach (var banner in BuildAlertBanners(request))
             headline.Children.Add(banner);
         headline.Children.Add(BuildPurposeCard(request));
         Grid.SetRow(headline, 1);
@@ -250,6 +397,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             MaxHeight = 150,
             Margin = new Thickness(0, 12, 0, 12)
         };
+        ApplyCodeBoxStyle(riskBox);
         Grid.SetRow(riskBox, 2);
         root.Children.Add(riskBox);
 
@@ -263,21 +411,21 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             FontFamily = new FontFamily("Cascadia Mono, Consolas"),
-            FontSize = 12,
-            Padding = new Thickness(10, 8, 10, 8)
+            FontSize = 12
         };
+        ApplyCodeBoxStyle(codeBox);
         Grid.SetRow(codeBox, 3);
         root.Children.Add(codeBox);
 
-        // "Remember this decision" section: let the user turn the things that
-        // triggered this prompt (non-whitelisted imports / referenced folders)
-        // into allow rules. The scope is chosen via a dropdown next to the
-        // "允许并记住" button (default: this session).
+        // "Remember this decision" section: turn what triggered this prompt —
+        // non-whitelisted imports, folders outside the working directory — into
+        // allow rules. The scope is chosen via a dropdown next to the "允许并记住"
+        // button (default: this session).
         var importCandidates = GetImportCandidates(request);
-        var pathCandidates = GetPathPrefixCandidates(request);
+        var folderCandidates = GetFolderCandidates(request);
         var importChecks = new List<CheckBox>();
-        var pathChecks = new List<CheckBox>();
-        var hasCandidates = importCandidates.Count > 0 || pathCandidates.Count > 0;
+        var folderChecks = new List<CheckBox>();
+        var hasCandidates = importCandidates.Count > 0 || folderCandidates.Count > 0;
 
         if (hasCandidates)
         {
@@ -297,10 +445,18 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
                 importChecks.Add(cb);
                 chips.Children.Add(cb);
             }
-            foreach (var prefix in pathCandidates)
+            // Folders, never drives. A read-only tool granted a whole volume can
+            // at worst read it; Python granted one can rewrite it, so the widest
+            // thing on offer here is the folder the code actually named.
+            foreach (var folder in folderCandidates)
             {
-                var cb = new CheckBox { Content = $"允许访问 {prefix}", Margin = new Thickness(0, 0, 16, 6), Tag = prefix };
-                pathChecks.Add(cb);
+                var cb = new CheckBox
+                {
+                    Content = $"允许读写 {folder}",
+                    Margin = new Thickness(0, 0, 16, 6),
+                    Tag = folder
+                };
+                folderChecks.Add(cb);
                 chips.Children.Add(cb);
             }
             remember.Children.Add(chips);
@@ -327,6 +483,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             Margin = new Thickness(0, 0, 8, 0),
             IsCancel = true
         };
+        ApplySecondaryButtonStyle(denyButton);
         // The scope picker is built into the remember button: clicking it drops a
         // menu with "this session" (default) and "permanent" choices.
         var rememberButton = new Button
@@ -337,6 +494,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             Margin = new Thickness(0, 0, 8, 0),
             Visibility = hasCandidates ? Visibility.Visible : Visibility.Collapsed
         };
+        ApplySecondaryButtonStyle(rememberButton);
         var allowButton = new Button
         {
             Content = "仅允许本次",
@@ -344,13 +502,17 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             Height = 34,
             IsDefault = true
         };
+        ApplyPrimaryButtonStyle(allowButton);
 
         void CommitRemember(bool toSession)
         {
             foreach (var cb in importChecks.Where(c => c.IsChecked == true))
                 ApplyImportRule((string)cb.Tag, toSession);
-            foreach (var cb in pathChecks.Where(c => c.IsChecked == true))
-                ApplyPathRule((string)cb.Tag, toSession);
+            foreach (var cb in folderChecks.Where(c => c.IsChecked == true))
+                _grants.GrantPath(
+                    (string)cb.Tag,
+                    toSession ? ToolGrantScope.Session : ToolGrantScope.Always,
+                    allowWriting: true);
             dialog.DialogResult = true;
             dialog.Close();
         }
@@ -367,7 +529,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         };
         rememberButton.Click += (_, _) =>
         {
-            var menu = new ContextMenu();
+            var menu = CreateThemedMenu();
             var sessionItem = new MenuItem { Header = "本次会话内有效" };
             sessionItem.Click += (_, _) => CommitRemember(toSession: true);
             var permanentItem = new MenuItem { Header = "长期有效" };
@@ -385,7 +547,7 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         root.Children.Add(buttons);
 
         dialog.Content = root;
-        return dialog.ShowDialog() == true
+        return ShowApprovalModal(dialog, owner)
             ? PythonExecutionApprovalDecision.Approved
             : PythonExecutionApprovalDecision.Denied;
     }
@@ -401,37 +563,12 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
             .ToArray();
     }
 
-    private static IReadOnlyList<string> GetPathPrefixCandidates(PythonExecutionApprovalRequest request)
-    {
-        // Suggest the parent folder of each referenced literal path as the prefix
-        // to allow, so a whole working directory can be trusted in one click.
-        var prefixes = new List<string>();
-        foreach (var path in request.Risk.LiteralPaths)
-        {
-            string? prefix;
-            try { prefix = Path.GetDirectoryName(path.Trim()); }
-            catch { prefix = null; }
-            prefix = string.IsNullOrWhiteSpace(prefix) ? path.Trim() : prefix;
-            if (!string.IsNullOrWhiteSpace(prefix))
-                prefixes.Add(prefix!);
-        }
-        return prefixes.Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToArray();
-    }
-
     private void ApplyImportRule(string module, bool sessionScope)
     {
         if (sessionScope)
             _sessionAllowList.AllowImport(module);
         else
             _settings.PythonToolAllowedImports = AppendCsv(_settings.PythonToolAllowedImports, module);
-    }
-
-    private void ApplyPathRule(string prefix, bool sessionScope)
-    {
-        if (sessionScope)
-            _sessionAllowList.AllowPathPrefix(prefix);
-        else
-            _settings.PythonToolAllowedPathPrefixes = AppendCsv(_settings.PythonToolAllowedPathPrefixes, prefix);
     }
 
     private static string AppendCsv(string? existing, string addition)
@@ -483,50 +620,100 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
     }
 
     /// <summary>
-    /// The loud part: only fires for the two findings that mean "this reaches your
-    /// real files", and names what it will touch.
+    /// The findings that go above everything else, in two tones so the louder one
+    /// keeps its meaning.
+    ///
+    /// Red is reserved for deletion — the operation nothing later can undo.
+    /// Reaching outside the working directory is a real thing to know about, but
+    /// it is usually "read that spreadsheet"; giving it the same red as
+    /// <c>rmtree</c> would train the red out of both.
     /// </summary>
-    private static Border? BuildAlertBanner(PythonExecutionApprovalRequest request)
+    private static IReadOnlyList<Border> BuildAlertBanners(PythonExecutionApprovalRequest request)
     {
-        var destructive = request.Risk.Flags.Any(f => string.Equals(f.Code, "destructive_file", StringComparison.Ordinal));
-        var outsidePaths = request.Risk.Flags
-            .Where(f => f.Code is "outside_allowed_path" or "absolute_path")
-            .Select(f => f.Subject)
-            .Where(p => !string.IsNullOrWhiteSpace(p))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var banners = new List<Border>();
 
-        if (!destructive && outsidePaths.Count == 0) return null;
-
-        var lines = new List<string>();
-        if (destructive) lines.Add("此次执行涉及删除、移动或覆盖文件");
-        if (outsidePaths.Count > 0)
+        if (request.Risk.Flags.Any(f => string.Equals(f.Code, "destructive_file", StringComparison.Ordinal)))
         {
-            lines.Add("此次执行将访问当前会话工作目录以外的位置：");
-            lines.AddRange(outsidePaths.Take(4).Select(p => "　" + p));
-            if (outsidePaths.Count > 4) lines.Add($"　等 {outsidePaths.Count - 4} 项");
+            banners.Add(Banner(
+                "此次执行涉及删除、移动或覆盖文件，无法撤销",
+                "Brush.Danger.Surface", Color.FromRgb(0xFD, 0xEC, 0xEC),
+                "Brush.Danger.Border", Color.FromRgb(0xE8, 0xB0, 0xB0),
+                "Brush.Danger.Foreground", Color.FromRgb(0x8A, 0x1C, 0x1C)));
         }
 
-        var text = new TextBlock
+        var outside = OutsidePaths(request);
+        if (outside.Count > 0)
         {
-            Text = string.Join("\n", lines),
-            TextWrapping = TextWrapping.Wrap,
-            Foreground = new SolidColorBrush(Color.FromRgb(0x8A, 0x1C, 0x1C)),
-            FontWeight = FontWeights.SemiBold,
-            LineHeight = 20
-        };
+            var lines = new List<string>
+            {
+                // Not "读取". Static analysis cannot tell a read from a write here,
+                // so the prompt states the capability rather than guessing the
+                // intent — see the comment in PythonExecutionRiskAnalyzer.
+                "此次执行将访问工作目录以外的位置（Python 对这些位置可读、可写、可删）："
+            };
+            lines.AddRange(outside.Take(4).Select(p => "　" + p));
+            if (outside.Count > 4) lines.Add($"　等 {outside.Count - 4} 项");
 
-        return new Border
+            banners.Add(Banner(
+                string.Join("\n", lines),
+                "Brush.Warning.Surface", Color.FromRgb(0xFF, 0xF6, 0xE5),
+                "Brush.Warning.Border", Color.FromRgb(0xE8, 0xCE, 0x9A),
+                "Brush.Warning.Foreground", Color.FromRgb(0x7A, 0x51, 0x0C)));
+        }
+
+        return banners;
+
+        Border Banner(
+            string text,
+            string surfaceKey, Color surfaceFallback,
+            string borderKey, Color borderFallback,
+            string foregroundKey, Color foregroundFallback) => new()
         {
-            Child = text,
-            Background = new SolidColorBrush(Color.FromRgb(0xFD, 0xEC, 0xEC)),
-            BorderBrush = new SolidColorBrush(Color.FromRgb(0xE8, 0xB0, 0xB0)),
+            Child = new TextBlock
+            {
+                Text = text,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = TryFindBrush(foregroundKey) ?? new SolidColorBrush(foregroundFallback),
+                FontWeight = FontWeights.SemiBold,
+                LineHeight = 20
+            },
+            Background = TryFindBrush(surfaceKey) ?? new SolidColorBrush(surfaceFallback),
+            BorderBrush = TryFindBrush(borderKey) ?? new SolidColorBrush(borderFallback),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(6),
             Padding = new Thickness(12, 10, 12, 10),
             Margin = new Thickness(0, 0, 0, 10)
         };
     }
+
+    /// <summary>The literal paths outside the working directory this run named.</summary>
+    private static IReadOnlyList<string> OutsidePaths(PythonExecutionApprovalRequest request) =>
+        request.Risk.Flags
+            .Where(f => string.Equals(f.Code, "outside_workspace", StringComparison.Ordinal))
+            .Select(f => f.Subject)
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p => p!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    /// <summary>
+    /// Folders offered as "remember this". One per outside path, deduplicated —
+    /// the folder holding a named file, or the folder itself when the code named a
+    /// directory.
+    ///
+    /// Only fully-rooted literals qualify. The analyzer also picks up <c>~/…</c>
+    /// and <c>%VAR%\…</c>, which are not paths yet; resolving them here would
+    /// produce a grant for a folder that is not the one the code will open.
+    /// </summary>
+    private static IReadOnlyList<string> GetFolderCandidates(PythonExecutionApprovalRequest request) =>
+        OutsidePaths(request)
+            .Where(Path.IsPathRooted)
+            .Select(WorkspaceScope.FolderPrefix)
+            .Where(f => !string.IsNullOrWhiteSpace(f))
+            .Select(f => f!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(4)
+            .ToArray();
 
     private static string BuildRiskText(PythonExecutionApprovalRequest request)
     {
@@ -538,8 +725,8 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         var codes = request.Risk.Flags.Select(f => f.Code).ToHashSet(StringComparer.Ordinal);
 
         var rest = request.Risk.Flags
-            // Shown in the banner above.
-            .Where(f => f.Code is not ("destructive_file" or "outside_allowed_path" or "absolute_path"))
+            // Shown in the banners above.
+            .Where(f => f.Code is not ("destructive_file" or "outside_workspace"))
             // The analyzer finds the same fact twice when a module import and a
             // call-site pattern both match — the module-specific line wins, since
             // it names what to allow.
@@ -571,16 +758,202 @@ public sealed class PythonExecutionApprovalService : IPythonExecutionApprovalSer
         "unknown_import" => $"涉及非常用模块 {flag.Subject}",
         "denied_import" => $"涉及已被规则禁用的模块 {flag.Subject}",
         "denied_path" => $"涉及已被规则禁用的路径 {flag.Subject}",
+        "outside_workspace" => $"涉及工作目录以外的路径 {flag.Subject}",
         _ => flag.Message,
     };
 
+    /// <summary>
+    /// The window an approval dialog should hang off.
+    ///
+    /// Every candidate is filtered for being visible and not minimized, which the
+    /// earlier version did not do for <see cref="Application.MainWindow"/>. That
+    /// mattered: this app hides its main window to the tray, and WPF hands
+    /// activation back to the owner when a modal dialog closes — an owner sitting
+    /// in the tray has nothing to hand it to, so the foreground fell through to
+    /// whatever other application was next in the Z order.
+    /// </summary>
     private static Window? FindOwnerWindow()
     {
         var app = Application.Current;
         if (app is null) return null;
-        return app.Windows.OfType<Window>().FirstOrDefault(w => w.IsActive)
-               ?? app.MainWindow
-               ?? app.Windows.OfType<Window>().FirstOrDefault(w => w.IsVisible);
+
+        return Usable(app.Windows.OfType<Window>().FirstOrDefault(w => w.IsActive))
+               ?? Usable(app.MainWindow)
+               ?? app.Windows.OfType<Window>().FirstOrDefault(w => Usable(w) is not null);
+    }
+
+    /// <summary>A window that can actually receive the foreground: shown, and not
+    /// sitting minimized or hidden in the tray.</summary>
+    private static Window? Usable(Window? window) =>
+        window is { IsVisible: true } && window.WindowState != WindowState.Minimized
+            ? window
+            : null;
+
+    /// <summary>
+    /// Shows an approval dialog so it actually reaches the user, and hands the
+    /// foreground back to the app afterwards.
+    ///
+    /// Both ends need help, because these dialogs open in the middle of a turn
+    /// rather than in response to a click:
+    ///
+    /// Opening — a turn can run for a minute, and people switch away while it
+    /// does. MolaGPT is then not the foreground application, so Windows'
+    /// foreground lock lets the dialog appear behind whatever the user is looking
+    /// at, flashing in the taskbar instead of coming forward.
+    ///
+    /// Closing — this is the one that shows up as "另一个窗口突然跳到最前面". While
+    /// a modal dialog is up, WPF disables the owner window (Win32 <c>WS_DISABLED</c>)
+    /// and only re-enables it <em>after</em> the dialog's HWND has been destroyed.
+    /// Windows, destroying the foreground window, looks for the next window to
+    /// activate and skips every disabled one — ours included — so it lands on
+    /// whichever other application is next in the Z order. Our window then ends up
+    /// behind a window it was in front of a moment earlier.
+    ///
+    /// Fixing that up after <c>ShowDialog</c> returns does not work, and that was
+    /// the first attempt here: by then the other application already holds the
+    /// foreground, its activation is still in flight as posted messages, and
+    /// whatever we do synchronously gets overwritten a frame later. The gap has to
+    /// be closed rather than patched, so the owner is re-enabled and re-activated
+    /// from <see cref="Window.Closing"/> — while the dialog still exists. By the
+    /// time it is destroyed there is an enabled window of ours holding the
+    /// foreground, and Windows has no reason to go looking. WPF re-enables the
+    /// owner again on its own afterwards, which is harmless.
+    /// </summary>
+    private static bool ShowApprovalModal(Window dialog, Window? owner)
+    {
+        dialog.Loaded += (_, _) => Raise(dialog);
+        dialog.Closing += (_, _) => HandBackForeground(owner);
+
+        try
+        {
+            return dialog.ShowDialog() == true;
+        }
+        finally
+        {
+            // Belt and braces for the paths where Closing could not do its job —
+            // the owner having gone to the tray mid-turn, say. A no-op when the
+            // foreground is already where it should be.
+            Raise(Usable(owner) ?? Usable(Application.Current?.MainWindow));
+        }
+    }
+
+    /// <summary>
+    /// Puts the foreground back on our window while the dialog is still alive.
+    /// Goes through Win32 rather than <see cref="Window.Activate"/> because the
+    /// owner is still disabled at this point, and activating a disabled window
+    /// does not stick — it has to be re-enabled first.
+    /// </summary>
+    private static void HandBackForeground(Window? owner)
+    {
+        var target = Usable(owner) ?? Usable(Application.Current?.MainWindow);
+        if (target is null) return;
+
+        try
+        {
+            var handle = new WindowInteropHelper(target).Handle;
+            if (handle == IntPtr.Zero) return;
+
+            EnableWindow(handle, true);
+            SetForegroundWindow(handle);
+        }
+        catch
+        {
+            // Racing a window that is closing is not worth failing an approval over.
+        }
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnableWindow(IntPtr hWnd, [MarshalAs(UnmanagedType.Bool)] bool enable);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    private static void Raise(Window? window)
+    {
+        if (window is null) return;
+        try
+        {
+            window.Activate();
+            window.Topmost = true;
+            window.Topmost = false;
+        }
+        catch
+        {
+            // Racing a window that is closing is not worth failing an approval over.
+        }
+    }
+
+    private static void ApplyDialogChrome(Window dialog)
+    {
+        dialog.Background = TryFindBrush("Brush.Bg.Primary") ?? dialog.Background;
+        dialog.Foreground = TryFindBrush("Brush.Text.Primary") ?? dialog.Foreground;
+    }
+
+    private static void ApplyCodeBoxStyle(TextBox box)
+    {
+        if (TryFindStyle("ThemedCodeBox") is Style style)
+            box.Style = style;
+        else
+        {
+            box.Background = TryFindBrush("Brush.Bg.Secondary") ?? box.Background;
+            box.Foreground = TryFindBrush("Brush.Text.Primary") ?? box.Foreground;
+            box.BorderBrush = TryFindBrush("Brush.Border") ?? box.BorderBrush;
+            box.Padding = new Thickness(10);
+        }
+    }
+
+    private static void ApplySecondaryButtonStyle(Button button)
+    {
+        var width = button.Width;
+        var height = button.Height;
+        var margin = button.Margin;
+        if (TryFindStyle("OutlineButton") is Style style)
+            button.Style = style;
+        button.Width = width;
+        button.Height = height;
+        button.Margin = margin;
+        button.Padding = new Thickness(0);
+        button.HorizontalAlignment = HorizontalAlignment.Right;
+        button.MinWidth = 0;
+    }
+
+    private static void ApplyPrimaryButtonStyle(Button button)
+    {
+        var width = button.Width;
+        var height = button.Height;
+        var margin = button.Margin;
+        if (TryFindStyle("PillPrimaryButton") is Style style)
+            button.Style = style;
+        button.Width = width;
+        button.Height = height;
+        button.Margin = margin;
+        button.Padding = new Thickness(0);
+        button.HorizontalAlignment = HorizontalAlignment.Right;
+        button.MinWidth = 0;
+    }
+
+    private static ContextMenu CreateThemedMenu()
+    {
+        var menu = new ContextMenu
+        {
+            Background = TryFindBrush("Brush.Bg.Elevated") ?? Brushes.White,
+            Foreground = TryFindBrush("Brush.Text.Primary") ?? Brushes.Black,
+            BorderBrush = TryFindBrush("Brush.Border") ?? Brushes.Gray
+        };
+        var itemForeground = TryFindBrush("Brush.Text.Primary") ?? Brushes.Black;
+        var itemStyle = new Style(typeof(MenuItem));
+        itemStyle.Setters.Add(new Setter(Control.ForegroundProperty, itemForeground));
+        itemStyle.Setters.Add(new Setter(Control.BackgroundProperty, Brushes.Transparent));
+        menu.ItemContainerStyle = itemStyle;
+        return menu;
+    }
+
+    private static Style? TryFindStyle(string key)
+    {
+        try { return Application.Current?.TryFindResource(key) as Style; }
+        catch { return null; }
     }
 
     private static FontFamily? TryFindFont(string key)

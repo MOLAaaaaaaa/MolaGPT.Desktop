@@ -72,7 +72,14 @@ public static partial class PythonExecutionRiskAnalyzer
     public static bool IsDefaultAllowedImport(string module) =>
         !string.IsNullOrWhiteSpace(module) && MatchesModuleList(module, DefaultAllowedImports);
 
-    public static PythonExecutionRiskAnalysis Analyze(string code, PythonExecutionOptions? options)
+    /// <param name="workspaceRoot">This conversation's working directory. Paths
+    /// under it are the tool's own sandbox and never flagged; paths outside it
+    /// need the user's approval, unless a remembered or configured prefix already
+    /// covers them.</param>
+    public static PythonExecutionRiskAnalysis Analyze(
+        string code,
+        PythonExecutionOptions? options,
+        string? workspaceRoot = null)
     {
         options ??= new PythonExecutionOptions();
         var flags = new List<PythonRiskFlag>();
@@ -178,16 +185,38 @@ public static partial class PythonExecutionRiskAnalyzer
                 continue;
             }
 
+            // The conversation's own working directory is where this tool is meant
+            // to operate; paths in it are not worth a word.
+            if (workspaceRoot is not null && PathMatchesAnyPrefix(literalPath, [workspaceRoot]))
+                continue;
+
             // A path under an explicitly allowed prefix is trusted: no flag at
-            // all (this is what makes "allow this path" actually stop asking).
+            // all. Two things feed this list — folders typed on the settings page,
+            // and folders the user chose to remember from the approval dialog.
             if (PathMatchesAnyPrefix(literalPath, allowedPathPrefixes))
                 continue;
 
-            // Outside an active allowlist is higher risk than a bare absolute path.
-            if (allowedPathPrefixes.Length > 0)
-                Add("outside_allowed_path", "high", $"代码引用了未在允许列表中的路径 {literalPath}", subject: literalPath);
-            else
-                Add("absolute_path", "medium", $"代码引用了本机绝对路径 {literalPath}", subject: literalPath);
+            // Everything else asks. This was briefly a hard deny, and that turned
+            // out to be the wrong line in the wrong place: deleting files *inside*
+            // the working directory only prompts, so refusing to *read* a csv
+            // outside it made the harmless case stricter than the destructive one.
+            // The decision belongs to the user, with the path named.
+            //
+            // What the prompt must not say is "读取". Nothing here can tell a read
+            // from a write — the mode is a second argument to open(), read_text and
+            // write_text look identical from the path's side, and shutil.copy takes
+            // one of each. Any guess would sometimes label a write as a read, which
+            // is the one direction that must not happen, so the dialog says
+            // "可读可写可删" and lets the user judge.
+            //
+            // And only *literal* paths are visible at all. Anything assembled at
+            // runtime — expanduser, an environment variable, concatenation — never
+            // reaches this loop, so treat the whole mechanism as a speed bump
+            // rather than a sandbox.
+            Add("outside_workspace",
+                "high",
+                $"代码引用了工作目录以外的路径 {literalPath}",
+                subject: literalPath);
         }
 
         var level = blocked

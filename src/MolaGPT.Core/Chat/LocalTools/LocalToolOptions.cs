@@ -22,7 +22,8 @@ public sealed record LocalToolOptions(
     ToolPermissionMode ImageGenerationPermissionMode = ToolPermissionMode.Approval,
     ToolPermissionMode VisionPermissionMode = ToolPermissionMode.Approval,
     ToolPermissionMode McpPermissionMode = ToolPermissionMode.Approval,
-    string? WorkspaceRoot = null)
+    string? WorkspaceRoot = null,
+    string? ReadableRootPrefixes = null)
 {
     public bool HasAny =>
         Network
@@ -38,6 +39,24 @@ public sealed record LocalToolOptions(
         string.IsNullOrWhiteSpace(DeniedPathPrefixes)
             ? Array.Empty<string>()
             : DeniedPathPrefixes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    /// <summary>
+    /// Directories the read-only tools may reach without asking, on top of the
+    /// working directory — the skill folders of whatever skills are switched on
+    /// for this turn.
+    ///
+    /// Deliberately a per-turn option rather than a stored grant. The model is
+    /// told about these skills in its own system prompt, so reading them back is
+    /// the app answering its own question, not a decision about the user's files;
+    /// and because the list is rebuilt every turn it follows the skill toggles
+    /// automatically instead of lingering as a permission nobody remembers giving.
+    /// The Python tool has been handled this way all along (its skill roots go in
+    /// via AllowedPathPrefixes); this is the same idea for read_file and friends.
+    /// </summary>
+    public IReadOnlyList<string> ReadableRootList =>
+        string.IsNullOrWhiteSpace(ReadableRootPrefixes)
+            ? Array.Empty<string>()
+            : ReadableRootPrefixes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     public static LocalToolOptions FromExtraBody(IReadOnlyDictionary<string, object>? extraBody)
     {
@@ -61,7 +80,9 @@ public sealed record LocalToolOptions(
             ReadEnum(raw, "permissionMode", ToolPermissionMode.Approval),
             ReadEnum(raw, "imageGenerationPermissionMode", ToolPermissionMode.Approval),
             ReadEnum(raw, "visionPermissionMode", ToolPermissionMode.Approval),
-            ReadEnum(raw, "mcpPermissionMode", ToolPermissionMode.Approval));
+            ReadEnum(raw, "mcpPermissionMode", ToolPermissionMode.Approval),
+            WorkspaceRoot: null,
+            ReadableRootPrefixes: ReadString(raw, "fileToolsReadableRoots"));
     }
 
     private static IReadOnlyList<McpServerOptions> ReadMcpServers(object raw)

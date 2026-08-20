@@ -2,6 +2,7 @@ using MolaGPT.Core.Chat.Providers;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
@@ -101,10 +102,24 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
         var latestUser = LatestUserMessage(request.Messages);
         var userText = latestUser?.AsText() ?? string.Empty;
         var images = ExtractImages(latestUser);
-        if (string.IsNullOrWhiteSpace(userText) && images.Count == 0) yield break;
+        var files = ExtractFiles(latestUser);
+        if (string.IsNullOrWhiteSpace(userText) && images.Count == 0 && files.Count == 0) yield break;
 
         var options = LocalToolOptions.FromExtraBody(request.ExtraBody);
         var modelSupportsVision = Models.FirstOrDefault(m => m.Id == request.ModelId)?.SupportsVision ?? false;
+
+        // Pi launches with --no-builtin-tools, so its only file access is the
+        // bridged MolaGPT tool set. read_file / execute_python_code both resolve
+        // relative paths against this conversation's workspace — the same folder
+        // the composer copied the attachments into — so the `path` values in this
+        // section are directly usable by the agent.
+        var fileSection = AttachedFilePrompt.Build(files, AttachmentPromptOptions.From(options, modelSupportsTools: true));
+        if (!string.IsNullOrWhiteSpace(fileSection))
+        {
+            userText = string.IsNullOrWhiteSpace(userText)
+                ? fileSection!
+                : userText.TrimEnd() + "\n\n" + fileSection;
+        }
 
         // LocalHttpClient must be supplied: ChatToolHost refuses search_web /
         // web_fetch / read_file / glob_files / grep_files without it.
@@ -147,9 +162,18 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
             _toolHost.ExecuteAsync(name, argsJson, toolContext, options, toolCt));
         _shim.SetTarget(new PiWorkLlmShim.ForwardTarget(creds.Endpoint, creds.TokenProvider, creds.OnUnauthorized, creds.Headers, creds.ExtraBody, creds.Auth));
 
+        // A cold sidecar costs a Node boot (~1.5s) before the model is even asked
+        // anything. Saying so beats a generic "等待模型回答" that makes the wait look
+        // like the model being slow.
+        if (holder.Session?.IsAlive != true)
+        {
+            yield return new ChatChunk(Pending: new PendingStatusDelta(
+                "启动 Agent 运行时", "本次对话首次运行，正在拉起本地 Agent"));
+        }
+
         string? errorMessage = null;
         var pendingArgs = new Dictionary<string, string>(StringComparer.Ordinal);
-        var preview = new Dictionary<int, ToolPreviewState>();
+        var preview = new ToolPreviewTracker();
         try
         {
             await foreach (var line in holder.Session!.SendTurnAsync(userText, images, ct).ConfigureAwait(false))
@@ -234,7 +258,7 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
         string line,
         LocalToolOptions options,
         IDictionary<string, string> pendingArgs,
-        IDictionary<int, ToolPreviewState> preview,
+        ToolPreviewTracker preview,
         ref string? errorMessage)
     {
         JsonDocument doc;
@@ -281,7 +305,7 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
                     // ends, and the finished card needs them — hold on to them.
                     pendingArgs[startId] = startArgs;
                     return new ChatChunk(Tool: OpenAICompatibleProvider.BuildToolDelta(
-                        CardIdFor(startId, preview), Str(root, "toolName"), startArgs, options, "running"));
+                        preview.CardIdFor(startId), Str(root, "toolName"), startArgs, options, "running"));
                 }
 
                 case "tool_execution_end":
@@ -295,7 +319,7 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
                     // duration, exit code and permission labels that live inside the
                     // tool's own result reach the card here too.
                     var delta = OpenAICompatibleProvider.BuildToolDelta(
-                        CardIdFor(endId, preview),
+                        preview.CardIdFor(endId),
                         Str(root, "toolName"),
                         endArgs ?? "{}",
                         options,
@@ -384,6 +408,15 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
         return images;
     }
 
+    /// <summary>File attachments on the turn. Like images, only this turn's are
+    /// needed — Pi owns the history, and the workspace copies stay on disk, so an
+    /// earlier turn's paths remain valid for the whole session.</summary>
+    private static IReadOnlyList<Attachment> ExtractFiles(ChatMessage? message)
+    {
+        if (message?.Attachments is not { Count: > 0 } attachments) return Array.Empty<Attachment>();
+        return attachments.Where(a => a.Kind == AttachmentKind.File).ToList();
+    }
+
     /// <summary>Pi writes the session as <c>&lt;id&gt;.jsonl</c>, so the id must be a
     /// safe filename. Conversation ids are already tame; this is belt-and-braces.
     /// Public so the session-file sweeper can derive the same ids it must match.</summary>
@@ -407,7 +440,7 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
     /// arguments as deltas against a content index; the card is rebuilt from the
     /// accumulated text, throttled so a long script does not emit a chunk per token.
     /// </summary>
-    private sealed class ToolPreviewState
+    internal sealed class ToolPreviewState
     {
         /// <summary>The model's own id for the call, once it has sent one.</summary>
         public string Id = "";
@@ -422,6 +455,10 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
         public int LastEmittedLength;
         public long LastEmittedTicks;
 
+        /// <summary>Set once Pi closes the block. A finished call must never take
+        /// another call's deltas, however the content index is reused.</summary>
+        public bool Finished;
+
         /// <summary>Same shape of throttle the direct provider uses: emit once a
         /// meaningful amount of new text has arrived, or after a pause.</summary>
         public bool ShouldEmit(long nowTicks) =>
@@ -429,18 +466,68 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
             || nowTicks - LastEmittedTicks >= TimeSpan.TicksPerMillisecond * 250;
     }
 
+    /// <summary>
+    /// Per-turn bookkeeping for Pi's tool cards.
+    ///
+    /// Pi's agent loop emits one assistant message per step, and <c>contentIndex</c>
+    /// numbers blocks <em>within</em> a message — so the tool call in step 2 arrives
+    /// at the same index step 1's did. Filing live previews under that index alone
+    /// made every later step land on the first step's card: a single card, its name
+    /// frozen at whatever ran first, its arguments and result overwritten again and
+    /// again by each following call.
+    ///
+    /// A finished call therefore releases its index, while the id → card mapping it
+    /// leaves behind lives for the whole turn — that mapping is what the execution
+    /// events still need after the preview slot has been recycled.
+    /// </summary>
+    internal sealed class ToolPreviewTracker
+    {
+        private readonly Dictionary<int, ToolPreviewState> _live = new();
+        private readonly Dictionary<string, string> _cardIdByCallId = new(StringComparer.Ordinal);
+
+        /// <summary>The state for a block still being written, starting a fresh one
+        /// when the slot's previous occupant has already been closed.</summary>
+        public ToolPreviewState Live(int contentIndex) =>
+            _live.TryGetValue(contentIndex, out var state) && !state.Finished
+                ? state
+                : _live[contentIndex] = new ToolPreviewState();
+
+        /// <summary>Closes the block and files its card under the id Pi settled on,
+        /// so the run/result events can find it.</summary>
+        public void Finish(int contentIndex, JsonElement call)
+        {
+            if (!_live.TryGetValue(contentIndex, out var state)) return;
+
+            if (call.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String)
+                state.Id = id.GetString() ?? state.Id;
+            if (state.Name.Length == 0
+                && call.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String)
+                state.Name = name.GetString() ?? "";
+
+            state.Finished = true;
+            if (state.Id.Length > 0 && state.CardId.Length > 0)
+                _cardIdByCallId[state.Id] = state.CardId;
+        }
+
+        /// <summary>The card key for a running/finished call: the key the preview
+        /// already put on screen, otherwise Pi's own id. The two are identical in the
+        /// common case, where the model named the call before streaming its
+        /// arguments.</summary>
+        public string CardIdFor(string toolCallId) =>
+            _cardIdByCallId.TryGetValue(toolCallId, out var cardId) ? cardId : toolCallId;
+    }
+
     private static ChatChunk? BuildPreparingCard(
         JsonElement ev,
         LocalToolOptions options,
-        IDictionary<int, ToolPreviewState> preview,
+        ToolPreviewTracker preview,
         Action<string>? log)
     {
         if (!ev.TryGetProperty("contentIndex", out var idx) || idx.ValueKind != JsonValueKind.Number)
             return null;
         var index = idx.GetInt32();
 
-        if (!preview.TryGetValue(index, out var state))
-            preview[index] = state = new ToolPreviewState();
+        var state = preview.Live(index);
 
         if (ev.TryGetProperty("delta", out var d) && d.ValueKind == JsonValueKind.String)
             state.Arguments.Append(d.GetString());
@@ -493,30 +580,13 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
     /// <summary>Record the id Pi settled on for a finished tool-call block, so the
     /// execution events can be matched back to the card the preview already put on
     /// screen even when the model sent the id last.</summary>
-    private static void NoteFinishedToolCall(JsonElement ev, IDictionary<int, ToolPreviewState> preview)
+    private static void NoteFinishedToolCall(JsonElement ev, ToolPreviewTracker preview)
     {
         if (!ev.TryGetProperty("contentIndex", out var idx) || idx.ValueKind != JsonValueKind.Number)
             return;
-        if (!preview.TryGetValue(idx.GetInt32(), out var state)) return;
         if (!ev.TryGetProperty("toolCall", out var call) || call.ValueKind != JsonValueKind.Object) return;
 
-        if (call.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String)
-            state.Id = id.GetString() ?? state.Id;
-        if (state.Name.Length == 0
-            && call.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String)
-            state.Name = name.GetString() ?? "";
-    }
-
-    /// <summary>The card key for a running/finished call: the preview's key when this
-    /// call already has a card on screen, otherwise Pi's own id. Identical to the id in
-    /// the common case, where the model named the call before streaming its
-    /// arguments.</summary>
-    private static string CardIdFor(string toolCallId, IDictionary<int, ToolPreviewState> preview)
-    {
-        foreach (var state in preview.Values)
-            if (state.CardId.Length > 0 && state.Id == toolCallId)
-                return state.CardId;
-        return toolCallId;
+        preview.Finish(idx.GetInt32(), call);
     }
 
     private static string UnwrapToolResult(JsonElement result)

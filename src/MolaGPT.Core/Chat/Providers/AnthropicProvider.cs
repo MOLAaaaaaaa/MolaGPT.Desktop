@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Models;
 using MolaGPT.Core.Net;
 using MolaGPT.Core.Sse;
@@ -169,29 +170,38 @@ public sealed class AnthropicProvider : IChatProvider
         if (!string.IsNullOrWhiteSpace(text))
             parts.Add(new { type = "text", text });
 
+        var imageOrdinal = 0;
         foreach (var attachment in message.Attachments)
         {
-            if (attachment.Kind == AttachmentKind.Image)
+            if (attachment.Kind != AttachmentKind.Image) continue;
+
+            imageOrdinal++;
+            if (attachment.IsUnavailable)
             {
                 parts.Add(new
                 {
-                    type = "image",
-                    source = new
-                    {
-                        type = "base64",
-                        media_type = attachment.MimeType,
-                        data = Convert.ToBase64String(attachment.Bytes)
-                    }
+                    type = "text",
+                    text = OpenAiMessageContentBuilder.UnavailableImageNote(attachment, imageOrdinal)
                 });
                 continue;
             }
 
             parts.Add(new
             {
-                type = "text",
-                text = OpenAiMessageContentBuilder.BuildFileTextPart(attachment)
+                type = "image",
+                source = new
+                {
+                    type = "base64",
+                    media_type = attachment.MimeType,
+                    data = Convert.ToBase64String(attachment.Bytes)
+                }
             });
         }
+
+        var fileSection = AttachedFilePrompt.Build(
+            message.Attachments.Where(a => a.Kind == AttachmentKind.File).ToList());
+        if (!string.IsNullOrWhiteSpace(fileSection))
+            parts.Add(new { type = "text", text = fileSection });
 
         return parts;
     }

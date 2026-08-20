@@ -29,6 +29,7 @@ public partial class AboutWindow : Window
         new("ColorCode.Core", "代码语法高亮", "MIT"),
         new("CommunityToolkit.Mvvm", "MVVM 框架（ObservableObject / RelayCommand）", "MIT"),
         new("Dapper", "轻量级 ORM", "Apache-2.0"),
+        new("PdfPig", "PDF 附件的文字层提取", "Apache-2.0"),
         new("Microsoft.Data.Sqlite", "SQLite 数据库驱动", "MIT"),
         new("SQLitePCLRaw / SQLite", "SQLite 原生库绑定与运行时", "Apache-2.0 / Public Domain"),
         new("Microsoft.Extensions.Hosting", "通用主机 / 依赖注入", "MIT"),
@@ -244,6 +245,7 @@ Apache License 2.0
 适用组件：
   - Dapper  © 2019 Stack Exchange, Inc.
   - SQLitePCLRaw  © 2014-2026 SourceGear, LLC
+  - PdfPig  © UglyToad and PdfPig contributors
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not use
 these files except in compliance with the License. You may obtain a copy of the

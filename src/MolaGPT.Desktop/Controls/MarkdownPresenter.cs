@@ -3120,10 +3120,10 @@ public sealed partial class MarkdownPresenter : ContentControl
         RestoreInlineMathPlaceholders(paragraph.Inlines, inlineMath);
         ApplyInlineMath(paragraph);
         ApplyCjkPunctuation(paragraph.Inlines);
+        StyleInlineCode(paragraph.Inlines);
         ApplyWebFontFallback(paragraph.Inlines);
         WireHyperlinks(paragraph.Inlines);
         ApplyCitationControls(paragraph.Inlines);
-        StyleInlineCode(paragraph);
 
         // Inline math is an InlineUIContainer wrapping a WpfMath FormulaControl,
         // which is frequently taller than a text line (a fraction with a radical
@@ -3165,6 +3165,7 @@ public sealed partial class MarkdownPresenter : ContentControl
         RestoreInlineMathPlaceholders(paragraph.Inlines, inlineMath);
         ApplyInlineMath(paragraph);
         ApplyCjkPunctuation(paragraph.Inlines);
+        StyleInlineCode(paragraph.Inlines);
         ApplyWebFontFallback(paragraph.Inlines);
         WireHyperlinks(paragraph.Inlines);
         ApplyCitationControls(paragraph.Inlines);
@@ -4230,16 +4231,7 @@ public sealed partial class MarkdownPresenter : ContentControl
         return run;
     }
 
-    private static bool IsMonoRun(Run run)
-    {
-        var source = run.FontFamily?.Source ?? string.Empty;
-        return source.Contains("Consolas", StringComparison.OrdinalIgnoreCase)
-            || source.Contains("Cascadia", StringComparison.OrdinalIgnoreCase)
-            || source.Contains("SFMono", StringComparison.OrdinalIgnoreCase)
-            || source.Contains("Menlo", StringComparison.OrdinalIgnoreCase)
-            || source.Contains("Courier", StringComparison.OrdinalIgnoreCase)
-            || source.Contains("Mono", StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool IsMonoRun(Run run) => IsMonoFont(run.FontFamily);
 
     private static bool ShouldUseCjkFont(char ch) =>
         ch is >= '\u2E80' and <= '\u2EFF'   // CJK radicals
@@ -4254,18 +4246,50 @@ public sealed partial class MarkdownPresenter : ContentControl
         or >= '\uFE10' and <= '\uFE4F'      // vertical / compatibility forms
         or >= '\uFF00' and <= '\uFFEF';     // full-width punctuation/forms
 
-    private void StyleInlineCode(Paragraph paragraph)
+    private void StyleInlineCode(InlineCollection inlines)
     {
-        foreach (var run in paragraph.Inlines.OfType<Run>())
+        var background = ResolveBrush("Brush.Bg.Tertiary", new SolidColorBrush(Color.FromRgb(241, 243, 245)));
+        var foreground = ResolveBrush("Brush.Text.Primary", Brushes.Black);
+
+        foreach (var inline in inlines)
         {
-            if (run.FontFamily?.Source.Contains("Consolas", StringComparison.OrdinalIgnoreCase) == true
-                || run.FontFamily?.Source.Contains("Cascadia", StringComparison.OrdinalIgnoreCase) == true)
+            switch (inline)
             {
-                run.Background = ResolveBrush("Brush.Bg.Tertiary", new SolidColorBrush(Color.FromRgb(241, 243, 245)));
-                run.Foreground = ResolveBrush("Brush.Primary.Hover", Brushes.IndianRed);
+                case Run run when IsCodeRun(run):
+                    run.Background = background;
+                    run.Foreground = foreground;
+                    break;
+                // Hyperlink derives from Span, so it has to be matched first — a
+                // `case Span` above this one takes every link and the compiler
+                // rejects this branch as unreachable. The order also carries the
+                // behaviour: a link recurses into its children but never takes the
+                // code background itself, which would repaint the whole link.
+                case Hyperlink link:
+                    StyleInlineCode(link.Inlines);
+                    break;
+                case Span span:
+                    if (span.Background is not null || IsMonoFont(span.FontFamily))
+                    {
+                        span.Background = background;
+                        span.Foreground = foreground;
+                    }
+                    StyleInlineCode(span.Inlines);
+                    break;
             }
         }
     }
+
+    private static bool IsCodeRun(Run run) =>
+        IsMonoRun(run) || run.Background is not null;
+
+    private static bool IsMonoFont(FontFamily? font) =>
+        font?.Source is { Length: > 0 } source
+        && (source.Contains("Consolas", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("Cascadia", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("SFMono", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("Menlo", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("Courier", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("Mono", StringComparison.OrdinalIgnoreCase));
 
     private void AnimateFade()
     {

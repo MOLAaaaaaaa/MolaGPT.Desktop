@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
@@ -133,26 +134,37 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
         var toolDefinitions = localToolDefinitions.Concat(extendedToolDefinitions).ToArray();
         var useLocalTools = toolDefinitions.Length > 0;
         var replaceImagesWithText = !modelSupportsVision && localToolOptions.Vision?.Enabled == true;
-        // Image ordinal runs globally across all messages so the [图片#N]
-        // placeholders line up with VisionProxyTool's flat enumeration order.
-        var imageOrdinal = 0;
-        var wireMessages = new List<object>(request.Messages.Count);
-        foreach (var m in request.Messages)
+        var attachmentOptions = AttachmentPromptOptions.From(localToolOptions, modelSupportsTools);
+        // Built off the calling thread: an `await foreach` runs an iterator body on
+        // the caller's thread until the first real suspension, and callers reach
+        // this from the UI thread. Base64-encoding a conversation's worth of images
+        // is hundreds of milliseconds once the history carries a few large ones.
+        // Everything read here is an immutable snapshot, so there is nothing to
+        // race with.
+        var wireMessages = await Task.Run(() =>
         {
-            if (m.Role == ChatMessage.RoleAssistant
-                && OpenAiWireHistory.TryRead(
-                    m.OpenAiWireHistoryJson,
-                    OpenAiWireApi.ChatCompletions,
-                    Id,
-                    request.ModelId,
-                    out var preservedItems))
+            // Image ordinal runs globally across all messages so the [图片#N]
+            // placeholders line up with VisionProxyTool's flat enumeration order.
+            var imageOrdinal = 0;
+            var built = new List<object>(request.Messages.Count);
+            foreach (var m in request.Messages)
             {
-                wireMessages.AddRange(preservedItems.Cast<object>());
-                continue;
-            }
+                if (m.Role == ChatMessage.RoleAssistant
+                    && OpenAiWireHistory.TryRead(
+                        m.OpenAiWireHistoryJson,
+                        OpenAiWireApi.ChatCompletions,
+                        Id,
+                        request.ModelId,
+                        out var preservedItems))
+                {
+                    built.AddRange(preservedItems.Cast<object>());
+                    continue;
+                }
 
-            wireMessages.Add(ToOpenAiWireMessage(m, request, replaceImagesWithText, ref imageOrdinal));
-        }
+                built.Add(ToOpenAiWireMessage(m, request, replaceImagesWithText, ref imageOrdinal, attachmentOptions));
+            }
+            return built;
+        }, ct).ConfigureAwait(false);
         var turnWireMessages = new List<object>();
 
         while (true)
@@ -492,12 +504,18 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
         return OpenAiWireHistory.Serialize(OpenAiWireApi.ChatCompletions, Id, request.ModelId, items);
     }
 
-    private static object ToOpenAiWireMessage(ChatMessage message, ChatRequest request, bool replaceImagesWithText, ref int imageOrdinal)
+    private static object ToOpenAiWireMessage(
+        ChatMessage message,
+        ChatRequest request,
+        bool replaceImagesWithText,
+        ref int imageOrdinal,
+        AttachmentPromptOptions attachmentOptions)
     {
         var wire = new Dictionary<string, object?>
         {
             ["role"] = message.Role,
-            ["content"] = OpenAiMessageContentBuilder.Build(message, replaceImagesWithText, ref imageOrdinal)
+            ["content"] = OpenAiMessageContentBuilder.Build(
+                message, replaceImagesWithText, ref imageOrdinal, attachmentOptions)
         };
         if (ShouldPassReasoningContent(request, message.Role, message.ReasoningContent))
             wire["reasoning_content"] = message.ReasoningContent;
@@ -696,6 +714,8 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
                 return ReadString(root, "url") ?? "等待网页地址";
             if (name == VisionProxyTool.ToolName)
                 return ReadString(root, "query") ?? "查看图片";
+            if (name == ImageAnalysisTool.ToolName)
+                return ReadString(root, "path") ?? "分析图片";
             if (name == ImageGenerationTool.ToolName)
                 return ReadString(root, "prompt") ?? "生成图片";
             if (name == PythonExecutionTool.ToolName)
@@ -735,6 +755,8 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
             return "读取页面标题、正文和链接";
         if (name == VisionProxyTool.ToolName)
             return "通过视觉模型读取图片";
+        if (name == ImageAnalysisTool.ToolName)
+            return "通过视觉模型分析工作目录中的图片";
         if (name == ImageGenerationTool.ToolName)
             return "通过图像生成 API 创建图片";
         if (name == PythonExecutionTool.ToolName)
@@ -879,6 +901,9 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
         "glob_files" => "查找文件",
         "grep_files" => "搜索内容",
         PythonExecutionTool.ToolName => "执行 Python",
+        VisionProxyTool.ToolName => "查看图片",
+        ImageAnalysisTool.ToolName => "图片分析",
+        ImageGenerationTool.ToolName => "生成图片",
         _ => "调用工具"
     };
 

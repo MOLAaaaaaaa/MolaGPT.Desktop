@@ -314,6 +314,34 @@ internal static class FileToolset
         }
     }
 
+    /// <summary>
+    /// The absolute path a call is going to touch, resolved through the very same
+    /// helpers the tools use. The permission layer asks for this before running
+    /// anything, so the location shown in the approval dialog is the location that
+    /// gets opened — resolving it a second way here would let the two disagree,
+    /// and the dialog would then be describing a file nobody is about to read.
+    ///
+    /// Returns null when the call has no resolvable target (a missing or malformed
+    /// argument); the tool itself will reject it a moment later with a proper error.
+    /// </summary>
+    public static string? ResolveApprovalTarget(string toolName, string? path, string? workspaceRoot)
+    {
+        var raw = string.IsNullOrWhiteSpace(path) ? null : path!.Trim().Trim('"', '\'');
+        try
+        {
+            return toolName switch
+            {
+                "read_file" => raw is null ? null : ResolvePath(raw, workspaceRoot, File.Exists),
+                "glob_files" or "grep_files" => ResolveDirectory(raw, workspaceRoot),
+                _ => null
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     // ---- helpers ----
 
     private static object Error(string message) => new { success = false, source = "local_file_tool", error = message };

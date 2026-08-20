@@ -123,9 +123,11 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private MolaGPT.Core.Chat.Agents.AgentPermissionMode _agentPermissionMode
         = MolaGPT.Core.Chat.Agents.AgentPermissionMode.AcceptEdits;
 
-    /// <summary>Tools the user answered "始终允许" for. Surfaced here because a
-    /// standing grant the user cannot see is a standing grant they cannot withdraw.</summary>
-    public ObservableCollection<string> AlwaysAllowedTools { get; } = new();
+    /// <summary>Tools the user answered "始终允许" for, plus the folders and drives
+    /// they let the read-only tools reach outside the working directory. Surfaced
+    /// here because a standing grant the user cannot see is a standing grant they
+    /// cannot withdraw.</summary>
+    public ObservableCollection<ToolGrantEntry> AlwaysAllowedTools { get; } = new();
 
     public bool HasAlwaysAllowedTools => AlwaysAllowedTools.Count > 0;
 
@@ -1003,8 +1005,8 @@ public sealed partial class SettingsViewModel : ObservableObject
         AlwaysAllowedTools.Clear();
         if (_settingsRepo is not null)
         {
-            foreach (var name in ToolGrantSettings.Read(_settingsRepo).OrderBy(n => n, StringComparer.Ordinal))
-                AlwaysAllowedTools.Add(name);
+            foreach (var key in ToolGrantSettings.Read(_settingsRepo).OrderBy(n => n, StringComparer.Ordinal))
+                AlwaysAllowedTools.Add(new ToolGrantEntry(key, ToolGrantSettings.Describe(key)));
         }
         OnPropertyChanged(nameof(HasAlwaysAllowedTools));
         OnPropertyChanged(nameof(HasNoAlwaysAllowedTools));

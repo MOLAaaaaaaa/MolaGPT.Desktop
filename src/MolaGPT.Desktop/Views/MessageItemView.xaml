@@ -141,7 +141,7 @@
                                                        FontSize="12"
                                                        Foreground="{DynamicResource Brush.Text.Primary}"
                                                        TextTrimming="CharacterEllipsis" />
-                                            <TextBlock Text="{Binding Label}"
+                                            <TextBlock Text="{Binding StatusLabel}"
                                                        FontSize="10"
                                                        Foreground="{DynamicResource Brush.Text.Muted}"
                                                        TextTrimming="CharacterEllipsis" />
@@ -374,6 +374,28 @@
                                        Foreground="{DynamicResource Brush.Text.Muted}"
                                        LineHeight="15" />
                         </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Stopped-before-any-output marker. Without it the bubble is a
+                     blank gap and the turn looks like it vanished. Only shown when
+                     nothing was produced; partial answers speak for themselves. -->
+                <Border Visibility="{Binding ShowStoppedNotice, Converter={x:Static views:BoolToVisibility.Instance}}"
+                        Background="{DynamicResource Brush.Bg.Tertiary}"
+                        CornerRadius="{DynamicResource Radius.Sm}"
+                        Padding="10,6"
+                        HorizontalAlignment="Left">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE71A;"
+                                   FontFamily="{DynamicResource Font.Icon}"
+                                   FontSize="12"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,6,0"
+                                   Foreground="{DynamicResource Brush.Text.Muted}" />
+                        <TextBlock Text="已停止生成，未产生回答"
+                                   FontSize="12"
+                                   VerticalAlignment="Center"
+                                   Foreground="{DynamicResource Brush.Text.Secondary}" />
                     </StackPanel>
                 </Border>
 
@@ -1357,7 +1379,7 @@
                                                Foreground="{DynamicResource Brush.Text.Primary}"
                                                TextTrimming="CharacterEllipsis"
                                                Margin="2,8,2,0" />
-                                    <TextBlock Text="{Binding Label}"
+                                    <TextBlock Text="{Binding StatusLabel}"
                                                FontSize="10.5"
                                                Foreground="{DynamicResource Brush.Text.Muted}"
                                                TextTrimming="CharacterEllipsis"

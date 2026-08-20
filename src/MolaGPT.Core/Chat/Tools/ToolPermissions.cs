@@ -7,7 +7,15 @@ public enum ToolCapability
     Read = 1 << 0,
     Write = 1 << 1,
     External = 1 << 2,
-    Destructive = 1 << 3
+    Destructive = 1 << 3,
+
+    /// <summary>
+    /// The call resolves to a path outside the conversation's working directory.
+    /// Orthogonal to <see cref="Read"/>/<see cref="Write"/> on purpose: a read
+    /// that leaves the workspace is still only a read, but it is the user's own
+    /// disk rather than a sandbox we created, so it is theirs to allow.
+    /// </summary>
+    OutsideWorkspace = 1 << 4
 }
 
 public enum ToolPermissionMode
@@ -16,13 +24,18 @@ public enum ToolPermissionMode
     FullAccess
 }
 
+/// <param name="ResolvedPath">The absolute path this call will actually touch,
+/// resolved the same way the tool resolves it. Present whenever
+/// <see cref="ToolCapability.OutsideWorkspace"/> is set, because that decision
+/// cannot be reviewed from <paramref name="ArgumentsJson"/> alone.</param>
 public sealed record ToolApprovalRequest(
     string ToolName,
     string DisplayName,
     ToolCapability Capabilities,
     string ArgumentsJson,
     string? Description = null,
-    bool AlwaysAsk = false);
+    bool AlwaysAsk = false,
+    string? ResolvedPath = null);
 
 public enum ToolApprovalDecision
 {
@@ -61,6 +74,37 @@ public interface IToolGrantStore
 
     /// <summary>Record a grant. <see cref="ToolGrantScope.Once"/> stores nothing.</summary>
     void Grant(string toolName, ToolGrantScope scope);
+
+    /// <summary>
+    /// True when an earlier "记住" covers <paramref name="fullPath"/>.
+    /// </summary>
+    /// <param name="forWriting">Ask about a tool that can also modify or delete
+    /// what it reaches — the Python tool. A read grant never satisfies this: the
+    /// user answered "让它看看这个文件夹", and silently reading that as "让它改这个
+    /// 文件夹" is the one upgrade a permission store must never perform.</param>
+    bool IsPathGranted(string fullPath, bool forWriting = false);
+
+    /// <summary>
+    /// Remember access to everything under <paramref name="pathPrefix"/> — the
+    /// folder (or, for read-only tools, the drive) the user picked in the dialog.
+    ///
+    /// Deliberately <b>not</b> keyed by tool name. The user is answering "may this
+    /// app reach D:\论文", not "may read_file specifically reach it"; keying by tool
+    /// would ask again for grep_files over the same folder, which teaches people
+    /// to stop reading the dialog. It is also strictly narrower than the per-tool
+    /// grant it sits beside: that one covers every path, this one covers one
+    /// subtree.
+    /// </summary>
+    /// <param name="allowWriting">Record a read-write grant, which implies read.</param>
+    void GrantPath(string pathPrefix, ToolGrantScope scope, bool allowWriting = false);
+
+    /// <summary>
+    /// Prefixes the user has granted read-write. Handed to the Python risk
+    /// analyzer, which already knows how to treat an allowed prefix as
+    /// unremarkable — so a remembered folder stops producing prompts without the
+    /// analyzer needing to learn about grants at all.
+    /// </summary>
+    IReadOnlyCollection<string> WritablePathPrefixes { get; }
 }
 
 /// <summary>

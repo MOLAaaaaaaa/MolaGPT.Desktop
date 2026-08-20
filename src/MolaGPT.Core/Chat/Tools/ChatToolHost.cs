@@ -11,6 +11,7 @@ public sealed class ChatToolHost : IChatToolHost
 {
     private readonly McpClientManager _mcp;
     private readonly VisionProxyTool _vision;
+    private readonly ImageAnalysisTool _imageAnalysis;
     private readonly ImageGenerationTool _imageGeneration;
     private readonly PythonExecutionTool _python;
     private readonly IToolApprovalService? _approval;
@@ -18,12 +19,14 @@ public sealed class ChatToolHost : IChatToolHost
     public ChatToolHost(
         McpClientManager mcp,
         VisionProxyTool vision,
+        ImageAnalysisTool imageAnalysis,
         ImageGenerationTool imageGeneration,
         PythonExecutionTool python,
         IToolApprovalService? approval = null)
     {
         _mcp = mcp;
         _vision = vision;
+        _imageAnalysis = imageAnalysis;
         _imageGeneration = imageGeneration;
         _python = python;
         _approval = approval;
@@ -39,6 +42,12 @@ public sealed class ChatToolHost : IChatToolHost
 
         if (options.Vision?.Enabled == true && !context.ModelSupportsVision)
             tools.Add(VisionProxyTool.BuildOpenAiToolDefinition());
+
+        // Offered regardless of the main model's own vision support: a file in
+        // the working directory is not in its context, and a tool result is
+        // text, so even a multimodal model has no other way to see it.
+        if (ImageAnalysisTool.IsAvailable(options))
+            tools.Add(ImageAnalysisTool.BuildOpenAiToolDefinition());
 
         if (options.ImageGeneration?.Enabled == true && options.ImageGeneration.AsTool)
             tools.Add(ImageGenerationTool.BuildOpenAiToolDefinition());
@@ -72,7 +81,8 @@ public sealed class ChatToolHost : IChatToolHost
 
         if (toolName is "search_web" or "web_fetch" or "read_file" or "glob_files" or "grep_files")
         {
-            var request = ToolCapabilityCatalog.ForBuiltIn(toolName, argumentsJson);
+            var request = WithWorkspaceScope(
+                ToolCapabilityCatalog.ForBuiltIn(toolName, argumentsJson), toolName, argumentsJson, options);
             if (!await IsApprovedAsync(request, options.PermissionMode, ct).ConfigureAwait(false))
                 return PermissionDenied(toolName);
             if (context.LocalHttpClient is null)
@@ -92,6 +102,37 @@ public sealed class ChatToolHost : IChatToolHost
             if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.VisionPermissionMode), ct).ConfigureAwait(false))
                 return PermissionDenied(toolName);
             return await _vision.ExecuteAsync(argumentsJson, context, options.Vision, ct).ConfigureAwait(false);
+        }
+
+        if (string.Equals(toolName, ImageAnalysisTool.ToolName, StringComparison.Ordinal))
+        {
+            // Same capability set and the same permission mode as the proxy —
+            // both amount to "send a picture to the configured vision model", so
+            // approving one kind of vision call and being asked again for the
+            // other would be noise.
+            var request = new ToolApprovalRequest(
+                toolName,
+                "图片分析",
+                ToolCapability.Read | ToolCapability.External,
+                argumentsJson,
+                "把图片发送给已配置的视觉模型分析");
+
+            // A picture outside the working directory is the user's own file, and
+            // this tool does not merely read it — it uploads it. Same prompt as
+            // the file tools, for the same reason, on the same resolved path.
+            var target = ImageAnalysisTool.ResolveApprovalTarget(argumentsJson, options);
+            if (target is not null && !NeedsNoPrompt(options, target))
+            {
+                request = request with
+                {
+                    Capabilities = request.Capabilities | ToolCapability.OutsideWorkspace,
+                    ResolvedPath = target
+                };
+            }
+
+            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.VisionPermissionMode), ct).ConfigureAwait(false))
+                return PermissionDenied(toolName);
+            return await _imageAnalysis.ExecuteAsync(argumentsJson, options, ct).ConfigureAwait(false);
         }
 
         if (string.Equals(toolName, ImageGenerationTool.ToolName, StringComparison.Ordinal))
@@ -163,6 +204,51 @@ public sealed class ChatToolHost : IChatToolHost
         }
     }
 
+    /// <summary>
+    /// Flags a read-only file call that resolves outside the conversation's working
+    /// directory, and records where it actually lands.
+    ///
+    /// Inside the workspace these tools stay silent — that directory exists for the
+    /// model to work in, and prompting for every file in it would train people to
+    /// click through. Leaving it is the part the user has to see, and it is not
+    /// something they can judge from the raw arguments: a bare file name, a "..",
+    /// and a drive letter all look alike in a JSON blob.
+    /// </summary>
+    private static ToolApprovalRequest WithWorkspaceScope(
+        ToolApprovalRequest request,
+        string toolName,
+        string argumentsJson,
+        LocalToolOptions options)
+    {
+        if (toolName is not ("read_file" or "glob_files" or "grep_files"))
+            return request;
+
+        var target = LocalToolRegistry.ResolveApprovalTarget(toolName, argumentsJson, options);
+        if (target is null || NeedsNoPrompt(options, target))
+            return request;
+
+        return request with
+        {
+            Capabilities = request.Capabilities | ToolCapability.OutsideWorkspace,
+            ResolvedPath = target
+        };
+    }
+
+    /// <summary>
+    /// Whether a read of <paramref name="target"/> is inside the ground this turn
+    /// already covers: the conversation's working directory, or a root the app
+    /// itself opened up — the folders of the skills switched on for this turn.
+    ///
+    /// The skill case is not a concession. Those files are the app's own content,
+    /// and the model was handed a catalogue of them in its system prompt; asking
+    /// the user to approve reading back something we just advertised is a prompt
+    /// with no decision in it, and prompts with no decision in them are how people
+    /// learn to click through the ones that matter.
+    /// </summary>
+    private static bool NeedsNoPrompt(LocalToolOptions options, string target) =>
+        WorkspaceScope.IsInside(options.WorkspaceRoot, target)
+        || options.ReadableRootList.Any(root => WorkspaceScope.Covers(root, target));
+
     private static LocalToolOptions WithConversationWorkspace(LocalToolOptions options, ChatToolContext context) =>
         string.IsNullOrWhiteSpace(options.WorkspaceRoot) && !string.IsNullOrWhiteSpace(context.Request.ConversationId)
             ? options with { WorkspaceRoot = PythonExecutionTool.GetSessionDirectory(context.Request.ConversationId) }
@@ -175,9 +261,13 @@ public sealed class ChatToolHost : IChatToolHost
     {
         if (_approval is null)
         {
+            // Nobody to ask. Anything that would have prompted is refused rather
+            // than waved through — including a read that leaves the workspace,
+            // which is exactly the case that only a human can answer.
             return !request.AlwaysAsk
                    && !request.Capabilities.HasFlag(ToolCapability.Write)
-                   && !request.Capabilities.HasFlag(ToolCapability.Destructive);
+                   && !request.Capabilities.HasFlag(ToolCapability.Destructive)
+                   && !request.Capabilities.HasFlag(ToolCapability.OutsideWorkspace);
         }
 
         return await _approval.RequestApprovalAsync(request, mode, ct).ConfigureAwait(false)
