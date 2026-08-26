@@ -8,7 +8,7 @@ namespace MolaGPT.Core.Auth;
 /// Used for: MolaGPT JWT, BYOK API keys.
 ///
 /// On non-Windows hosts (e.g. running a unit test on Linux), the store falls
-/// back to plain bytes so tests can run; production WPF host will always be
+/// back to plain bytes so tests can run; the production desktop host is always
 /// on Windows.
 /// </summary>
 public sealed class CredentialStore

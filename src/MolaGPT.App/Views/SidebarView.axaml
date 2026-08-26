@@ -1,0 +1,468 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
+             x:Class="MolaGPT.App.Views.SidebarView"
+             x:DataType="vm:ConversationListViewModel">
+
+  <!--
+    Sidebar card contents, matching the WPF MainWindow sidebar:
+
+      header      "对话历史" at Font.Size.Title / ExtraBold, collapse button right
+      new chat    PillPrimaryButton, Margin 20,4,16,8
+      search      Bg.Tertiary, Radius.Sm, Padding 14,8, brand border on focus
+      list        Margin 14,4,12,8, rows Padding 12,7 / Margin 0,1
+
+    The list is split into a BYOK group and a MolaGPT group, each with a
+    collapsible header carrying a chevron and a count, exactly as the original.
+    Two separate ListBoxes rather than one list with grouping: the view model
+    already publishes ByokItems and MolaGptConversationItems as distinct
+    collections, and a grouped list would have to re-derive what it already knows.
+
+    The BYOK list is capped at 240px so a heavy BYOK user cannot push the
+    MolaGPT group off the bottom; the MolaGPT list takes the remaining height.
+  -->
+
+  <DockPanel LastChildFill="True">
+
+    <!-- Header -->
+    <Grid DockPanel.Dock="Top" Margin="20,20,16,12" ColumnDefinitions="*,Auto">
+      <TextBlock Grid.Column="0"
+                 Text="对话历史"
+                 FontSize="{DynamicResource Font.Size.Title}"
+                 FontWeight="ExtraBold"
+                 VerticalAlignment="Center"
+                 Foreground="{DynamicResource Brush.Text.Primary}" />
+      <Button Grid.Column="1"
+              Name="PART_Collapse"
+              Classes="headericon"
+              Width="32" Height="32"
+              ToolTip.Tip="收起侧边栏">
+        <TextBlock Classes="icon" Text="&#xE76B;" FontSize="12" />
+      </Button>
+    </Grid>
+
+    <!-- New conversation -->
+    <Button DockPanel.Dock="Top"
+            Name="PART_NewChat"
+            Classes="pillprimary"
+            Margin="20,4,16,8">
+      <StackPanel Classes="inlinerow" Orientation="Horizontal" HorizontalAlignment="Center">
+        <TextBlock Classes="icon" Text="&#xE710;" FontSize="13" Margin="0,0,8,0"
+                   Foreground="{DynamicResource Brush.Text.OnPrimary}"
+                   VerticalAlignment="Center" />
+        <TextBlock Text="新建对话"
+                   Foreground="{DynamicResource Brush.Text.OnPrimary}"
+                   VerticalAlignment="Center" />
+      </StackPanel>
+    </Button>
+
+    <!-- Search -->
+    <Border DockPanel.Dock="Top"
+            Name="PART_SearchBox"
+            Classes="searchbox"
+            Margin="20,4,16,8"
+            Padding="14,8">
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <TextBlock Grid.Column="0" Classes="icon" Text="&#xE721;" FontSize="12"
+                   Margin="0,0,8,0" VerticalAlignment="Center"
+                   Foreground="{DynamicResource Brush.Text.Muted}" />
+        <TextBox Grid.Column="1"
+                 Text="{Binding SearchQuery, Mode=TwoWay}"
+                 PlaceholderText="搜索对话"
+                 FontFamily="{DynamicResource Font.UI}"
+                 FontSize="{DynamicResource Font.Size.Body}"
+                  VerticalContentAlignment="Center" />
+        <Button Grid.Column="2" Classes="headericon" Width="20" Height="20"
+                Margin="6,0,0,0" Padding="0"
+                IsVisible="{Binding HasSearchQuery}"
+                Command="{Binding ClearSearchCommand}" ToolTip.Tip="清空搜索">
+          <TextBlock Classes="icon" Text="&#xE711;" FontSize="10" />
+        </Button>
+      </Grid>
+    </Border>
+
+    <Border DockPanel.Dock="Top" Classes="selectionbar"
+            IsVisible="{Binding HasSelectedConversations}">
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock Text="{Binding SelectionSummary}" FontSize="12"
+                   FontWeight="SemiBold" VerticalAlignment="Center"
+                   Foreground="{DynamicResource Brush.Primary.Hover}" />
+        <Button Grid.Column="1" Classes="headericon" Width="28" Height="28"
+                Command="{Binding DeleteSelectedConversationsCommand}"
+                ToolTip.Tip="删除已选对话">
+          <TextBlock Classes="icon" Text="&#xE74D;" FontSize="13" />
+        </Button>
+      </Grid>
+    </Border>
+
+    <!-- Undo toast for the most recent soft-delete. Docked above the list rather
+         than floating over it: a toast that covers rows makes the user wait for
+         it to expire before they can click anything underneath. -->
+    <Border DockPanel.Dock="Bottom"
+            Name="PART_UndoToast"
+            Classes="undotoast"
+            IsVisible="{Binding HasPendingUndo}">
+      <DockPanel LastChildFill="True">
+        <Button DockPanel.Dock="Right"
+                Classes="pillprimary"
+                Margin="10,0,0,0" Padding="14,5" FontSize="12"
+                HorizontalAlignment="Right" VerticalAlignment="Center"
+                Content="撤销"
+                Command="{Binding UndoDeleteCommand}" />
+        <TextBlock DockPanel.Dock="Left" Classes="icon" Text="&#xE74D;" FontSize="12"
+                   VerticalAlignment="Center" Margin="0,0,8,0"
+                   Foreground="{DynamicResource Brush.Primary.Hover}" />
+        <TextBlock Text="{Binding PendingUndoMessage}"
+                   VerticalAlignment="Center"
+                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"
+                   FontSize="12.5" FontWeight="SemiBold"
+                   Foreground="{DynamicResource Brush.Primary.Hover}" />
+      </DockPanel>
+    </Border>
+
+    <!-- Conversations, grouped -->
+    <Grid Name="PART_ConversationGroupsHost" Margin="14,4,12,8">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="*" />
+      </Grid.RowDefinitions>
+
+      <!-- ===== BYOK group ===== -->
+      <Button Grid.Row="0"
+              Name="PART_ByokHeader"
+              Tag="byok"
+              Classes="groupheader"
+              IsVisible="{Binding HasByokConversations}"
+              Command="{Binding ToggleByokGroupCommand}">
+        <Grid ColumnDefinitions="Auto,*,Auto">
+          <TextBlock Grid.Column="0" Classes="icon"
+                     Text="{Binding ByokGroupChevron}"
+                     FontSize="9" Opacity="0.7"
+                     VerticalAlignment="Center"
+                     Margin="0,0,8,0" />
+          <TextBlock Grid.Column="1" Text="BYOK 模型"
+                     FontSize="{DynamicResource Font.Size.XSmall}"
+                     FontWeight="SemiBold"
+                     VerticalAlignment="Center"
+                     Foreground="{DynamicResource Brush.Text.Secondary}" />
+          <Border Grid.Column="2" Classes="countpill">
+            <TextBlock Text="{Binding ByokCount}" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{DynamicResource Brush.Text.Muted}" />
+          </Border>
+        </Grid>
+      </Button>
+
+      <ListBox Grid.Row="1"
+               Name="PART_ByokList"
+               ItemsSource="{Binding ByokItems}"
+               SelectionMode="Multiple"
+               IsVisible="{Binding IsByokGroupExpanded}"
+               MaxHeight="240"
+               Background="Transparent"
+               BorderThickness="0"
+               Padding="0"
+               ItemContainerTheme="{StaticResource ConversationItemTheme}"
+               ItemTemplate="{StaticResource ConversationRowTemplate}"
+               ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+               ScrollViewer.VerticalScrollBarVisibility="Auto" />
+
+      <!-- ===== MolaGPT group ===== -->
+      <Button Grid.Row="2"
+              Name="PART_MolaGptHeader"
+              Tag="molagpt"
+              Classes="groupheader"
+              IsVisible="{Binding HasMolaGptConversationItems}"
+              Command="{Binding ToggleMolaGptGroupCommand}">
+        <Grid ColumnDefinitions="Auto,*,Auto">
+          <TextBlock Grid.Column="0" Classes="icon"
+                     Text="{Binding MolaGptGroupChevron}"
+                     FontSize="9" Opacity="0.7"
+                     VerticalAlignment="Center"
+                     Margin="0,0,8,0" />
+          <TextBlock Grid.Column="1" Text="MolaGPT 对话"
+                     FontSize="{DynamicResource Font.Size.XSmall}"
+                     FontWeight="SemiBold"
+                     VerticalAlignment="Center"
+                     Foreground="{DynamicResource Brush.Text.Secondary}" />
+          <Border Grid.Column="2" Classes="countpill">
+            <TextBlock Text="{Binding MolaGptConversationCount}" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{DynamicResource Brush.Text.Muted}" />
+          </Border>
+        </Grid>
+      </Button>
+
+      <ListBox Grid.Row="3"
+               Name="PART_MolaGptList"
+               ItemsSource="{Binding MolaGptConversationItems}"
+               SelectionMode="Multiple"
+               IsVisible="{Binding IsMolaGptGroupExpanded}"
+               Background="Transparent"
+               BorderThickness="0"
+               Padding="0"
+               ItemContainerTheme="{StaticResource ConversationItemTheme}"
+               ItemTemplate="{StaticResource ConversationRowTemplate}"
+               ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+               ScrollViewer.VerticalScrollBarVisibility="Auto" />
+    </Grid>
+  </DockPanel>
+
+  <UserControl.Resources>
+    <!-- One row, shared by both groups — the WPF ConversationRowTemplate. -->
+    <DataTemplate x:Key="ConversationRowTemplate" DataType="vm:ConversationListItem">
+      <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto" Background="Transparent">
+
+        <!-- Right-click menu. The hover trash button stays as the fast path;
+             this exists because actions the user cannot see do not exist, and
+             because "打开本地工作目录" has nowhere else to live. -->
+        <Grid.ContextMenu>
+          <ContextMenu>
+            <MenuItem Header="打开本地工作目录" Tag="open-folder" Click="OnOpenConversationFolder" />
+            <Separator />
+            <MenuItem Header="删除对话（可撤销）" Tag="delete" Click="OnDeleteConversationFromMenu" />
+          </ContextMenu>
+        </Grid.ContextMenu>
+
+        <TextBlock Grid.Column="0" Grid.RowSpan="2"
+                   Classes="icon"
+                   Text="{Binding IconGlyph}"
+                   FontSize="13"
+                   Opacity="0.7"
+                   VerticalAlignment="Center"
+                   Margin="0,0,10,0" />
+
+        <Grid Grid.Column="1" Grid.Row="0" ColumnDefinitions="*,Auto">
+          <TextBlock Grid.Column="0"
+                     Text="{Binding Title}"
+                     ToolTip.Tip="{Binding Title}"
+                     TextTrimming="CharacterEllipsis"
+                     TextWrapping="NoWrap"
+                     VerticalAlignment="Center"
+                     FontSize="13"
+                     FontWeight="Medium" />
+
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
+                      IsVisible="{Binding !HasSidebarMetadata}">
+            <StackPanel Orientation="Horizontal" Margin="0,0,4,0" VerticalAlignment="Center"
+                        IsVisible="{Binding IsGenerating}">
+              <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Margin="0,0,3,0" Opacity="0.6" />
+              <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Margin="0,0,3,0" Opacity="0.6" />
+              <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Opacity="0.6" />
+            </StackPanel>
+
+            <!-- Time and delete share one fixed 36×16 slot. Swapping them must
+                 never change the row's desired size, or every row would shift
+                 as the pointer travels down the list. -->
+            <Panel Width="36" Height="16" VerticalAlignment="Center">
+              <TextBlock Classes="rowtime"
+                         Text="{Binding TimeLabel}"
+                         FontSize="{DynamicResource Font.Size.XSmall}"
+                         Foreground="{DynamicResource Brush.Text.Muted}"
+                         HorizontalAlignment="Right" VerticalAlignment="Center"
+                         TextWrapping="NoWrap" />
+              <Button Classes="rowdelete"
+                      Width="22" Height="16" Padding="0"
+                      HorizontalAlignment="Right"
+                      Click="OnDeleteConversation"
+                      Tag="{Binding Id}"
+                      ToolTip.Tip="删除对话（可撤销）">
+                <TextBlock Classes="icon" Text="&#xE74D;" FontSize="11" />
+              </Button>
+            </Panel>
+          </StackPanel>
+        </Grid>
+
+        <!-- BYOK and Work rows carry a provider/mode badge; plain MolaGPT chat
+             rows have nothing to say and collapse the second line entirely. -->
+        <Grid Grid.Column="1" Grid.Row="1" ColumnDefinitions="*,Auto"
+              Height="16" Margin="0,2,0,0" IsVisible="{Binding HasSidebarMetadata}">
+          <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+            <TextBlock Text="{Binding BadgeLabel}" IsVisible="{Binding IsByok}"
+                       FontSize="{DynamicResource Font.Size.XSmall}"
+                       Foreground="{DynamicResource Brush.Text.Muted}"
+                       MaxWidth="110" TextTrimming="CharacterEllipsis" />
+            <TextBlock Text="{Binding ModeBadgeLabel}" IsVisible="{Binding IsWork}"
+                       FontSize="{DynamicResource Font.Size.XSmall}"
+                       Foreground="{DynamicResource Brush.Text.Secondary}" />
+            <StackPanel Orientation="Horizontal" Margin="3,0,0,0"
+                        VerticalAlignment="Center" IsVisible="{Binding IsGenerating}">
+              <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Margin="0,0,3,0" Opacity="0.6" />
+              <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Margin="0,0,3,0" Opacity="0.6" />
+              <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Opacity="0.6" />
+            </StackPanel>
+          </StackPanel>
+          <Panel Grid.Column="1" Width="36" Height="16">
+            <TextBlock Classes="rowtime" Text="{Binding TimeLabel}"
+                       FontSize="{DynamicResource Font.Size.XSmall}"
+                       Foreground="{DynamicResource Brush.Text.Muted}"
+                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+            <Button Classes="rowdelete" Width="22" Height="16" Padding="0"
+                    HorizontalAlignment="Right" Click="OnDeleteConversation"
+                    Tag="{Binding Id}" ToolTip.Tip="删除对话（可撤销）">
+              <TextBlock Classes="icon" Text="&#xE74D;" FontSize="11" />
+            </Button>
+          </Panel>
+        </Grid>
+      </Grid>
+    </DataTemplate>
+
+    <!-- ConversationListItemStyle: Padding 12,7 / Margin 0,1 / Radius.Sm,
+         hover = Bg.HoverOverlay, selected = Primary.Soft + Primary.Hover text. -->
+    <ControlTheme x:Key="ConversationItemTheme" TargetType="ListBoxItem">
+      <Setter Property="Padding" Value="12,7" />
+      <Setter Property="Margin" Value="0,1" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Name="PART_Root"
+                  Background="Transparent"
+                  CornerRadius="{DynamicResource Radius.Sm}"
+                  Padding="{TemplateBinding Padding}">
+            <ContentPresenter Content="{TemplateBinding Content}"
+                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                              HorizontalContentAlignment="Stretch" />
+          </Border>
+        </ControlTemplate>
+      </Setter>
+      <Style Selector="^:pointerover /template/ Border#PART_Root">
+        <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+      </Style>
+      <Style Selector="^:selected /template/ Border#PART_Root">
+        <Setter Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+      </Style>
+      <!-- The selected row's text colour lives in UserControl.Styles below: a
+           ControlTheme may not contain a descendant selector, and that only
+           fails when the theme is first resolved at runtime, not at build. -->
+    </ControlTheme>
+  </UserControl.Resources>
+
+  <UserControl.Styles>
+    <!-- Selected conversation: brand text, matching the WPF trigger. -->
+    <Style Selector="ListBoxItem:selected TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+
+    <!-- Time ⇄ delete swap. Both live in the same fixed slot, so only their
+         visibility changes and the row geometry is constant. -->
+    <Style Selector="Button.rowdelete">
+      <Setter Property="IsVisible" Value="False" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    </Style>
+    <Style Selector="ListBoxItem:pointerover Button.rowdelete,
+                     ListBoxItem:selected Button.rowdelete">
+      <Setter Property="IsVisible" Value="True" />
+    </Style>
+    <Style Selector="ListBoxItem:pointerover TextBlock.rowtime,
+                     ListBoxItem:selected TextBlock.rowtime">
+      <Setter Property="IsVisible" Value="False" />
+    </Style>
+    <Style Selector="Button.rowdelete:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
+    </Style>
+
+    <Style Selector="Border.undotoast">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="1.5" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,8" />
+      <Setter Property="Margin" Value="14,4,12,12" />
+      <Setter Property="BoxShadow" Value="0 4 20 0 #3D000000" />
+    </Style>
+    <!-- The undo toast is a deadline: it appears after a delete and takes the
+         only chance to get the conversation back with it. Sliding up from the
+         bottom edge is how it gets noticed without a colour it has not earned. -->
+    <Style Selector="Border.undotoast[IsVisible=True]">
+      <Style.Animations>
+        <Animation Duration="0:0:0.22" Easing="CubicEaseOut" FillMode="Forward">
+          <KeyFrame Cue="0%">
+            <Setter Property="Opacity" Value="0" />
+            <Setter Property="TranslateTransform.Y" Value="16" />
+          </KeyFrame>
+          <KeyFrame Cue="100%">
+            <Setter Property="Opacity" Value="1" />
+            <Setter Property="TranslateTransform.Y" Value="0" />
+          </KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+
+    <Style Selector="Border.selectionbar">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="10,7" />
+      <Setter Property="Margin" Value="20,0,16,6" />
+    </Style>
+
+    <!-- PillPrimaryButton: Primary fill, Radius.Md, Padding 20,10, SemiBold. -->
+    <Style Selector="Button.pillprimary">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.OnPrimary}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="20,10" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.09" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.pillprimary:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+    <Style Selector="Button.pillprimary:pressed">
+      <Setter Property="RenderTransform" Value="scale(0.97)" />
+    </Style>
+
+    <!-- SidebarGroupHeaderButton: Bg.Tertiary chip, Radius.Sm, Padding 9,7,
+         Margin 0,8,0,4, hover lifts to the overlay tint. -->
+    <Style Selector="Button.groupheader">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="9,7" />
+      <Setter Property="Margin" Value="0,8,0,4" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    </Style>
+    <Style Selector="Button.groupheader:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+    </Style>
+
+    <Style Selector="Border.countpill">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Primary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="6,1" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style Selector="Border.searchbox">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.searchbox:focus-within">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+  </UserControl.Styles>
+</UserControl>

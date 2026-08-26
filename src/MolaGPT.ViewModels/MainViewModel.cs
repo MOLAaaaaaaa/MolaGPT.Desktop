@@ -93,6 +93,7 @@ public sealed partial class MainViewModel : ObservableObject
         _personas = personas;
         _backgroundStreams = backgroundStreams;
         _molaGptProxy = molaGptProxy;
+        _chat.AutoCollapseThinking = _settings.AutoCollapseThinking;
 
         _conversationList.ConversationSelected += async (_, id) =>
         {
@@ -191,6 +192,8 @@ public sealed partial class MainViewModel : ObservableObject
         };
         _settings.PropertyChanged += (_, e) =>
         {
+            if (e.PropertyName is nameof(SettingsViewModel.AutoCollapseThinking))
+                _chat.AutoCollapseThinking = _settings.AutoCollapseThinking;
             if (e.PropertyName is nameof(SettingsViewModel.IsLoggedIn))
             {
                 OnPropertyChanged(nameof(IsQuotaChipVisible));

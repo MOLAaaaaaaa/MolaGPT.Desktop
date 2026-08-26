@@ -421,9 +421,12 @@ public sealed class MolaGptProxyProvider : IChatProvider
             ["enabled_tools"] = enabledTools,
             ["privacy_mode"] = false
         };
+        // Unlike the BYOK providers this path keeps privacy_mode: it is MolaGPT's
+        // own protocol field, already written above, and the composer's value
+        // (Tracks off -> true) is meant to override the default.
         if (request.ExtraBody is not null)
             foreach (var kv in request.ExtraBody)
-                if (kv.Key != "enabled_tools") bodyDict[kv.Key] = kv.Value;
+                if (kv.Key != InternalExtraBodyKeys.EnabledTools) bodyDict[kv.Key] = kv.Value;
 
         if (IsAutoRouteEndpoint(apiUrlRel, request.ModelId))
         {

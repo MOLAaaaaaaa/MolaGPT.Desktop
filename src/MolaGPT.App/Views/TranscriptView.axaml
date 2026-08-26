@@ -1,0 +1,1059 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:r="clr-namespace:MolaGPT.App.Rendering"
+             xmlns:p="clr-namespace:MolaGPT.Presentation;assembly=MolaGPT.Presentation"
+             xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
+             xmlns:cc="clr-namespace:MolaGPT.Core.Chat;assembly=MolaGPT.Core"
+             xmlns:m="clr-namespace:MolaGPT.Core.Models;assembly=MolaGPT.Core"
+             x:Class="MolaGPT.App.Views.TranscriptView">
+
+  <!--
+    Transcript, matching MainWindow's MessagesScroll + MessageItemView.
+
+    Geometry copied from the WPF original:
+      scroller padding   40,64,40,24  (64 top clears the floating header)
+      bottom reserve     160          (the floating composer sits over it)
+      row margin         0,10         (MessageItemView.Margin) + 0,4 per item
+      assistant column   32px avatar, content capped at 820 and left-aligned
+      user bubble        max 640, right-aligned, avatar 32 to its right
+
+    The one departure: an assistant message is many rows rather than one, so a
+    long answer virtualizes. Every horizontal measurement above is preserved, so
+    the result lays out identically.
+  -->
+
+  <!-- ==================== block templates (inner level) ==================== -->
+  <UserControl.DataTemplates>
+
+    <DataTemplate DataType="p:ParagraphBlock">
+      <r:MarkdownTextBlock Markdown="{Binding Markdown}" Classes="prose" />
+    </DataTemplate>
+
+    <DataTemplate DataType="p:HeadingBlock">
+      <r:MarkdownTextBlock Markdown="{Binding Markdown}"
+                           Classes="heading"
+                           FontSize="{Binding Level, Converter={x:Static r:LevelConverters.HeadingFontSize}}"
+                           FontWeight="{Binding Level, Converter={x:Static r:LevelConverters.HeadingFontWeight}}"
+                           Margin="{Binding Level, Converter={x:Static r:LevelConverters.HeadingMargin}}" />
+    </DataTemplate>
+
+    <DataTemplate DataType="p:CodeBlock">
+      <Border Classes="codepanel">
+        <Grid RowDefinitions="Auto,*">
+          <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="12,7,6,0">
+            <TextBlock Grid.Column="0"
+                       Text="{Binding Language}"
+                       FontSize="{DynamicResource Font.Size.XSmall}"
+                       Foreground="{DynamicResource Brush.Text.Muted}"
+                       VerticalAlignment="Center" />
+            <Button Grid.Column="1" Classes="inlineaction" Width="26" Height="24"
+                    Click="OnCopyCode" Tag="{Binding Code}" ToolTip.Tip="复制代码">
+              <TextBlock Classes="icon" Text="&#xE8C8;" FontSize="13" />
+            </Button>
+          </Grid>
+          <!-- Vertical scrolling is styled, not set here: in an answer a fence
+               grows to its full height, but inside a tool card it has to stay
+               capped (see the MolaGptMarkupBlockView selector below). -->
+          <ScrollViewer Grid.Row="1" Classes="codescroll"
+                        HorizontalScrollBarVisibility="Auto">
+            <r:CodeTextBlock Code="{Binding Code}" Language="{Binding Language}"
+                             Classes="code" Margin="12,6,12,10" />
+          </ScrollViewer>
+        </Grid>
+      </Border>
+    </DataTemplate>
+
+    <DataTemplate DataType="p:QuoteBlock">
+      <Border Classes="quote">
+        <r:MarkdownTextBlock Markdown="{Binding Markdown}" Classes="prose quoted" />
+      </Border>
+    </DataTemplate>
+
+    <DataTemplate DataType="p:ListBlock">
+      <r:MarkdownListView Block="{Binding}" Classes="listview" />
+    </DataTemplate>
+
+    <DataTemplate DataType="p:TableBlock">
+      <Border Classes="tablepanel">
+        <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+          <r:MarkdownTableView Block="{Binding}" Classes="tableview" />
+        </ScrollViewer>
+      </Border>
+    </DataTemplate>
+
+    <!-- Typeset by AvaloniaMath (the Avalonia half of XAML-Math, same engine and
+         Computer Modern fonts the WPF build used via WpfMath). MathView falls
+         back to the LaTeX source when a formula will not parse. -->
+    <DataTemplate DataType="p:MathBlock">
+      <Border Classes="mathpanel">
+        <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+          <r:MathView Latex="{Binding Latex}" Classes="mathview" Margin="14,12" />
+        </ScrollViewer>
+      </Border>
+    </DataTemplate>
+
+    <!-- A lone image is a fixed-ratio card, not a bare Image: the card reserves
+         its space before the bitmap arrives, so an image finishing its download
+         never reflows the answer the reader is already looking at. -->
+    <DataTemplate DataType="p:ImageBlock">
+      <r:MarkdownImageView Url="{Binding Url}" Alt="{Binding Alt}" Classes="imagecard" />
+    </DataTemplate>
+
+    <DataTemplate DataType="p:ThematicBreakBlock">
+      <Border Height="1" Background="{DynamicResource Brush.Divider}" Margin="0,16" />
+    </DataTemplate>
+
+    <DataTemplate DataType="p:RawTextBlock">
+      <SelectableTextBlock Text="{Binding Text}" Classes="prose" />
+    </DataTemplate>
+
+    <DataTemplate DataType="p:MarkupUnitBlock">
+      <r:MolaGptMarkupBlockView Block="{Binding}" />
+    </DataTemplate>
+
+    <!-- ==================== row templates (outer level) ==================== -->
+
+    <!-- USER: bubble + avatar, right-aligned. MessageItemView.Margin 0,10. -->
+    <DataTemplate DataType="r:UserMessageRow">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10">
+        <Border Classes="userbubble">
+          <StackPanel>
+            <!-- What was sent with the turn. Above the text, as in the original:
+                 the attachments are the premise of the question, not a footnote
+                 to it. -->
+            <ItemsControl ItemsSource="{Binding Message.Attachments}"
+                          IsVisible="{Binding Message.HasAttachments}"
+                          Margin="0,0,0,6">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:AttachmentChip">
+                  <!-- A button, not a Border: an image chip opens the picture
+                       full size, the same as the composer's own chips. -->
+                  <Button Classes="sentchip" ToolTip.Tip="{Binding FileName}"
+                          Click="OnSentAttachment">
+                    <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="6">
+                      <Border Width="24" Height="24" CornerRadius="{DynamicResource Radius.Xs}" ClipToBounds="True"
+                              Background="{DynamicResource Brush.Bg.Tertiary}">
+                        <Panel>
+                          <r:AttachmentThumbnail Bytes="{Binding Bytes}" IsVisible="{Binding IsImage}" />
+                          <TextBlock Classes="icon" Text="&#xE7C3;" FontSize="12"
+                                     IsVisible="{Binding !IsImage}"
+                                     HorizontalAlignment="Center" VerticalAlignment="Center"
+                                     Foreground="{DynamicResource Brush.Text.Secondary}" />
+                        </Panel>
+                      </Border>
+                      <TextBlock Text="{Binding Label}" FontSize="11" VerticalAlignment="Center"
+                                 TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                 MaxWidth="150" />
+                    </StackPanel>
+                  </Button>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <ItemsControl ItemsSource="{Binding Blocks}" />
+            <Button Classes="inlineaction" Width="26" Height="24"
+                    HorizontalAlignment="Right" Margin="0,6,-4,-4"
+                    Click="OnCopyMessage" ToolTip.Tip="复制消息">
+              <TextBlock Classes="icon" Text="&#xE8C8;" FontSize="13" />
+            </Button>
+          </StackPanel>
+        </Border>
+        <Border Classes="useravatar">
+          <TextBlock Classes="icon" Text="&#xE77B;" FontSize="14"
+                     Foreground="White"
+                     HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+      </StackPanel>
+    </DataTemplate>
+
+    <!-- ASSISTANT header: 32px avatar + model label. -->
+    <DataTemplate DataType="r:HeaderRow">
+      <StackPanel Orientation="Horizontal" Margin="0,10,0,8">
+        <Border Classes="botavatar">
+          <TextBlock Classes="fa" Text="&#xF544;" FontSize="14"
+                     Foreground="{DynamicResource Brush.Text.Primary}"
+                     HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+        <TextBlock Text="{Binding Label}"
+                   Margin="10,0,0,0"
+                   VerticalAlignment="Center"
+                   FontSize="13"
+                   FontWeight="Medium"
+                   Foreground="{DynamicResource Brush.Text.Secondary}" />
+      </StackPanel>
+    </DataTemplate>
+
+    <DataTemplate DataType="r:ProseRow">
+      <Border Classes="assistantcol">
+        <ContentControl Content="{Binding Block}" />
+      </Border>
+    </DataTemplate>
+
+    <DataTemplate DataType="r:PendingRow">
+      <Border Classes="pendingpill">
+        <StackPanel Classes="inlinerow compact" Orientation="Horizontal" VerticalAlignment="Center">
+          <Ellipse Name="PART_Dot1" Classes="pendingdot" />
+          <Ellipse Name="PART_Dot2" Classes="pendingdot" />
+          <Ellipse Name="PART_Dot3" Classes="pendingdot" />
+          <TextBlock Text="{Binding Message.PendingLabel}"
+                     Margin="6,0,0,0"
+                     FontSize="{DynamicResource Font.Size.Small}"
+                     Foreground="{DynamicResource Brush.Text.Secondary}"
+                     VerticalAlignment="Center" />
+        </StackPanel>
+      </Border>
+    </DataTemplate>
+
+    <DataTemplate DataType="r:StoppedRow">
+      <Border Classes="assistantcol">
+        <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                CornerRadius="{DynamicResource Radius.Sm}"
+                Padding="10,6"
+                HorizontalAlignment="Left">
+          <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="6">
+            <TextBlock Classes="icon" Text="&#xE71A;" FontSize="12"
+                       Foreground="{DynamicResource Brush.Text.Muted}" />
+            <TextBlock Text="已停止生成，未产生回答"
+                       FontSize="12"
+                       Foreground="{DynamicResource Brush.Text.Secondary}" />
+          </StackPanel>
+        </Border>
+      </Border>
+    </DataTemplate>
+
+    <DataTemplate DataType="r:ThinkingRow">
+      <Border Classes="assistantcol">
+        <r:ThinkBlockView Source="{Binding Segment.Source}"
+                          IsThinking="{Binding Segment.IsThinking}"
+                          ElapsedSeconds="{Binding Segment.ElapsedSeconds}"
+                          IsExpanded="{Binding Segment.IsExpanded, Mode=TwoWay}"
+                          Margin="0,0,0,8" />
+      </Border>
+    </DataTemplate>
+
+    <!-- Tool card, matching the MessageItemView original: 32px typed icon tile,
+         title + one-line argument preview, status chip, and a body that varies
+         by what the tool was called with (code / URL / path / search queries /
+         key-value pairs). The body starts collapsed — a run of tool calls should
+         read as a list of steps, not a wall of JSON. -->
+    <DataTemplate DataType="r:ToolRow">
+      <Border Classes="assistantcol toolcard"
+              Classes.compact="{Binding !Tool.HasHeaderArgPreview}">
+        <Expander Classes="toolbody" IsExpanded="{Binding IsExpanded, Mode=TwoWay}">
+          <Expander.Header>
+            <Grid ColumnDefinitions="Auto,10,*,Auto">
+              <Border Grid.Column="0" Classes="toolicon"
+                      CornerRadius="{DynamicResource Radius.Sm}"
+                      Background="{DynamicResource Brush.Primary.Tint}"
+                      Classes.compact="{Binding !Tool.HasHeaderArgPreview}"
+                      Classes.errored="{Binding Tool.IsError}">
+                <TextBlock Classes="icon" Text="{Binding Tool.IconGlyph}"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Brush.Primary}" />
+              </Border>
+
+              <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="2">
+                <TextBlock Text="{Binding Tool.Label}" FontSize="13" FontWeight="Medium"
+                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                <TextBlock Text="{Binding Tool.HeaderArgPreview}"
+                           IsVisible="{Binding Tool.HasHeaderArgPreview}"
+                           FontFamily="{DynamicResource Font.Mono}"
+                           FontSize="{DynamicResource Font.Size.XSmall}"
+                           Foreground="{DynamicResource Brush.Text.Muted}"
+                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+              </StackPanel>
+
+              <Border Grid.Column="3" Classes="statuschip"
+                      Classes.errored="{Binding Tool.IsError}"
+                      Classes.done="{Binding Tool.IsCompleted}">
+                <TextBlock Text="{Binding Tool.StatusText}" FontSize="10" FontWeight="SemiBold" />
+              </Border>
+            </Grid>
+          </Expander.Header>
+
+          <StackPanel Spacing="8" Margin="0,10,0,0">
+            <!-- search_web: one chip per query -->
+            <ItemsControl ItemsSource="{Binding Tool.ArgsView.SearchQueries}"
+                          IsVisible="{Binding Tool.ArgsView.HasSearchQueries}">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="cc:ToolSearchQueryView">
+                  <Border Classes="argchip">
+                    <StackPanel Classes="inlinerow compact" Orientation="Horizontal" Spacing="6">
+                      <TextBlock Classes="icon" Text="&#xE721;" FontSize="10" Opacity="0.6"
+                                 VerticalAlignment="Center" />
+                      <TextBlock Text="{Binding Text}" FontSize="12" VerticalAlignment="Center" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- execute_python_code and friends: the actual source, highlighted -->
+            <Border Classes="codepanel" Margin="0"
+                    IsVisible="{Binding Tool.ArgsView.HasCodeArg}">
+              <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
+                            MaxHeight="260">
+                <r:CodeTextBlock Code="{Binding Tool.ArgsView.CodeArg.Code}"
+                                 Language="{Binding Tool.ArgsView.CodeArg.Language}"
+                                 Classes="code" Margin="12,10" />
+              </ScrollViewer>
+            </Border>
+
+            <!-- web_fetch / read_file / a single text argument -->
+            <Border Classes="argchip" HorizontalAlignment="Left"
+                    IsVisible="{Binding Tool.ArgsView.HasPrimaryArg}">
+              <TextBlock Text="{Binding Tool.ArgsView.PrimaryArg.Value}"
+                         FontFamily="{DynamicResource Font.Mono}"
+                         FontSize="12"
+                         TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+            </Border>
+
+            <ItemsControl ItemsSource="{Binding Tool.ArgsView.KeyValueArgs}"
+                          IsVisible="{Binding Tool.ArgsView.HasKeyValueArgs}">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="cc:ToolKeyValueView">
+                  <Border Classes="argchip">
+                    <StackPanel Classes="inlinerow compact" Orientation="Horizontal" Spacing="5">
+                      <TextBlock Text="{Binding Key}" FontSize="11" FontWeight="SemiBold"
+                                 Foreground="{DynamicResource Brush.Text.Muted}"
+                                 VerticalAlignment="Center" />
+                      <TextBlock Text="{Binding Value}" FontSize="12" VerticalAlignment="Center"
+                                 TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <TextBlock Text="{Binding Tool.Detail}" IsVisible="{Binding Tool.HasDetail}"
+                       Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}"
+                       TextWrapping="Wrap" />
+
+            <!-- Raw payloads last, and only for tools whose arguments the card
+                 has no typed view for. -->
+            <Border Classes="rawfold" IsVisible="{Binding Tool.ShowArgumentsFold}">
+              <SelectableTextBlock Text="{Binding Tool.DisplayArgumentsJson}"
+                                   FontFamily="{DynamicResource Font.Mono}" FontSize="11"
+                                   TextWrapping="Wrap" MaxHeight="180" />
+            </Border>
+            <Border Classes="rawfold" IsVisible="{Binding Tool.HasResultPreview}">
+              <SelectableTextBlock Text="{Binding Tool.DisplayResultPreviewJson}"
+                                   FontFamily="{DynamicResource Font.Mono}" FontSize="11"
+                                   TextWrapping="Wrap" MaxHeight="180" />
+            </Border>
+          </StackPanel>
+        </Expander>
+      </Border>
+    </DataTemplate>
+
+    <DataTemplate DataType="r:ToolGroupRow">
+      <Border Classes="assistantcol toolcard compact">
+        <Grid ColumnDefinitions="Auto,*,Auto">
+          <Border Grid.Column="0" Width="24" Height="24"
+                  CornerRadius="{DynamicResource Radius.Sm}"
+                  Background="{DynamicResource Brush.Bg.Tertiary}">
+            <TextBlock Classes="icon" Text="&#xE90F;" FontSize="12"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Foreground="{DynamicResource Brush.Text.Secondary}" />
+          </Border>
+          <TextBlock Grid.Column="1" Text="{Binding Group.Name}" Margin="10,0,12,0"
+                     FontSize="13" FontWeight="Medium" VerticalAlignment="Center"
+                     TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+          <TextBlock Grid.Column="2" Text="{Binding Group.CountText}" Classes="muted"
+                     FontSize="{DynamicResource Font.Size.XSmall}" VerticalAlignment="Center" />
+        </Grid>
+      </Border>
+    </DataTemplate>
+
+    <!-- ASSISTANT actions: icon-only, matching InlineActionButton. -->
+    <DataTemplate DataType="r:ActionRow">
+      <StackPanel Margin="0,8,0,10" Spacing="8">
+
+        <!-- Citations from a web-search turn. Numbered so the [n] markers in the
+             answer body point somewhere. -->
+        <ItemsControl ItemsSource="{Binding Message.Sources}"
+                      IsVisible="{Binding Message.Sources, Converter={x:Static ObjectConverters.IsNotNull}}">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="m:SourceReference">
+              <Button Classes="sourcechip" Tag="{Binding Url}" Click="OnOpenSource"
+                      ToolTip.Tip="{Binding Url}">
+                <StackPanel Classes="inlinerow compact" Orientation="Horizontal" Spacing="6">
+                  <Border Classes="sourceindex">
+                    <TextBlock Text="{Binding Id}" FontSize="10" FontWeight="SemiBold" />
+                  </Border>
+                  <TextBlock Text="{Binding Title}" FontSize="11" VerticalAlignment="Center"
+                             TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                             MaxWidth="240" />
+                </StackPanel>
+              </Button>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <!-- Recoverable-error banner: turns a dead-end failure (no working
+             directory / balance-402) into a one-tap fix. -->
+        <Border Classes="errorbanner" IsVisible="{Binding Message.HasActionError}">
+          <DockPanel LastChildFill="True">
+            <TextBlock DockPanel.Dock="Left" Classes="icon" Text="&#xE7BA;" FontSize="14"
+                       VerticalAlignment="Center" Margin="0,0,10,0"
+                       Foreground="{DynamicResource Brush.Error}" />
+            <Button DockPanel.Dock="Right" Classes="textlink"
+                    Content="{Binding Message.ActionErrorButtonLabel}"
+                    Click="OnErrorAction"
+                    VerticalAlignment="Center" Margin="12,0,0,0" />
+            <TextBlock Text="{Binding Message.ActionErrorText}"
+                       VerticalAlignment="Center" TextWrapping="Wrap" FontSize="12.5" />
+          </DockPanel>
+        </Border>
+
+      <StackPanel Orientation="Horizontal">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
+                    Margin="0,0,10,0"
+                    IsVisible="{Binding Message.HasRetryBar}">
+          <Button Classes="inlineaction" Width="28" Height="24" ToolTip.Tip="上一个回答版本"
+                  Command="{Binding Message.PreviousAttemptCommand}">
+            <TextBlock Classes="icon" Text="&#xE72B;" FontSize="11" />
+          </Button>
+          <TextBlock Text="{Binding Message.RetryCounter}" MinWidth="36"
+                     TextAlignment="Center" VerticalAlignment="Center"
+                     FontSize="{DynamicResource Font.Size.Small}"
+                     Foreground="{DynamicResource Brush.Text.Secondary}" />
+          <Button Classes="inlineaction" Width="28" Height="24" ToolTip.Tip="下一个回答版本"
+                  Command="{Binding Message.NextAttemptCommand}">
+            <TextBlock Classes="icon" Text="&#xE72A;" FontSize="11" />
+          </Button>
+        </StackPanel>
+
+        <!-- Retry lives on the composer view model, so it is invoked through the
+             view rather than bound: the row's DataContext is the transcript row. -->
+        <Button Classes="inlineaction" Click="OnRetry" ToolTip.Tip="重新回答（使用当前模型）">
+          <TextBlock Classes="icon" Text="&#xE72C;" FontSize="14" />
+        </Button>
+        <Button Classes="inlineaction" Click="OnCopyMessage" ToolTip.Tip="复制回答">
+          <TextBlock Classes="icon" Text="&#xE8C8;" FontSize="14" />
+        </Button>
+        <Button Classes="inlineaction" Click="OnShowStats" ToolTip.Tip="响应统计"
+                IsVisible="{Binding Message.HasResponseStats}">
+          <TextBlock Classes="icon" Text="&#xE9D2;" FontSize="14" />
+        </Button>
+        </StackPanel>
+      </StackPanel>
+    </DataTemplate>
+  </UserControl.DataTemplates>
+
+  <!-- ================================ layout ================================ -->
+  <Panel>
+    <!-- The transcript needs virtualization but no selection model. -->
+    <ScrollViewer Name="PART_Scroll"
+                  Padding="40,64,40,24"
+                  Margin="0,0,0,160"
+                  BringIntoViewOnFocusChange="False"
+                  HorizontalScrollBarVisibility="Disabled"
+                  VerticalScrollBarVisibility="Auto">
+      <ItemsControl Name="PART_Rows" Background="Transparent">
+        <ItemsControl.ItemsPanel>
+          <ItemsPanelTemplate>
+            <r:StableVirtualizingStackPanel />
+          </ItemsPanelTemplate>
+        </ItemsControl.ItemsPanel>
+      </ItemsControl>
+    </ScrollViewer>
+
+    <!-- Welcome overlay, kept outside the scroller so its presence never
+         perturbs the virtualizing panel — the same reason the WPF version
+         made it a sibling ContentControl. -->
+    <StackPanel Name="PART_Welcome"
+                MaxWidth="720"
+                Margin="40,80,40,180"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                IsVisible="False">
+      <!-- Inline brand row: logo + greeting on one line. -->
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,10">
+        <Border Width="48" Height="48" CornerRadius="{DynamicResource Radius.Md}" Margin="0,0,16,0" ClipToBounds="True">
+          <Image Source="avares://MolaGPT.Desktop/Assets/app-logo.png"
+                 Stretch="UniformToFill"
+                 RenderOptions.BitmapInterpolationMode="HighQuality" />
+        </Border>
+        <TextBlock Text="时刻准备着。"
+                   FontSize="20" FontWeight="Medium"
+                   VerticalAlignment="Center"
+                   Foreground="{DynamicResource Brush.Text.Primary}" />
+      </StackPanel>
+      <TextBlock Text="问点什么，或者从下方挑一个开始。"
+                 FontSize="{DynamicResource Font.Size.Body}"
+                 HorizontalAlignment="Center"
+                 Margin="0,0,0,24"
+                 Opacity="0.75"
+                 Foreground="{DynamicResource Brush.Text.Secondary}" />
+      <ItemsControl Name="PART_Hints" HorizontalAlignment="Center">
+        <ItemsControl.ItemsPanel>
+          <ItemsPanelTemplate>
+            <WrapPanel HorizontalAlignment="Center" />
+          </ItemsPanelTemplate>
+        </ItemsControl.ItemsPanel>
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="x:String">
+            <Button Classes="hintchip liftable" Content="{Binding}" Click="OnHintChip" />
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+
+      <!-- Persona quick-pick — BYOK only. In MolaGPT-account mode the server
+           owns its own system prompts, so offering a role here would be a
+           control that quietly does nothing. -->
+      <StackPanel Name="PART_PersonaPick" HorizontalAlignment="Center" Margin="0,28,0,0"
+                  IsVisible="False">
+        <TextBlock Text="或者从一个角色开始"
+                   FontSize="{DynamicResource Font.Size.Small}"
+                   HorizontalAlignment="Center" Margin="0,0,0,10"
+                   Foreground="{DynamicResource Brush.Text.Muted}" />
+        <ItemsControl Name="PART_Personas" HorizontalAlignment="Center">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <WrapPanel HorizontalAlignment="Center" />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:PersonaItemViewModel">
+              <Button Classes="personacard liftable" Tag="{Binding Id}" Click="OnPersonaCard">
+                <StackPanel HorizontalAlignment="Center">
+                  <TextBlock Classes="icon" Text="{Binding DisplayAvatar}" FontSize="22"
+                             HorizontalAlignment="Center"
+                             Foreground="{DynamicResource Brush.Primary}" />
+                  <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold"
+                             HorizontalAlignment="Center" Margin="0,6,0,0"
+                             TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+              </Button>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </StackPanel>
+    </StackPanel>
+
+    <!-- Scroll-to-bottom affordance: 32×32 circle, 196 above the bottom. -->
+    <Button Name="PART_JumpLatest"
+            Classes="jumpbottom"
+            Width="32" Height="32"
+            HorizontalAlignment="Center" VerticalAlignment="Bottom"
+            Margin="0,0,0,196" IsVisible="False"
+            Click="OnJumpToLatest"
+            ToolTip.Tip="滚动到底部">
+      <TextBlock Classes="icon" Text="&#xE74B;" FontSize="12"
+                 Foreground="{DynamicResource Brush.Text.Secondary}" />
+    </Button>
+
+    <!-- Conversation-load indicator. A large conversation takes a moment to
+         materialize, and without this the card is simply blank — which reads as
+         a hang. No dimming backdrop: it caused a flash on fast loads. -->
+    <Border Name="PART_LoadingPill"
+            ZIndex="60"
+            IsVisible="False"
+            HorizontalAlignment="Center" VerticalAlignment="Center"
+            Background="{DynamicResource Brush.Bg.Elevated}"
+            BorderBrush="{DynamicResource Brush.Border}"
+            BorderThickness="1"
+            CornerRadius="{DynamicResource Radius.Pill}"
+            Padding="22,13"
+            BoxShadow="0 3 22 0 #3D000000">
+      <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="11">
+        <TextBlock Name="PART_LoadingSpinner"
+                   Classes="icon" Text="&#xF16A;" FontSize="18"
+                   Foreground="{DynamicResource Brush.Primary.Hover}"
+                   RenderTransformOrigin="50%,50%" />
+        <TextBlock Text="正在打开对话…" FontSize="{DynamicResource Font.Size.Small}"
+                   TextWrapping="NoWrap"
+                   Foreground="{DynamicResource Brush.Text.Secondary}" />
+      </StackPanel>
+    </Border>
+  </Panel>
+
+  <!-- ================================ styles ================================ -->
+  <UserControl.Styles>
+
+    <!-- Assistant reading column: left-aligned, capped, spanning under the
+         avatar exactly as Grid.Column=0 ColumnSpan=2 did. -->
+    <Style Selector="Border.assistantcol">
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="MaxWidth" Value="{DynamicResource Size.Assistant.MaxWidth}" />
+    </Style>
+
+    <!-- prose -->
+    <Style Selector="r|MarkdownTextBlock.prose">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.BodyLg}" />
+      <Setter Property="LineHeight" Value="24" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="AccentBrush" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="CodeBackground" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="Margin" Value="0,0,0,10" />
+    </Style>
+    <Style Selector="SelectableTextBlock.prose">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.BodyLg}" />
+      <Setter Property="LineHeight" Value="24" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+      <Setter Property="Margin" Value="0,0,0,10" />
+    </Style>
+    <Style Selector="SelectableTextBlock.thought">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+      <Setter Property="Margin" Value="0" />
+    </Style>
+    <Style Selector="r|MarkdownTextBlock.quoted">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="Margin" Value="0" />
+    </Style>
+
+    <!-- headings -->
+    <Style Selector="r|MarkdownTextBlock.heading">
+      <Setter Property="TextWrapping" Value="Wrap" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="AccentBrush" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+    <!-- user bubble: Brush.Primary.Tint / Radius.UserBubble / Padding 14,10 -->
+    <Style Selector="Border.userbubble">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.UserBubble}" />
+      <Setter Property="Padding" Value="14,10" />
+      <Setter Property="MaxWidth" Value="{DynamicResource Size.UserBubble.MaxWidth}" />
+      <Setter Property="VerticalAlignment" Value="Top" />
+    </Style>
+    <Style Selector="Border.userbubble r|MarkdownTextBlock.prose">
+      <Setter Property="Margin" Value="0" />
+    </Style>
+
+    <!-- avatars: 32×32, Radius.Sm -->
+    <Style Selector="Border.useravatar">
+      <Setter Property="Width" Value="32" />
+      <Setter Property="Height" Value="32" />
+      <Setter Property="Margin" Value="12,2,0,0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="VerticalAlignment" Value="Top" />
+    </Style>
+    <Style Selector="Border.botavatar">
+      <Setter Property="Width" Value="32" />
+      <Setter Property="Height" Value="32" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <!-- code / quote / table / tool -->
+    <Style Selector="Border.codepanel">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Margin" Value="0,4,0,12" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+    <Style Selector="ScrollViewer.codescroll">
+      <Setter Property="VerticalScrollBarVisibility" Value="Disabled" />
+    </Style>
+    <!-- Inside a tool card a fence is evidence, not the answer: cap it so 输入
+         and 输出 stay side by side in one screen instead of pushing the whole
+         card body past its own 620px scroller. -->
+    <Style Selector="r|MolaGptMarkupBlockView ScrollViewer.codescroll">
+      <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
+      <Setter Property="MaxHeight" Value="240" />
+    </Style>
+    <Style Selector="SelectableTextBlock.code, r|CodeTextBlock.code">
+      <Setter Property="FontFamily" Value="{DynamicResource Font.Mono}" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="LineHeight" Value="20" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+    <Style Selector="Border.mathpanel">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Blockquote}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Margin" Value="0,4,0,12" />
+    </Style>
+    <Style Selector="r|MathView.mathview">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="FormulaSize" Value="19" />
+      <Setter Property="HorizontalAlignment" Value="Center" />
+    </Style>
+
+    <!-- list + table share the prose typography so they sit in the same rhythm
+         as the paragraphs around them -->
+    <Style Selector="r|MarkdownListView.listview">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.BodyLg}" />
+      <Setter Property="LineHeight" Value="24" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="AccentBrush" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="CodeBackground" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="Margin" Value="0,2,0,10" />
+    </Style>
+
+    <Style Selector="r|MarkdownTableView.tableview">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+      <Setter Property="LineHeight" Value="21" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="AccentBrush" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="CodeBackground" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="LineBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="HeaderBackground" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    </Style>
+
+    <Style Selector="r|MarkdownImageView.imagecard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+      <Setter Property="Margin" Value="0,4,0,12" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+    </Style>
+
+    <Style Selector="Border.quote">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Blockquote}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="3,0,0,0" />
+      <Setter Property="Padding" Value="12,8" />
+      <Setter Property="Margin" Value="0,4,0,12" />
+    </Style>
+    <Style Selector="Border.tablepanel">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Margin" Value="0,4,0,12" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+    </Style>
+    <Style Selector="SelectableTextBlock.tabletext">
+      <Setter Property="FontFamily" Value="{DynamicResource Font.Mono}" />
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="LineHeight" Value="20" />
+      <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+    <!-- Tool card: Bg.Primary + Radius.Md + Padding 16,14, capped at 720 as in
+         the original (narrower than the prose column on purpose — a tool card is
+         an aside, not the answer). -->
+    <Style Selector="Border.toolcard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Primary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="16,14" />
+      <Setter Property="Margin" Value="0,8,0,8" />
+      <Setter Property="MaxWidth" Value="720" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+    </Style>
+
+    <!-- A card with no argument preview under the title is one line of text: the
+         32px tile and 14px padding were sized for two, so it read as a mostly
+         empty box in a run of steps. -->
+    <Style Selector="Border.toolcard.compact">
+      <Setter Property="Padding" Value="12,8" />
+    </Style>
+    <Style Selector="Border.toolicon">
+      <Setter Property="Width" Value="32" />
+      <Setter Property="Height" Value="32" />
+      <Setter Property="VerticalAlignment" Value="Top" />
+    </Style>
+    <Style Selector="Border.toolicon TextBlock.icon">
+      <Setter Property="FontSize" Value="14" />
+    </Style>
+    <Style Selector="Border.toolicon.compact">
+      <Setter Property="Width" Value="22" />
+      <Setter Property="Height" Value="22" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Border.toolicon.compact TextBlock.icon">
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+
+    <!-- The card's own chrome is the Border above, so the Expander contributes
+         only the fold: no background, no border, no header padding of its own. -->
+    <Style Selector="Expander.toolbody">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    </Style>
+
+    <Style Selector="Border.statuschip">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="Padding" Value="8,2" />
+      <Setter Property="Margin" Value="10,0,0,0" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Border.statuschip TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+    </Style>
+    <Style Selector="Border.statuschip.done">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+    </Style>
+    <Style Selector="Border.statuschip.done TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+    <Style Selector="Border.statuschip.errored">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    </Style>
+    <Style Selector="Border.statuschip.errored TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
+    </Style>
+
+    <!-- A failed call drops the brand tint: an error must not look like a
+         successful step wearing the same colour. -->
+    <Style Selector="Border.errored">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    </Style>
+    <Style Selector="Border.errored TextBlock.icon">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
+    </Style>
+
+    <Style Selector="Button.sentchip">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="5,4" />
+      <Setter Property="Margin" Value="0,0,6,4" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+    </Style>
+    <Style Selector="Button.sentchip:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+    </Style>
+
+    <Style Selector="Button.sourcechip">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="7,4" />
+      <Setter Property="Margin" Value="0,0,6,6" />
+    </Style>
+    <Style Selector="Button.sourcechip:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+    <Style Selector="Border.sourceindex">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="MinWidth" Value="16" />
+      <Setter Property="Padding" Value="4,1" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Border.sourceindex TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+      <Setter Property="TextAlignment" Value="Center" />
+    </Style>
+
+    <Style Selector="Border.errorbanner">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,10" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="MaxWidth" Value="560" />
+    </Style>
+    <Style Selector="Button.textlink">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="FontSize" Value="12.5" />
+      <Setter Property="Padding" Value="2" />
+    </Style>
+    <Style Selector="Button.textlink:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+
+    <Style Selector="Border.argchip">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="8,4" />
+      <Setter Property="Margin" Value="0,0,6,6" />
+      <Setter Property="MaxWidth" Value="640" />
+    </Style>
+
+    <Style Selector="Border.rawfold">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="10,8" />
+    </Style>
+
+    <!-- Thinking card body: prose one step down from the answer's weight, so a
+         long reasoning block never competes with the answer for attention. -->
+    <Style Selector="r|ThinkBlockView r|MarkdownTextBlock.prose">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+      <Setter Property="LineHeight" Value="22" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <Style Selector="Ellipse.pulsing">
+      <Style.Animations>
+        <Animation Duration="0:0:1.2" IterationCount="Infinite" Easing="SineEaseInOut">
+          <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.4" /></KeyFrame>
+          <KeyFrame Cue="50%"><Setter Property="Opacity" Value="1" /></KeyFrame>
+          <KeyFrame Cue="100%"><Setter Property="Opacity" Value="0.4" /></KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+
+    <!-- pending pill: three dots, staggered, as in the WPF storyboard -->
+    <Style Selector="Border.pendingpill">
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Blockquote}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="Padding" Value="12,8" />
+      <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+    <Style Selector="Ellipse.pendingdot">
+      <Setter Property="Width" Value="6" />
+      <Setter Property="Height" Value="6" />
+      <Setter Property="Margin" Value="0,0,4,0" />
+      <Setter Property="Fill" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="Opacity" Value="0.28" />
+    </Style>
+    <Style Selector="Ellipse#PART_Dot1">
+      <Style.Animations>
+        <Animation Duration="0:0:1.2" IterationCount="Infinite" Easing="SineEaseInOut">
+          <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.28" /></KeyFrame>
+          <KeyFrame Cue="50%"><Setter Property="Opacity" Value="1" /></KeyFrame>
+          <KeyFrame Cue="100%"><Setter Property="Opacity" Value="0.28" /></KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+    <Style Selector="Ellipse#PART_Dot2">
+      <Style.Animations>
+        <Animation Duration="0:0:1.2" IterationCount="Infinite" Delay="0:0:0.15" Easing="SineEaseInOut">
+          <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.28" /></KeyFrame>
+          <KeyFrame Cue="50%"><Setter Property="Opacity" Value="1" /></KeyFrame>
+          <KeyFrame Cue="100%"><Setter Property="Opacity" Value="0.28" /></KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+    <Style Selector="Ellipse#PART_Dot3">
+      <Style.Animations>
+        <Animation Duration="0:0:1.2" IterationCount="Infinite" Delay="0:0:0.3" Easing="SineEaseInOut">
+          <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.28" /></KeyFrame>
+          <KeyFrame Cue="50%"><Setter Property="Opacity" Value="1" /></KeyFrame>
+          <KeyFrame Cue="100%"><Setter Property="Opacity" Value="0.28" /></KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+
+    <!-- HintChip: Bg.Tertiary, Radius.Md, Padding 14,6, Margin 0,0,8,8 -->
+    <Style Selector="Button.hintchip">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="14,6" />
+      <Setter Property="Margin" Value="0,0,8,8" />
+      <Setter Property="FontFamily" Value="{DynamicResource Font.Cjk}" />
+      <Setter Property="FontSize" Value="13" />
+    </Style>
+    <Style Selector="Button.hintchip:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+
+    <Style Selector="Button.personacard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="14,12" />
+      <Setter Property="Margin" Value="6" />
+      <Setter Property="MinWidth" Value="140" />
+      <Setter Property="MaxWidth" Value="180" />
+    </Style>
+    <Style Selector="Button.personacard:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+
+    <!-- scroll-to-bottom circle -->
+    <Style Selector="Button.jumpbottom">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+    </Style>
+    <Style Selector="Button.jumpbottom:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Primary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <!-- It appears mid-scroll, over moving text. Rising into place says "there
+         is more below" in a way a button that blinks into existence does not.
+         IsVisible stays the gate so it cannot swallow clicks while hidden. -->
+    <Style Selector="Button.jumpbottom[IsVisible=True]">
+      <Style.Animations>
+        <Animation Duration="0:0:0.22" Easing="CubicEaseOut" FillMode="Forward">
+          <KeyFrame Cue="0%">
+            <Setter Property="Opacity" Value="0" />
+            <Setter Property="TranslateTransform.Y" Value="12" />
+          </KeyFrame>
+          <KeyFrame Cue="100%">
+            <Setter Property="Opacity" Value="1" />
+            <Setter Property="TranslateTransform.Y" Value="0" />
+          </KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+
+    <!-- Scoped to the pill actually being up, so the spinner is not turning
+         invisibly for the whole session.
+
+         RotateTransform.Angle, not RenderTransform: the keyframe animators are
+         registered per property type, and RenderTransform has none — a
+         TransformOperations value animates fine as a *transition* but throws
+         "No animator registered" the moment a keyframe animation starts. -->
+    <Style Selector="Border#PART_LoadingPill[IsVisible=True] TextBlock#PART_LoadingSpinner">
+      <Style.Animations>
+        <Animation Duration="0:0:0.9" IterationCount="Infinite">
+          <KeyFrame Cue="0%"><Setter Property="RotateTransform.Angle" Value="0.0" /></KeyFrame>
+          <KeyFrame Cue="100%"><Setter Property="RotateTransform.Angle" Value="360.0" /></KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+    <!-- The pill deliberately has no fade or scale of its own — not a keyframe
+         animation, not an Opacity transition.
+
+         It goes up immediately before the UI thread starts building message
+         view models, which is a markdown parse per message and entirely
+         synchronous, and animation clocks tick on that same thread. Anything
+         timed gets a frame or two in, freezes near opacity zero, and stays
+         there for the whole stall the pill exists to explain — so the pill
+         vanishes and the card just sits blank, which is exactly the symptom it
+         was added to prevent. It has to be fully painted on the first frame it
+         exists. The spinner above is the exception only because it starts at a
+         legible angle and a frozen glyph still reads as "busy". -->
+
+    <!-- Nothing inside PART_Rows gets an entry animation, however tempting the
+         pending pill is. Containers there are recycled, so a style animation
+         replays every time a row is scrolled back into view — the transcript is
+         the one surface where that is guaranteed to happen. -->
+
+  </UserControl.Styles>
+</UserControl>

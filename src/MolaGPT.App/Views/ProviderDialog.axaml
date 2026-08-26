@@ -1,0 +1,197 @@
+<v:MolaWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:v="clr-namespace:MolaGPT.App.Views"
+        x:Class="MolaGPT.App.Views.ProviderDialog"
+        Title="模型服务"
+        Width="620" Height="660"
+        MinWidth="520" MinHeight="460"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Background="{DynamicResource Brush.Bg.Canvas}"
+        FontFamily="{DynamicResource Font.UI}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+  <!--
+    One BYOK provider: protocol, endpoint, key, and its model list.
+
+    The model rows carry capability flags rather than being just ids, because
+    everything downstream keys off them — the composer hides 推理 for a model
+    that has no thinking, the picker shows the vision pip, and the tool loop
+    refuses to run against a model without tool support. Getting them wrong is
+    silent, so they are checkboxes on the row rather than something inferred.
+  -->
+
+  <DockPanel>
+    <v:MolaWindowTitleBar DockPanel.Dock="Top" Name="PART_TitleBar" TitleText="模型服务" />
+    <DockPanel Margin="20">
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal"
+                HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">
+      <Button Name="PART_Cancel" Content="取消" Padding="18,7" />
+      <Button Name="PART_Save" Classes="pillprimary" Content="保存" Padding="18,7" />
+    </StackPanel>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+      <StackPanel Spacing="16">
+
+        <StackPanel Classes="field">
+          <TextBlock Classes="label" Text="协议" />
+          <ComboBox Name="PART_Type" HorizontalAlignment="Stretch">
+            <ComboBoxItem Content="OpenAI 兼容" />
+            <ComboBoxItem Content="Anthropic" />
+            <ComboBoxItem Content="Gemini" />
+          </ComboBox>
+        </StackPanel>
+
+        <StackPanel Classes="field">
+          <TextBlock Classes="label" Text="显示名称" />
+          <Border Classes="input">
+            <TextBox Name="PART_Name" PlaceholderText="例如 我的 DeepSeek" />
+          </Border>
+        </StackPanel>
+
+        <StackPanel Classes="field">
+          <TextBlock Classes="label" Text="接口地址" />
+          <Border Classes="input">
+            <TextBox Name="PART_BaseUrl" PlaceholderText="https://api.example.com/v1" />
+          </Border>
+          <TextBlock Classes="hint" Text="填到版本段为止，不要带 /chat/completions。" />
+        </StackPanel>
+
+        <StackPanel Classes="field">
+          <TextBlock Classes="label" Text="API Key" />
+          <Border Classes="input">
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBox Grid.Column="0" Name="PART_ApiKey" PasswordChar="•" />
+              <Button Grid.Column="1" Name="PART_RevealKey" Classes="inlineaction"
+                      Width="26" Height="24" ToolTip.Tip="显示 / 隐藏">
+                <TextBlock Classes="icon" Text="&#xE7B3;" FontSize="12" />
+              </Button>
+            </Grid>
+          </Border>
+          <TextBlock Classes="hint" Text="保存在本机凭据库，不写进对话记录，也不上传。" />
+        </StackPanel>
+
+        <StackPanel Classes="field">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Grid.Column="0" Classes="label" Text="模型" VerticalAlignment="Center"
+                       Margin="0" />
+            <Button Grid.Column="1" Name="PART_AddModel" Classes="textlink" Content="+ 添加模型"
+                    VerticalAlignment="Center" />
+          </Grid>
+
+          <ItemsControl Name="PART_Models">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="v:ModelRow">
+                <Border Classes="card">
+                  <StackPanel Spacing="8">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <Border Grid.Column="0" Classes="input" Padding="10,6">
+                        <TextBox Text="{Binding Id, Mode=TwoWay}" PlaceholderText="模型 ID" FontSize="12" />
+                      </Border>
+                      <Button Grid.Column="1" Classes="inlineaction" Width="26" Height="26"
+                              Margin="6,0,0,0" Click="OnRemoveModel" ToolTip.Tip="移除">
+                        <TextBlock Classes="icon" Text="&#xE711;" FontSize="11" />
+                      </Button>
+                    </Grid>
+                    <Border Classes="input" Padding="10,6">
+                      <TextBox Text="{Binding DisplayName, Mode=TwoWay}"
+                               PlaceholderText="显示名称（留空用 ID）" FontSize="12" />
+                    </Border>
+                    <WrapPanel>
+                      <CheckBox Content="视觉" IsChecked="{Binding Vision, Mode=TwoWay}" Margin="0,0,14,0" />
+                      <CheckBox Content="推理" IsChecked="{Binding Thinking, Mode=TwoWay}" Margin="0,0,14,0" />
+                      <CheckBox Content="推理强度" IsChecked="{Binding ReasoningEffort, Mode=TwoWay}" Margin="0,0,14,0" />
+                      <CheckBox Content="工具调用" IsChecked="{Binding Tools, Mode=TwoWay}" />
+                    </WrapPanel>
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+
+          <TextBlock Name="PART_NoModels" Classes="hint"
+                     Text="至少添加一个模型，这个服务才会出现在模型选择器里。" />
+        </StackPanel>
+
+        <Expander Name="PART_HeadersFold" Header="自定义请求头（高级）">
+          <StackPanel Spacing="8" Margin="0,10,0,0">
+            <ItemsControl Name="PART_Headers">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="v:HeaderRow">
+                  <Grid ColumnDefinitions="*,8,*,Auto" Margin="0,0,0,6">
+                    <Border Grid.Column="0" Classes="input" Padding="10,6">
+                      <TextBox Text="{Binding Name, Mode=TwoWay}" PlaceholderText="名称" FontSize="12" />
+                    </Border>
+                    <Border Grid.Column="2" Classes="input" Padding="10,6">
+                      <TextBox Text="{Binding Value, Mode=TwoWay}" PlaceholderText="值" FontSize="12" />
+                    </Border>
+                    <Button Grid.Column="3" Classes="inlineaction" Width="26" Height="26"
+                            Margin="6,0,0,0" Click="OnRemoveHeader" ToolTip.Tip="移除">
+                      <TextBlock Classes="icon" Text="&#xE711;" FontSize="11" />
+                    </Button>
+                  </Grid>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <Button Name="PART_AddHeader" Classes="textlink" Content="+ 添加请求头"
+                    HorizontalAlignment="Left" />
+          </StackPanel>
+        </Expander>
+
+        <TextBlock Name="PART_Error" Classes="hint" IsVisible="False"
+                   Foreground="{DynamicResource Brush.Error}" />
+      </StackPanel>
+    </ScrollViewer>
+    </DockPanel>
+  </DockPanel>
+
+  <Window.Styles>
+    <Style Selector="TextBlock.label">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="Margin" Value="0,0,0,6" />
+    </Style>
+    <Style Selector="TextBlock.hint">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.XSmall}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+      <Setter Property="Margin" Value="0,4,0,0" />
+    </Style>
+    <Style Selector="StackPanel.field">
+      <Setter Property="Spacing" Value="6" />
+    </Style>
+    <Style Selector="Border.input">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,8" />
+    </Style>
+    <Style Selector="Border.input:focus-within">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,10" />
+      <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+    <Style Selector="Button.pillprimary">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.OnPrimary}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.pillprimary:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+    <Style Selector="Button.textlink">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="Padding" Value="4,2" />
+    </Style>
+  </Window.Styles>
+</v:MolaWindow>

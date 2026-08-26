@@ -166,7 +166,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                     IsImageGenerationMode = false;
 
                 ActiveThinkingKind = _chat.ActiveModel?.ThinkingConfig?.Kind
-                    ?? MolaGPT.Core.Models.ThinkingParamKind.None;
+                    ?? MolaGPT.Core.Models.ThinkingParamKindInference.InferFromModelId(_chat.ActiveModel?.Id);
 
                 // Normalize ReasoningEffort BEFORE notifying AvailableEffortLevels so
                 // the ComboBox doesn't reverse-write null when the previous value
@@ -239,9 +239,10 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// model_config_public.php; BYOK models get it from user settings.</summary>
     public bool IsThinkingVisible => _chat.ActiveModel?.SupportsThinking == true;
 
-    /// <summary>Show "推理强度" iff the active model supports effort control
-    /// and the user has enabled thinking.</summary>
-    public bool IsReasoningEffortVisible => EnableThinking && _chat.ActiveModel?.SupportsReasoningEffort == true;
+    /// <summary>Show the thinking control when the user has enabled thinking and
+    /// the model exposes either effort or budget controls.</summary>
+    public bool IsReasoningEffortVisible => EnableThinking
+        && (_chat.ActiveModel?.SupportsReasoningEffort == true || IsBudgetSliderVisible);
 
     /// <summary>Attach button is always shown; text/document attachments are
     /// validated at send time, while images also require vision support.</summary>
@@ -333,12 +334,22 @@ public sealed partial class ComposerViewModel : ObservableObject
         var other => other
     };
 
+    /// <summary>Label for the thinking control in the composer toolbar. Budget
+    /// models must not present their token count as a qualitative effort level.</summary>
+    public string ReasoningControlLabel => IsBudgetSliderVisible
+        ? $"预算: {ThinkingBudgetTokens}"
+        : $"强度: {ReasoningEffortLabel}";
+
+    public string ReasoningControlTitle => IsBudgetSliderVisible ? "推理预算" : "推理强度";
+
+    public string ReasoningControlToolTip => IsBudgetSliderVisible ? "调整推理预算" : "调整推理强度";
+
     public IReadOnlyList<string> AvailableEffortLevels
     {
         get
         {
             var model = _chat.ActiveModel;
-            var kind = ActiveThinkingKind;
+            var kind = EffectiveThinkingKind;
             var resolved = MolaGPT.Core.Models.ThinkingEffortLevels.Resolve(model?.ThinkingConfig, kind);
             // OpenAI 模板历史上带 none（关）；若模型未自定义档位，保留兼容。
             if (kind == MolaGPT.Core.Models.ThinkingParamKind.OpenAiReasoningEffort
@@ -350,12 +361,12 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
     }
 
-    public bool IsEffortComboVisible => ActiveThinkingKind is not (
+    public bool IsEffortComboVisible => EffectiveThinkingKind is not (
         MolaGPT.Core.Models.ThinkingParamKind.AnthropicBudget or
         MolaGPT.Core.Models.ThinkingParamKind.GeminiBudget or
         MolaGPT.Core.Models.ThinkingParamKind.QwenThinkingBudget);
 
-    public bool IsBudgetSliderVisible => ActiveThinkingKind is
+    public bool IsBudgetSliderVisible => EffectiveThinkingKind is
         MolaGPT.Core.Models.ThinkingParamKind.AnthropicBudget or
         MolaGPT.Core.Models.ThinkingParamKind.GeminiBudget or
         MolaGPT.Core.Models.ThinkingParamKind.QwenThinkingBudget;
@@ -391,6 +402,10 @@ public sealed partial class ComposerViewModel : ObservableObject
         OnPropertyChanged(nameof(AvailableEffortLevels));
         OnPropertyChanged(nameof(IsEffortComboVisible));
         OnPropertyChanged(nameof(IsBudgetSliderVisible));
+        OnPropertyChanged(nameof(IsReasoningEffortVisible));
+        OnPropertyChanged(nameof(ReasoningControlLabel));
+        OnPropertyChanged(nameof(ReasoningControlTitle));
+        OnPropertyChanged(nameof(ReasoningControlToolTip));
         OnPropertyChanged(nameof(BudgetMin));
         OnPropertyChanged(nameof(BudgetMax));
     }
@@ -1752,6 +1767,12 @@ public sealed partial class ComposerViewModel : ObservableObject
     partial void OnReasoningEffortChanged(string value)
     {
         OnPropertyChanged(nameof(ReasoningEffortLabel));
+        OnPropertyChanged(nameof(ReasoningControlLabel));
+    }
+
+    partial void OnThinkingBudgetTokensChanged(int value)
+    {
+        OnPropertyChanged(nameof(ReasoningControlLabel));
     }
 
     partial void OnIsImageGenerationModeChanged(bool value)
@@ -1771,12 +1792,16 @@ public sealed partial class ComposerViewModel : ObservableObject
     {
         if (!IsThinkingVisible) return null;
 
-        var kind = ActiveThinkingKind;
-        if (kind == MolaGPT.Core.Models.ThinkingParamKind.None)
-            kind = MolaGPT.Core.Models.ThinkingParamKindInference.InferFromModelId(_chat.ActiveModel?.Id);
+        var kind = EffectiveThinkingKind;
 
         return kind == MolaGPT.Core.Models.ThinkingParamKind.None ? null : kind;
     }
+
+    private MolaGPT.Core.Models.ThinkingParamKind EffectiveThinkingKind =>
+        ActiveThinkingKind != MolaGPT.Core.Models.ThinkingParamKind.None
+            ? ActiveThinkingKind
+            : _chat.ActiveModel?.ThinkingConfig?.Kind
+              ?? MolaGPT.Core.Models.ThinkingParamKindInference.InferFromModelId(_chat.ActiveModel?.Id);
 
     private static string CreateWebCompatibleConversationId()
     {

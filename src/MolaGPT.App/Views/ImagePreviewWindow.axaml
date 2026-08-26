@@ -1,0 +1,81 @@
+<views:MolaWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        x:Class="MolaGPT.App.Views.ImagePreviewWindow"
+        Title="图片预览"
+        ShowInTaskbar="False"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Cursor="Hand"
+        FontFamily="{DynamicResource Font.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+  <Grid Name="PART_Root" RowDefinitions="*,Auto" Margin="14">
+
+        <Border Grid.Row="0"
+                Name="PART_Stage"
+                Background="{DynamicResource Brush.Bg.Secondary}"
+                CornerRadius="{DynamicResource Radius.Md}"
+                ClipToBounds="True">
+          <Image Name="PART_Image"
+                 Stretch="Uniform"
+                 StretchDirection="DownOnly"
+                 RenderOptions.BitmapInterpolationMode="HighQuality"
+                 HorizontalAlignment="Center"
+                 VerticalAlignment="Center" />
+        </Border>
+
+        <!-- Floats over the image rather than sitting above it: the picture is
+             what the window is for, and a toolbar row would push it down in
+             every preview to serve the two clicks that occasionally follow. -->
+        <StackPanel Grid.Row="0"
+                    Name="PART_Toolbar"
+                    Orientation="Horizontal"
+                    Spacing="6"
+                    Margin="0,10,10,0"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top">
+          <Button Name="PART_Copy" Classes="previewtool" Content="复制" />
+          <Button Name="PART_Save" Classes="previewtool" Content="保存" />
+          <Button Name="PART_Close" Classes="previewtool" Padding="9,0" ToolTip.Tip="关闭">
+            <TextBlock Classes="icon" Text="&#xE711;" FontSize="12" />
+          </Button>
+        </StackPanel>
+
+        <Border Grid.Row="1"
+                Name="PART_CaptionHost"
+                Background="{DynamicResource Brush.Bg.Tertiary}"
+                CornerRadius="{DynamicResource Radius.Sm}"
+                Padding="10,5"
+                Margin="0,12,0,0"
+                MaxWidth="780"
+                HorizontalAlignment="Center">
+          <TextBlock Name="PART_Caption"
+                     FontSize="{DynamicResource Font.Size.Small}"
+                     Foreground="{DynamicResource Brush.Text.Secondary}"
+                     TextTrimming="CharacterEllipsis"
+                     TextWrapping="NoWrap" />
+        </Border>
+  </Grid>
+
+  <Window.Styles>
+    <Style Selector="Button.previewtool">
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="Height" Value="28" />
+      <Setter Property="Padding" Value="12,0" />
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+    <Style Selector="Button.previewtool:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+  </Window.Styles>
+</views:MolaWindow>

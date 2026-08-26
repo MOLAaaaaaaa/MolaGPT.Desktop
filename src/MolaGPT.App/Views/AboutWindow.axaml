@@ -1,0 +1,145 @@
+<views:MolaWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        x:Class="MolaGPT.App.Views.AboutWindow"
+        Title="关于 MolaGPT Desktop"
+         Width="564" Height="664"
+        CanResize="False"
+        ShowInTaskbar="False"
+         WindowStartupLocation="CenterOwner"
+          FontFamily="{DynamicResource Font.UI}"
+          Foreground="{DynamicResource Brush.Text.Primary}">
+
+  <DockPanel>
+      <Border Name="PART_Header"
+              DockPanel.Dock="Top"
+              Padding="24,14"
+              BorderBrush="{DynamicResource Brush.Divider}"
+              BorderThickness="0,0,0,1">
+        <Grid>
+          <TextBlock Text="关于" FontSize="{DynamicResource Font.Size.Heading}"
+                     FontWeight="Bold" VerticalAlignment="Center" />
+          <Button Name="PART_Close" Classes="headericon"
+                  HorizontalAlignment="Right" ToolTip.Tip="关闭">
+            <TextBlock Classes="icon" Text="&#xE711;" />
+          </Button>
+        </Grid>
+      </Border>
+
+      <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="34,28,34,32">
+          <StackPanel HorizontalAlignment="Center">
+            <Border Width="88" Height="88" CornerRadius="{DynamicResource Radius.Xl}" ClipToBounds="True">
+              <Image Source="avares://MolaGPT.Desktop/Assets/app-logo.png"
+                     Stretch="UniformToFill"
+                     RenderOptions.BitmapInterpolationMode="HighQuality" />
+            </Border>
+            <TextBlock Text="MolaGPT Desktop" Margin="0,18,0,4"
+                       HorizontalAlignment="Center" FontSize="24" FontWeight="SemiBold" />
+            <SelectableTextBlock Name="PART_Version" HorizontalAlignment="Center"
+                                 FontSize="{DynamicResource Font.Size.Small}"
+                                 Foreground="{DynamicResource Brush.Text.Muted}" />
+            <TextBlock Text="自由、开放的 MolaGPT 及其他 LLM API 的 Windows 实现"
+                       MaxWidth="430" Margin="0,16,0,0"
+                       TextAlignment="Center"
+                       Foreground="{DynamicResource Brush.Text.Secondary}" />
+          </StackPanel>
+
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"
+                      Spacing="12" Margin="0,26,0,0">
+            <Button Name="PART_CheckUpdate" Classes="primary" Padding="18,9">
+              <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="8">
+                <TextBlock Classes="icon" Text="&#xE895;" />
+                <TextBlock Name="PART_CheckUpdateText" Text="检查更新" />
+              </StackPanel>
+            </Button>
+            <Button Name="PART_GitHub" Classes="outline" Padding="18,9">
+              <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="8">
+                <TextBlock Classes="icon" Text="&#xE774;" />
+                <TextBlock Text="GitHub 主页" />
+              </StackPanel>
+            </Button>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"
+                      Spacing="8" Margin="0,10,0,0">
+            <TextBlock Name="PART_UpdateStatus" IsVisible="False"
+                       VerticalAlignment="Center" Classes="muted"
+                       FontSize="{DynamicResource Font.Size.Small}" />
+            <Button Name="PART_UpdateAction" IsVisible="False"
+                    Classes="textlink" Padding="4,2" />
+          </StackPanel>
+
+          <TextBlock Text="开源项目" Classes="section" Margin="0,34,0,6" />
+          <TextBlock Text="MolaGPT Desktop 构建于以下开源项目之上，在此致谢。"
+                     Margin="0,0,0,12" Classes="secondary"
+                     FontSize="{DynamicResource Font.Size.Small}" />
+
+          <Border BorderBrush="{DynamicResource Brush.Border}"
+                  BorderThickness="1" CornerRadius="{DynamicResource Radius.Lg}"
+                  ClipToBounds="True">
+            <ItemsControl Name="PART_DependencyList">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="views:AboutDependency">
+                  <Border BorderBrush="{DynamicResource Brush.Divider}"
+                          BorderThickness="0,0,0,1" Padding="16,12">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,16,0">
+                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding Description}" Margin="0,2,0,0"
+                                   Classes="muted"
+                                   FontSize="{DynamicResource Font.Size.Small}" />
+                      </StackPanel>
+                      <Border Grid.Column="1"
+                              Background="{DynamicResource Brush.Bg.Tertiary}"
+                              BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                              BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}"
+                              Padding="9,4" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding License}" Classes="secondary"
+                                   FontSize="{DynamicResource Font.Size.XSmall}" />
+                      </Border>
+                    </Grid>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </Border>
+
+          <TextBlock Text="开放源代码协议" Classes="section" Margin="0,32,0,12" />
+          <Expander Header="查看完整开源许可证">
+            <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                    BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                    BorderThickness="1" CornerRadius="{DynamicResource Radius.Md}"
+                    Padding="16" Margin="0,12,0,0" MaxHeight="330">
+              <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <SelectableTextBlock Name="PART_LicenseText"
+                                     FontFamily="{DynamicResource Font.Mono}"
+                                     FontSize="12"
+                                     Foreground="{DynamicResource Brush.Text.Secondary}" />
+              </ScrollViewer>
+            </Border>
+          </Expander>
+        </StackPanel>
+      </ScrollViewer>
+  </DockPanel>
+
+  <Window.Styles>
+    <Style Selector="TextBlock.section">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.XSmall}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+    </Style>
+    <Style Selector="Button.primary">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.OnPrimary}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.primary:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+    <Style Selector="Button.textlink">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+    </Style>
+  </Window.Styles>
+</views:MolaWindow>

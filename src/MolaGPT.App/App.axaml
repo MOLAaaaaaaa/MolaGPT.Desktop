@@ -1,0 +1,22 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="MolaGPT.App.App"
+             RequestedThemeVariant="Default">
+
+  <Application.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceInclude Source="avares://MolaGPT.Desktop/Theme/Tokens.axaml" />
+      </ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+
+  <Application.Styles>
+    <!-- Fluent supplies the control templates this app does not override
+         (ScrollViewer, Popup, ContextMenu, TextPresenter internals). Tokens and
+         Controls then restyle everything the user actually sees. -->
+    <StyleInclude Source="avares://MolaGPT.Desktop/Theme/Fluent.axaml" />
+    <StyleInclude Source="avares://MolaGPT.Desktop/Theme/Controls.axaml" />
+  </Application.Styles>
+
+</Application>

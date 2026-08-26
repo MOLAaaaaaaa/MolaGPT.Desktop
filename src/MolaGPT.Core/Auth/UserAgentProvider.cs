@@ -24,7 +24,10 @@ namespace MolaGPT.Core.Auth;
 /// </summary>
 public static class UserAgentProvider
 {
-    /// <summary>Recognizable, app-stable User-Agent. Easy to whitelist in Cloudflare.</summary>
+    /// <summary>
+    /// Recognizable, app-stable User-Agent. The legacy stack label is retained
+    /// because the complete value participates in the account token hash.
+    /// </summary>
     public const string FixedUa = "MolaGPT-Desktop (Windows; .NET 8 WPF)";
 
     /// <summary>

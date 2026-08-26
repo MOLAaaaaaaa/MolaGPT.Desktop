@@ -1,0 +1,38 @@
+<views:MolaWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:r="clr-namespace:MolaGPT.App.Rendering"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        x:Class="MolaGPT.App.Views.UpdateWindow"
+        Title="发现新版本"
+        Width="452" Height="502"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        FontFamily="{DynamicResource Font.UI}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+  <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="28">
+        <Grid Name="PART_Header" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,8">
+          <TextBlock Classes="icon" Text="&#xE777;" FontSize="18"
+                     Foreground="{DynamicResource Brush.Primary}" VerticalAlignment="Center" />
+          <TextBlock Grid.Column="1" Text="发现新版本" FontSize="20" FontWeight="SemiBold"
+                     Margin="10,0,0,0" VerticalAlignment="Center" />
+          <Button Grid.Column="2" Name="PART_Close" Classes="headericon" ToolTip.Tip="稍后">
+            <TextBlock Classes="icon" Text="&#xE711;" />
+          </Button>
+        </Grid>
+
+        <TextBlock Grid.Row="1" Name="PART_Version" Classes="muted" Margin="0,0,0,16" />
+
+        <Border Grid.Row="2" Background="{DynamicResource Brush.Bg.Tertiary}"
+                BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1"
+                CornerRadius="{DynamicResource Radius.Md}" Padding="14,12">
+          <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <r:MarkdownTextBlock Name="PART_Notes" Classes="prose" />
+          </ScrollViewer>
+        </Border>
+
+        <Grid Grid.Row="3" ColumnDefinitions="*,12,*" Margin="0,18,0,0">
+          <Button Name="PART_Later" Classes="outline" Height="42" Content="稍后再说" />
+          <Button Grid.Column="2" Name="PART_Action" Classes="primary" Height="42" Content="立即下载" />
+        </Grid>
+  </Grid>
+</views:MolaWindow>

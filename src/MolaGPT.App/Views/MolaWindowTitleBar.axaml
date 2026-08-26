@@ -1,0 +1,34 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="MolaGPT.App.Views.MolaWindowTitleBar"
+             x:CompileBindings="False"
+             Name="PART_Root"
+             Height="52">
+  <Border Name="PART_DragArea"
+          Padding="18,0,10,0"
+          Background="{DynamicResource Brush.Bg.Elevated}"
+          BorderBrush="{DynamicResource Brush.Divider}"
+          BorderThickness="0,0,0,1">
+    <Grid ColumnDefinitions="Auto,*,Auto">
+      <Image Width="22" Height="22"
+             Margin="0,0,10,0"
+             VerticalAlignment="Center"
+             IsHitTestVisible="False"
+             Source="avares://MolaGPT.Desktop/Assets/app-logo.png"
+             RenderOptions.BitmapInterpolationMode="HighQuality" />
+      <TextBlock Grid.Column="1"
+                 Text="{Binding TitleText, ElementName=PART_Root}"
+                 FontSize="{DynamicResource Font.Size.Heading}"
+                 FontWeight="SemiBold"
+                 VerticalAlignment="Center"
+                 IsHitTestVisible="False" />
+      <Button Grid.Column="2"
+              Name="PART_Close"
+              Classes="headericon"
+              IsVisible="{Binding ShowCloseButton, ElementName=PART_Root}"
+              ToolTip.Tip="关闭">
+        <TextBlock Classes="icon" Text="&#xE711;" FontSize="14" />
+      </Button>
+    </Grid>
+  </Border>
+</UserControl>

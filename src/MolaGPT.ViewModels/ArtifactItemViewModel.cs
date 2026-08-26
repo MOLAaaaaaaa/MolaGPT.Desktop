@@ -4,9 +4,8 @@ namespace MolaGPT.ViewModels;
 
 /// <summary>
 /// One entry in the session-level artifact panel: a file produced (or uploaded)
-/// in the conversation's Python working directory. Images expose their path for
-/// inline thumbnailing (XAML binds an <c>Image</c> to <see cref="FullPath"/> via
-/// a file URI); other types fall back to a glyph + filename.
+/// in the conversation's Python working directory. Images expose a preview path;
+/// other types fall back to a glyph + filename without entering bitmap decoding.
 /// </summary>
 public sealed class ArtifactItemViewModel
 {
@@ -25,6 +24,7 @@ public sealed class ArtifactItemViewModel
     public string FullPath { get; }
     public long Bytes { get; }
     public bool IsImage { get; }
+    public string? ImagePreviewPath => IsImage ? FullPath : null;
 
     /// <summary>Upper-cased extension without the dot, e.g. "PNG", "CSV". Empty
     /// when the file has no extension. Drives the non-image type badge.</summary>

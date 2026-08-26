@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MolaGPT.Presentation</RootNamespace>
+    <AssemblyName>MolaGPT.Presentation</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Parser behavior and span corrections are covered against this version;
+         upgrade it separately from the UI migration. -->
+    <PackageReference Include="Markdig" Version="0.22.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="MolaGPT.Presentation.Tests" />
+  </ItemGroup>
+
+</Project>

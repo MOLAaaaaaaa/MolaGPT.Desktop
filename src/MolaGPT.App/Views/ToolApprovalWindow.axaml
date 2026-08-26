@@ -1,0 +1,150 @@
+<views:MolaWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        x:Class="MolaGPT.App.Views.ToolApprovalWindow"
+        Title="工具授权"
+        Width="624" Height="504"
+        MinWidth="504" MinHeight="384"
+        CanResize="False"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        FontFamily="{DynamicResource Font.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+  <Grid RowDefinitions="52,*">
+        <Border Name="PART_Header"
+                Grid.Row="0"
+                Background="{DynamicResource Brush.Bg.Tertiary}"
+                BorderBrush="{DynamicResource Brush.Divider}"
+                BorderThickness="0,0,0,1"
+                Padding="20,0">
+          <Grid ColumnDefinitions="*,Auto">
+            <StackPanel Classes="inlinerow" Orientation="Horizontal" VerticalAlignment="Center">
+              <TextBlock Classes="icon"
+                         Text="&#xE72E;"
+                         FontSize="15"
+                         Margin="0,0,9,0"
+                         Foreground="{DynamicResource Brush.Primary}" />
+              <TextBlock Name="PART_Title"
+                         FontSize="14"
+                         FontWeight="SemiBold"
+                         VerticalAlignment="Center" />
+            </StackPanel>
+            <Button Grid.Column="1" Name="PART_Close" Classes="headericon" ToolTip.Tip="关闭">
+              <TextBlock Classes="icon" Text="&#xE711;" FontSize="14" />
+            </Button>
+          </Grid>
+        </Border>
+
+        <ContentControl Grid.Row="1" Name="PART_Body" />
+  </Grid>
+
+  <!--
+    The dialog bodies are assembled in ToolApprovalService rather than here,
+    because what they contain depends on what the risk analyzer found. Their
+    appearance still belongs in XAML: an earlier version resolved every brush
+    imperatively through TryGetResource and got null for all of them, because
+    the tokens live in ThemeDictionaries and cannot be looked up without a
+    variant — which is why the dialog rendered with no card, no code block and
+    no banners. Style classes cannot fail that way, and they follow a theme
+    switch while the dialog is open.
+  -->
+  <Window.Styles>
+    <Style Selector="Button.approvalprimary">
+      <Setter Property="MinHeight" Value="34" />
+      <Setter Property="Padding" Value="16,7" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.OnPrimary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.approvalprimary:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Hover}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+
+    <!-- Alert banners. Two tones, and the louder one is spent only on deletion:
+         reaching outside the working directory is usually "read that
+         spreadsheet", and giving it the same red as rmtree trains the red out
+         of both. -->
+    <Style Selector="Border.banner">
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,10" />
+      <Setter Property="Margin" Value="0,0,0,10" />
+    </Style>
+    <Style Selector="Border.banner TextBlock, Border.banner SelectableTextBlock">
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="LineHeight" Value="20" />
+    </Style>
+    <Style Selector="Border.banner.danger">
+      <Setter Property="Background" Value="{DynamicResource Brush.Danger.Surface}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Danger.Border}" />
+    </Style>
+    <Style Selector="Border.banner.danger TextBlock, Border.banner.danger SelectableTextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Danger.Foreground}" />
+    </Style>
+    <Style Selector="Border.banner.warning">
+      <Setter Property="Background" Value="{DynamicResource Brush.Warning.Surface}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Warning.Border}" />
+    </Style>
+    <Style Selector="Border.banner.warning TextBlock, Border.banner.warning SelectableTextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Warning.Foreground}" />
+    </Style>
+
+    <!-- "Why am I being asked": the model's stated purpose. -->
+    <Style Selector="Border.purposecard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Blockquote}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="14,10,14,12" />
+    </Style>
+    <Style Selector="Border.purposecard.unstated">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    </Style>
+    <Style Selector="Border.purposecard TextBlock.cardlabel">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="Margin" Value="0,0,0,4" />
+    </Style>
+    <Style Selector="Border.purposecard.unstated TextBlock.cardbody">
+      <Setter Property="FontStyle" Value="Italic" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+    </Style>
+
+    <Style Selector="Border.codebox">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,10" />
+    </Style>
+    <Style Selector="Border.codebox SelectableTextBlock">
+      <Setter Property="FontFamily" Value="{DynamicResource Font.Mono}" />
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+
+    <Style Selector="Border.factpill">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,9" />
+    </Style>
+
+    <Style Selector="TextBlock.rulelabel">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="Margin" Value="0,0,0,6" />
+    </Style>
+    <Style Selector="CheckBox.rulechip">
+      <Setter Property="Margin" Value="0,0,16,6" />
+      <Setter Property="MinHeight" Value="0" />
+    </Style>
+  </Window.Styles>
+</views:MolaWindow>

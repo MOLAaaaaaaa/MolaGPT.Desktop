@@ -1,0 +1,257 @@
+<views:MolaWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="using:MolaGPT.App.Views"
+        x:Class="MolaGPT.App.Views.AccountWindow"
+        Title="MolaGPT 账号"
+        Width="412" Height="512"
+        CanResize="False"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        FontFamily="{DynamicResource Font.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+  <Grid RowDefinitions="Auto,Auto,*,Auto">
+        <Border Grid.Row="0"
+                Name="PART_Header"
+                PointerPressed="OnHeaderPointerPressed"
+                Padding="20,18,16,12"
+                BorderBrush="{DynamicResource Brush.Divider}"
+                BorderThickness="0,0,0,1">
+          <Grid>
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+              <Border Width="40" Height="40"
+                      CornerRadius="{DynamicResource Radius.Xl}"
+                      Background="{DynamicResource Brush.Primary}">
+                <TextBlock Text="&#xE77B;"
+                           Classes="icon"
+                           FontSize="18"
+                           Foreground="White"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center" />
+              </Border>
+              <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                <TextBlock Name="PART_Username"
+                           Text="用户"
+                           FontSize="{DynamicResource Font.Size.Heading}"
+                           FontWeight="SemiBold" />
+                <StackPanel Classes="inlinerow compact" Orientation="Horizontal" Margin="0,2,0,0" Spacing="6">
+                  <Ellipse Width="6" Height="6"
+                           Fill="{DynamicResource Brush.Success}"
+                           VerticalAlignment="Center" />
+                  <TextBlock Name="PART_UserBadge"
+                             Text="已注册用户"
+                             FontSize="{DynamicResource Font.Size.Small}"
+                             Foreground="{DynamicResource Brush.Text.Secondary}" />
+                </StackPanel>
+              </StackPanel>
+            </StackPanel>
+            <Button Name="PART_Close"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Classes="headericon"
+                    ToolTip.Tip="关闭">
+              <TextBlock Classes="icon" Text="&#xE711;" FontSize="14" />
+            </Button>
+          </Grid>
+        </Border>
+
+        <StackPanel Grid.Row="1" Margin="20,14,20,8">
+          <TextBlock Name="PART_SectionTitle"
+                     Text="今日使用情况"
+                     FontSize="{DynamicResource Font.Size.Small}"
+                     FontWeight="SemiBold"
+                     Foreground="{DynamicResource Brush.Text.Muted}"
+                     Margin="0,0,0,8" />
+
+          <Border CornerRadius="{DynamicResource Radius.Md}"
+                  Padding="16,10">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                <GradientStop Color="#FFBE727F" Offset="0" />
+                <GradientStop Color="#FFD4949E" Offset="1" />
+              </LinearGradientBrush>
+            </Border.Background>
+            <Grid ColumnDefinitions="*,*">
+              <StackPanel Grid.Column="0" HorizontalAlignment="Center">
+                <TextBlock Name="PART_TotalRequests"
+                           Text="0" FontSize="20" FontWeight="SemiBold"
+                           Foreground="White" HorizontalAlignment="Center" />
+                <TextBlock Name="PART_TotalRequestsLabel"
+                           Text="总请求次数"
+                           FontSize="{DynamicResource Font.Size.XSmall}"
+                           Foreground="#E6FFFFFF"
+                           Margin="0,2,0,0" HorizontalAlignment="Center" />
+              </StackPanel>
+              <StackPanel Grid.Column="1" HorizontalAlignment="Center">
+                <TextBlock Name="PART_TotalTokens"
+                           Text="0" FontSize="20" FontWeight="SemiBold"
+                           Foreground="White" HorizontalAlignment="Center" />
+                <TextBlock Name="PART_TotalTokensLabel"
+                           Text="总 Tokens 用量"
+                           FontSize="{DynamicResource Font.Size.XSmall}"
+                           Foreground="#E6FFFFFF"
+                           Margin="0,2,0,0" HorizontalAlignment="Center" />
+              </StackPanel>
+            </Grid>
+          </Border>
+
+          <StackPanel Name="PART_CreditsPanel" Margin="0,10,0,0" IsVisible="False">
+            <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,4">
+              <TextBlock Name="PART_CreditsTier"
+                         FontSize="12"
+                         Foreground="{DynamicResource Brush.Text.Secondary}" />
+              <TextBlock Grid.Column="1" Name="PART_CreditsWindow"
+                         FontSize="12"
+                         FontFamily="{DynamicResource Font.Mono}"
+                         Foreground="{DynamicResource Brush.Text.Secondary}" />
+            </Grid>
+            <ProgressBar Name="PART_CreditsProgress"
+                         Minimum="0" Maximum="1" Height="6"
+                         Foreground="{DynamicResource Brush.Primary}" />
+            <TextBlock Name="PART_CreditsHint"
+                       IsVisible="False"
+                       FontSize="{DynamicResource Font.Size.XSmall}"
+                       Foreground="{DynamicResource Brush.Text.Muted}"
+                       TextWrapping="Wrap"
+                       Margin="0,6,0,0" />
+          </StackPanel>
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="2"
+                      Margin="20,0,12,0"
+                      Padding="0,0,8,0"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+          <StackPanel>
+            <TextBlock Name="PART_Empty"
+                       Text="加载用量中..."
+                       FontSize="{DynamicResource Font.Size.Small}"
+                       Foreground="{DynamicResource Brush.Text.Muted}"
+                       Margin="0,8"
+                       HorizontalAlignment="Center" />
+            <ItemsControl Name="PART_ModelList">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="views:AccountModelRow">
+                  <Border Classes="modelcard"
+                          Opacity="{Binding Opacity}">
+                    <StackPanel>
+                      <Grid ColumnDefinitions="*,Auto,Auto">
+                        <TextBlock Grid.Column="0"
+                                   Text="{Binding Name}"
+                                   FontWeight="SemiBold"
+                                   FontSize="14"
+                                   TextTrimming="CharacterEllipsis"
+                                   VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding PriceSymbol}"
+                                   IsVisible="{Binding HasPriceSymbol}"
+                                   Classes.success="{Binding PriceIsSuccess}"
+                                   Classes.warning="{Binding PriceIsWarning}"
+                                   Classes.error="{Binding PriceIsError}"
+                                   FontFamily="{DynamicResource Font.Mono}"
+                                   FontSize="12" FontWeight="Bold"
+                                   Margin="6,0,0,0"
+                                   VerticalAlignment="Center"
+                                   ToolTip.Tip="消耗档位，$ 越多越贵" />
+                        <TextBlock Grid.Column="2"
+                                   Text="{Binding RightText}"
+                                   IsVisible="{Binding HasRightText}"
+                                   Classes.success="{Binding RightIsSuccess}"
+                                   Classes.warning="{Binding RightIsWarning}"
+                                   Classes.error="{Binding RightIsError}"
+                                   FontSize="13" Margin="10,0,0,0"
+                                   VerticalAlignment="Center" />
+                      </Grid>
+
+                      <TextBlock Text="{Binding Detail}"
+                                 IsVisible="{Binding HasDetail}"
+                                 Classes="muted"
+                                 FontSize="11"
+                                 Margin="0,3,0,0" />
+
+                      <StackPanel IsVisible="{Binding HasLegacyUsage}" Margin="0,8,0,0" Spacing="7">
+                        <StackPanel>
+                          <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,4">
+                            <TextBlock Text="请求次数" Classes="secondary" FontSize="12" />
+                            <TextBlock Grid.Column="1" Text="{Binding RequestsText}"
+                                       Classes="secondary" FontSize="12"
+                                       FontFamily="{DynamicResource Font.Mono}" />
+                          </Grid>
+                          <ProgressBar Minimum="0" Maximum="1"
+                                       Value="{Binding RequestsRatio}"
+                                       IsVisible="{Binding ShowRequestsBar}"
+                                       Height="6"
+                                       Foreground="{DynamicResource Brush.Primary}" />
+                        </StackPanel>
+                        <StackPanel>
+                          <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,4">
+                            <TextBlock Text="Tokens 用量" Classes="secondary" FontSize="12" />
+                            <TextBlock Grid.Column="1" Text="{Binding TokensText}"
+                                       Classes="secondary" FontSize="12"
+                                       FontFamily="{DynamicResource Font.Mono}" />
+                          </Grid>
+                          <ProgressBar Minimum="0" Maximum="1"
+                                       Value="{Binding TokensRatio}"
+                                       IsVisible="{Binding ShowTokensBar}"
+                                       Height="6"
+                                       Foreground="{DynamicResource Brush.Success}" />
+                        </StackPanel>
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <TextBlock Name="PART_EstimateHint"
+                       Text="次数按平均对话长度估算，实际随对话长短浮动。"
+                       IsVisible="False"
+                       FontSize="11"
+                       Foreground="{DynamicResource Brush.Text.Muted}"
+                       TextWrapping="Wrap"
+                       Margin="0,2,0,12" />
+          </StackPanel>
+        </ScrollViewer>
+
+        <Border Grid.Row="3"
+                BorderBrush="{DynamicResource Brush.Divider}"
+                BorderThickness="0,1,0,0"
+                Padding="20,12,20,18">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Name="PART_Status"
+                       VerticalAlignment="Center"
+                       Margin="0,0,16,0"
+                       FontSize="{DynamicResource Font.Size.Small}"
+                       Foreground="{DynamicResource Brush.Text.Muted}"
+                       TextWrapping="Wrap" />
+            <Button Grid.Column="1"
+                    Name="PART_Logout"
+                    Classes="outline danger"
+                    Content="退出登录"
+                    Padding="14,8" />
+          </Grid>
+        </Border>
+  </Grid>
+
+  <Window.Styles>
+    <Style Selector="Border.modelcard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="12,10" />
+      <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+    <Style Selector="TextBlock.success">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Success}" />
+    </Style>
+    <Style Selector="TextBlock.warning">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Warning}" />
+    </Style>
+    <Style Selector="TextBlock.error">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
+    </Style>
+    <Style Selector="Button.danger">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Error}" />
+    </Style>
+  </Window.Styles>
+</views:MolaWindow>

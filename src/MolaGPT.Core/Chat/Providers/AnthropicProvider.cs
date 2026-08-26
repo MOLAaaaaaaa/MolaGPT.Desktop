@@ -105,8 +105,7 @@ public sealed class AnthropicProvider : IChatProvider
         }
         CustomRequestParams.ApplyBody(body, Models.FirstOrDefault(m => m.Id.Equals(request.ModelId, StringComparison.OrdinalIgnoreCase))?.CustomBody);
 
-        if (request.ExtraBody is not null)
-            foreach (var kv in request.ExtraBody) body[kv.Key] = kv.Value;
+        InternalExtraBodyKeys.MergeSendable(body, request.ExtraBody);
 
         var url = NetworkSecurity.CombineEndpoint(BaseUrl, MessagesPath, DisplayName);
         using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = JsonContent.Create(body) };

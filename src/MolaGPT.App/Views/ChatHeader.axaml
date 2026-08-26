@@ -1,0 +1,267 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
+             xmlns:views="clr-namespace:MolaGPT.App.Views"
+             x:Class="MolaGPT.App.Views.ChatHeader"
+             x:DataType="vm:MainViewModel">
+
+  <!--
+    Floating header over the transcript, matching the WPF "Floating top header
+    centered above the active page": transparent, Margin 16,16,16,0,
+    Padding 16,8, with the model-selector pill left-aligned in the centre column.
+
+    It floats rather than occupying a layout row, which is why the transcript
+    below reserves 64px of top padding for it. The transcript does scroll under
+    it — that is the original's behaviour too — so every control in here must
+    paint an opaque background of its own.
+  -->
+
+  <Border Background="Transparent" Margin="16,16,16,0" Padding="16,8">
+    <Grid ColumnDefinitions="Auto,*,Auto">
+
+      <!-- Left: expand-sidebar pill, shown only while the sidebar is collapsed -->
+      <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+        <Button Name="PART_ExpandSidebar"
+                Classes="headericon"
+                Width="32" Height="32"
+                Margin="0,0,8,0"
+                IsVisible="False"
+                ToolTip.Tip="展开侧边栏">
+          <TextBlock Classes="icon" Text="&#xE700;" FontSize="12" />
+        </Button>
+      </StackPanel>
+
+      <!-- Centre: model selector pill -->
+      <Button Grid.Column="1"
+              Name="PART_ModelSelector"
+              Classes="outline"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Center"
+              Padding="14,6"
+              Margin="16,0,0,0"
+              IsVisible="{Binding !IsImageWorkbenchVisible}"
+              ToolTip.Tip="选择模型">
+        <StackPanel Classes="inlinerow" Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBlock Classes="icon" Text="&#xE99A;" FontSize="14" Margin="0,0,8,0"
+                     VerticalAlignment="Center" />
+          <TextBlock Text="{Binding Chat.ActiveModelLabel}" FontWeight="SemiBold"
+                     TextWrapping="NoWrap" VerticalAlignment="Center" />
+          <TextBlock Name="PART_ModeLabel"
+                     Classes="muted"
+                     FontSize="{DynamicResource Font.Size.XSmall}"
+                     Margin="8,0,0,0"
+                     TextWrapping="NoWrap"
+                     VerticalAlignment="Center" />
+          <TextBlock Classes="icon" Text="&#xE70D;" FontSize="10" Margin="8,0,0,0"
+                     Opacity="0.6" VerticalAlignment="Center" />
+        </StackPanel>
+
+        <Button.Flyout>
+          <Flyout Placement="BottomEdgeAlignedLeft" ShowMode="Standard"
+                  FlyoutPresenterClasses="molaflyout">
+            <Border Name="PART_ModelPanel" Classes="flyoutsurface modelpanel">
+              <Grid RowDefinitions="Auto,*" Width="380">
+                <Border Grid.Row="0" Classes="searchbox" Margin="0,0,0,8" Padding="12,7">
+                  <Grid ColumnDefinitions="Auto,*">
+                    <TextBlock Grid.Column="0" Classes="icon" Text="&#xE721;" FontSize="12"
+                               Margin="0,0,8,0" VerticalAlignment="Center"
+                               Foreground="{DynamicResource Brush.Text.Muted}" />
+                    <TextBox Grid.Column="1" Name="PART_ModelSearch"
+                             PlaceholderText="搜索模型"
+                             FontSize="{DynamicResource Font.Size.Body}"
+                             VerticalContentAlignment="Center" />
+                  </Grid>
+                </Border>
+
+                <ListBox Grid.Row="1" Name="PART_ModelList"
+                         MaxHeight="420"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         Padding="0"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                  <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="views:ModelSelectorRow">
+                      <Panel>
+                        <!-- Header / hint / empty rows are not selectable content;
+                             they share the template so the list stays one flat
+                             collection rather than nested groups. -->
+                        <TextBlock Text="{Binding HeaderText}" IsVisible="{Binding IsHeader}"
+                                   Margin="2,10,2,4"
+                                   FontSize="{DynamicResource Font.Size.XSmall}"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource Brush.Text.Secondary}" />
+
+                        <TextBlock Text="{Binding HintText}" IsVisible="{Binding IsHint}"
+                                   Margin="2,0,2,6"
+                                   FontSize="{DynamicResource Font.Size.XSmall}"
+                                   TextWrapping="Wrap"
+                                   Foreground="{DynamicResource Brush.Text.Muted}" />
+
+                        <TextBlock Text="{Binding EmptyText}" IsVisible="{Binding IsEmpty}"
+                                   Margin="2,16" TextAlignment="Center"
+                                   FontSize="{DynamicResource Font.Size.Small}"
+                                   Foreground="{DynamicResource Brush.Text.Muted}" />
+
+                        <Grid IsVisible="{Binding IsModel}" ColumnDefinitions="*,Auto"
+                              Margin="0,1">
+                          <StackPanel Grid.Column="0" Classes="inlinerow" Orientation="Horizontal" Spacing="6">
+                            <TextBlock Text="{Binding ModelName}" FontSize="13"
+                                       VerticalAlignment="Center"
+                                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                            <!-- Capability pips, same three the WPF row shows. -->
+                            <TextBlock Classes="icon pip" Text="&#xEA80;" IsVisible="{Binding SupportsThinking}"
+                                       ToolTip.Tip="支持推理" />
+                            <TextBlock Classes="icon pip" Text="&#xE90F;" IsVisible="{Binding SupportsTools}"
+                                       ToolTip.Tip="支持工具调用" />
+                            <TextBlock Classes="icon pip" Text="&#xE7B3;" IsVisible="{Binding SupportsVision}"
+                                       ToolTip.Tip="支持图片输入" />
+                          </StackPanel>
+                          <TextBlock Grid.Column="1" Classes="icon" Text="&#xE73E;" FontSize="12"
+                                     IsVisible="{Binding IsActive}"
+                                     VerticalAlignment="Center"
+                                     Foreground="{DynamicResource Brush.Primary}" />
+                        </Grid>
+                      </Panel>
+                    </DataTemplate>
+                  </ListBox.ItemTemplate>
+                </ListBox>
+              </Grid>
+            </Border>
+          </Flyout>
+        </Button.Flyout>
+      </Button>
+
+      <Button Grid.Column="1"
+              Name="PART_WorkbenchSelector"
+              Classes="outline"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Center"
+              Padding="14,6"
+              Margin="16,0,0,0"
+              IsVisible="{Binding IsImageWorkbenchVisible}"
+              ToolTip.Tip="选择图像模型">
+        <StackPanel Classes="inlinerow" Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBlock Classes="icon" Text="&#xE91B;" FontSize="14" Margin="0,0,8,0" />
+          <TextBlock Name="PART_WorkbenchModelLabel" Text="图像模型" FontWeight="SemiBold"
+                     MaxWidth="260" TextTrimming="CharacterEllipsis" />
+          <TextBlock Classes="icon" Text="&#xE70D;" FontSize="10" Margin="8,0,0,0" Opacity="0.6" />
+        </StackPanel>
+        <Button.Flyout>
+          <Flyout Placement="BottomEdgeAlignedLeft" FlyoutPresenterClasses="molaflyout">
+            <Border Classes="flyoutsurface modelpanel" Width="360">
+              <Grid RowDefinitions="Auto,*">
+                <Border Grid.Row="0" Classes="searchbox" Margin="0,0,0,8" Padding="12,7">
+                  <Grid ColumnDefinitions="Auto,*">
+                    <TextBlock Classes="icon" Text="&#xE721;" FontSize="12" Margin="0,0,8,0"
+                               VerticalAlignment="Center" Foreground="{DynamicResource Brush.Text.Muted}" />
+                    <TextBox Grid.Column="1" Name="PART_WorkbenchSearch"
+                             PlaceholderText="搜索图像模型" FontSize="{DynamicResource Font.Size.Body}" />
+                  </Grid>
+                </Border>
+                <ListBox Grid.Row="1" Name="PART_WorkbenchModels" MaxHeight="360"
+                         Background="Transparent" BorderThickness="0" Padding="0">
+                  <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="vm:ImageGenerationProviderModelOption">
+                      <Grid ColumnDefinitions="*,Auto" Margin="2,1">
+                        <TextBlock Text="{Binding Label}" FontSize="13"
+                                   TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                        <Border Grid.Column="1" IsVisible="{Binding SupportsEdit}"
+                                Classes="capbadge" Margin="8,0,0,0">
+                          <TextBlock Text="可编辑" FontSize="10" />
+                        </Border>
+                      </Grid>
+                    </DataTemplate>
+                  </ListBox.ItemTemplate>
+                </ListBox>
+              </Grid>
+            </Border>
+          </Flyout>
+        </Button.Flyout>
+      </Button>
+
+      <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+        <Button Name="PART_Update" Classes="statuschip" Margin="0,0,6,0"
+                IsVisible="{Binding UpdateAvailable}" ToolTip.Tip="{Binding UpdateTooltip}"
+                Command="{Binding OpenUpdateDownloadCommand}">
+          <StackPanel Classes="inlinerow compact" Orientation="Horizontal">
+            <TextBlock Classes="icon" Text="&#xE777;" FontSize="12" Margin="0,0,6,0"
+                       Foreground="{DynamicResource Brush.Primary}" />
+            <TextBlock Text="{Binding UpdateChipLabel}" FontSize="11" FontWeight="SemiBold"
+                       Foreground="{DynamicResource Brush.Primary}" />
+            <TextBlock Text="{Binding UpdateChipDetail}" FontSize="11" Margin="5,0,0,0"
+                       Foreground="{DynamicResource Brush.Primary}" Opacity="0.75" />
+          </StackPanel>
+        </Button>
+
+        <Button Name="PART_CloudSync" Classes="statuschip" Margin="0,0,6,0"
+                MinWidth="116" IsVisible="{Binding IsCloudSyncChipVisible}"
+                ToolTip.Tip="{Binding CloudSyncStatusToolTip}"
+                Command="{Binding SyncCloudCommand}">
+          <StackPanel Classes="inlinerow compact" Orientation="Horizontal">
+            <Ellipse Name="PART_CloudDot" Width="7" Height="7" Margin="0,0,7,0"
+                     Fill="{DynamicResource Brush.Text.Muted}" VerticalAlignment="Center" />
+            <TextBlock Classes="icon" Text="&#xE753;" FontSize="12" Margin="0,0,6,0" />
+            <TextBlock Text="{Binding CloudSyncStatusText}" FontSize="11" FontWeight="SemiBold"
+                       MaxWidth="150" TextTrimming="CharacterEllipsis" />
+          </StackPanel>
+        </Button>
+
+        <Button Name="PART_SystemPrompt" Classes="headericon"
+                IsVisible="{Binding ConversationSystemPromptVisible}"
+                ToolTip.Tip="会话提示词覆盖"
+                Command="{Binding OpenSystemPromptCommand}">
+          <Grid>
+            <TextBlock Classes="icon" Text="&#xE8A5;" />
+            <Ellipse Name="PART_SystemPromptDot" Width="7" Height="7"
+                     Fill="{DynamicResource Brush.Primary}"
+                     HorizontalAlignment="Right" VerticalAlignment="Top"
+                     Margin="0,-2,-2,0" IsVisible="False" />
+          </Grid>
+        </Button>
+      </StackPanel>
+    </Grid>
+  </Border>
+
+  <UserControl.Styles>
+    <Style Selector="Border.modelpanel">
+      <Setter Property="Padding" Value="12" />
+    </Style>
+    <Style Selector="Border.capbadge">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="5,1" />
+    </Style>
+    <Style Selector="Button.statuschip">
+      <Setter Property="Padding" Value="9,5" />
+      <Setter Property="MinHeight" Value="28" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    </Style>
+    <Style Selector="Border.searchbox">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    </Style>
+    <Style Selector="Border.searchbox:focus-within">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+    <Style Selector="TextBlock.pip">
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="Opacity" Value="0.55" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="ListBoxItem">
+      <Setter Property="Padding" Value="10,6" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    </Style>
+    <Style Selector="ListBoxItem:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+  </UserControl.Styles>
+</UserControl>

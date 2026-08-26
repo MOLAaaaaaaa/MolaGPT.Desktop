@@ -1,0 +1,132 @@
+<views:MolaWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        x:Class="MolaGPT.App.Views.LoginWindow"
+        Title="登录 MolaGPT"
+        Width="372" Height="492"
+        CanResize="False"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        FontFamily="{DynamicResource Font.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+  <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="28">
+        <Grid Grid.Row="0" Margin="0,0,0,18"
+              Name="PART_Header" PointerPressed="OnHeaderPointerPressed">
+          <TextBlock Text="登录 MolaGPT"
+                     FontSize="{DynamicResource Font.Size.Heading}"
+                     FontWeight="SemiBold"
+                     VerticalAlignment="Center" />
+          <Button Name="PART_Close"
+                  HorizontalAlignment="Right"
+                  Classes="headericon"
+                  ToolTip.Tip="关闭">
+            <TextBlock Classes="icon" Text="&#xE711;" FontSize="14" />
+          </Button>
+        </Grid>
+
+        <StackPanel Grid.Row="1">
+          <TextBlock Text="用户名" Classes="fieldlabel" />
+          <TextBox Name="PART_Username"
+                   Classes="logininput"
+                   Margin="0,0,0,12" />
+
+          <TextBlock Text="密码" Classes="fieldlabel" />
+          <TextBox Name="PART_Password"
+                   Classes="logininput"
+                   PasswordChar="•"
+                   Margin="0,0,0,12" />
+
+          <TextBlock Text="您的登录凭据将通过 TLS 加密传输。"
+                     Classes="muted"
+                     FontSize="{DynamicResource Font.Size.Small}"
+                     TextWrapping="Wrap"
+                     Margin="0,4,0,0" />
+
+          <Grid Margin="0,16,0,0" ColumnDefinitions="*,Auto,*">
+            <Border Grid.Column="0" Height="1" VerticalAlignment="Center"
+                    Background="{DynamicResource Brush.Divider}" />
+            <TextBlock Grid.Column="1"
+                       Text="或使用第三方账号"
+                       Margin="10,0"
+                       FontSize="{DynamicResource Font.Size.Small}"
+                       Foreground="{DynamicResource Brush.Text.Muted}" />
+            <Border Grid.Column="2" Height="1" VerticalAlignment="Center"
+                    Background="{DynamicResource Brush.Divider}" />
+          </Grid>
+
+          <Grid Margin="0,12,0,0" ColumnDefinitions="*,8,*,8,*">
+            <Button Grid.Column="0" Name="PART_Google"
+                    Classes="outline" Height="40"
+                    Click="OnGoogleLoginClick"
+                    ToolTip.Tip="使用 Google 账号登录"
+                    Content="Google" />
+            <Button Grid.Column="2" Name="PART_Microsoft"
+                    Classes="outline" Height="40"
+                    Click="OnMicrosoftLoginClick"
+                    ToolTip.Tip="使用 Microsoft 账号登录"
+                    Content="Microsoft" />
+            <Button Grid.Column="4" Name="PART_LinuxDo"
+                    Classes="outline" Height="40"
+                    Click="OnLinuxDoLoginClick"
+                    ToolTip.Tip="使用 Linux Do 账号登录"
+                    Content="Linux Do" />
+          </Grid>
+        </StackPanel>
+
+        <Border Grid.Row="2"
+                Name="PART_StatusPanel"
+                Margin="0,14,0,0"
+                Padding="10,8"
+                MaxHeight="92"
+                Background="{DynamicResource Brush.Bg.Tertiary}"
+                BorderBrush="{DynamicResource Brush.Error}"
+                BorderThickness="1"
+                CornerRadius="{DynamicResource Radius.Sm}"
+                IsVisible="False">
+          <ScrollViewer VerticalScrollBarVisibility="Auto"
+                        HorizontalScrollBarVisibility="Disabled">
+            <TextBlock Name="PART_StatusText"
+                       Foreground="{DynamicResource Brush.Error}"
+                       FontSize="{DynamicResource Font.Size.Small}"
+                       TextWrapping="Wrap" />
+          </ScrollViewer>
+        </Border>
+
+        <Grid Grid.Row="3" Margin="0,18,0,0" ColumnDefinitions="*,Auto,Auto">
+          <Button Grid.Column="1"
+                  Name="PART_Cancel"
+                  Classes="outline"
+                  Content="取消"
+                  Width="86" Height="42"
+                  Margin="0,0,10,0" />
+          <Button Grid.Column="2"
+                  Name="PART_Login"
+                  Classes="pillprimary"
+                  Content="登录"
+                  Width="104" Height="42"
+                  Click="OnLoginClick" />
+        </Grid>
+  </Grid>
+
+  <Window.Styles>
+    <Style Selector="TextBlock.fieldlabel">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="Margin" Value="0,0,0,4" />
+    </Style>
+    <Style Selector="TextBox.logininput">
+      <Setter Property="MinHeight" Value="40" />
+      <Setter Property="Padding" Value="11,8" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="TextBox.logininput:focus">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+  </Window.Styles>
+</views:MolaWindow>

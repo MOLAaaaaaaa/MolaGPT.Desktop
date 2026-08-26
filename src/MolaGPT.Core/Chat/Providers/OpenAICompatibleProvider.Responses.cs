@@ -461,13 +461,11 @@ public sealed partial class OpenAICompatibleProvider
             body["tool_choice"] = "auto";
         }
 
-        // Internal tool flags (enabled_tools) never go on the wire; any other ExtraBody
-        // keys merge last, mirroring BuildRequestBody.
+        // Internal keys (enabled_tools / privacy_mode) never go on the wire; any
+        // other ExtraBody keys merge last, mirroring BuildRequestBody.
         ApplyCustomBody(body, request.ModelId);
 
-        if (request.ExtraBody is not null)
-            foreach (var kv in request.ExtraBody)
-                if (kv.Key != "enabled_tools") body[kv.Key] = kv.Value;
+        InternalExtraBodyKeys.MergeSendable(body, request.ExtraBody);
 
         return body;
     }

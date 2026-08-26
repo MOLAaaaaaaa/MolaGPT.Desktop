@@ -1,0 +1,113 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
+             x:Class="MolaGPT.App.Views.TitleBar"
+             Height="{DynamicResource Size.TitleBar.Height}">
+
+  <!--
+    Self-drawn title bar, matching the 46px caption region in the WPF
+    MainWindow: brand on the left, the Chat/Work mode switcher centred, global
+    action icons and window controls on the right.
+
+    The whole strip drags the window; the controls opt back out by being
+    Buttons, which the press handler skips — the same split WPF expressed with
+    WindowChrome.IsHitTestVisibleInChrome.
+  -->
+
+  <Border Background="{DynamicResource Brush.Bg.Canvas}">
+    <Grid ColumnDefinitions="*,Auto,*">
+
+      <!-- Left: brand -->
+      <StackPanel Grid.Column="0" Orientation="Horizontal"
+                  VerticalAlignment="Center" Margin="14,0,0,0">
+        <Border Width="24" Height="24" CornerRadius="{DynamicResource Radius.Sm}" ClipToBounds="True">
+          <Image Source="avares://MolaGPT.Desktop/Assets/app-logo.png"
+                 Stretch="UniformToFill"
+                 RenderOptions.BitmapInterpolationMode="HighQuality" />
+        </Border>
+      </StackPanel>
+
+      <!-- Centre: MolaGPT Chat / MolaGPT Work -->
+      <Border Grid.Column="1"
+              VerticalAlignment="Center"
+              RenderTransform="translate(0, 2.5px)"
+              Background="{DynamicResource Brush.Bg.Tertiary}"
+              BorderBrush="{DynamicResource Brush.Border.Subtle}"
+              BorderThickness="1"
+              CornerRadius="{DynamicResource Radius.Md}"
+              Padding="3">
+        <!-- A single capsule slides between the two segments rather than each
+             one lighting up on its own.
+
+             It sits in the Panel beside the track, not inside it. As a
+             column-spanning child of the Auto/Auto Grid its code-assigned width
+             fed straight back into column measurement, and the segments and the
+             capsule chased each other by a pixel per pass. Here the Panel takes
+             the larger of the two desired widths, which is always the track's,
+             so there is no loop. Declared first so it draws underneath. -->
+      <Panel>
+        <Border Name="PART_ModeThumb"
+                HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                IsVisible="False"
+                IsHitTestVisible="False"
+                Background="{DynamicResource Brush.Primary.Soft}"
+                BorderBrush="{DynamicResource Brush.Primary.Border}"
+                BorderThickness="1"
+                CornerRadius="{DynamicResource Radius.Sm}" />
+
+        <Grid Name="PART_ModeTrack" ColumnDefinitions="Auto,Auto">
+          <Button Grid.Column="0" Name="PART_ModeChat" Classes="modeseg">
+            <StackPanel>
+              <TextBlock Text="MolaGPT Chat" FontSize="12" HorizontalAlignment="Center"
+                         Foreground="{Binding $parent[Button].Foreground}" />
+              <TextBlock Text="网页版对话" FontSize="9" Opacity="0.7" HorizontalAlignment="Center"
+                         Foreground="{Binding $parent[Button].Foreground}" />
+            </StackPanel>
+          </Button>
+          <Button Grid.Column="1" Name="PART_ModeWork" Classes="modeseg" Margin="2,0,0,0">
+            <StackPanel>
+              <TextBlock Text="MolaGPT Work" FontSize="12" HorizontalAlignment="Center"
+                         Foreground="{Binding $parent[Button].Foreground}" />
+              <TextBlock Text="本地对话" FontSize="9" Opacity="0.7" HorizontalAlignment="Center"
+                         Foreground="{Binding $parent[Button].Foreground}" />
+            </StackPanel>
+          </Button>
+        </Grid>
+      </Panel>
+      </Border>
+
+      <!-- Right: global actions + window controls -->
+      <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,6,0">
+          <Button Name="PART_AgentStatus" Classes="headericon"
+                   ToolTip.Tip="Agent 状态">
+            <TextBlock Classes="icon" Text="&#xE756;" />
+          </Button>
+          <Button Name="PART_Settings" Classes="headericon" ToolTip.Tip="设置">
+            <TextBlock Classes="icon" Text="&#xE713;" />
+          </Button>
+          <Button Name="PART_About" Classes="headericon" ToolTip.Tip="关于 MolaGPT">
+            <TextBlock Classes="icon" Text="&#xE946;" />
+          </Button>
+          <Button Name="PART_ToggleTheme" Classes="headericon" ToolTip.Tip="主题切换">
+            <TextBlock Classes="icon" Text="&#xE793;" />
+          </Button>
+          <Button Name="PART_Login" Classes="headericon"
+                   ToolTip.Tip="登录 / 账户">
+            <TextBlock Classes="icon" Text="&#xE77B;" />
+          </Button>
+        </StackPanel>
+
+        <Button Name="PART_Minimize" Classes="caption" ToolTip.Tip="最小化">
+          <TextBlock Classes="icon" Text="&#xE921;" />
+        </Button>
+        <Button Name="PART_Maximize" Classes="caption" ToolTip.Tip="最大化">
+          <TextBlock Name="PART_MaximizeGlyph" Classes="icon" Text="&#xE922;" />
+        </Button>
+        <Button Name="PART_Close" Classes="caption close" ToolTip.Tip="关闭">
+          <TextBlock Classes="icon" Text="&#xE8BB;" />
+        </Button>
+      </StackPanel>
+    </Grid>
+  </Border>
+</UserControl>

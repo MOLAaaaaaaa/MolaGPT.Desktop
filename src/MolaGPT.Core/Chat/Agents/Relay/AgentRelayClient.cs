@@ -29,6 +29,15 @@ public sealed class AgentRelayClient
     private static readonly TimeSpan CommandLeaseRenewInterval = TimeSpan.FromSeconds(30);
     private const int HistoryBackfillMaxTurns = 30;
 
+    /// <summary>How stale an agent-history disk scan may be when one of the
+    /// polling loops below asks for it. These loops run forever on a 10–15s
+    /// clock; without a budget each one re-walked the whole ~/.claude and
+    /// ~/.codex history on every tick, which on a real history was most of the
+    /// desktop's idle CPU. The reader only honours this while its file watchers
+    /// are live and have seen nothing change, so a real edit is still picked up
+    /// on the very next tick.</summary>
+    private static readonly TimeSpan PollScanStaleness = TimeSpan.FromSeconds(30);
+
     /// <summary>How long after the last transcript-file activity an externally
     /// driven session (open projected tail, never bridge-driven) still reports
     /// Running. Bounds the "stuck Running" window when a CLI dies mid-turn
@@ -79,6 +88,13 @@ public sealed class AgentRelayClient
     private readonly Dictionary<string, TurnStreamState> _turnStreams = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _historyProjectionQueue = new();
     private readonly ConcurrentDictionary<string, byte> _queuedHistoryProjections = new(StringComparer.Ordinal);
+    // conversationId -> the transcript mtime that projected to zero turns. See
+    // RefreshHistoryAsync; keyed by mtime so a later write retries by itself.
+    private readonly ConcurrentDictionary<string, long> _emptyHistoryProjections = new(StringComparer.Ordinal);
+    // Exponential backoff for projections whose relay post failed, so an
+    // unreachable relay cannot pin the desktop to a re-read-everything loop.
+    private readonly ConcurrentDictionary<string, int> _projectionFailures = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, long> _projectionBackoffUntilMs = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _executingCommands = new(StringComparer.Ordinal);
     private Task _eventPostTail = Task.CompletedTask;
     private CancellationTokenSource? _cts;
@@ -86,13 +102,17 @@ public sealed class AgentRelayClient
     private bool _relayCursorsSeeded;
     private const int EventPostRetryBurst = 5;
 
+    private readonly Action<string>? _log;
+
     public AgentRelayClient(
         AgentBridgeService bridge,
         IRelayProducer producer,
-        IAgentConfigProvider? config = null)
+        IAgentConfigProvider? config = null,
+        Action<string>? log = null)
     {
         _bridge = bridge;
         _producer = producer;
+        _log = log;
         _machineId = (config?.MachineId ?? string.Empty).Trim();
         _machineName = string.IsNullOrWhiteSpace(config?.MachineName)
             ? Environment.MachineName
@@ -441,6 +461,7 @@ public sealed class AgentRelayClient
             // if the relay tail is still open, and is a no-op if already closed.
             // Bounded to recently-active sessions so a large history isn't re-swept.
             if (IsHistoryProjection(session)
+                && !ProjectedEmptyAt(session)
                 && nowMs - session.UpdatedAtMs > (long)ExternalTurnActiveWindow.TotalMilliseconds
                 && nowMs - session.UpdatedAtMs <= (long)StartupTailHealWindow.TotalMilliseconds)
             {
@@ -453,7 +474,7 @@ public sealed class AgentRelayClient
     private async Task<IReadOnlyList<AgentSessionStateDto>> PublishMachineSnapshotAsync(CancellationToken ct)
     {
         IReadOnlyList<AgentSessionStateDto> sessions;
-        try { sessions = await _bridge.ListSessionsAsync(ct).ConfigureAwait(false); }
+        try { sessions = await _bridge.ListSessionsAsync(ct, PollScanStaleness).ConfigureAwait(false); }
         catch { return Array.Empty<AgentSessionStateDto>(); }
 
         foreach (var s in sessions)
@@ -521,7 +542,7 @@ public sealed class AgentRelayClient
     {
         try
         {
-            var sessions = await _bridge.ListSessionsAsync(ct).ConfigureAwait(false);
+            var sessions = await _bridge.ListSessionsAsync(ct, PollScanStaleness).ConfigureAwait(false);
             var ids = sessions
                 .Where(ShouldHeartbeat)
                 .Select(s => s.ConversationId)
@@ -562,44 +583,68 @@ public sealed class AgentRelayClient
         ct.ThrowIfCancellationRequested();
 
         IReadOnlyList<AgentSessionStateDto> sessions;
-        try { sessions = await _bridge.ListSessionsAsync(ct).ConfigureAwait(false); }
+        try { sessions = await _bridge.ListSessionsAsync(ct, PollScanStaleness).ConfigureAwait(false); }
         catch { return; }
 
         var state = sessions.FirstOrDefault(s => string.Equals(s.ConversationId, sessionId, StringComparison.Ordinal));
         if (state is null)
             return;
 
-        var turns = await _bridge.LoadHistoryTurnsAsync(
-            sessionId,
-            HistoryBackfillMaxTurns,
-            ct).ConfigureAwait(false);
-        if (turns.Count == 0)
-            return;
+        try
+        {
+            var turns = await _bridge.LoadHistoryTurnsAsync(
+                sessionId,
+                HistoryBackfillMaxTurns,
+                ct,
+                PollScanStaleness).ConfigureAwait(false);
+            if (turns.Count == 0)
+            {
+                // Remember a successfully parsed empty transcript against its
+                // mtime. A later write changes UpdatedAtMs and retries it.
+                _emptyHistoryProjections[sessionId] = state.UpdatedAtMs;
+                _projectionFailures.TryRemove(sessionId, out _);
+                _projectionBackoffUntilMs.TryRemove(sessionId, out _);
+                return;
+            }
+            _emptyHistoryProjections.TryRemove(sessionId, out _);
 
-        // Freshness decides whether the open tail is a live turn or a finished one.
-        // Claude's interactive transcripts never carry a terminal marker, so their
-        // last turn is ALWAYS open — without this, every completed Claude session
-        // would hang on 运行中 in the phone's detail view forever.
-        var tailOpen = turns[^1].IsOpen;
-        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var fileFresh = nowMs - state.UpdatedAtMs <= (long)ExternalTurnActiveWindow.TotalMilliseconds;
-        var liveTail = tailOpen && fileFresh;
-        // A stale open tail = the writer stopped without a terminal; close it.
-        var closeStaleTail = tailOpen && !fileFresh;
+            // Freshness decides whether the open tail is a live turn or a finished one.
+            // Claude's interactive transcripts never carry a terminal marker, so their
+            // last turn is ALWAYS open — without this, every completed Claude session
+            // would hang on 运行中 in the phone's detail view forever.
+            var tailOpen = turns[^1].IsOpen;
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var fileFresh = nowMs - state.UpdatedAtMs <= (long)ExternalTurnActiveWindow.TotalMilliseconds;
+            var liveTail = tailOpen && fileFresh;
+            // A stale open tail = the writer stopped without a terminal; close it.
+            var closeStaleTail = tailOpen && !fileFresh;
 
-        // Record BEFORE the meta post below so the phone sees Running while the
-        // external turn's tail is still live, and flips back once it closes.
-        SetProjectedTailOpen(sessionId, liveTail);
+            // Record BEFORE the meta post below so the phone sees Running while the
+            // external turn's tail is still live, and flips back once it closes.
+            SetProjectedTailOpen(sessionId, liveTail);
 
-        await PublishHistoryProjectionAsync(
-            state.ConversationId,
-            state.UpdatedAtMs,
-            turns,
-            closeStaleTail,
-            ct).ConfigureAwait(false);
+            await PublishHistoryProjectionAsync(
+                state.ConversationId,
+                state.UpdatedAtMs,
+                turns,
+                closeStaleTail,
+                ct).ConfigureAwait(false);
+            _projectionFailures.TryRemove(sessionId, out _);
+            _projectionBackoffUntilMs.TryRemove(sessionId, out _);
 
-        var fresh = _bridge.GetSession(sessionId) ?? state;
-        await PostMetaSafeAsync(BuildMeta(fresh), ct).ConfigureAwait(false);
+            var fresh = _bridge.GetSession(sessionId) ?? state;
+            await PostMetaSafeAsync(BuildMeta(fresh), ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            // A read or relay failure must not be mistaken for an empty
+            // transcript. Leave the cursor unchanged and retry with backoff.
+            var wait = NoteProjectionFailure(sessionId);
+            _log?.Invoke($"history projection failed for {sessionId}: " +
+                         $"{ex.GetType().Name}: {ex.Message}; retry in {wait.TotalSeconds:N0}s");
+            throw;
+        }
     }
 
     private void EnqueueHistoryProjection(string sessionId)
@@ -703,8 +748,31 @@ public sealed class AgentRelayClient
 
     private bool NeedsHistoryProjection(AgentSessionStateDto s)
         => IsHistoryProjection(s)
+           && !ProjectedEmptyAt(s)
+           && !InProjectionBackoff(s.ConversationId)
            && (LastConfirmedRelaySeq(s.ConversationId) <= 0
                || LastRelayActivity(s.ConversationId) < s.UpdatedAtMs);
+
+    /// <summary>True when this exact transcript revision already parsed to zero
+    /// turns, so re-reading it would produce the same nothing.</summary>
+    private bool ProjectedEmptyAt(AgentSessionStateDto s)
+        => _emptyHistoryProjections.TryGetValue(s.ConversationId, out var at) && at == s.UpdatedAtMs;
+
+    private bool InProjectionBackoff(string sessionId)
+        => _projectionBackoffUntilMs.TryGetValue(sessionId, out var until)
+           && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < until;
+
+    /// <summary>Record a failed projection and return how long the session is
+    /// now parked for. Doubles from 20s up to a 5 minute ceiling.</summary>
+    private TimeSpan NoteProjectionFailure(string sessionId)
+    {
+        var failures = _projectionFailures.AddOrUpdate(sessionId, 1, (_, n) => n + 1);
+        var seconds = Math.Min(300, 20 * Math.Pow(2, Math.Min(failures - 1, 8)));
+        var wait = TimeSpan.FromSeconds(seconds);
+        _projectionBackoffUntilMs[sessionId] =
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + (long)wait.TotalMilliseconds;
+        return wait;
+    }
 
     // A projected tail we left OPEN (external turn was live) has since gone stale —
     // the writer stopped without a terminal. The file is no longer growing, so

@@ -1,0 +1,40 @@
+<views:MolaWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        x:Class="MolaGPT.App.Views.TrayClosePromptWindow"
+        Title="关闭 MolaGPT"
+        Width="432" Height="262"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        FontFamily="{DynamicResource Font.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+  <DockPanel>
+        <Border Name="PART_Header" DockPanel.Dock="Top" Padding="22,16"
+                BorderBrush="{DynamicResource Brush.Divider}"
+                BorderThickness="0,0,0,1">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="关闭 MolaGPT"
+                       FontSize="{DynamicResource Font.Size.Title}"
+                       FontWeight="Bold" />
+            <Button Grid.Column="1" Name="PART_Cancel" Classes="headericon"
+                    ToolTip.Tip="取消">
+              <TextBlock Classes="icon" Text="&#xE711;" />
+            </Button>
+          </Grid>
+        </Border>
+
+        <StackPanel Margin="28,24,28,28">
+          <TextBlock Text="点击右上角关闭按钮时，要怎么处理？"
+                     TextWrapping="Wrap"
+                     Foreground="{DynamicResource Brush.Text.Secondary}"
+                     Margin="0,0,0,18" />
+          <Grid ColumnDefinitions="*,12,*">
+            <Button Grid.Column="0" Name="PART_Minimize" Classes="pillprimary"
+                    Content="最小化到托盘" Padding="14,10" />
+            <Button Grid.Column="2" Name="PART_Exit" Classes="outline"
+                    Content="关闭软件" Padding="14,10" />
+          </Grid>
+        </StackPanel>
+  </DockPanel>
+</views:MolaWindow>

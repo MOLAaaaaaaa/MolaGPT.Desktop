@@ -429,9 +429,7 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
         ThinkingParams.Apply(body, request);
         ApplyCustomBody(body, request.ModelId);
 
-        if (request.ExtraBody is not null)
-            foreach (var kv in request.ExtraBody)
-                if (kv.Key != "enabled_tools") body[kv.Key] = kv.Value;
+        InternalExtraBodyKeys.MergeSendable(body, request.ExtraBody);
 
         return body;
     }

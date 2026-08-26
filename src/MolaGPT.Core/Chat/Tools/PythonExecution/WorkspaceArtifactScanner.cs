@@ -90,7 +90,7 @@ public static class WorkspaceArtifactScanner
                 file,
                 info.Length,
                 info.LastWriteTimeUtc,
-                IsImageExtension(info.Extension)));
+                IsBitmapExtension(info.Extension)));
         }
 
         // Newest first so freshly generated artifacts surface at the top.
@@ -100,8 +100,8 @@ public static class WorkspaceArtifactScanner
             .ToArray();
     }
 
-    private static bool IsImageExtension(string extension) =>
-        extension.ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".webp" or ".gif" or ".svg";
+    private static bool IsBitmapExtension(string extension) =>
+        extension.ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".webp" or ".gif";
 
 }
 

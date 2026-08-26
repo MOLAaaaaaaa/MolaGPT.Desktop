@@ -76,7 +76,11 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
     /// history sessions, de-duplicated by conversation id, newest first. History
     /// sessions are surfaced as <see cref="AgentSessionPhase.Idle"/> and primed
     /// to resume on first send.</summary>
-    public async Task<IReadOnlyList<AgentSessionStateDto>> ListSessionsAsync(CancellationToken ct = default)
+    /// <param name="maxStaleness">Passed straight to
+    /// <see cref="AgentHistoryReader.ListRecentAsync"/>: the relay's polling
+    /// loops tolerate a slightly old disk scan, on-demand callers do not.</param>
+    public async Task<IReadOnlyList<AgentSessionStateDto>> ListSessionsAsync(
+        CancellationToken ct = default, TimeSpan maxStaleness = default)
     {
         // Restore durable stubs FIRST. They carry each conversation's CLI-side
         // resume id, which the history scan below needs in order to recognise a
@@ -99,7 +103,9 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         // later SendAsync can resume them. Cheap; de-dups by conversationId.
         try
         {
-            var recent = await _history.ListRecentAsync(max: 40, ct: ct).ConfigureAwait(false);
+            var recent = await _history
+                .ListRecentAsync(max: 40, ct: ct, maxStaleness: maxStaleness)
+                .ConfigureAwait(false);
             foreach (var e in recent)
             {
                 // Skip the throwaway model-discovery session (warm-up spawns a CLI in a
@@ -145,20 +151,17 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
     public async Task<IReadOnlyList<AgentHistoryTurn>> LoadHistoryTurnsAsync(
         string conversationId,
         int maxTurns = 30,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        TimeSpan maxStaleness = default)
     {
-        try
-        {
-            var recent = await _history.ListRecentAsync(max: 120, ct: ct).ConfigureAwait(false);
-            var entry = recent.FirstOrDefault(e => string.Equals(e.SessionId, conversationId, StringComparison.Ordinal));
-            return entry is null
-                ? Array.Empty<AgentHistoryTurn>()
-                : await _history.LoadTurnsAsync(entry, maxTurns, ct).ConfigureAwait(false);
-        }
-        catch
-        {
-            return Array.Empty<AgentHistoryTurn>();
-        }
+        var recent = await _history
+            .ListRecentAsync(max: 120, ct: ct, maxStaleness: maxStaleness)
+            .ConfigureAwait(false);
+        var entry = recent.FirstOrDefault(e => string.Equals(e.SessionId, conversationId, StringComparison.Ordinal));
+        if (entry is null)
+            throw new FileNotFoundException($"History transcript for session '{conversationId}' was not found.");
+
+        return await _history.LoadTurnsAsync(entry, maxTurns, ct).ConfigureAwait(false);
     }
 
     /// <summary>Create a brand-new agent session (does not spawn the CLI yet —

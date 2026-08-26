@@ -1,0 +1,250 @@
+<views:MolaWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
+        xmlns:r="clr-namespace:MolaGPT.App.Rendering"
+        x:Class="MolaGPT.App.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Title="MolaGPT"
+        Width="1240" Height="820"
+        MinWidth="880" MinHeight="560"
+        Background="{DynamicResource Brush.Bg.Canvas}"
+        FontFamily="{DynamicResource Font.UI}"
+        Foreground="{DynamicResource Brush.Text.Primary}"
+        WindowStartupLocation="CenterScreen">
+
+  <!--
+    Shell, matching MolaGPT.Desktop/Views/MainWindow.xaml:
+
+      canvas (Brush.Bg.Canvas)
+        └ 46px self-drawn title bar
+        └ Grid Margin="16,6,16,16"
+            ├ sidebar card   280px   (Brush.Bg.Secondary, Radius.Xl)
+            ├ gap            16px
+            └ main card      *       (Brush.Bg.Xxl)
+
+    The cards float on the canvas rather than meeting edge to edge, and the
+    composer floats inside the main card over the transcript — it is not a
+    layout row. Both are load-bearing for the look, so they are reproduced
+    exactly rather than approximated.
+
+    MolaWindow supplies the native DWM shell while this view draws the title bar.
+  -->
+
+  <LayoutTransformControl Name="PART_UiScale">
+    <DockPanel Name="PART_Root">
+
+    <!-- ============================ title bar ============================ -->
+    <views:TitleBar DockPanel.Dock="Top" Name="PART_TitleBar" />
+
+    <!-- ============================== body =============================== -->
+    <Grid Margin="16,6,16,16" ColumnDefinitions="Auto,Auto,*,Auto,Auto">
+
+      <Border Grid.Column="0"
+              Name="PART_SidebarCard"
+              Classes="floatingcard"
+              Width="{DynamicResource Size.Sidebar.Width}"
+              Background="{DynamicResource Brush.Bg.Secondary}"
+              ClipToBounds="True">
+        <views:SidebarView Name="PART_Sidebar" />
+      </Border>
+
+      <!-- Gap column collapses with the sidebar so the main card reclaims it. -->
+      <Border Grid.Column="1" Name="PART_SidebarGap" Width="16" />
+
+      <Border Grid.Column="2"
+              Name="PART_MainCard"
+              Background="{DynamicResource Brush.Bg.Primary}"
+              BorderBrush="{DynamicResource Brush.Border.Subtle}"
+              BorderThickness="1"
+              CornerRadius="{DynamicResource Radius.Xxl}"
+              ClipToBounds="True">
+        <Grid>
+          <Grid IsVisible="{Binding !IsImageWorkbenchVisible}">
+            <!-- Transcript fills the card; the composer floats over it. -->
+            <views:TranscriptView Name="PART_Transcript" />
+            <views:ComposerView Name="PART_Composer"
+                                VerticalAlignment="Bottom"
+                                Margin="40,0,40,24" />
+          </Grid>
+          <ContentControl Name="PART_ImageWorkbenchHost"
+                          Margin="0,72,0,0"
+                          IsVisible="{Binding IsImageWorkbenchVisible}" />
+          <views:ChatHeader Name="PART_Header" VerticalAlignment="Top" />
+        </Grid>
+      </Border>
+
+      <!-- A slim tab riding the chat card's right edge, exactly where the WPF
+           build put it. It shares the chat column rather than owning one: as its
+           own column it shifted the whole layout, and it kept a 36px gutter even
+           with the panel closed. -->
+      <Button Grid.Column="2" Name="PART_ArtifactHandle"
+              ZIndex="50"
+              Width="22" Height="64" Margin="0,0,14,0"
+              HorizontalAlignment="Right" VerticalAlignment="Center" Padding="0"
+              Classes="artifacthandle"
+              IsVisible="{Binding IsArtifactPanelAvailable}"
+              Command="{Binding ToggleArtifactPanelCommand}"
+              ToolTip.Tip="产物面板">
+        <Panel>
+          <!-- Closed → points left, "pull it out". Open → points right, "push
+               it back". These were the wrong way round, so the arrow described
+               the state it was in rather than the action it would perform. -->
+          <TextBlock Classes="icon" Text="&#xE76B;" FontSize="12"
+                     IsVisible="{Binding !ArtifactPanelVisible}" />
+          <TextBlock Classes="icon" Text="&#xE76C;" FontSize="12"
+                     IsVisible="{Binding ArtifactPanelVisible}" />
+        </Panel>
+      </Button>
+
+      <!-- Gap collapses with the panel, same as the sidebar's. -->
+      <Border Grid.Column="3" Name="PART_ArtifactGap" Width="0" />
+
+      <Border Grid.Column="4" Name="PART_ArtifactCard"
+              Width="0"
+              Background="{DynamicResource Brush.Bg.Primary}"
+              BorderBrush="{DynamicResource Brush.Border.Subtle}"
+              BorderThickness="1" CornerRadius="{DynamicResource Radius.Xxl}"
+              ClipToBounds="True">
+        <Grid Margin="16,14,14,14" RowDefinitions="Auto,*">
+          <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="2,0,0,12">
+            <StackPanel VerticalAlignment="Center" Spacing="2">
+              <TextBlock Text="产物和工作区" FontWeight="SemiBold"
+                         FontSize="{DynamicResource Font.Size.Heading}"
+                         TextWrapping="NoWrap" />
+              <TextBlock Text="{Binding Chat.ArtifactCount, StringFormat='{}{0} 个文件'}"
+                         Classes="muted"
+                         FontSize="{DynamicResource Font.Size.XSmall}"
+                         TextWrapping="NoWrap"
+                         IsVisible="{Binding Chat.HasArtifacts}" />
+            </StackPanel>
+            <Button Grid.Column="1" Classes="headericon"
+                    VerticalAlignment="Top"
+                    Command="{Binding ToggleArtifactPanelCommand}"
+                    ToolTip.Tip="关闭产物面板">
+              <TextBlock Classes="icon" Text="&#xE8BB;" />
+            </Button>
+          </Grid>
+
+          <TextBlock Grid.Row="1" Text="暂无产物" Classes="muted"
+                     Margin="2,8,2,0" IsVisible="{Binding !Chat.HasArtifacts}" />
+          <ScrollViewer Grid.Row="1" IsVisible="{Binding Chat.HasArtifacts}"
+                        VerticalScrollBarVisibility="Auto"
+                        HorizontalScrollBarVisibility="Disabled">
+            <ItemsControl ItemsSource="{Binding Chat.Artifacts}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:ArtifactItemViewModel">
+                  <!-- No "liftable" here: that class drives RenderTransform as a
+                       TransformOperations value, and the entry animation below
+                       drives the same property as a TranslateTransform. One
+                       control cannot have both. The entry wins — hover already
+                       reads through the background and border. -->
+                  <Button Classes="artifactrow" Tag="{Binding}" Click="OnArtifactClick"
+                          ToolTip.Tip="{Binding ToolTip}">
+                    <Grid ColumnDefinitions="40,*">
+                      <Border Grid.Column="0" Width="36" Height="36"
+                              CornerRadius="{DynamicResource Radius.Sm}"
+                              VerticalAlignment="Center"
+                              ClipToBounds="True">
+                        <Panel>
+                          <r:MarkdownImageView Url="{Binding ImagePreviewPath}" Alt="{Binding FileName}"
+                                               IsVisible="{Binding IsImage}" />
+                          <Border Background="{DynamicResource Brush.Primary.Tint}"
+                                  IsVisible="{Binding !IsImage}">
+                            <TextBlock Text="{Binding Extension}" FontSize="9" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource Brush.Primary}"
+                                       TextWrapping="NoWrap"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+                          </Border>
+                        </Panel>
+                      </Border>
+                      <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
+                        <!-- NoWrap is load-bearing: the app-wide TextBlock style
+                             sets TextWrapping=Wrap, so TextTrimming never got a
+                             chance and long names broke across two lines. -->
+                        <TextBlock Text="{Binding FileName}" FontSize="12"
+                                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{Binding SizeLabel}" Classes="muted" FontSize="10"
+                                   TextWrapping="NoWrap" Margin="0,2,0,0" />
+                      </StackPanel>
+                    </Grid>
+                  </Button>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+        </Grid>
+      </Border>
+    </Grid>
+    </DockPanel>
+  </LayoutTransformControl>
+
+  <Window.Styles>
+    <Style Selector="Button.artifacthandle">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.OnPrimary}" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Opacity" Value="0.92" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+    <!-- BoxShadow lives on Border, not Button, so it has to reach the template. -->
+    <Style Selector="Button.artifacthandle /template/ Border#PART_Root">
+      <Setter Property="BoxShadow" Value="0 0 8 0 #40000000" />
+    </Style>
+    <Style Selector="Button.artifacthandle">
+      <Setter Property="RenderTransform" Value="translateX(0px)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity" Duration="0:0:0.14" Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.14" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <!-- Nudges outward under the pointer rather than changing colour. It rides
+         over scrolling text, where a colour change reads as a state change —
+         but a tab that leans towards you is unambiguously "pull me". -->
+    <Style Selector="Button.artifacthandle:pointerover">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="RenderTransform" Value="translateX(3px)" />
+    </Style>
+    <!-- The template's own hover brush would lighten the tab on the way past;
+         WPF varied only opacity, and the tab sits over scrolling text where a
+         colour change reads as a state change. -->
+    <Style Selector="Button.artifacthandle:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+
+    <Style Selector="Button.artifactrow">
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="8" />
+      <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+    <Style Selector="Button.artifactrow:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+    <!-- A produced file is a result the user did not ask for by name, so it
+         announces itself. The list is a plain ItemsControl, not virtualized, so
+         this runs once per artifact and never on scroll. -->
+    <Style Selector="Button.artifactrow">
+      <Style.Animations>
+        <Animation Duration="0:0:0.24" Easing="CubicEaseOut" FillMode="Forward">
+          <KeyFrame Cue="0%">
+            <Setter Property="Opacity" Value="0" />
+            <Setter Property="TranslateTransform.X" Value="16" />
+          </KeyFrame>
+          <KeyFrame Cue="100%">
+            <Setter Property="Opacity" Value="1" />
+            <Setter Property="TranslateTransform.X" Value="0" />
+          </KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+  </Window.Styles>
+</views:MolaWindow>

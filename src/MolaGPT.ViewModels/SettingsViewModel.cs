@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Text.Json;
 using CommunityToolkit.Mvvm.ComponentModel;
 using MolaGPT.Core.Auth;
@@ -20,9 +21,11 @@ public sealed partial class SettingsViewModel : ObservableObject
 {
     private const string SyncConversationsKey = "sync_conversations";
     private const string EnterToSendKey = "enter_to_send";
+    public const string AutoCollapseThinkingKey = "auto_collapse_thinking";
     private const string TracksEnabledKey = "molagpt_tracks_enabled";
     private const string CompletionNotificationKey = "completion_notification";
     private const string ThemeModeKey = "theme_mode";
+    private const string FontScaleKey = "font_scale";
     private const string TrayIconEnabledKey = "tray_icon_enabled";
     private const string TrayCloseBehaviorKey = "tray_close_behavior";
     private const string WebSearchProviderKey = "web_search_provider";
@@ -77,6 +80,9 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private bool _isLoggedIn;
     [ObservableProperty] private ThemeMode _themeMode = ThemeMode.System;
     [ObservableProperty] private bool _enterToSend = true;
+    [ObservableProperty] private bool _autoCollapseThinking = true;
+    public const double MinFontScale = 0.8;
+    public const double MaxFontScale = 1.4;
     [ObservableProperty] private double _fontScale = 1.0;
     [ObservableProperty] private bool _syncConversations = true;
     [ObservableProperty] private bool _tracksEnabled = true;
@@ -188,6 +194,8 @@ public sealed partial class SettingsViewModel : ObservableObject
                 SyncConversations = syncConversations;
             if (bool.TryParse(_settingsRepo.Get(EnterToSendKey), out var enterToSend))
                 EnterToSend = enterToSend;
+            if (bool.TryParse(_settingsRepo.Get(AutoCollapseThinkingKey), out var autoCollapseThinking))
+                AutoCollapseThinking = autoCollapseThinking;
             if (bool.TryParse(_settingsRepo.Get(TracksEnabledKey), out var tracksEnabled))
                 TracksEnabled = tracksEnabled;
             if (bool.TryParse(_settingsRepo.Get(CompletionNotificationKey), out var completionNotification))
@@ -203,6 +211,11 @@ public sealed partial class SettingsViewModel : ObservableObject
             var themeRaw = _settingsRepo.Get(ThemeModeKey);
             if (!string.IsNullOrEmpty(themeRaw) && Enum.TryParse<ThemeMode>(themeRaw, true, out var theme))
                 ThemeMode = theme;
+            if (double.TryParse(_settingsRepo.Get(FontScaleKey), NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out var fontScale))
+            {
+                FontScale = NormalizeFontScale(fontScale);
+            }
             WebSearchProvider = _settingsRepo.Get(WebSearchProviderKey) ?? "duckduckgo";
             WebSearchBaseUrl = _settingsRepo.Get(WebSearchBaseUrlKey) ?? DefaultWebSearchBaseUrl(WebSearchProvider);
             if (int.TryParse(_settingsRepo.Get(WebSearchMaxResultsKey), out var maxResults))
@@ -298,6 +311,22 @@ public sealed partial class SettingsViewModel : ObservableObject
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(EnterToSendKey, value.ToString());
     }
+
+    partial void OnAutoCollapseThinkingChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(AutoCollapseThinkingKey, value.ToString());
+    }
+
+    partial void OnFontScaleChanged(double value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(FontScaleKey, value.ToString(CultureInfo.InvariantCulture));
+    }
+
+    public static double NormalizeFontScale(double value) =>
+        Math.Round(Math.Clamp(value, MinFontScale, MaxFontScale) * 5,
+            MidpointRounding.AwayFromZero) / 5;
 
     partial void OnTracksEnabledChanged(bool value)
     {

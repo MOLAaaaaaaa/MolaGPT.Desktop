@@ -1,0 +1,128 @@
+<views:MolaWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        x:Class="MolaGPT.App.Views.SystemPromptWindow"
+        Title="会话提示词"
+         Width="612" Height="572"
+         WindowStartupLocation="CenterOwner"
+         CanResize="False"
+         ShowInTaskbar="False"
+         FontFamily="{DynamicResource Font.UI}"
+         Foreground="{DynamicResource Brush.Text.Primary}">
+  <Grid RowDefinitions="48,*,Auto">
+      <Border Grid.Row="0" Name="PART_Header" Background="{DynamicResource Brush.Bg.Tertiary}"
+              BorderBrush="{DynamicResource Brush.Divider}" BorderThickness="0,0,0,1"
+              Padding="20,0">
+        <Grid ColumnDefinitions="*,Auto">
+          <StackPanel Classes="inlinerow" Orientation="Horizontal" VerticalAlignment="Center">
+            <TextBlock Classes="icon" Text="&#xE8A5;" FontSize="14" Margin="0,0,8,0"
+                       Foreground="{DynamicResource Brush.Primary}" />
+            <TextBlock Text="会话提示词" FontWeight="SemiBold" FontSize="14" />
+            <TextBlock Text="为当前对话临时改写系统提示词" Classes="muted"
+                       Margin="10,0,0,0" FontSize="11" />
+          </StackPanel>
+          <Button Grid.Column="1" Name="PART_Close" Classes="headericon">
+            <TextBlock Classes="icon" Text="&#xE711;" FontSize="14" />
+          </Button>
+        </Grid>
+      </Border>
+
+      <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
+                    HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="22,18,22,16">
+          <Border Background="{DynamicResource Brush.Primary.Soft}"
+                  BorderBrush="{DynamicResource Brush.Primary.Border}" BorderThickness="1"
+                  CornerRadius="{DynamicResource Radius.Md}" Padding="14,10" Margin="0,0,0,14">
+            <Grid ColumnDefinitions="Auto,*">
+              <TextBlock Name="PART_PersonaAvatar" Classes="icon" FontSize="22" Width="30"
+                         VerticalAlignment="Center" Margin="0,0,12,0" />
+              <StackPanel Grid.Column="1">
+                <StackPanel Classes="inlinerow compact" Orientation="Horizontal">
+                  <TextBlock Text="当前角色 · " Classes="muted" FontSize="11" />
+                  <TextBlock Name="PART_PersonaName" FontSize="13" FontWeight="SemiBold" />
+                </StackPanel>
+                <TextBlock Name="PART_PersonaHint" Classes="muted" FontSize="11"
+                           TextWrapping="Wrap" Margin="0,2,0,0" />
+              </StackPanel>
+            </Grid>
+          </Border>
+
+          <StackPanel Name="PART_PersonaModes" Margin="0,0,0,12">
+            <TextBlock Text="提示词来源" Classes="label" Margin="0,0,0,6" />
+            <RadioButton Name="PART_Inherit" GroupName="PromptMode"
+                         Content="使用角色默认提示词（推荐）" Margin="0,0,0,4" />
+            <RadioButton Name="PART_Append" GroupName="PromptMode"
+                         Content="在角色提示词之后追加" Margin="0,0,0,4" />
+            <RadioButton Name="PART_Override" GroupName="PromptMode"
+                         Content="完全替换为下方文本" />
+            <TextBlock Name="PART_ModeHint" Classes="muted" FontSize="11"
+                       TextWrapping="Wrap" Margin="0,6,0,0" />
+          </StackPanel>
+
+          <StackPanel Name="PART_NoPersonaModes" Margin="0,0,0,12" IsVisible="False">
+            <TextBlock Text="提示词" Classes="label" Margin="0,0,0,6" />
+            <RadioButton Name="PART_NoSystem" GroupName="NoPersonaMode"
+                         Content="不发送 system 消息（默认）" Margin="0,0,0,4" />
+            <RadioButton Name="PART_CustomSystem" GroupName="NoPersonaMode"
+                         Content="使用下方文本作为 system 消息" />
+          </StackPanel>
+
+          <TextBlock Name="PART_EditorLabel" Text="本次对话的提示词"
+                     Classes="label" Margin="0,0,0,6" />
+          <Border Name="PART_EditorBorder" Background="{DynamicResource Brush.Bg.Primary}"
+                  BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1"
+                  CornerRadius="{DynamicResource Radius.Sm}" Padding="12,10" Height="200">
+            <TextBox Name="PART_Prompt" AcceptsReturn="True" TextWrapping="Wrap"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                     Background="Transparent" BorderThickness="0" FontSize="13" />
+          </Border>
+
+          <WrapPanel Margin="0,8,0,0" VerticalAlignment="Center">
+            <TextBlock Text="可用变量：" Classes="muted" FontSize="11"
+                       VerticalAlignment="Center" Margin="0,0,6,4" />
+            <Button Classes="hintchip" Tag="{}{{date}}" Content="{}{{date}}" Click="OnInsertVariable" />
+            <Button Classes="hintchip" Tag="{}{{time}}" Content="{}{{time}}" Click="OnInsertVariable" />
+            <Button Classes="hintchip" Tag="{}{{datetime}}" Content="{}{{datetime}}" Click="OnInsertVariable" />
+            <Button Classes="hintchip" Tag="{}{{model}}" Content="{}{{model}}" Click="OnInsertVariable" />
+            <Button Classes="hintchip" Tag="{}{{provider}}" Content="{}{{provider}}" Click="OnInsertVariable" />
+            <Button Classes="hintchip" Tag="{}{{username}}" Content="{}{{username}}" Click="OnInsertVariable" />
+          </WrapPanel>
+
+          <Expander Name="PART_PersonaPromptExpander" Header="查看角色默认提示词"
+                    Margin="0,12,0,0">
+            <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                    CornerRadius="{DynamicResource Radius.Sm}" Padding="12,10" Margin="0,6,0,0">
+              <StackPanel>
+                <TextBox Name="PART_PersonaPrompt" IsReadOnly="True" AcceptsReturn="True"
+                         TextWrapping="Wrap" MaxHeight="180" Background="Transparent"
+                         BorderThickness="0" FontSize="12" />
+                <Button Name="PART_CopyPersona" Content="复制到编辑框作为起点"
+                        Classes="outline" HorizontalAlignment="Left" Margin="0,8,0,0" />
+              </StackPanel>
+            </Border>
+          </Expander>
+        </StackPanel>
+      </ScrollViewer>
+
+      <Border Grid.Row="2" BorderBrush="{DynamicResource Brush.Divider}"
+              BorderThickness="0,1,0,0" Padding="22,12,22,16">
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+          <Button Name="PART_Reset" Content="恢复默认" Classes="outline" Margin="0,0,8,0" />
+          <Button Name="PART_Cancel" Content="取消" Classes="outline" Margin="0,0,8,0" />
+          <Button Name="PART_Save" Content="保存" Classes="primary" />
+        </StackPanel>
+      </Border>
+  </Grid>
+
+  <Window.Styles>
+    <Style Selector="Button.hintchip">
+      <Setter Property="Padding" Value="10,3" />
+      <Setter Property="Margin" Value="0,0,6,4" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+  </Window.Styles>
+</views:MolaWindow>

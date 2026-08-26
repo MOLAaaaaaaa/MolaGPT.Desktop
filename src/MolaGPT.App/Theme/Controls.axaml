@@ -1,0 +1,594 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:r="clr-namespace:MolaGPT.App.Rendering">
+
+  <!--
+    Control styles ported from MolaGPT.Desktop/Themes/Generic.xaml.
+
+    WPF addressed these by x:Key ("HeaderIconButton", "InlineActionButton",
+    "SendButton", …). Avalonia has no BasedOn-by-key idiom for call sites, so
+    each one becomes a style class of the same name lower-cased: a WPF
+    Style="{StaticResource HeaderIconButton}" is Classes="headericon" here.
+    The mapping is deliberately one-to-one so the two files stay diffable.
+
+    Sizes, radii and hover colours are copied, not re-derived.
+  -->
+
+  <Styles.Resources>
+
+    <!-- Base button: no chrome of its own. Every variant below is additive, the
+         way the WPF styles were — none of them inherited a themed default. -->
+    <ControlTheme x:Key="{x:Type Button}" TargetType="Button">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="Cursor" Value="Hand" />
+      <!-- Hover and press used to land on the next frame, whole-value. Every
+           button in the app changes state through this one pair of transitions
+           instead: WPF needed a ColorAnimation storyboard per template to do
+           the same, so only the send button ever got one. -->
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground" Duration="0:0:0.13" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Name="PART_Root"
+                  Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}"
+                  CornerRadius="{TemplateBinding CornerRadius}">
+            <Border.Transitions>
+              <Transitions>
+                <BrushTransition Property="Background" Duration="0:0:0.13" Easing="CubicEaseOut" />
+                <BrushTransition Property="BorderBrush" Duration="0:0:0.13" Easing="CubicEaseOut" />
+              </Transitions>
+            </Border.Transitions>
+            <ContentPresenter Name="PART_ContentPresenter"
+                              Content="{TemplateBinding Content}"
+                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                              Padding="{TemplateBinding Padding}"
+                              HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                              VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                              RecognizesAccessKey="True" />
+          </Border>
+        </ControlTemplate>
+      </Setter>
+      <!-- Dimming the content, not the whole button. A disabled button that
+           fades its own background stops occluding what is behind it, and the
+           floating header sits over a scrolling transcript — the model pill went
+           see-through and the answer text read straight through it. -->
+      <Style Selector="^:disabled /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Opacity" Value="0.45" />
+      </Style>
+      <Style Selector="^:disabled">
+        <Setter Property="Cursor" Value="Arrow" />
+      </Style>
+    </ControlTheme>
+
+    <!-- ToggleButton mirrors the Button theme part for part, including the
+         PART_Root border name, so a style class written for one works on the
+         other — the composer's toolbar mixes both. -->
+    <ControlTheme x:Key="{x:Type ToggleButton}" TargetType="ToggleButton">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground" Duration="0:0:0.13" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Name="PART_Root"
+                  Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}"
+                  CornerRadius="{TemplateBinding CornerRadius}">
+            <Border.Transitions>
+              <Transitions>
+                <BrushTransition Property="Background" Duration="0:0:0.13" Easing="CubicEaseOut" />
+                <BrushTransition Property="BorderBrush" Duration="0:0:0.13" Easing="CubicEaseOut" />
+              </Transitions>
+            </Border.Transitions>
+            <ContentPresenter Name="PART_ContentPresenter"
+                              Content="{TemplateBinding Content}"
+                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                              Padding="{TemplateBinding Padding}"
+                              HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                              VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                              RecognizesAccessKey="True" />
+          </Border>
+        </ControlTemplate>
+      </Setter>
+      <Style Selector="^:disabled">
+        <Setter Property="Opacity" Value="0.55" />
+        <Setter Property="Cursor" Value="Arrow" />
+      </Style>
+    </ControlTheme>
+
+    <!-- ComposerTextBox / InlineTextBox: borderless, transparent, brand caret. -->
+    <ControlTheme x:Key="{x:Type TextBox}" TargetType="TextBox">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="CaretBrush" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="SelectionBrush" Value="{DynamicResource Brush.Selection}" />
+      <Setter Property="SelectionForegroundBrush" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="Cursor" Value="Ibeam" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="FontFamily" Value="{DynamicResource Font.Cjk}" />
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}"
+                  CornerRadius="{TemplateBinding CornerRadius}">
+            <Panel>
+              <TextBlock Name="PART_Placeholder"
+                         Text="{TemplateBinding PlaceholderText}"
+                         Foreground="{DynamicResource Brush.Text.Muted}"
+                         FontFamily="{TemplateBinding FontFamily}"
+                         FontSize="{TemplateBinding FontSize}"
+                         Margin="{TemplateBinding Padding}"
+                         IsVisible="{TemplateBinding Text, Converter={x:Static StringConverters.IsNullOrEmpty}}"
+                         VerticalAlignment="Top"
+                         IsHitTestVisible="False" />
+              <ScrollViewer Name="PART_ScrollViewer"
+                            HorizontalScrollBarVisibility="{TemplateBinding (ScrollViewer.HorizontalScrollBarVisibility)}"
+                            VerticalScrollBarVisibility="{TemplateBinding (ScrollViewer.VerticalScrollBarVisibility)}">
+                <TextPresenter Name="PART_TextPresenter"
+                               Text="{TemplateBinding Text, Mode=TwoWay}"
+                               CaretIndex="{TemplateBinding CaretIndex}"
+                               SelectionStart="{TemplateBinding SelectionStart}"
+                               SelectionEnd="{TemplateBinding SelectionEnd}"
+                               CaretBrush="{TemplateBinding CaretBrush}"
+                               SelectionBrush="{TemplateBinding SelectionBrush}"
+                               SelectionForegroundBrush="{TemplateBinding SelectionForegroundBrush}"
+                               TextAlignment="{TemplateBinding TextAlignment}"
+                               TextWrapping="{TemplateBinding TextWrapping}"
+                               LineHeight="{TemplateBinding LineHeight}"
+                               PasswordChar="{TemplateBinding PasswordChar}"
+                               Margin="{TemplateBinding Padding}"
+                               VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+              </ScrollViewer>
+            </Panel>
+          </Border>
+        </ControlTemplate>
+      </Setter>
+      <Style Selector="^:focus-within /template/ TextBlock#PART_Placeholder">
+        <Setter Property="IsVisible" Value="False" />
+      </Style>
+    </ControlTheme>
+
+    <!-- Expander with no chrome of its own.
+         Fluent's template wraps the header in a bordered ToggleButton and the
+         content in a second bordered panel. Setting Background/BorderThickness
+         on the Expander does not reach either of them, which is where the stray
+         rounded box inside every tool card came from. This template is the fold
+         and nothing else: the card around it supplies the chrome.
+
+         The body sits in a RevealPresenter so opening animates instead of
+         snapping — with the content measured at its natural width throughout, so
+         the text does not reflow while the panel travels. -->
+    <ControlTheme x:Key="{x:Type Expander}" TargetType="Expander">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <StackPanel Background="Transparent">
+            <ToggleButton Name="PART_toggle"
+                          IsChecked="{Binding $parent[Expander].IsExpanded, Mode=TwoWay}"
+                          Background="Transparent"
+                          BorderThickness="0"
+                          Padding="0"
+                          MinHeight="0"
+                          HorizontalAlignment="Stretch"
+                          HorizontalContentAlignment="Stretch">
+              <Grid ColumnDefinitions="*,Auto">
+                <ContentPresenter Grid.Column="0"
+                                  Content="{TemplateBinding Header}"
+                                  ContentTemplate="{TemplateBinding HeaderTemplate}"
+                                  HorizontalContentAlignment="Stretch"
+                                  VerticalContentAlignment="Center" />
+                <TextBlock Grid.Column="1"
+                           Name="PART_chevron"
+                           Classes="icon"
+                           Text="&#xE70D;"
+                           FontSize="10"
+                           Opacity="0.55"
+                           Margin="10,0,0,0"
+                           VerticalAlignment="Center"
+                           RenderTransformOrigin="50%,50%">
+                  <TextBlock.Transitions>
+                    <Transitions>
+                      <TransformOperationsTransition Property="RenderTransform"
+                                                     Duration="0:0:0.2"
+                                                     Easing="CubicEaseOut" />
+                    </Transitions>
+                  </TextBlock.Transitions>
+                </TextBlock>
+              </Grid>
+            </ToggleButton>
+
+            <r:RevealPresenter Name="PART_reveal"
+                               IsOpen="{TemplateBinding IsExpanded}">
+              <ContentPresenter Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"
+                                Padding="{TemplateBinding Padding}"
+                                HorizontalContentAlignment="Stretch" />
+            </r:RevealPresenter>
+          </StackPanel>
+        </ControlTemplate>
+      </Setter>
+
+      <Style Selector="^:expanded /template/ TextBlock#PART_chevron">
+        <Setter Property="RenderTransform" Value="rotate(180deg)" />
+      </Style>
+      <Style Selector="^ /template/ TextBlock#PART_chevron">
+        <Setter Property="RenderTransform" Value="rotate(0deg)" />
+      </Style>
+      <!-- No hover suppression needed for PART_toggle: the ToggleButton theme
+           above paints nothing by default. It could not be written here anyway —
+           a selector may cross /template/ only once, and Avalonia only rejects a
+           second hop when the theme is first resolved at runtime, not at build. -->
+    </ControlTheme>
+
+    <!-- Conversation rows and transcript rows both opt out of the themed
+         ListBoxItem chrome; selection is drawn by the row content itself. -->
+    <ControlTheme x:Key="{x:Type ListBoxItem}" TargetType="ListBoxItem">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Name="PART_Root"
+                  Background="{TemplateBinding Background}"
+                  CornerRadius="{TemplateBinding CornerRadius}"
+                  Padding="{TemplateBinding Padding}">
+            <Border.Transitions>
+              <Transitions>
+                <BrushTransition Property="Background" Duration="0:0:0.13" Easing="CubicEaseOut" />
+                <BrushTransition Property="BorderBrush" Duration="0:0:0.13" Easing="CubicEaseOut" />
+              </Transitions>
+            </Border.Transitions>
+            <ContentPresenter Name="PART_ContentPresenter"
+                              Content="{TemplateBinding Content}"
+                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                              HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                              VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+          </Border>
+        </ControlTemplate>
+      </Setter>
+    </ControlTheme>
+  </Styles.Resources>
+
+  <Style Selector=":is(Window).molawindow">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
+    <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+  </Style>
+
+  <!-- =========================== press motion ===========================
+       WPF gave the send button a ScaleTransform because a template was the
+       only place to hang one; every other button had to go without. A style
+       class carries RenderTransform here, so one rule covers the lot.
+
+       Both states name the same operations in the same order. Interpolating
+       "translateY(-2px) scale(1)" into "scale(0.94)" would drop to matrix
+       blending and wobble; matching lists blend component by component. -->
+  <Style Selector=":is(Button).pressable,
+                   :is(Button).headericon,
+                   :is(Button).inlineaction,
+                   :is(Button).outline,
+                   :is(Button).toolchip">
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform"
+                                       Duration="0:0:0.11" Easing="CubicEaseOut" />
+        <BrushTransition Property="Foreground" Duration="0:0:0.13" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector=":is(Button).pressable:pressed,
+                   :is(Button).headericon:pressed,
+                   :is(Button).inlineaction:pressed,
+                   :is(Button).outline:pressed,
+                   :is(Button).toolchip:pressed">
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(0.93)" />
+  </Style>
+
+  <!-- Cards are large enough that a 7% dip reads as a glitch; they lift on
+       hover and settle on press instead. -->
+  <Style Selector=":is(Button).liftable">
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform"
+                                       Duration="0:0:0.16" Easing="CubicEaseOut" />
+        <BrushTransition Property="Foreground" Duration="0:0:0.13" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector=":is(Button).liftable:pointerover">
+    <Setter Property="RenderTransform" Value="translateY(-2px) scale(1)" />
+  </Style>
+  <Style Selector=":is(Button).liftable:pressed">
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(0.985)" />
+  </Style>
+
+  <!-- ===================== HeaderIconButton (36×36) ===================== -->
+  <Style Selector="Button.headericon">
+    <Setter Property="Width" Value="36" />
+    <Setter Property="Height" Value="36" />
+    <Setter Property="FontFamily" Value="{DynamicResource Font.Icon}" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+  </Style>
+  <Style Selector="Button.headericon:pointerover /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+  </Style>
+  <Style Selector="Button.headericon:pointerover">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+  </Style>
+
+  <!-- ==================== InlineActionButton (30×30) ==================== -->
+  <Style Selector="Button.inlineaction">
+    <Setter Property="Width" Value="30" />
+    <Setter Property="Height" Value="30" />
+    <Setter Property="FontFamily" Value="{DynamicResource Font.Icon}" />
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+  </Style>
+  <Style Selector="Button.inlineaction:pointerover /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+  </Style>
+  <Style Selector="Button.inlineaction:pointerover">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+  </Style>
+
+  <!-- ========================= CaptionButton (46×46) ===================== -->
+  <Style Selector="Button.caption">
+    <Setter Property="Width" Value="46" />
+    <Setter Property="Height" Value="46" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="FontFamily" Value="{DynamicResource Font.Icon}" />
+    <Setter Property="FontSize" Value="10" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+  </Style>
+  <Style Selector="Button.caption:pointerover /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+  </Style>
+  <Style Selector="Button.caption.close:pointerover /template/ Border#PART_Root">
+    <Setter Property="Background" Value="#E81123" />
+  </Style>
+  <Style Selector="Button.caption.close:pointerover">
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <!-- ============================= SendButton =========================== -->
+  <Style Selector="Button.send">
+    <Setter Property="Width" Value="{DynamicResource Size.SendButton}" />
+    <Setter Property="Height" Value="{DynamicResource Size.SendButton}" />
+    <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.OnPrimary}" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    <Setter Property="FontFamily" Value="{DynamicResource Font.Icon}" />
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="RenderTransform" Value="scale(1)" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.09" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.send:pointerover /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Primary.Hover}" />
+  </Style>
+  <Style Selector="Button.send:pressed /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Primary.Active}" />
+  </Style>
+  <!-- "Barely-there press feedback (primary action buttons only)" — the same
+       0.97 scale the WPF SendButton template used. -->
+  <Style Selector="Button.send:pressed">
+    <Setter Property="RenderTransform" Value="scale(0.97)" />
+  </Style>
+
+  <!-- ============================ OutlineButton ========================= -->
+  <Style Selector="Button.outline">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    <Setter Property="Padding" Value="14,6" />
+    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+  </Style>
+
+  <Style Selector="Button.pillprimary, Button.primary">
+    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="Padding" Value="14,7" />
+    <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.OnPrimary}" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <Style Selector="Button.pillprimary:pointerover /template/ Border#PART_Root,
+                   Button.primary:pointerover /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Primary.Hover}" />
+  </Style>
+  <Style Selector="Button.outline:pointerover /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+  </Style>
+
+  <!-- ======================= mode switcher segment ====================== -->
+  <Style Selector="Button.modeseg">
+    <Setter Property="Padding" Value="12,4" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+  </Style>
+  <!-- No fill here: the capsule behind the segments carries it, so that the
+       highlight can slide from one to the other instead of one going out as the
+       other comes on. Foreground only. -->
+  <Style Selector="Button.modeseg.active">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+  </Style>
+
+  <!-- ============================== text ================================ -->
+  <!-- Deliberately no Foreground setter. TextElement.Foreground inherits, and a
+       blanket setter here outranks inheritance, so every glyph inside a button
+       stayed Text.Primary and none of the button states reached it — the close
+       button's × never turned white on its red hover. The window supplies the
+       default instead, exactly as the WPF build did. -->
+  <Style Selector="TextBlock">
+    <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
+    <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+  </Style>
+  <Style Selector="TextBlock.icon">
+    <Setter Property="FontFamily" Value="{DynamicResource Font.Icon}" />
+    <Setter Property="TextWrapping" Value="NoWrap" />
+  </Style>
+  <!-- WPF's InlineIconTextPanel / InlineTextBlock pair fixed mixed icon,
+       Latin and CJK content to one visual row. Without the equivalent here,
+       every font contributes its own ascent and line box, which is why labels
+       appear a pixel or two above or below their neighbouring glyphs. -->
+  <Style Selector="StackPanel.inlinerow">
+    <Setter Property="Orientation" Value="Horizontal" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="UseLayoutRounding" Value="True" />
+  </Style>
+  <Style Selector="StackPanel.inlinerow TextBlock">
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="TextWrapping" Value="NoWrap" />
+    <Setter Property="LineHeight" Value="16" />
+    <Setter Property="UseLayoutRounding" Value="True" />
+  </Style>
+  <Style Selector="StackPanel.inlinerow.compact TextBlock">
+    <Setter Property="LineHeight" Value="14" />
+  </Style>
+  <Style Selector="StackPanel.inlinerow TextBlock.icon, StackPanel.inlinerow TextBlock.fa">
+    <Setter Property="TextAlignment" Value="Center" />
+  </Style>
+  <Style Selector="StackPanel.inlinerow Ellipse">
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="TextBlock.fa">
+    <Setter Property="FontFamily" Value="{DynamicResource Font.FA.Solid}" />
+    <Setter Property="TextWrapping" Value="NoWrap" />
+  </Style>
+  <Style Selector="TextBlock.muted">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+  </Style>
+  <Style Selector="TextBlock.secondary">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+  </Style>
+  <Style Selector="SelectableTextBlock">
+    <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
+    <Setter Property="SelectionBrush" Value="{DynamicResource Brush.Selection}" />
+  </Style>
+
+  <!-- ============================ FloatingCard ========================== -->
+  <Style Selector="Border.floatingcard">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Xxl}" />
+  </Style>
+
+  <!-- Avalonia re-attaches flyout content on each open, so this animation
+       restarts without per-call-site wiring. -->
+  <Style Selector="Border.flyoutsurface">
+    <Style.Animations>
+      <Animation Duration="0:0:0.15" Easing="CubicEaseOut" FillMode="Forward">
+        <KeyFrame Cue="0%">
+          <Setter Property="Opacity" Value="0" />
+          <Setter Property="TranslateTransform.Y" Value="7" />
+        </KeyFrame>
+        <KeyFrame Cue="100%">
+          <Setter Property="Opacity" Value="1" />
+          <Setter Property="TranslateTransform.Y" Value="0" />
+        </KeyFrame>
+      </Animation>
+    </Style.Animations>
+  </Style>
+
+  <Style Selector="FlyoutPresenter.molaflyout">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Padding" Value="12" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="MinHeight" Value="0" />
+  </Style>
+  <Style Selector="Border.flyoutsurface">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Strong}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+    <Setter Property="BoxShadow" Value="0 10 30 0 #3D16202A" />
+  </Style>
+
+  <!-- ============================== ToolTip ============================= -->
+  <Style Selector="ToolTip">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    <Setter Property="Padding" Value="9,5" />
+    <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
+    <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+  </Style>
+
+  <!-- ============================= ScrollBar ============================ -->
+  <Style Selector="ScrollBar">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="ScrollBar /template/ Thumb">
+    <Setter Property="Background" Value="{DynamicResource Brush.Border.Strong}" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.16" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="ScrollBar /template/ Thumb:pointerover">
+    <Setter Property="Background" Value="{DynamicResource Brush.Text.Muted}" />
+  </Style>
+
+</Styles>

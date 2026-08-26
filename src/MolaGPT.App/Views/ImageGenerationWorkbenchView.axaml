@@ -1,0 +1,258 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:views="clr-namespace:MolaGPT.App.Views"
+             x:Class="MolaGPT.App.Views.ImageGenerationWorkbenchView"
+             FontFamily="{DynamicResource Font.Cjk}"
+             Foreground="{DynamicResource Brush.Text.Primary}">
+  <Grid RowDefinitions="*,Auto" Margin="22,4,22,22">
+    <Grid Grid.Row="0" ColumnDefinitions="*,240" ColumnSpacing="14">
+      <Border Grid.Column="0" Classes="workbenchcard">
+        <Grid RowDefinitions="Auto,*">
+          <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto" Margin="0,0,0,12">
+            <Button Name="PART_CurrentTab" Classes="segment">
+              <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="6">
+                <TextBlock Text="当前任务" />
+                <TextBlock Name="PART_CurrentCount" Text="0" Classes="muted" FontSize="10" />
+              </StackPanel>
+            </Button>
+            <Button Grid.Column="1" Name="PART_GalleryTab" Classes="segment" Margin="4,0,0,0">
+              <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="6">
+                <TextBlock Text="画廊" />
+                <TextBlock Name="PART_GalleryCount" Text="0" Classes="muted" FontSize="10" />
+              </StackPanel>
+            </Button>
+            <Button Grid.Column="3" Name="PART_ClearResults" Classes="textlink" Content="清空结果"
+                    Padding="8,6" Margin="0,0,4,0" IsVisible="False" />
+            <Button Grid.Column="4" Name="PART_NewTask" Classes="outline" Content="新任务"
+                    Padding="12,6" Margin="0,0,6,0" />
+            <Button Grid.Column="5" Name="PART_Close" Classes="headericon" ToolTip.Tip="返回对话">
+              <TextBlock Classes="icon" Text="&#xE8BB;" />
+            </Button>
+          </Grid>
+
+          <Grid Grid.Row="1">
+            <Grid Name="PART_CurrentPane">
+              <TextBlock Name="PART_EmptyResults" Text="生成的图片将显示在此处"
+                         Classes="muted" HorizontalAlignment="Center" VerticalAlignment="Center" />
+              <ScrollViewer Name="PART_ResultsScroll" VerticalScrollBarVisibility="Auto"
+                            HorizontalScrollBarVisibility="Disabled">
+                <ItemsControl Name="PART_Results" ItemTemplate="{StaticResource WorkbenchResultTemplate}" />
+              </ScrollViewer>
+            </Grid>
+
+            <Grid Name="PART_GalleryPane" IsVisible="False">
+              <TextBlock Name="PART_EmptyGallery" Text="图像工作台的全部作品都会汇集于此"
+                         Classes="muted" HorizontalAlignment="Center" VerticalAlignment="Center" />
+              <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <ItemsControl Name="PART_Gallery" ItemTemplate="{StaticResource WorkbenchResultTemplate}" />
+              </ScrollViewer>
+            </Grid>
+          </Grid>
+        </Grid>
+      </Border>
+
+      <Border Grid.Column="1" Classes="workbenchcard">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel>
+            <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,10">
+              <TextBlock Text="生成参数" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" />
+              <Button Grid.Column="1" Name="PART_OpenSettings" Classes="headericon"
+                      ToolTip.Tip="在设置中管理图像服务">
+                <TextBlock Classes="icon" Text="&#xE713;" />
+              </Button>
+            </Grid>
+
+            <TextBlock Text="画幅比例" Classes="label" Margin="0,0,0,6" />
+            <WrapPanel Name="PART_RatioChips" Margin="0,0,0,10">
+              <Button Classes="optionchip" Content="1:1" Tag="1024x1024" Click="OnRatio" />
+              <Button Classes="optionchip" Content="16:9" Tag="1792x1024" Click="OnRatio" />
+              <Button Classes="optionchip" Content="9:16" Tag="1024x1792" Click="OnRatio" />
+              <Button Classes="optionchip" Content="4:3" Tag="1536x1024" Click="OnRatio" />
+              <Button Classes="optionchip" Content="3:4" Tag="1024x1536" Click="OnRatio" />
+            </WrapPanel>
+
+            <TextBlock Text="尺寸" Classes="label" Margin="0,0,0,6" />
+            <ComboBox Name="PART_Size" Margin="0,0,0,10">
+              <ComboBoxItem Content="1024×1024 · 1:1" Tag="1024x1024" />
+              <ComboBoxItem Content="1536×1024 · 横图" Tag="1536x1024" />
+              <ComboBoxItem Content="1024×1536 · 竖图" Tag="1024x1536" />
+              <ComboBoxItem Content="1792×1024 · 宽屏" Tag="1792x1024" />
+              <ComboBoxItem Content="1024×1792 · 长图" Tag="1024x1792" />
+              <ComboBoxItem Content="auto" Tag="auto" />
+            </ComboBox>
+
+            <TextBlock Text="风格（可选）" Classes="label" Margin="0,0,0,6" />
+            <WrapPanel Name="PART_StyleChips" Margin="0,0,0,6">
+              <Button Classes="optionchip" Content="无" Tag="" Click="OnStyle" />
+              <Button Classes="optionchip" Content="vivid" Tag="vivid" Click="OnStyle" />
+              <Button Classes="optionchip" Content="自然" Tag="natural" Click="OnStyle" />
+              <Button Classes="optionchip" Content="插画" Tag="illustration" Click="OnStyle" />
+              <Button Classes="optionchip" Content="写实" Tag="photorealistic" Click="OnStyle" />
+              <Button Classes="optionchip" Content="动漫" Tag="anime" Click="OnStyle" />
+            </WrapPanel>
+            <TextBox Name="PART_Style" PlaceholderText="自定义风格" Margin="0,0,0,12" />
+
+            <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                    BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1"
+                    CornerRadius="{DynamicResource Radius.Sm}" Padding="10">
+              <StackPanel>
+                <TextBlock Name="PART_ConfigSummary" FontSize="11.5" TextWrapping="Wrap" />
+                <TextBlock Name="PART_Status" Classes="muted" FontSize="11"
+                           TextWrapping="Wrap" Margin="0,6,0,0" />
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </Border>
+    </Grid>
+
+    <Border Grid.Row="1" Classes="workbenchcomposer" Margin="0,14,0,0">
+      <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto">
+        <Grid Grid.Row="0" Grid.ColumnSpan="2" ColumnDefinitions="Auto,*" Margin="0,0,0,6">
+          <StackPanel Grid.Column="0" Name="PART_EditModes" Orientation="Horizontal" IsVisible="False">
+            <Button Name="PART_ReferenceLatest" Classes="segment" Content="参考上图" Tag="reference" />
+            <Button Name="PART_FreshGenerate" Classes="segment" Content="直接生成" Tag="fresh" Margin="4,0,0,0" />
+          </StackPanel>
+          <TextBlock Grid.Column="1" Name="PART_ModeLabel" Text="图像生成"
+                     Classes="muted" FontSize="11" HorizontalAlignment="Right"
+                     VerticalAlignment="Center" />
+        </Grid>
+
+        <TextBox Grid.Row="1" Grid.Column="0" Name="PART_Prompt"
+                 PlaceholderText="描述你想要的画面…"
+                 AcceptsReturn="True" TextWrapping="Wrap"
+                 MinHeight="54" MaxHeight="160" Padding="8,6"
+                 ScrollViewer.VerticalScrollBarVisibility="Auto" />
+        <Button Grid.Row="1" Grid.Column="1" Name="PART_Generate"
+                Classes="send" Margin="10,0,0,0" VerticalAlignment="Bottom"
+                ToolTip.Tip="生成">
+          <TextBlock Name="PART_GenerateIcon" Classes="icon" Text="&#xE724;"
+                     FontSize="14" Foreground="{DynamicResource Brush.Text.OnPrimary}" />
+        </Button>
+      </Grid>
+    </Border>
+  </Grid>
+
+  <UserControl.Resources>
+    <DataTemplate x:Key="WorkbenchResultTemplate" DataType="views:ImageWorkbenchResult">
+      <Border Classes="resultcard">
+        <StackPanel>
+          <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+            <StackPanel Orientation="Horizontal">
+              <Border Classes="modebadge"><TextBlock Text="{Binding ModeLabel}" FontSize="10" /></Border>
+              <Border Classes="modebadge" Margin="6,0,0,0" IsVisible="{Binding HasModelLabel}">
+                <TextBlock Text="{Binding ModelLabel}" FontSize="10" />
+              </Border>
+            </StackPanel>
+            <TextBlock Grid.Column="1" Text="{Binding CreatedAtText}" Classes="muted" FontSize="10" />
+          </Grid>
+
+          <TextBlock Text="{Binding PromptHeader}" Classes="label" Margin="0,0,0,3" />
+          <TextBlock Text="{Binding Prompt}" TextWrapping="Wrap" FontSize="12.5" Margin="0,0,0,10" />
+
+          <Border IsVisible="{Binding IsPending}" Height="210"
+                  Background="{DynamicResource Brush.Bg.Tertiary}"
+                  CornerRadius="{DynamicResource Radius.Md}">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+              <ProgressBar IsIndeterminate="True" Width="150" Height="4" />
+              <TextBlock Text="{Binding PendingStatusText}" Classes="muted" Margin="0,10,0,0" />
+            </StackPanel>
+          </Border>
+
+          <Border IsVisible="{Binding IsError}" Classes="errorbox">
+            <StackPanel>
+              <TextBlock Text="生成失败" FontWeight="SemiBold" Foreground="{DynamicResource Brush.Error}" />
+              <TextBlock Text="{Binding ErrorDisplay}" TextWrapping="Wrap" FontSize="12" Margin="0,4,0,0" />
+            </StackPanel>
+          </Border>
+
+          <Border IsVisible="{Binding HasImage}" CornerRadius="{DynamicResource Radius.Md}"
+                  Background="{DynamicResource Brush.Bg.Tertiary}" ClipToBounds="True">
+            <Image Source="{Binding Thumbnail}" Stretch="Uniform" MaxHeight="460" />
+          </Border>
+
+          <Grid ColumnDefinitions="*,Auto" Margin="0,8,0,0" IsVisible="{Binding HasImage}">
+            <TextBlock Text="{Binding RevisedPromptDisplay}" Classes="muted" FontSize="11"
+                       TextWrapping="Wrap" VerticalAlignment="Center" />
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="10,0,0,0">
+              <Button Classes="headericon" ToolTip.Tip="预览" Click="OnPreviewResult">
+                <TextBlock Classes="icon" Text="&#xE71E;" />
+              </Button>
+              <Button Classes="headericon" ToolTip.Tip="另存" Click="OnSaveResult">
+                <TextBlock Classes="icon" Text="&#xE74E;" />
+              </Button>
+            </StackPanel>
+          </Grid>
+        </StackPanel>
+      </Border>
+    </DataTemplate>
+  </UserControl.Resources>
+
+  <UserControl.Styles>
+    <Style Selector="Border.workbenchcard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Xl}" />
+      <Setter Property="Padding" Value="14" />
+    </Style>
+    <Style Selector="Border.workbenchcomposer">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Strong}" />
+      <Setter Property="BorderThickness" Value="1.5" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Xl}" />
+      <Setter Property="Padding" Value="14,10" />
+    </Style>
+    <Style Selector="Border.resultcard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="14" />
+      <Setter Property="Margin" Value="0,0,0,12" />
+    </Style>
+    <Style Selector="Border.modebadge">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="6,2" />
+    </Style>
+    <Style Selector="Border.errorbox">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Error}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="12" />
+    </Style>
+    <Style Selector="Button.segment">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,6" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <Style Selector="Button.segment.active">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.optionchip">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="9,3" />
+      <Setter Property="Margin" Value="0,0,5,5" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="Button.optionchip.active">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+  </UserControl.Styles>
+</UserControl>

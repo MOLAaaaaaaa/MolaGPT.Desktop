@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MolaGPT.Core\MolaGPT.Core.csproj" />
+    <ProjectReference Include="..\MolaGPT.Presentation\MolaGPT.Presentation.csproj" />
     <ProjectReference Include="..\MolaGPT.Storage\MolaGPT.Storage.csproj" />
   </ItemGroup>
 

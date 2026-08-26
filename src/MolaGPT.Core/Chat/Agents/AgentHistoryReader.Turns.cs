@@ -12,7 +12,7 @@ public sealed partial class AgentHistoryReader
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(entry.FilePath) || !File.Exists(entry.FilePath))
-            return Array.Empty<AgentHistoryTurn>();
+            throw new FileNotFoundException("History transcript was not found.", entry.FilePath);
 
         return await Task.Run(() =>
         {

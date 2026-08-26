@@ -18,7 +18,13 @@ namespace MolaGPT.ViewModels;
 /// </summary>
 public sealed partial class ChatViewModel : ObservableObject
 {
-    public ObservableCollection<MessageViewModel> Messages { get; } = new();
+    // Bulk-capable so opening a conversation publishes one collection change
+    // instead of one per message: every Add is a separate notification, and the
+    // transcript turns each into its own row insert, so a 10-message
+    // conversation used to raise ~300 CollectionChanged events on the UI thread
+    // before the first frame. Streaming still appends one message at a time.
+    private readonly BulkObservableCollection<MessageViewModel> _messages = new();
+    public ObservableCollection<MessageViewModel> Messages => _messages;
 
     /// <summary>
     /// Session-level artifacts: files currently in this conversation's Python
@@ -171,6 +177,7 @@ public sealed partial class ChatViewModel : ObservableObject
     /// background.
     /// </summary>
     [ObservableProperty] private bool _isConversationLoading;
+    [ObservableProperty] private bool _autoCollapseThinking = true;
 
     public string ActiveModelLabel => ActiveModel?.DisplayName ?? "未选择";
     public string ActiveProviderLabel => ActiveProvider?.DisplayName ?? "未选择";
@@ -181,6 +188,12 @@ public sealed partial class ChatViewModel : ObservableObject
     private readonly PersonaListViewModel? _personas;
     private readonly SettingsRepository? _settingsRepo;
     private int _messageLoadVersion;
+
+    /// <summary>
+    /// Optional sink for timing traces, wired by the desktop layer to PerfLog.
+    /// Kept as a delegate so the view-model project stays UI-free.
+    /// </summary>
+    public static Action<string, string?>? PerfTrace { get; set; }
 
     /// <summary>How many of the newest messages a conversation opens with —
     /// enough to overfill a maximized viewport so the user lands on the latest
@@ -490,12 +503,15 @@ public sealed partial class ChatViewModel : ObservableObject
             ConversationRow? conversationRow = null;
             if (_messageRepo is not null)
             {
+                var readSw = System.Diagnostics.Stopwatch.StartNew();
                 var snapshot = await Task.Run(() =>
                 {
                     var messages = PrepareMessageSnapshot(_messageRepo.List(conversationId));
                     var conversation = _conversationRepo?.Get(conversationId);
                     return (messages, conversation);
                 }).ConfigureAwait(true);
+                PerfTrace?.Invoke("load.read+meta",
+                    $"{readSw.Elapsed.TotalMilliseconds:N0} ms  msgs={snapshot.messages.Count}");
 
                 if (loadVersion != _messageLoadVersion || ConversationId != conversationId)
                     return;
@@ -510,21 +526,25 @@ public sealed partial class ChatViewModel : ObservableObject
                 // every message we build here is a full markdown parse and
                 // FlowDocument, on the UI thread. The rest waits in
                 // _pendingOlderMessages until the user scrolls up.
+                var materialized = new List<MessageViewModel>();
                 if (loadAllMessagesImmediately)
                 {
                     foreach (var message in prepared)
-                        Messages.Add(CreateMessageViewModel(message));
+                        materialized.Add(CreateMessageViewModel(message));
                 }
                 else
                 {
                     var tailStart = Math.Max(0, prepared.Count - TailBatch);
                     for (int i = tailStart; i < prepared.Count; i++)
-                        Messages.Add(CreateMessageViewModel(prepared[i]));
+                        materialized.Add(CreateMessageViewModel(prepared[i]));
                     if (tailStart > 0)
                         _pendingOlderMessages.AddRange(prepared.GetRange(0, tailStart));
                 }
+                _messages.ReplaceAll(materialized);
                 OnPropertyChanged(nameof(HasOlderMessages));
                 UpdateLatestAssistantFlags();
+                PerfTrace?.Invoke("load.materialize",
+                    $"{Messages.Count} shown, {_pendingOlderMessages.Count} parked");
             }
 
             conversationRow ??= _conversationRepo?.Get(conversationId);
@@ -562,8 +582,31 @@ public sealed partial class ChatViewModel : ObservableObject
     {
         var prepared = new List<PreparedMessage>(rows.Count);
         IReadOnlyList<SourceReference>? lastKnownSources = null;
-        foreach (var row in rows)
+
+        // Every retry attempt carries a full copy of that answer's body, so a
+        // message the user regenerated a few times can hold megabytes of meta —
+        // measured at 7.6 MB of attempts against 3.1 MB of actual content on one
+        // deepresearch answer. Materializing all of it on load is pure waste:
+        // MessageViewModel.HasRetryBar gates the attempt switcher on
+        // IsLatestAssistant, so no older message can ever display them.
+        //
+        // Parse them for the newest assistant row only. Nothing writes meta back
+        // for older rows either — UpdatePersistedMessage runs on the user's own
+        // message or on the assistant turn currently being generated — so the
+        // rows we skip keep their stored history untouched.
+        var latestAssistantIndex = -1;
+        for (var i = rows.Count - 1; i >= 0; i--)
         {
+            if (rows[i].Role == ChatMessage.RoleAssistant)
+            {
+                latestAssistantIndex = i;
+                break;
+            }
+        }
+
+        for (var index = 0; index < rows.Count; index++)
+        {
+            var row = rows[index];
             var split = SplitInlineThinking(row.Content);
             string? modelLabel = null;
             string? providerLabel = null;
@@ -598,10 +641,17 @@ public sealed partial class ChatViewModel : ObservableObject
                     attachments = ParseAttachments(doc.RootElement);
                     contentPartsJson = ParseContentPartsJson(doc.RootElement);
                     openAiWireHistoryJson = ParseJsonObjectProperty(doc.RootElement, "openai_wire_history");
-                    (retryAttempts, retryCurrent) = ParseRetry(doc.RootElement);
+                    if (index == latestAssistantIndex)
+                        (retryAttempts, retryCurrent) = ParseRetry(doc.RootElement);
                     toolCalls = ParseToolCalls(doc.RootElement);
                     thinkingSegments = ParseThinkingSegments(doc.RootElement);
                     (toolCalls, thinkingSegments) = InferMissingTimelineIndexes(toolCalls, thinkingSegments);
+                    retryAttempts = RestoreCurrentRetryAttemptState(
+                        retryAttempts,
+                        retryCurrent,
+                        thinkingText,
+                        thinkingSegments,
+                        toolCalls);
                     wasStopped = doc.RootElement.TryGetProperty("stopped", out var st)
                                  && st.ValueKind == JsonValueKind.True;
                 }
@@ -652,7 +702,7 @@ public sealed partial class ChatViewModel : ObservableObject
         return prepared;
     }
 
-    private static MessageViewModel CreateMessageViewModel(PreparedMessage prepared)
+    private MessageViewModel CreateMessageViewModel(PreparedMessage prepared)
     {
         var vm = new MessageViewModel(prepared.Role, prepared.Content, DateTimeOffset.FromUnixTimeMilliseconds(prepared.CreatedAt))
         {
@@ -666,7 +716,8 @@ public sealed partial class ChatViewModel : ObservableObject
             OpenAiWireHistoryJson = prepared.OpenAiWireHistoryJson,
             RetryAttempts = prepared.RetryAttempts,
             RetryCurrentIndex = prepared.RetryCurrentIndex,
-            WasStopped = prepared.WasStopped
+            WasStopped = prepared.WasStopped,
+            AutoCollapseThinkingOnComplete = AutoCollapseThinking
         };
         if (prepared.ToolCalls is { Count: > 0 })
         {
@@ -755,7 +806,8 @@ public sealed partial class ChatViewModel : ObservableObject
         {
             IsStreaming = true,
             ModelLabel = ActiveModel?.DisplayName,
-            ProviderLabel = ActiveProvider?.DisplayName
+            ProviderLabel = ActiveProvider?.DisplayName,
+            AutoCollapseThinkingOnComplete = AutoCollapseThinking
         };
         vm.StartPending(IsRoutesModel(ActiveModel));
         Messages.Add(vm);
@@ -927,15 +979,7 @@ public sealed partial class ChatViewModel : ObservableObject
             {
                 ["current"] = vm.RetryCurrentIndex,
                 ["attempts"] = new JsonArray(vm.RetryAttempts
-                    .Select(a => new JsonObject
-                    {
-                        ["content"] = a.Content,
-                        ["model_label"] = a.ModelLabel,
-                        ["response_stats"] = a.Usage is null ? (JsonNode?)null : BuildUsageJson(a.Usage),
-                        ["sources"] = a.Sources is null ? (JsonNode?)null : BuildSourcesJson(a.Sources),
-                        ["openai_wire_history"] = ParseJsonObjectNode(a.OpenAiWireHistoryJson),
-                        ["stopped"] = a.WasStopped ? true : (JsonNode?)null
-                    })
+                    .Select(BuildRetryAttemptJson)
                     .Cast<JsonNode?>()
                     .ToArray())
             };
@@ -1000,6 +1044,56 @@ public sealed partial class ChatViewModel : ObservableObject
             })
             .Cast<JsonNode?>()
             .ToArray());
+
+    private static JsonObject BuildRetryAttemptJson(MessageAttempt attempt)
+    {
+        var result = new JsonObject
+        {
+            ["content"] = attempt.Content,
+            ["model_label"] = attempt.ModelLabel,
+            ["response_stats"] = attempt.Usage is null ? (JsonNode?)null : BuildUsageJson(attempt.Usage),
+            ["sources"] = attempt.Sources is null ? (JsonNode?)null : BuildSourcesJson(attempt.Sources),
+            ["openai_wire_history"] = ParseJsonObjectNode(attempt.OpenAiWireHistoryJson),
+            ["stopped"] = attempt.WasStopped ? true : (JsonNode?)null
+        };
+        if (!string.IsNullOrWhiteSpace(attempt.Thinking))
+            result["thinking"] = attempt.Thinking;
+        if (attempt.ToolCalls is { Count: > 0 })
+        {
+            result["tool_calls"] = new JsonArray(attempt.ToolCalls
+                .Select(tool => new JsonObject
+                {
+                    ["id"] = tool.Id,
+                    ["name"] = tool.Name,
+                    ["status"] = tool.Status,
+                    ["label"] = tool.Label,
+                    ["summary"] = tool.Summary,
+                    ["detail"] = tool.Detail,
+                    ["arguments_json"] = tool.ArgumentsJson,
+                    ["result_preview_json"] = tool.ResultPreviewJson,
+                    ["provider"] = tool.Provider,
+                    ["content_offset"] = tool.ContentOffset,
+                    ["timeline_index"] = tool.TimelineIndex
+                })
+                .Cast<JsonNode?>()
+                .ToArray());
+        }
+        if (attempt.ThinkingSegments is { Count: > 0 })
+        {
+            result["thinking_segments"] = new JsonArray(attempt.ThinkingSegments
+                .Where(segment => !string.IsNullOrWhiteSpace(segment.Source))
+                .Select(segment => new JsonObject
+                {
+                    ["source"] = segment.Source,
+                    ["content_offset"] = segment.ContentOffset,
+                    ["timeline_index"] = segment.TimelineIndex,
+                    ["elapsed_seconds"] = segment.ElapsedSeconds
+                })
+                .Cast<JsonNode?>()
+                .ToArray());
+        }
+        return result;
+    }
 
     private void EnsureConversationExists(string? firstUserText = null)
     {
@@ -1297,7 +1391,13 @@ public sealed partial class ChatViewModel : ObservableObject
         {
             if (item.ValueKind == JsonValueKind.String)
             {
-                attempts.Add(new MessageAttempt(NormalizeRetryAttemptContent(item.GetString()), null, null, null));
+                var legacySplit = SplitInlineThinking(item.GetString());
+                attempts.Add(new MessageAttempt(
+                    legacySplit.Visible,
+                    null,
+                    null,
+                    null,
+                    Thinking: legacySplit.Thinking));
                 continue;
             }
             if (item.ValueKind != JsonValueKind.Object) continue;
@@ -1307,13 +1407,23 @@ public sealed partial class ChatViewModel : ObservableObject
             var modelLabel = item.TryGetProperty("model_label", out var modelNode) && modelNode.ValueKind == JsonValueKind.String
                 ? modelNode.GetString()
                 : null;
+            var split = SplitInlineThinking(content);
+            var thinking = ReadString(item, "thinking");
+            if (!string.IsNullOrWhiteSpace(split.Thinking))
+                thinking = string.IsNullOrWhiteSpace(thinking) ? split.Thinking : MergeThinking(thinking, split.Thinking);
+            var toolCalls = ParseToolCalls(item);
+            var thinkingSegments = ParseThinkingSegments(item);
+            (toolCalls, thinkingSegments) = InferMissingTimelineIndexes(toolCalls, thinkingSegments);
             attempts.Add(new MessageAttempt(
-                NormalizeRetryAttemptContent(content),
+                split.Visible,
                 modelLabel,
                 ParseUsage(item, "response_stats"),
                 ParseSources(item),
                 ParseJsonObjectProperty(item, "openai_wire_history"),
-                item.TryGetProperty("stopped", out var stoppedNode) && stoppedNode.ValueKind == JsonValueKind.True));
+                item.TryGetProperty("stopped", out var stoppedNode) && stoppedNode.ValueKind == JsonValueKind.True,
+                thinking,
+                thinkingSegments,
+                toolCalls));
         }
 
         var current = ReadInt(retry, "current") ?? Math.Max(0, attempts.Count - 1);
@@ -1321,10 +1431,25 @@ public sealed partial class ChatViewModel : ObservableObject
         return attempts.Count == 0 ? (null, 0) : (attempts, current);
     }
 
-    private static string NormalizeRetryAttemptContent(string? content)
+    private static IReadOnlyList<MessageAttempt>? RestoreCurrentRetryAttemptState(
+        IReadOnlyList<MessageAttempt>? attempts,
+        int current,
+        string? thinking,
+        IReadOnlyList<ThinkingSegmentDelta>? thinkingSegments,
+        IReadOnlyList<ToolCallDelta>? toolCalls)
     {
-        if (string.IsNullOrEmpty(content)) return string.Empty;
-        return SplitInlineThinking(content).Visible;
+        if (attempts is not { Count: > 0 } || current < 0 || current >= attempts.Count)
+            return attempts;
+
+        var restored = attempts.ToList();
+        var attempt = restored[current];
+        restored[current] = attempt with
+        {
+            Thinking = !string.IsNullOrWhiteSpace(thinking) ? thinking : attempt.Thinking,
+            ThinkingSegments = thinkingSegments is { Count: > 0 } ? thinkingSegments : attempt.ThinkingSegments,
+            ToolCalls = toolCalls is { Count: > 0 } ? toolCalls : attempt.ToolCalls
+        };
+        return restored;
     }
 
     private static IReadOnlyList<ToolCallDelta>? ParseToolCalls(JsonElement root)
@@ -1338,16 +1463,18 @@ public sealed partial class ChatViewModel : ObservableObject
         {
             if (item.ValueKind != JsonValueKind.Object) continue;
             var name = ReadString(item, "name");
-            if (string.IsNullOrWhiteSpace(name)) continue;
+            var label = ReadString(item, "label");
+            if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(label)) continue;
+            name = RestoreToolName(name, label);
             var id = ReadString(item, "id");
             if (string.IsNullOrWhiteSpace(id))
                 id = $"restored-tool-{fallbackIndex}";
 
             list.Add(new ToolCallDelta(
                 id!,
-                name!,
+                name,
                 ReadString(item, "status") ?? "completed",
-                ReadString(item, "label"),
+                label,
                 ReadString(item, "summary"),
                 ReadString(item, "detail"),
                 ReadString(item, "arguments_json") ?? ReadString(item, "argumentsJson"),
@@ -1359,6 +1486,24 @@ public sealed partial class ChatViewModel : ObservableObject
         }
 
         return list.Count == 0 ? null : list;
+    }
+
+    private static string RestoreToolName(string? name, string? label)
+    {
+        if (!string.IsNullOrWhiteSpace(name)) return name;
+        return label switch
+        {
+            "联网搜索" => "search_web",
+            "网页阅读" => "web_fetch",
+            "Python" => "execute_python_code",
+            "读取文件" => "read_file",
+            "查找文件" => "glob_files",
+            "搜索内容" => "grep_files",
+            "查看图片" => "view_image",
+            "图片分析" => "analyze_image",
+            "生成图片" => "generate_image",
+            _ => string.Empty
+        };
     }
 
     private static IReadOnlyList<ThinkingSegmentDelta>? ParseThinkingSegments(JsonElement root)
@@ -1617,6 +1762,12 @@ public sealed partial class ChatViewModel : ObservableObject
     partial void OnActiveModelChanged(ProviderModel? value)
     {
         OnPropertyChanged(nameof(ActiveModelLabel));
+    }
+
+    partial void OnAutoCollapseThinkingChanged(bool value)
+    {
+        foreach (var message in Messages)
+            message.AutoCollapseThinkingOnComplete = value;
     }
 
 }

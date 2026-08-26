@@ -58,6 +58,12 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [GeneratedRegex("✝[^✝]*✝")]
     private static partial Regex DaggerWrappedTokenRegex();
 
+    [GeneratedRegex("<ref\\b(?<attrs>[^>]*)>(?<inner>[\\s\\S]*?)</ref>|<ref\\b(?<attrs2>[^>]*)/?>", RegexOptions.IgnoreCase)]
+    private static partial Regex RefTagRegex();
+
+    [GeneratedRegex("\\bsource\\s*=\\s*(?:\"(?<value>[^\"]*)\"|'(?<value>[^']*)'|(?<value>[^\\s/>]+))", RegexOptions.IgnoreCase)]
+    private static partial Regex RefSourceRegex();
+
     [ObservableProperty] private string _role;
     [ObservableProperty] private string _content;
     [ObservableProperty] private string? _messageId;
@@ -76,6 +82,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _isLatestAssistant;
     [ObservableProperty] private bool _isPending;
     [ObservableProperty] private bool _isRoutesPending;
+    [ObservableProperty] private bool _autoCollapseThinkingOnComplete = true;
 
     /// <summary>
     /// The user stopped this turn. Persisted so the bubble still explains itself
@@ -143,7 +150,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public bool HasResponseStats => Usage is not null || !string.IsNullOrWhiteSpace(ModelLabel);
     public bool HasAttachments => Attachments is { Count: > 0 };
     public bool HasToolCalls => ToolCalls.Count > 0;
-    public string VisibleContent => StripSystemHints(Content);
+    public string VisibleContent => ProcessCitationRefs(StripSystemHints(Content));
     public bool HasRetryBar => IsLatestAssistant && RetryAttempts is { Count: > 1 };
     public string RetryCounter => HasRetryBar ? $"{RetryCurrentIndex + 1}/{RetryAttempts!.Count}" : string.Empty;
     public string ResponseStatsText
@@ -341,6 +348,8 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         {
             segment.ElapsedSeconds = ThinkingElapsedSeconds;
             segment.IsThinking = false;
+            if (AutoCollapseThinkingOnComplete)
+                segment.IsExpanded = false;
         }
         _activeThinkingSegment = null;
         _thinkingStartedAt = null;
@@ -353,7 +362,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     {
         var attempts = RetryAttempts?.ToList() ?? new List<MessageAttempt>();
         if (attempts.Count == 0)
-            attempts.Add(new MessageAttempt(Content, ModelLabel, Usage, Sources, OpenAiWireHistoryJson, WasStopped));
+            attempts.Add(CaptureRetryAttempt());
 
         Content = string.Empty;
         Thinking = null;
@@ -364,6 +373,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         DisplayBlocks.Clear();
         _activeThinkingSegment = null;
         _thinkingStartedAt = null;
+        _nextDisplaySequence = 0;
         ThinkingElapsedSeconds = 0;
         Usage = null;
         Sources = null;
@@ -374,9 +384,50 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public void CommitRetryAttempt()
     {
         var attempts = RetryAttempts?.ToList() ?? new List<MessageAttempt>();
-        attempts.Add(new MessageAttempt(Content, ModelLabel, Usage, Sources, OpenAiWireHistoryJson, WasStopped));
+        attempts.Add(CaptureRetryAttempt());
         RetryAttempts = attempts;
         RetryCurrentIndex = attempts.Count - 1;
+    }
+
+    private MessageAttempt CaptureRetryAttempt()
+    {
+        var thinkingSegments = ThinkingSegments.Count == 0
+            ? null
+            : ThinkingSegments
+                .Where(segment => !string.IsNullOrWhiteSpace(segment.Source))
+                .Select(segment => new ThinkingSegmentDelta(
+                    segment.Source,
+                    segment.ContentOffset,
+                    segment.ElapsedSeconds,
+                    segment.TimelineIndex))
+                .ToArray();
+        var toolCalls = ToolCalls.Count == 0
+            ? null
+            : ToolCalls
+                .Select(tool => new ToolCallDelta(
+                    tool.Id,
+                    tool.Name,
+                    tool.Status,
+                    tool.Label,
+                    tool.Summary,
+                    tool.Detail,
+                    tool.ArgumentsJson,
+                    tool.ResultPreviewJson,
+                    tool.Provider,
+                    tool.ContentOffset,
+                    tool.TimelineIndex))
+                .ToArray();
+
+        return new MessageAttempt(
+            Content,
+            ModelLabel,
+            Usage,
+            Sources,
+            OpenAiWireHistoryJson,
+            WasStopped,
+            Thinking,
+            thinkingSegments,
+            toolCalls);
     }
 
     [RelayCommand(CanExecute = nameof(CanPreviousAttempt))]
@@ -401,13 +452,26 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         StopThinking();
         ToolCalls.Clear();
         ThinkingSegments.Clear();
+        _nextDisplaySequence = 0;
 
         Content = attempt.Content;
+        Thinking = attempt.Thinking;
         ModelLabel = attempt.ModelLabel;
         Usage = attempt.Usage;
         Sources = attempt.Sources;
         OpenAiWireHistoryJson = attempt.OpenAiWireHistoryJson;
         WasStopped = attempt.WasStopped;
+        if (attempt.ToolCalls is { Count: > 0 })
+        {
+            foreach (var toolCall in attempt.ToolCalls)
+                ApplyToolDelta(toolCall);
+        }
+        if (!string.IsNullOrWhiteSpace(attempt.Thinking))
+        {
+            RestoreThinkingSegments(attempt.ThinkingSegments is { Count: > 0 }
+                ? attempt.ThinkingSegments
+                : [new ThinkingSegmentDelta(attempt.Thinking, 0)]);
+        }
         RetryCurrentIndex = index;
     }
 
@@ -564,6 +628,11 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         OnActionStateChanged();
     }
     partial void OnAttachmentsChanged(IReadOnlyList<AttachmentChip>? value) => OnPropertyChanged(nameof(HasAttachments));
+    partial void OnSourcesChanged(IReadOnlyList<SourceReference>? value)
+    {
+        OnPropertyChanged(nameof(VisibleContent));
+        RebuildDisplayBlocks();
+    }
     partial void OnUsageChanged(Usage? value)
     {
         OnPropertyChanged(nameof(HasResponseStats));
@@ -625,7 +694,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             if (offset > cursor)
             {
                 FlushRun(); // visible text between calls breaks a run
-                next.Add(MessageDisplayBlockViewModel.ForText(content[cursor..offset]));
+                next.Add(MessageDisplayBlockViewModel.ForText(ProcessCitationRefs(content[cursor..offset])));
             }
             if (tool is ToolCallViewModel toolCall)
             {
@@ -652,7 +721,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
 
         FlushRun();
         if (cursor < content.Length)
-            next.Add(MessageDisplayBlockViewModel.ForText(content[cursor..]));
+            next.Add(MessageDisplayBlockViewModel.ForText(ProcessCitationRefs(content[cursor..])));
 
         SyncDisplayBlocks(next);
     }
@@ -713,6 +782,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
                 ContentOffset = item.ContentOffset,
                 TimelineIndex = item.TimelineIndex ?? _nextDisplaySequence++,
                 IsThinking = false,
+                IsExpanded = !AutoCollapseThinkingOnComplete,
                 ElapsedSeconds = item.ElapsedSeconds
             });
             AdvanceNextDisplaySequence(ThinkingSegments[^1].TimelineIndex);
@@ -746,6 +816,66 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         return DaggerWrappedTokenRegex().Replace(content, string.Empty).Trim();
     }
 
+    private string ProcessCitationRefs(string source)
+    {
+        if (source.Length == 0 || !source.Contains("<ref", StringComparison.OrdinalIgnoreCase))
+            return source;
+
+        var sources = Sources ?? Array.Empty<SourceReference>();
+        return RefTagRegex().Replace(source, match =>
+        {
+            var inner = match.Groups["inner"].Success ? match.Groups["inner"].Value : string.Empty;
+            if (sources.Count == 0) return inner;
+
+            var attrs = match.Groups["attrs"].Success
+                ? match.Groups["attrs"].Value
+                : match.Groups["attrs2"].Value;
+            var sourceMatch = RefSourceRegex().Match(attrs);
+            if (!sourceMatch.Success) return inner;
+
+            var links = new List<string>();
+            foreach (var id in ParseSourceIds(sourceMatch.Groups["value"].Value))
+            {
+                var sourceRef = sources.FirstOrDefault(item => item.Id == id);
+                if (sourceRef is null) continue;
+
+                var url = string.IsNullOrWhiteSpace(sourceRef.Url)
+                    ? "#"
+                    : sourceRef.Url.Replace(")", "%29", StringComparison.Ordinal);
+                var title = sourceRef.Title.Replace("\\", "\\\\", StringComparison.Ordinal)
+                    .Replace("\"", "\\\"", StringComparison.Ordinal);
+                links.Add(title.Length == 0
+                    ? $"[[来源 {id}]]({url})"
+                    : $"[[来源 {id}]]({url} \"{title}\")");
+            }
+
+            return links.Count == 0 ? inner : string.Join(" ", links) + inner;
+        });
+    }
+
+    private static IReadOnlyList<int> ParseSourceIds(string value)
+    {
+        var result = new List<int>();
+        var seen = new HashSet<int>();
+        foreach (var part in value.Split([',', '，', '|', ' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var range = Regex.Match(part, @"^(\d+)\s*[-~]\s*(\d+)$");
+            if (range.Success
+                && int.TryParse(range.Groups[1].Value, out var start)
+                && int.TryParse(range.Groups[2].Value, out var end))
+            {
+                for (var id = Math.Min(start, end); id <= Math.Max(start, end); id++)
+                    if (seen.Add(id)) result.Add(id);
+                continue;
+            }
+
+            if (int.TryParse(part, out var single) && seen.Add(single))
+                result.Add(single);
+        }
+
+        return result;
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
@@ -770,7 +900,10 @@ public sealed record MessageAttempt(
     Usage? Usage,
     IReadOnlyList<SourceReference>? Sources,
     string? OpenAiWireHistoryJson = null,
-    bool WasStopped = false);
+    bool WasStopped = false,
+    string? Thinking = null,
+    IReadOnlyList<ThinkingSegmentDelta>? ThinkingSegments = null,
+    IReadOnlyList<ToolCallDelta>? ToolCalls = null);
 /// <summary>
 /// Lightweight representation of a sent attachment, kept on the message
 /// view-model after the original <see cref="MolaGPT.Core.Models.Attachment"/>
@@ -976,6 +1109,7 @@ public sealed partial class ThinkingSegmentViewModel : ObservableObject
 {
     [ObservableProperty] private string _source = string.Empty;
     [ObservableProperty] private bool _isThinking;
+    [ObservableProperty] private bool _isExpanded = true;
     [ObservableProperty] private double _elapsedSeconds;
 
     public int ContentOffset { get; set; }
@@ -997,7 +1131,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
     };
 
     public string Id { get; }
-    public string Name { get; }
+    [ObservableProperty] private string _name;
     public int ContentOffset { get; set; }
     public int TimelineIndex { get; set; }
 
@@ -1013,7 +1147,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
     public ToolCallViewModel(string id, string name)
     {
         Id = id;
-        Name = name;
+        _name = name;
         _label = ToolLabelFor(name);
     }
 
@@ -1141,6 +1275,9 @@ public sealed partial class ToolCallViewModel : ObservableObject
     {
         Status = delta.Status;
 
+        if (IsPlaceholderToolName(Name) && !IsPlaceholderToolName(delta.Name))
+            Name = delta.Name;
+
         // Deltas are partial. A tool surfaces across multiple phases: the call
         // phase carries the name + arguments, while a later result/echo phase may
         // omit them (Claude Code's tool_result echo has no tool name and sends
@@ -1171,9 +1308,23 @@ public sealed partial class ToolCallViewModel : ObservableObject
     /// the tool (Claude Code's tool_result echo sends "tool"). We must not let
     /// these overwrite the real label captured from the call phase.</summary>
     private static bool IsPlaceholderToolName(string? name) =>
-        string.IsNullOrWhiteSpace(name) || string.Equals(name, "tool", StringComparison.OrdinalIgnoreCase);
+        string.IsNullOrWhiteSpace(name)
+        || string.Equals(name, "tool", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, "unknown", StringComparison.OrdinalIgnoreCase);
 
     partial void OnStatusChanged(string value) => RefreshComputed();
+    partial void OnNameChanged(string value)
+    {
+        OnPropertyChanged(nameof(IconGlyph));
+        OnPropertyChanged(nameof(IsSearch));
+        OnPropertyChanged(nameof(IsGenericTool));
+        OnPropertyChanged(nameof(IsKnownBuiltInTool));
+        OnPropertyChanged(nameof(ShowArgumentsFold));
+        OnPropertyChanged(nameof(IsFileOperation));
+        ArgsView = ToolArgsExtractor.Extract(value, ArgumentsJson);
+        OnPropertyChanged(nameof(HeaderArgPreview));
+        OnPropertyChanged(nameof(HasHeaderArgPreview));
+    }
     partial void OnSummaryChanged(string? value) => OnPropertyChanged(nameof(HasSummary));
     partial void OnDetailChanged(string? value) => OnPropertyChanged(nameof(HasDetail));
     partial void OnArgumentsJsonChanged(string? value)

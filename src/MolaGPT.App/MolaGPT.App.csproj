@@ -1,0 +1,88 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The Avalonia desktop front end. Core / ViewModels / Storage /
+       Presentation remain platform-free and are referenced unchanged.
+
+       Why Avalonia, in one line: its compositor runs on its own thread and kept
+       producing frames at ~200 fps with zero dropped frames while the UI thread
+       was blocked 48% of a measured window, where WPF's animation clock ticks on
+       the UI thread and simply stops. See tests/MolaGPT.AvaloniaBench. -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
+    <OutputPath>bin\$(Configuration)\net10.0\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <RootNamespace>MolaGPT.App</RootNamespace>
+    <AssemblyName>MolaGPT.Desktop</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <Platforms>AnyCPU;x64</Platforms>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <NoWarn>$(NoWarn);NU1608</NoWarn>
+  </PropertyGroup>
+
+  <!-- Carried over from MolaGPT.Desktop: cloud-sync payloads land on the Large
+       Object Heap, which is never compacted by default, so dead buffers show up
+       as committed-but-unused segments in an idle app. -->
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.9" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.9" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.9" />
+    <PackageReference Include="Microsoft.Toolkit.Uwp.Notifications" Version="7.1.3" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.0" />
+    <!-- Skia is already in the box with Avalonia; referenced explicitly because
+         SkiaImageNormalizer uses the API directly rather than through Avalonia. -->
+    <PackageReference Include="SkiaSharp" Version="3.119.4" />
+    <!-- Syntax highlighting for code blocks. TextMateSharp is used standalone
+         for tokenizing, not through AvaloniaEdit: one editor control per fenced
+         block would make transcript rows heavy again, which is the thing this
+         migration exists to avoid. -->
+    <PackageReference Include="TextMateSharp" Version="2.0.4" />
+    <PackageReference Include="TextMateSharp.Grammars" Version="2.0.4" />
+    <!-- LaTeX typesetting. This is the Avalonia half of XAML-Math, the same
+         project the WPF build used as WpfMath, so formulae render from the same
+         engine and the same Computer Modern fonts.
+
+         NU1608 is suppressed deliberately: the package declares
+         Avalonia < 12.0.0, but it was verified against 12.1.1 headless —
+         parse, measure and arrange all succeed. Revisit when an Avalonia 12
+         build ships. -->
+    <PackageReference Include="AvaloniaMath" Version="2.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MolaGPT.Core\MolaGPT.Core.csproj" />
+    <ProjectReference Include="..\MolaGPT.Presentation\MolaGPT.Presentation.csproj" />
+    <ProjectReference Include="..\MolaGPT.Storage\MolaGPT.Storage.csproj" />
+    <ProjectReference Include="..\MolaGPT.ViewModels\MolaGPT.ViewModels.csproj" />
+    <ProjectReference Include="..\MolaGPT.Services\MolaGPT.Services.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\**" />
+  </ItemGroup>
+
+  <!-- Built-in Agent Skills shipped next to the app; SkillManager scans <AppDir>/skills. -->
+  <ItemGroup>
+    <Content Include="..\skills\**\*">
+      <Link>skills\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+
+</Project>

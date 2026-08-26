@@ -1,0 +1,261 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!--
+    Design tokens, ported 1:1 from MolaGPT.Desktop/Themes/Tokens.Light.xaml and
+    Tokens.Dark.xaml.
+
+    The original key names are kept verbatim — "Brush.Primary", "Color.Bg.Canvas",
+    "Radius.Xl" and so on. They are not the names this file would have chosen,
+    but keeping them means any WPF view can be ported by copying its markup and
+    changing syntax only: if a value looks wrong, the two files can be diffed key
+    by key. Renaming would have made every such comparison a manual translation.
+
+    The one structural change: light and dark live in ThemeDictionaries instead
+    of two separate files swapped at runtime, so switching variant is a single
+    property on the Application rather than a dictionary swap plus a walk of the
+    visual tree to refresh every presenter.
+  -->
+
+  <ResourceDictionary.ThemeDictionaries>
+
+    <!-- ================================ LIGHT ================================ -->
+    <ResourceDictionary x:Key="Light">
+
+      <!-- Brand -->
+      <Color x:Key="Color.Primary">#FFBE727F</Color>
+      <Color x:Key="Color.Primary.Hover">#FFA05A66</Color>
+      <Color x:Key="Color.Primary.Active">#FF8E4F5A</Color>
+      <Color x:Key="Color.Primary.Soft">#1ABE727F</Color>
+      <Color x:Key="Color.Primary.Tint">#14BE727F</Color>
+      <Color x:Key="Color.Primary.Blockquote">#0DBE727F</Color>
+      <Color x:Key="Color.Primary.Border">#38BE727F</Color>
+
+      <Color x:Key="Color.Selection">#59BE727F</Color>
+
+      <!-- Surfaces -->
+      <Color x:Key="Color.Bg.Canvas">#FFF2F4F7</Color>
+      <Color x:Key="Color.Bg.Primary">#FFFFFFFF</Color>
+      <Color x:Key="Color.Bg.Secondary">#FFF8F9FA</Color>
+      <Color x:Key="Color.Bg.Tertiary">#FFF1F3F5</Color>
+      <Color x:Key="Color.Bg.Elevated">#FFFFFFFF</Color>
+      <Color x:Key="Color.Bg.HoverOverlay">#0D000000</Color>
+
+      <!-- Text -->
+      <Color x:Key="Color.Text.Primary">#FF212529</Color>
+      <Color x:Key="Color.Text.Secondary">#FF6C757D</Color>
+      <Color x:Key="Color.Text.Muted">#FF8B95A2</Color>
+      <Color x:Key="Color.Text.OnPrimary">#FFFFFFFF</Color>
+
+      <!-- Border -->
+      <Color x:Key="Color.Border">#FFDEE2E6</Color>
+      <Color x:Key="Color.Border.Strong">#FFCBD2DB</Color>
+      <Color x:Key="Color.Border.Subtle">#08000000</Color>
+      <Color x:Key="Color.Divider">#FFEEF1F4</Color>
+
+      <!-- Semantic -->
+      <Color x:Key="Color.Success">#FF2E7D32</Color>
+      <Color x:Key="Color.Warning">#FFF57C00</Color>
+      <Color x:Key="Color.Error">#FFC62828</Color>
+      <Color x:Key="Color.Info">#FF1976D2</Color>
+
+      <Color x:Key="Color.Danger.Surface">#FFFDECEC</Color>
+      <Color x:Key="Color.Danger.Border">#FFE8B0B0</Color>
+      <Color x:Key="Color.Danger.Foreground">#FF8A1C1C</Color>
+      <Color x:Key="Color.Warning.Surface">#FFFFF6E5</Color>
+      <Color x:Key="Color.Warning.Border">#FFE8CE9A</Color>
+      <Color x:Key="Color.Warning.Foreground">#FF7A510C</Color>
+
+      <!-- Carried over unused, as in the original: "shadow color tokens kept
+           for future non-effect treatments". -->
+      <Color x:Key="Color.Shadow.Soft">#0A000000</Color>
+      <Color x:Key="Color.Shadow.Medium">#1F000000</Color>
+
+      <SolidColorBrush x:Key="Brush.Primary" Color="{StaticResource Color.Primary}" />
+      <SolidColorBrush x:Key="Brush.Primary.Hover" Color="{StaticResource Color.Primary.Hover}" />
+      <SolidColorBrush x:Key="Brush.Primary.Active" Color="{StaticResource Color.Primary.Active}" />
+      <SolidColorBrush x:Key="Brush.Primary.Soft" Color="{StaticResource Color.Primary.Soft}" />
+      <SolidColorBrush x:Key="Brush.Primary.Tint" Color="{StaticResource Color.Primary.Tint}" />
+      <SolidColorBrush x:Key="Brush.Primary.Blockquote" Color="{StaticResource Color.Primary.Blockquote}" />
+      <SolidColorBrush x:Key="Brush.Primary.Border" Color="{StaticResource Color.Primary.Border}" />
+      <SolidColorBrush x:Key="Brush.Selection" Color="{StaticResource Color.Selection}" />
+      <SolidColorBrush x:Key="Brush.Bg.Canvas" Color="{StaticResource Color.Bg.Canvas}" />
+      <SolidColorBrush x:Key="Brush.Bg.Primary" Color="{StaticResource Color.Bg.Primary}" />
+      <SolidColorBrush x:Key="Brush.Bg.Secondary" Color="{StaticResource Color.Bg.Secondary}" />
+      <SolidColorBrush x:Key="Brush.Bg.Tertiary" Color="{StaticResource Color.Bg.Tertiary}" />
+      <SolidColorBrush x:Key="Brush.Bg.Elevated" Color="{StaticResource Color.Bg.Elevated}" />
+      <SolidColorBrush x:Key="Brush.Bg.HoverOverlay" Color="{StaticResource Color.Bg.HoverOverlay}" />
+      <SolidColorBrush x:Key="Brush.Text.Primary" Color="{StaticResource Color.Text.Primary}" />
+      <SolidColorBrush x:Key="Brush.Text.Secondary" Color="{StaticResource Color.Text.Secondary}" />
+      <SolidColorBrush x:Key="Brush.Text.Muted" Color="{StaticResource Color.Text.Muted}" />
+      <SolidColorBrush x:Key="Brush.Text.OnPrimary" Color="{StaticResource Color.Text.OnPrimary}" />
+      <SolidColorBrush x:Key="Brush.Border" Color="{StaticResource Color.Border}" />
+      <SolidColorBrush x:Key="Brush.Border.Strong" Color="{StaticResource Color.Border.Strong}" />
+      <SolidColorBrush x:Key="Brush.Border.Subtle" Color="{StaticResource Color.Border.Subtle}" />
+      <SolidColorBrush x:Key="Brush.Divider" Color="{StaticResource Color.Divider}" />
+      <SolidColorBrush x:Key="Brush.Success" Color="{StaticResource Color.Success}" />
+      <SolidColorBrush x:Key="Brush.Warning" Color="{StaticResource Color.Warning}" />
+      <SolidColorBrush x:Key="Brush.Error" Color="{StaticResource Color.Error}" />
+      <SolidColorBrush x:Key="Brush.Info" Color="{StaticResource Color.Info}" />
+      <SolidColorBrush x:Key="Brush.Danger.Surface" Color="{StaticResource Color.Danger.Surface}" />
+      <SolidColorBrush x:Key="Brush.Danger.Border" Color="{StaticResource Color.Danger.Border}" />
+      <SolidColorBrush x:Key="Brush.Danger.Foreground" Color="{StaticResource Color.Danger.Foreground}" />
+      <SolidColorBrush x:Key="Brush.Warning.Surface" Color="{StaticResource Color.Warning.Surface}" />
+      <SolidColorBrush x:Key="Brush.Warning.Border" Color="{StaticResource Color.Warning.Border}" />
+      <SolidColorBrush x:Key="Brush.Warning.Foreground" Color="{StaticResource Color.Warning.Foreground}" />
+    </ResourceDictionary>
+
+    <!-- ================================= DARK ================================= -->
+    <ResourceDictionary x:Key="Dark">
+
+      <Color x:Key="Color.Primary">#FFBE727F</Color>
+      <Color x:Key="Color.Primary.Hover">#FFE1A3AF</Color>
+      <Color x:Key="Color.Primary.Active">#FFA05A66</Color>
+      <Color x:Key="Color.Primary.Soft">#2ECF8996</Color>
+      <Color x:Key="Color.Primary.Tint">#24BE727F</Color>
+      <Color x:Key="Color.Primary.Blockquote">#1ABE727F</Color>
+      <Color x:Key="Color.Primary.Border">#52BE727F</Color>
+
+      <Color x:Key="Color.Selection">#66CF8996</Color>
+
+      <Color x:Key="Color.Bg.Canvas">#FF000000</Color>
+      <Color x:Key="Color.Bg.Primary">#FF1A1A1A</Color>
+      <Color x:Key="Color.Bg.Secondary">#FF2D2D2D</Color>
+      <Color x:Key="Color.Bg.Tertiary">#FF3A3A3A</Color>
+      <Color x:Key="Color.Bg.Elevated">#FF1A1A1A</Color>
+      <Color x:Key="Color.Bg.HoverOverlay">#14FFFFFF</Color>
+
+      <Color x:Key="Color.Text.Primary">#FFE0E0E0</Color>
+      <Color x:Key="Color.Text.Secondary">#FFB4B4B4</Color>
+      <Color x:Key="Color.Text.Muted">#FF9A9A9A</Color>
+      <Color x:Key="Color.Text.OnPrimary">#FFFFFFFF</Color>
+
+      <Color x:Key="Color.Border">#FF404040</Color>
+      <Color x:Key="Color.Border.Strong">#1AFFFFFF</Color>
+      <Color x:Key="Color.Border.Subtle">#14FFFFFF</Color>
+      <Color x:Key="Color.Divider">#FF333333</Color>
+
+      <Color x:Key="Color.Success">#FF4CAF50</Color>
+      <Color x:Key="Color.Warning">#FFFFB74D</Color>
+      <Color x:Key="Color.Error">#FFF44336</Color>
+      <Color x:Key="Color.Info">#FF64B5F6</Color>
+
+      <Color x:Key="Color.Danger.Surface">#FF3A1C1C</Color>
+      <Color x:Key="Color.Danger.Border">#FF8A4545</Color>
+      <Color x:Key="Color.Danger.Foreground">#FFFFC9C9</Color>
+      <Color x:Key="Color.Warning.Surface">#FF3A2E16</Color>
+      <Color x:Key="Color.Warning.Border">#FF8A7040</Color>
+      <Color x:Key="Color.Warning.Foreground">#FFFFE0A8</Color>
+
+      <Color x:Key="Color.Shadow.Soft">#33000000</Color>
+      <Color x:Key="Color.Shadow.Medium">#7F000000</Color>
+
+      <SolidColorBrush x:Key="Brush.Primary" Color="{StaticResource Color.Primary}" />
+      <SolidColorBrush x:Key="Brush.Primary.Hover" Color="{StaticResource Color.Primary.Hover}" />
+      <SolidColorBrush x:Key="Brush.Primary.Active" Color="{StaticResource Color.Primary.Active}" />
+      <SolidColorBrush x:Key="Brush.Primary.Soft" Color="{StaticResource Color.Primary.Soft}" />
+      <SolidColorBrush x:Key="Brush.Primary.Tint" Color="{StaticResource Color.Primary.Tint}" />
+      <SolidColorBrush x:Key="Brush.Primary.Blockquote" Color="{StaticResource Color.Primary.Blockquote}" />
+      <SolidColorBrush x:Key="Brush.Primary.Border" Color="{StaticResource Color.Primary.Border}" />
+      <SolidColorBrush x:Key="Brush.Selection" Color="{StaticResource Color.Selection}" />
+      <SolidColorBrush x:Key="Brush.Bg.Canvas" Color="{StaticResource Color.Bg.Canvas}" />
+      <SolidColorBrush x:Key="Brush.Bg.Primary" Color="{StaticResource Color.Bg.Primary}" />
+      <SolidColorBrush x:Key="Brush.Bg.Secondary" Color="{StaticResource Color.Bg.Secondary}" />
+      <SolidColorBrush x:Key="Brush.Bg.Tertiary" Color="{StaticResource Color.Bg.Tertiary}" />
+      <SolidColorBrush x:Key="Brush.Bg.Elevated" Color="{StaticResource Color.Bg.Elevated}" />
+      <SolidColorBrush x:Key="Brush.Bg.HoverOverlay" Color="{StaticResource Color.Bg.HoverOverlay}" />
+      <SolidColorBrush x:Key="Brush.Text.Primary" Color="{StaticResource Color.Text.Primary}" />
+      <SolidColorBrush x:Key="Brush.Text.Secondary" Color="{StaticResource Color.Text.Secondary}" />
+      <SolidColorBrush x:Key="Brush.Text.Muted" Color="{StaticResource Color.Text.Muted}" />
+      <SolidColorBrush x:Key="Brush.Text.OnPrimary" Color="{StaticResource Color.Text.OnPrimary}" />
+      <SolidColorBrush x:Key="Brush.Border" Color="{StaticResource Color.Border}" />
+      <SolidColorBrush x:Key="Brush.Border.Strong" Color="{StaticResource Color.Border.Strong}" />
+      <SolidColorBrush x:Key="Brush.Border.Subtle" Color="{StaticResource Color.Border.Subtle}" />
+      <SolidColorBrush x:Key="Brush.Divider" Color="{StaticResource Color.Divider}" />
+      <SolidColorBrush x:Key="Brush.Success" Color="{StaticResource Color.Success}" />
+      <SolidColorBrush x:Key="Brush.Warning" Color="{StaticResource Color.Warning}" />
+      <SolidColorBrush x:Key="Brush.Error" Color="{StaticResource Color.Error}" />
+      <SolidColorBrush x:Key="Brush.Info" Color="{StaticResource Color.Info}" />
+      <SolidColorBrush x:Key="Brush.Danger.Surface" Color="{StaticResource Color.Danger.Surface}" />
+      <SolidColorBrush x:Key="Brush.Danger.Border" Color="{StaticResource Color.Danger.Border}" />
+      <SolidColorBrush x:Key="Brush.Danger.Foreground" Color="{StaticResource Color.Danger.Foreground}" />
+      <SolidColorBrush x:Key="Brush.Warning.Surface" Color="{StaticResource Color.Warning.Surface}" />
+      <SolidColorBrush x:Key="Brush.Warning.Border" Color="{StaticResource Color.Warning.Border}" />
+      <SolidColorBrush x:Key="Brush.Warning.Foreground" Color="{StaticResource Color.Warning.Foreground}" />
+    </ResourceDictionary>
+  </ResourceDictionary.ThemeDictionaries>
+
+  <!-- ===================== variant-independent ===================== -->
+
+  <!-- Sizing -->
+  <x:Double x:Key="Size.Sidebar.Width">280</x:Double>
+  <x:Double x:Key="Size.Sidebar.Collapsed">80</x:Double>
+  <!-- Carried over verbatim, and unused — the WPF title bar hardcodes
+       Height="46" and never reads this token. Size.TitleBar.Height below is
+       what the bar actually uses; both are kept so a diff against the original
+       token file comes back clean and the discrepancy stays visible. -->
+  <x:Double x:Key="Size.TopBar.Height">56</x:Double>
+  <x:Double x:Key="Size.TitleBar.Height">46</x:Double>
+  <x:Double x:Key="Size.Composer.MaxWidth">900</x:Double>
+  <x:Double x:Key="Size.Composer.MinHeight">120</x:Double>
+  <x:Double x:Key="Size.SendButton">32</x:Double>
+  <!-- Reading measures from MessageItemView: the assistant column is capped so
+       maximising the window leaves whitespace rather than stretching prose edge
+       to edge, and the user bubble is narrower still. -->
+  <x:Double x:Key="Size.Assistant.MaxWidth">820</x:Double>
+  <x:Double x:Key="Size.UserBubble.MaxWidth">640</x:Double>
+
+  <!-- Radii -->
+  <!--
+    The radius scale. Nothing in the app is allowed a literal any more: every
+    CornerRadius names one of these, because thirteen distinct values were in
+    use (3, 7, 8, 9, 11, 12, 22 among them) and adjacent surfaces disagreed by
+    a pixel or two in ways that read as sloppiness rather than as intent.
+
+    Which step to reach for:
+      Xs    thumbnails inside a chip (24–36px squares)
+      Sm    inputs, search boxes, small badges, the mode segments
+      Md    buttons, cards, list rows, tool chips — the workhorse
+      Lg    large inner cards
+      Xl    floating panels, large avatars and image workbenches
+      Xxl   the shell cards (sidebar, chat, artifacts) — the outermost radius
+      Pill  anything whose radius should just be half its height
+
+    Values are unchanged from the WPF build, which was verified key by key.
+  -->
+  <CornerRadius x:Key="Radius.2xs">4</CornerRadius>
+  <CornerRadius x:Key="Radius.Web.Sm">6</CornerRadius>
+  <CornerRadius x:Key="Radius.Xs">4</CornerRadius>
+  <CornerRadius x:Key="Radius.Sm">6</CornerRadius>
+  <CornerRadius x:Key="Radius.Md">10</CornerRadius>
+  <CornerRadius x:Key="Radius.Lg">16</CornerRadius>
+  <CornerRadius x:Key="Radius.Xl">20</CornerRadius>
+  <CornerRadius x:Key="Radius.Xxl">24</CornerRadius>
+  <CornerRadius x:Key="Radius.Pill">999</CornerRadius>
+  <!-- Asymmetric user bubble: the flat corner is top-right, beside the avatar. -->
+  <CornerRadius x:Key="Radius.UserBubble">10,0,10,10</CornerRadius>
+
+  <Thickness x:Key="Padding.Tight">8</Thickness>
+  <Thickness x:Key="Padding.Md">12</Thickness>
+  <Thickness x:Key="Padding.Lg">16</Thickness>
+  <Thickness x:Key="Padding.Xl">20</Thickness>
+
+  <!-- Fonts. Geist ships with the app; the CJK stack behind it is what actually
+       renders most body copy, and Font.Icon / Font.FA.Solid supply the glyphs
+       the original views address by code point. -->
+  <FontFamily x:Key="Font.Latin">avares://MolaGPT.Desktop/Assets/Fonts#Geist,Segoe UI Variable,Segoe UI,Helvetica Neue,Arial,sans-serif</FontFamily>
+  <FontFamily x:Key="Font.Cjk">Noto Sans CJK SC,Noto Sans SC,PingFang SC,Hiragino Sans GB,Microsoft YaHei UI,Microsoft YaHei,SimHei,Segoe UI,sans-serif</FontFamily>
+  <FontFamily x:Key="Font.UI">avares://MolaGPT.Desktop/Assets/Fonts#Geist,Noto Sans SC,Noto Sans CJK SC,PingFang SC,Hiragino Sans GB,Microsoft YaHei UI,Microsoft YaHei,Segoe UI Variable,Segoe UI,Helvetica Neue,Arial,sans-serif</FontFamily>
+  <FontFamily x:Key="Font.Mono">SFMono-Regular,Consolas,Liberation Mono,Menlo,Cascadia Code,Cascadia Mono,Courier,monospace</FontFamily>
+  <FontFamily x:Key="Font.Icon">Segoe Fluent Icons,Segoe MDL2 Assets</FontFamily>
+  <FontFamily x:Key="Font.FA.Solid">avares://MolaGPT.Desktop/Assets/fa-solid-900.ttf#Font Awesome 5 Free</FontFamily>
+
+  <x:Double x:Key="Font.Size.XSmall">11</x:Double>
+  <x:Double x:Key="Font.Size.Small">12</x:Double>
+  <x:Double x:Key="Font.Size.Body">14</x:Double>
+  <x:Double x:Key="Font.Size.BodyLg">15</x:Double>
+  <x:Double x:Key="Font.Size.Heading">18</x:Double>
+  <x:Double x:Key="Font.Size.Title">24</x:Double>
+  <x:Double x:Key="Font.Size.Welcome">28</x:Double>
+
+</ResourceDictionary>
