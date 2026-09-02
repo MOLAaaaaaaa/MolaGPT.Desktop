@@ -1,13 +1,12 @@
 using System.Diagnostics;
 using Avalonia.Controls;
-using Avalonia.Input;
 using MolaGPT.Desktop.Services;
 
 namespace MolaGPT.App.Views;
 
 public sealed record AboutDependency(string Name, string Description, string License);
 
-public partial class AboutWindow : MolaWindow
+public partial class AboutWindow : MolaContentWindow
 {
     private const string GitHubUrl = "https://github.com/MOLAaaaaaaa/MolaGPT.Desktop";
     private readonly UpdateCheckService _updateCheck;
@@ -22,7 +21,6 @@ public partial class AboutWindow : MolaWindow
         PART_DependencyList.ItemsSource = Dependencies;
         PART_LicenseText.Text = LicenseNotice;
 
-        PART_Header.PointerPressed += OnHeaderPointerPressed;
         PART_Close.Click += (_, _) => Close();
         PART_CheckUpdate.Click += CheckUpdate;
         PART_GitHub.Click += (_, _) => OpenUrl(GitHubUrl);
@@ -89,12 +87,6 @@ public partial class AboutWindow : MolaWindow
         }
     }
 
-    private void OnHeaderPointerPressed(object? sender, PointerPressedEventArgs e)
-    {
-        if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
-            BeginMoveDrag(e);
-    }
-
     private static Version? ParseVersion(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return null;
@@ -109,6 +101,7 @@ public partial class AboutWindow : MolaWindow
         new("Avalonia UI", "跨平台桌面界面框架", "MIT"),
         new("Markdig", "CommonMark Markdown 解析引擎", "BSD-2-Clause"),
         new("AvaloniaMath", "LaTeX 数学公式渲染（含字体）", "MIT / OFL-1.1"),
+        new("CSharpMath", "LaTeX 数学公式渲染（含字体）", "MIT / GUST / OFL-1.1"),
         new("TextMateSharp", "代码语法分析与高亮", "MIT"),
         new("SkiaSharp", "图像解码与处理", "MIT"),
         new("CommunityToolkit.Mvvm", "MVVM 框架", "MIT"),
@@ -125,7 +118,7 @@ MolaGPT Desktop 使用了以下开源组件，并依据其许可证要求保留�
 ================================================================
 MIT License
 ================================================================
-适用组件：Avalonia UI、AvaloniaMath（代码部分）、TextMateSharp、SkiaSharp、
+适用组件：Avalonia UI、AvaloniaMath（代码部分）、CSharpMath（代码部分）、TextMateSharp、SkiaSharp、
 CommunityToolkit.Mvvm、Microsoft.Data.Sqlite、Microsoft.Extensions.*。
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -191,10 +184,13 @@ SQLite Public Domain Dedication
 SQLite is in the public domain. 详情见：https://sqlite.org/copyright.html
 
 ================================================================
-SIL Open Font License 1.1 / Creative Commons Attribution 4.0
+GUST Font License / SIL Open Font License 1.1 / Creative Commons Attribution 4.0
 ================================================================
-AvaloniaMath 内置字体与 Geist 依据 SIL OFL 1.1 发布；Font Awesome Free
-图标字形依据 CC BY 4.0 发布。完整条款见：
+CSharpMath 使用的 Latin Modern Math 字体依据 GUST Font License 发布；
+CSharpMath 的 Cyrillic Modern、AMS 字体、AvaloniaMath 内置字体与 Geist
+依据 SIL OFL 1.1 发布；Font Awesome Free 图标字形依据 CC BY 4.0 发布。
+完整条款见：
+https://www.gust.org.pl/projects/e-foundry/licenses/GUST-FONT-LICENSE.txt/view
 https://openfontlicense.org
 https://creativecommons.org/licenses/by/4.0/
 """;

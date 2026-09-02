@@ -218,7 +218,7 @@ public sealed class MolaGptMarkupBlockView : ContentControl
             titles.Children.Add(new TextBlock
             {
                 Text = subtitle,
-                FontSize = 11,
+                FontSize = 12,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 TextWrapping = TextWrapping.NoWrap,
                 Foreground = Brush("Brush.Text.Muted")
@@ -236,7 +236,7 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         var statusText = new TextBlock
         {
             Text = status,
-            FontSize = 10,
+            FontSize = 11,
             FontWeight = FontWeight.SemiBold,
             Foreground = Brush(error ? "Brush.Error" : "Brush.Text.Muted")
         };
@@ -283,7 +283,7 @@ public sealed class MolaGptMarkupBlockView : ContentControl
             row.Children.Add(new TextBlock
             {
                 Text = badge,
-                FontSize = 10,
+                FontSize = 11,
                 Foreground = Brush("Brush.Text.Muted"),
                 VerticalAlignment = VerticalAlignment.Center
             });

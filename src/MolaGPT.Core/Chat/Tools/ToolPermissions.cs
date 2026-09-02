@@ -24,6 +24,37 @@ public enum ToolPermissionMode
     FullAccess
 }
 
+/// <summary>
+/// Paths the local tools refuse regardless of settings or permission mode.
+///
+/// Only the credential store: it holds every provider API key at once, and an
+/// approval dialog is a poor defence for that one file — it names a path, the
+/// user is mid-task, and a single careless click leaks all of them. Not a
+/// default for the user-facing deny list, because a default can be cleared by
+/// anyone editing that field for an unrelated reason.
+///
+/// Enforced where a resolved absolute path exists (the read-only file tools);
+/// advisory where only source text does (the Python analyzer sees literal paths,
+/// not ones assembled at runtime). It raises the floor; it is not a boundary.
+/// </summary>
+public static class ProtectedPaths
+{
+    public static IReadOnlyList<string> All { get; } = BuildAll();
+
+    private static IReadOnlyList<string> BuildAll()
+    {
+        // Must match where AppServices creates the CredentialStore.
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return string.IsNullOrWhiteSpace(localAppData)
+            ? Array.Empty<string>()
+            : new[] { Path.Combine(localAppData, "MolaGPT", "creds.json") };
+    }
+
+    /// <summary>The caller's deny list with the built-ins folded in, first.</summary>
+    public static IReadOnlyList<string> Combine(IReadOnlyList<string>? configured) =>
+        configured is null || configured.Count == 0 ? All : All.Concat(configured).ToArray();
+}
+
 /// <param name="ResolvedPath">The absolute path this call will actually touch,
 /// resolved the same way the tool resolves it. Present whenever
 /// <see cref="ToolCapability.OutsideWorkspace"/> is set, because that decision

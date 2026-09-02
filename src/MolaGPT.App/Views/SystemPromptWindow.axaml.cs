@@ -6,7 +6,7 @@ using MolaGPT.ViewModels.Services;
 
 namespace MolaGPT.App.Views;
 
-public partial class SystemPromptWindow : MolaWindow
+public partial class SystemPromptWindow : MolaContentWindow
 {
     private ChatViewModel? _chat;
     private bool _hasPersona;
@@ -15,7 +15,6 @@ public partial class SystemPromptWindow : MolaWindow
     public SystemPromptWindow()
     {
         InitializeComponent();
-        PART_Header.PointerPressed += OnHeaderPointerPressed;
         PART_Close.Click += (_, _) => Close(false);
         PART_Cancel.Click += (_, _) => Close(false);
         PART_Save.Click += (_, _) => Save();
@@ -189,11 +188,6 @@ public partial class SystemPromptWindow : MolaWindow
         PART_Prompt.Text = text[..start] + token + text[end..];
         PART_Prompt.CaretIndex = start + token.Length;
         PART_Prompt.Focus();
-    }
-
-    private void OnHeaderPointerPressed(object? sender, PointerPressedEventArgs e)
-    {
-        if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) BeginMoveDrag(e);
     }
 
     private void OnKeyDown(object? sender, KeyEventArgs e)

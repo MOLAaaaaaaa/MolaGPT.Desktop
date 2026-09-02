@@ -72,6 +72,7 @@ public sealed class CloudSyncService
     private readonly MessageRepository _messages;
     private readonly SettingsRepository _settings;
     private int _isSyncing;
+    private volatile bool _syncIsUserInitiated;
     private CancellationTokenSource? _periodicSyncCts;
 
     public event EventHandler<CloudSyncStatusChangedEventArgs>? StatusChanged;
@@ -95,10 +96,16 @@ public sealed class CloudSyncService
     public async Task<CloudSyncResult> SyncAsync(
         IProgress<string>? progress = null,
         CancellationToken ct = default,
-        bool publishStatus = true)
+        bool publishStatus = true,
+        bool userInitiated = true)
     {
         if (Interlocked.Exchange(ref _isSyncing, 1) == 1)
             throw new InvalidOperationException("云同步正在进行中。");
+
+        // Carried on the status event so the shell can tell "you asked for this"
+        // from "the timer fired". Progress and success are only worth announcing
+        // for the former; failures are worth announcing either way.
+        _syncIsUserInitiated = userInitiated;
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(SyncTimeout);
@@ -210,6 +217,7 @@ public sealed class CloudSyncService
         }
         finally
         {
+            _syncIsUserInitiated = false;
             Interlocked.Exchange(ref _isSyncing, 0);
         }
     }
@@ -230,9 +238,17 @@ public sealed class CloudSyncService
         cts.Dispose();
     }
 
-    public async Task<CloudSyncResult?> RequestForegroundSyncAsync(CancellationToken ct = default)
+    /// <param name="userInitiated">
+    /// False for syncs the app starts on its own (the one at launch, for
+    /// example). Those still update the header chip, but they do not narrate
+    /// themselves with a banner — the user did not ask, so there is nothing to
+    /// report unless it fails.
+    /// </param>
+    public async Task<CloudSyncResult?> RequestForegroundSyncAsync(
+        CancellationToken ct = default,
+        bool userInitiated = true)
     {
-        return await TryPeriodicSyncAsync(ct, publishStatus: true).ConfigureAwait(false);
+        return await TryPeriodicSyncAsync(ct, publishStatus: true, userInitiated).ConfigureAwait(false);
     }
 
     private async Task RunPeriodicSyncAsync(CancellationToken ct)
@@ -242,13 +258,16 @@ public sealed class CloudSyncService
             using var timer = new PeriodicTimer(PeriodicSyncInterval);
             while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
             {
-                await TryPeriodicSyncAsync(ct, publishStatus: true).ConfigureAwait(false);
+                await TryPeriodicSyncAsync(ct, publishStatus: true, userInitiated: false).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) { }
     }
 
-    private async Task<CloudSyncResult?> TryPeriodicSyncAsync(CancellationToken ct, bool publishStatus)
+    private async Task<CloudSyncResult?> TryPeriodicSyncAsync(
+        CancellationToken ct,
+        bool publishStatus,
+        bool userInitiated)
     {
         if (string.IsNullOrWhiteSpace(_auth.CurrentJwt)) return null;
         if (bool.TryParse(_settings.Get(SyncEnabledKey), out var enabled) && !enabled)
@@ -258,7 +277,7 @@ public sealed class CloudSyncService
 
         try
         {
-            return await SyncAsync(null, ct, publishStatus).ConfigureAwait(false);
+            return await SyncAsync(null, ct, publishStatus, userInitiated).ConfigureAwait(false);
         }
         catch
         {
@@ -2184,7 +2203,8 @@ public sealed class CloudSyncService
 
     private void PublishStatus(CloudSyncState state, string message)
     {
-        StatusChanged?.Invoke(this, new CloudSyncStatusChangedEventArgs(state, message, DateTimeOffset.Now));
+        StatusChanged?.Invoke(this, new CloudSyncStatusChangedEventArgs(
+            state, message, DateTimeOffset.Now, _syncIsUserInitiated));
     }
 }
 
@@ -2222,4 +2242,5 @@ public enum CloudSyncState
 public sealed record CloudSyncStatusChangedEventArgs(
     CloudSyncState State,
     string Message,
-    DateTimeOffset Timestamp);
+    DateTimeOffset Timestamp,
+    bool IsUserInitiated = false);

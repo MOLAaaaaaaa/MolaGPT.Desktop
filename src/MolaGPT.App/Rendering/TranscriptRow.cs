@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using MolaGPT.Presentation;
 using MolaGPT.ViewModels;
 
@@ -69,15 +70,43 @@ public sealed class ProseRow : TranscriptRow
     public RenderBlock Block { get; }
 }
 
-public sealed class ToolRow : TranscriptRow
+public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged
 {
+    private bool _isExpanded;
+    private bool _bodyLoaded;
+
     public ToolRow(MessageViewModel message, ToolCallViewModel tool, int segment)
         : base(message, $"{message.RowKey()}:{segment}:tool")
         => Tool = tool;
 
     public ToolCallViewModel Tool { get; }
 
-    public bool IsExpanded { get; set; }
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set
+        {
+            if (_isExpanded == value) return;
+            _isExpanded = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsExpanded)));
+
+            if (!value || _bodyLoaded) return;
+            _bodyLoaded = true;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(BodyContent)));
+        }
+    }
+
+    /// <summary>The expensive payload view is materialized only after the card
+    /// has actually been opened. It stays enabled afterwards so closing can
+    /// animate and reopening the same realized card is immediate.</summary>
+    public ToolRow? BodyContent => _bodyLoaded ? this : null;
+
+    // The raw folds keep their own open state here rather than in the control,
+    // so scrolling a card out of view and back does not undo the choice.
+    public bool IsArgumentsExpanded { get; set; }
+    public bool IsResultExpanded { get; set; }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
 
 public sealed class ToolGroupRow : TranscriptRow

@@ -16,6 +16,8 @@ namespace MolaGPT.App.Rendering;
 /// </summary>
 public sealed class CodeTextBlock : SelectableTextBlock
 {
+    private (string? Code, string? Language, bool Dark)? _rendered;
+
     public static readonly StyledProperty<string?> CodeProperty =
         AvaloniaProperty.Register<CodeTextBlock, string?>(nameof(Code));
 
@@ -61,6 +63,12 @@ public sealed class CodeTextBlock : SelectableTextBlock
     private void Rebuild()
     {
         var code = Code;
+        var language = Language;
+        var dark = ActualThemeVariant == ThemeVariant.Dark;
+        var state = (code, language, dark);
+        if (_rendered == state) return;
+        _rendered = state;
+
         if (string.IsNullOrEmpty(code))
         {
             Inlines?.Clear();
@@ -68,8 +76,7 @@ public sealed class CodeTextBlock : SelectableTextBlock
             return;
         }
 
-        var dark = ActualThemeVariant == ThemeVariant.Dark;
-        var runs = CodeHighlighter.Highlight(code, Language, dark);
+        var runs = CodeHighlighter.Highlight(code, language, dark);
 
         if (runs is null)
         {

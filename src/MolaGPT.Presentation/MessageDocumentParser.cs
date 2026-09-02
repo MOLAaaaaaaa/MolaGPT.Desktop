@@ -200,6 +200,18 @@ public static partial class MessageDocumentParser
     /// The view needs depth plus the item's own inline markdown; it does not
     /// need the tree. Flattening here keeps the view a straight loop and means
     /// a deeply nested list cannot recurse the UI layer.
+    ///
+    /// Two properties this has to hold, both of which it once did not:
+    ///
+    ///  1. Document order. A nested list written between two of its parent's
+    ///     paragraphs renders there. Collecting the parent's blocks first and
+    ///     recursing afterwards hoisted that bullet below every paragraph of the
+    ///     item — for a reasoning block with one numbered point and forty
+    ///     indented paragraphs, a bullet from the second line surfaced thousands
+    ///     of lines further down, looking frozen while the text above it moved.
+    ///  2. One entry per block. Joining an item's blocks into a single string
+    ///     ran its paragraphs together *and* made the entry grow without bound,
+    ///     so the view had to rebuild one enormous text block per delta.
     /// </summary>
     private static List<ListItem> FlattenList(MdList list, string segment)
     {
@@ -215,24 +227,28 @@ public static partial class MessageDocumentParser
             {
                 if (child is not Markdig.Syntax.ListItemBlock item) continue;
 
-                // The item's own text is its leaf blocks; a nested list under it
-                // is a separate child and is recursed into rather than inlined.
-                var text = new List<string>();
-                var nested = new List<MdList>();
+                // Only the item's first block gets the marker; everything after
+                // it is a continuation of the same entry.
+                var marked = false;
 
                 foreach (var part in item)
                 {
-                    if (part is MdList inner) nested.Add(inner);
-                    else if (SliceOf(part, segment) is { Length: > 0 } s) text.Add(s);
+                    if (part is MdList inner)
+                    {
+                        Walk(inner, depth + 1);
+                        continue;
+                    }
+
+                    if (SliceOf(part, segment) is not { Length: > 0 } slice) continue;
+                    if (slice.Trim() is not { Length: > 0 } text) continue;
+
+                    items.Add(new ListItem(text, depth, current.IsOrdered, number, marked));
+                    marked = true;
                 }
 
-                items.Add(new ListItem(
-                    string.Join(" ", text).Trim(),
-                    depth,
-                    current.IsOrdered,
-                    number++));
-
-                foreach (var inner in nested) Walk(inner, depth + 1);
+                // An item whose only content is a nested list still consumes a
+                // number: "1." then a sub-list then "2." must not renumber.
+                number++;
             }
         }
     }
@@ -370,7 +386,16 @@ public static partial class MessageDocumentParser
         int segmentStart,
         List<RenderBlock> blocks,
         Dictionary<string, int> seen,
-        CancellationToken ct)
+        CancellationToken ct) =>
+        AppendMarkdownBlocks(segment, segmentStart, blocks, seen, ct, splitDisplayMath: true);
+
+    private static void AppendMarkdownBlocks(
+        string segment,
+        int segmentStart,
+        List<RenderBlock> blocks,
+        Dictionary<string, int> seen,
+        CancellationToken ct,
+        bool splitDisplayMath)
     {
         if (segment.Length == 0) return;
 
@@ -383,8 +408,66 @@ public static partial class MessageDocumentParser
             if (length <= 0) continue;
             var slice = segment.Substring(start, length);
 
+            if (splitDisplayMath
+                && node is MdParagraph
+                && TryAppendDisplayMathParagraph(
+                    slice, segmentStart + start, blocks, seen, ct))
+            {
+                continue;
+            }
+
             blocks.Add(Classify(node, segment, slice, segmentStart + start, length, seen));
         }
+    }
+
+    private static bool TryAppendDisplayMathParagraph(
+        string markdown,
+        int sourceStart,
+        List<RenderBlock> blocks,
+        Dictionary<string, int> seen,
+        CancellationToken ct)
+    {
+        var spans = LatexDisplayParser.Find(markdown);
+        if (spans.Count == 0) return false;
+
+        var cursor = 0;
+        foreach (var span in spans)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (span.Start > cursor)
+            {
+                AppendMarkdownBlocks(
+                    markdown[cursor..span.Start],
+                    sourceStart + cursor,
+                    blocks,
+                    seen,
+                    ct,
+                    splitDisplayMath: false);
+            }
+
+            var formula = markdown.Substring(span.FormulaStart, span.FormulaLength).Trim();
+            blocks.Add(new MathBlock
+            {
+                Latex = formula,
+                SourceStart = sourceStart + span.Start,
+                SourceLength = span.Length,
+                Key = MakeKey("math", formula, seen)
+            });
+            cursor = span.Start + span.Length;
+        }
+
+        if (cursor < markdown.Length)
+        {
+            AppendMarkdownBlocks(
+                markdown[cursor..],
+                sourceStart + cursor,
+                blocks,
+                seen,
+                ct,
+                splitDisplayMath: false);
+        }
+
+        return true;
     }
 
     /// <param name="segment">The text the node's spans index into. Needed because

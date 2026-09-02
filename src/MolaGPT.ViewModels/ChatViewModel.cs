@@ -855,8 +855,49 @@ public sealed partial class ChatViewModel : ObservableObject
     public void AttachTransientMessage(MessageViewModel vm)
     {
         if (Messages.Contains(vm)) return;
+
+        // A regenerated message already exists in the store, so loading the
+        // conversation on the way back rebuilt it from the row — which still holds
+        // the attempt being replaced. The streaming instance is the live one; it
+        // takes that copy's place instead of appearing next to it.
+        if (!string.IsNullOrWhiteSpace(vm.MessageId))
+        {
+            var stale = Messages.FirstOrDefault(m =>
+                string.Equals(m.MessageId, vm.MessageId, StringComparison.Ordinal));
+            if (stale is not null)
+            {
+                var at = Messages.IndexOf(stale);
+                Messages.RemoveAt(at);
+                Messages.Insert(at, vm);
+                UpdateLatestAssistantFlags();
+                return;
+            }
+        }
+
         Messages.Add(vm);
         UpdateLatestAssistantFlags();
+    }
+
+    /// <summary>
+    /// Finish an assistant message that is already in the store — a retry.
+    ///
+    /// The difference from <see cref="FinalizeAssistantMessage(string, MessageViewModel)"/>
+    /// is the persistence verb: that one inserts, which for a regenerated answer
+    /// would leave two rows for one bubble. Touching the conversation still matters
+    /// though — cloud sync picks work up by <c>updated_at</c>, and updating a
+    /// message row alone does not move it, so without this the server keeps serving
+    /// the attempt the user threw away.
+    /// </summary>
+    public void CompleteRetriedAssistantMessage(string conversationId, MessageViewModel vm)
+    {
+        vm.StopPending();
+        vm.FlushPendingDelta();
+        vm.IsStreaming = false;
+        vm.StopThinking();
+        UpdatePersistedMessage(vm);
+
+        if (string.IsNullOrWhiteSpace(conversationId)) TouchConversation();
+        else TouchConversation(conversationId);
     }
 
     public void ApplyExternalConversationTitle(string conversationId, string title)

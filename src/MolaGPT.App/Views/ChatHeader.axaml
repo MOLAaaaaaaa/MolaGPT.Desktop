@@ -167,7 +167,7 @@
                                    TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
                         <Border Grid.Column="1" IsVisible="{Binding SupportsEdit}"
                                 Classes="capbadge" Margin="8,0,0,0">
-                          <TextBlock Text="可编辑" FontSize="10" />
+                          <TextBlock Text="可编辑" FontSize="11" />
                         </Border>
                       </Grid>
                     </DataTemplate>
@@ -186,23 +186,23 @@
           <StackPanel Classes="inlinerow compact" Orientation="Horizontal">
             <TextBlock Classes="icon" Text="&#xE777;" FontSize="12" Margin="0,0,6,0"
                        Foreground="{DynamicResource Brush.Primary}" />
-            <TextBlock Text="{Binding UpdateChipLabel}" FontSize="11" FontWeight="SemiBold"
+            <TextBlock Text="{Binding UpdateChipLabel}" FontSize="12" FontWeight="SemiBold"
                        Foreground="{DynamicResource Brush.Primary}" />
-            <TextBlock Text="{Binding UpdateChipDetail}" FontSize="11" Margin="5,0,0,0"
+            <TextBlock Text="{Binding UpdateChipDetail}" FontSize="12" Margin="5,0,0,0"
                        Foreground="{DynamicResource Brush.Primary}" Opacity="0.75" />
           </StackPanel>
         </Button>
 
+        <!-- A light, not a message. What the sync actually did is announced by
+             a notification banner; the chip only says it is happening now. -->
         <Button Name="PART_CloudSync" Classes="statuschip" Margin="0,0,6,0"
-                MinWidth="116" IsVisible="{Binding IsCloudSyncChipVisible}"
+                IsVisible="{Binding IsCloudSyncChipVisible}"
                 ToolTip.Tip="{Binding CloudSyncStatusToolTip}"
                 Command="{Binding SyncCloudCommand}">
           <StackPanel Classes="inlinerow compact" Orientation="Horizontal">
             <Ellipse Name="PART_CloudDot" Width="7" Height="7" Margin="0,0,7,0"
                      Fill="{DynamicResource Brush.Text.Muted}" VerticalAlignment="Center" />
-            <TextBlock Classes="icon" Text="&#xE753;" FontSize="12" Margin="0,0,6,0" />
-            <TextBlock Text="{Binding CloudSyncStatusText}" FontSize="11" FontWeight="SemiBold"
-                       MaxWidth="150" TextTrimming="CharacterEllipsis" />
+            <TextBlock Classes="icon" Text="&#xE753;" FontSize="12" />
           </StackPanel>
         </Button>
 

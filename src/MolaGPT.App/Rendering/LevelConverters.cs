@@ -17,7 +17,7 @@ public static class LevelConverters
         {
             1 => 24,
             2 => 18,
-            _ => 15
+            _ => 16
         });
 
     public static readonly IValueConverter HeadingFontWeight =

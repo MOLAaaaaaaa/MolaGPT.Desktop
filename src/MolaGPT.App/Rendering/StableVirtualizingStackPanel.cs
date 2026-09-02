@@ -29,6 +29,7 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
 
     private Rect _viewport;
     private double[] _positions = [0];
+    private bool _positionsDirty = true;
     private IScrollAnchorProvider? _anchorProvider;
     private int _scrollToIndex = -1;
 
@@ -39,10 +40,13 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
 
     protected override Size MeasureOverride(Size availableSize)
     {
+        var traceStarted = AnimationPerformanceTrace.Timestamp();
         if (Items.Count == 0)
         {
             RecycleAll();
             _positions = [0];
+            _positionsDirty = false;
+            AnimationPerformanceTrace.PanelMeasureFinished(traceStarted, 0, 0, 0, -1);
             return default;
         }
 
@@ -50,9 +54,9 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
         var viewport = MeasureViewport(availableSize);
         var maxWidth = 0d;
 
-        // A measured height can change the end of the realization range. Two
-        // passes are sufficient: the second uses the exact sizes learned by the
-        // first and fills any newly exposed space.
+        // A measured height can change the end of the realization range. A
+        // second pass is needed only when the first pass actually moves that
+        // boundary; running it unconditionally doubled expansion layout work.
         for (var pass = 0; pass < 2; pass++)
         {
             var (first, last) = RangeFor(viewport);
@@ -78,25 +82,42 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
                     || Math.Abs(previous - measured) > 0.25)
                 {
                     _heights[realized.Item] = measured;
+                    _positionsDirty = true;
                 }
             }
 
             BuildPositions();
+            var nextRange = RangeFor(viewport);
+            if (_scrollToIndex >= 0)
+            {
+                nextRange.First = Math.Min(nextRange.First, _scrollToIndex);
+                nextRange.Last = Math.Max(nextRange.Last, _scrollToIndex);
+            }
+
+            if (nextRange == (first, last)) break;
         }
 
         var finalRange = RangeFor(viewport);
         RecycleOutside(finalRange.First, finalRange.Last);
 
         var desiredWidth = double.IsInfinity(availableSize.Width) ? maxWidth : availableSize.Width;
+        AnimationPerformanceTrace.PanelMeasureFinished(
+            traceStarted,
+            Items.Count,
+            _realized.Count,
+            finalRange.First,
+            finalRange.Last);
         return new Size(desiredWidth, _positions[^1]);
     }
 
     protected override Size ArrangeOverride(Size finalSize)
     {
+        var traceStarted = AnimationPerformanceTrace.Timestamp();
         BuildPositions();
 
         Control? anchorCandidate = null;
-        foreach (var realized in _realized.Values.OrderBy(x => x.Index))
+        var anchorIndex = int.MaxValue;
+        foreach (var realized in _realized.Values)
         {
             if (realized.Index < 0 || realized.Index >= Items.Count) continue;
 
@@ -105,17 +126,22 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
             var bounds = new Rect(0, top, finalSize.Width, height);
             realized.Control.Arrange(bounds);
 
-            if (anchorCandidate is null
+            if (realized.Index < anchorIndex
                 && realized.Control.IsVisible
                 && _viewport.Intersects(bounds))
             {
                 anchorCandidate = realized.Control;
+                anchorIndex = realized.Index;
             }
         }
 
         if (anchorCandidate is not null && _registeredAnchors.Add(anchorCandidate))
             _anchorProvider?.RegisterAnchorCandidate(anchorCandidate);
 
+        AnimationPerformanceTrace.PanelArrangeFinished(
+            traceStarted,
+            Items.Count,
+            _realized.Count);
         return finalSize;
     }
 
@@ -142,6 +168,7 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
         IReadOnlyList<object?> items,
         NotifyCollectionChangedEventArgs e)
     {
+        _positionsDirty = true;
         if (e.Action == NotifyCollectionChangedAction.Reset)
         {
             RecycleAll();
@@ -230,8 +257,21 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
     {
         var next = e.EffectiveViewport.Intersect(new Rect(Bounds.Size));
         if (next == _viewport) return;
+        var previous = _viewport;
+        var previousRange = previous.Height > 0
+            ? RangeFor(AddCache(previous))
+            : (-1, -1);
+        var previousAnchor = VisibleIndex(previous);
+        var nextRange = next.Height > 0
+            ? RangeFor(AddCache(next))
+            : (-1, -1);
+        var nextAnchor = VisibleIndex(next);
         _viewport = next;
-        InvalidateMeasure();
+
+        if (previousRange != nextRange)
+            InvalidateMeasure();
+        else if (previousAnchor != nextAnchor)
+            InvalidateArrange();
     }
 
     private Rect MeasureViewport(Size availableSize)
@@ -245,11 +285,19 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
             viewport = new Rect(0, 0, Math.Max(availableSize.Width, 1), initialHeight);
         }
 
+        return AddCache(viewport);
+    }
+
+    private Rect AddCache(Rect viewport)
+    {
         var cache = viewport.Height * CacheScreens;
         var top = Math.Max(0, viewport.Top - cache);
         var bottom = Math.Min(_positions[^1], viewport.Bottom + cache);
         return new Rect(viewport.X, top, viewport.Width, Math.Max(0, bottom - top));
     }
+
+    private int VisibleIndex(Rect viewport) =>
+        Items.Count == 0 || viewport.Height <= 0 ? -1 : FindIndex(viewport.Top);
 
     private (int First, int Last) RangeFor(Rect viewport)
     {
@@ -272,6 +320,7 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
 
     private void BuildPositions()
     {
+        if (!_positionsDirty && _positions.Length == Items.Count + 1) return;
         if (_positions.Length != Items.Count + 1)
             _positions = new double[Items.Count + 1];
 
@@ -284,14 +333,17 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
                 : EstimateHeight(item);
             _positions[i + 1] = _positions[i] + height;
         }
+
+        _positionsDirty = false;
     }
 
     private static double EstimateHeight(object? item) => item switch
     {
         HeaderRow => 60,
         UserMessageRow => 96,
-        ToolRow => 56,
+        ToolRow => 80,
         ToolGroupRow => 56,
+        ThinkingRow { Segment.IsExpanded: false } => 42,
         ThinkingRow => 88,
         PendingRow => 48,
         ActionRow => 40,

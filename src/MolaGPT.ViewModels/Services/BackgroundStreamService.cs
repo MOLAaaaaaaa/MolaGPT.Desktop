@@ -22,6 +22,14 @@ public sealed class BackgroundStreamTask
     public bool GenerateTitleOnCompletion { get; init; }
     public bool CompletedSuccessfully { get; set; }
 
+    /// <summary>
+    /// This stream is replacing an answer that already exists rather than adding a
+    /// new one. The assistant message is therefore already in the store, so it must
+    /// be updated on completion — persisting it the normal way would insert a
+    /// second copy of the same bubble.
+    /// </summary>
+    public bool IsRegeneration { get; init; }
+
     public string? SessionId { get; init; }
     public string? ApiUrl { get; set; }
     public int ReceivedChunkCount { get; set; }

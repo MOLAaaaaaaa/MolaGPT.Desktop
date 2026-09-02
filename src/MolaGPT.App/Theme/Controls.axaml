@@ -1,6 +1,8 @@
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:r="clr-namespace:MolaGPT.App.Rendering">
+        xmlns:r="clr-namespace:MolaGPT.App.Rendering"
+        xmlns:v="clr-namespace:MolaGPT.App.Views"
+        xmlns:chrome="using:Avalonia.Controls.Chrome">
 
   <!--
     Control styles ported from MolaGPT.Desktop/Themes/Generic.xaml.
@@ -15,6 +17,37 @@
   -->
 
   <Styles.Resources>
+
+    <ControlTheme x:Key="{x:Type v:MolaContentWindow}" TargetType="v:MolaContentWindow">
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="VerticalContentAlignment" Value="Stretch" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Name="PART_WindowBackground"
+                  Background="{TemplateBinding Background}">
+            <DockPanel>
+              <Border DockPanel.Dock="Top"
+                      Background="Transparent"
+                      chrome:WindowDecorationProperties.ElementRole="TitleBar">
+                <Border.Styles>
+                  <Style Selector="Button">
+                    <Setter Property="(chrome:WindowDecorationProperties.ElementRole)" Value="User" />
+                  </Style>
+                </Border.Styles>
+                <ContentControl Content="{TemplateBinding Header}"
+                                HorizontalContentAlignment="Stretch"
+                                VerticalContentAlignment="Stretch" />
+              </Border>
+              <ContentPresenter Name="PART_ContentPresenter"
+                                Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"
+                                HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+            </DockPanel>
+          </Border>
+        </ControlTemplate>
+      </Setter>
+    </ControlTheme>
 
     <!-- Base button: no chrome of its own. Every variant below is additive, the
          way the WPF styles were — none of them inherited a themed default. -->
@@ -560,6 +593,50 @@
     <Setter Property="BorderThickness" Value="1" />
     <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
     <Setter Property="BoxShadow" Value="0 10 30 0 #3D16202A" />
+  </Style>
+
+  <!-- The Windows tray menu is a separate transparent window. The low-latency
+       DXGI swap chain cannot composite its transparent rounded corners, so the
+       presenter deliberately paints every pixel of the window. -->
+  <Style Selector="MenuFlyoutPresenter">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="MinWidth" Value="184" />
+    <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
+    <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+  </Style>
+  <Style Selector="MenuFlyoutPresenter MenuItem">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    <Setter Property="Padding" Value="12,7" />
+    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
+    <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+    <Setter Property="Cursor" Value="Hand" />
+  </Style>
+  <Style Selector="MenuFlyoutPresenter MenuItem:selected /template/ Border#PART_LayoutRoot">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+  </Style>
+  <Style Selector="MenuFlyoutPresenter MenuItem:pressed /template/ Border#PART_LayoutRoot">
+    <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+  </Style>
+  <Style Selector="MenuFlyoutPresenter MenuItem:selected /template/ ContentPresenter#PART_HeaderPresenter">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+  </Style>
+  <Style Selector="MenuFlyoutPresenter MenuItem:separator">
+    <Setter Property="MinHeight" Value="9" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Cursor" Value="Arrow" />
+  </Style>
+  <Style Selector="MenuFlyoutPresenter MenuItem:separator /template/ Separator">
+    <Setter Property="Background" Value="{DynamicResource Brush.Divider}" />
+    <Setter Property="Height" Value="1" />
+    <Setter Property="Margin" Value="8,4" />
   </Style>
 
   <!-- ============================== ToolTip ============================= -->

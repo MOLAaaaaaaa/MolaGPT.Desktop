@@ -10,12 +10,18 @@ public interface IPythonExecutionApprovalService
         CancellationToken ct);
 }
 
+/// <param name="RequestedPaths">Folders the model declared it needs to write to
+/// that are not already writable — resolved to absolute paths, so the dialog
+/// shows the folder that will actually be granted rather than the "~/Desktop"
+/// the model wrote. Empty when the code declared nothing new, which is the
+/// common case.</param>
 public sealed record PythonExecutionApprovalRequest(
     string Code,
     string? Description,
     PythonExecutionOptions Options,
     PythonExecutionRiskAnalysis Risk,
-    ToolCapability Capabilities);
+    ToolCapability Capabilities,
+    IReadOnlyList<string>? RequestedPaths = null);
 
 public enum PythonExecutionApprovalDecision
 {

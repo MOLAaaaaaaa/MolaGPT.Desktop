@@ -25,7 +25,7 @@ using MolaGPT.ViewModels.Services;
 
 namespace MolaGPT.App.Views;
 
-public partial class SettingsWindow : MolaWindow
+public partial class SettingsWindow : MolaContentWindow
 {
     private static readonly string[] ProviderTypes = ["openai-compat", "anthropic", "gemini", "openai-response"];
     private static readonly double[] FontScaleLevels = [0.8, 1.0, 1.2, 1.4];
@@ -40,7 +40,10 @@ public partial class SettingsWindow : MolaWindow
     private readonly ImageGenerationTool? _imageGenerationTool;
     private readonly PythonRuntimeManager? _pythonRuntime;
     private readonly PiSidecarRuntimeManager? _piSidecar;
-    private readonly AppStatusService? _appStatus;
+    private readonly NotificationCenter? _notifications;
+
+    private const string PythonRuntimeNotificationKey = "python-runtime";
+    private const string PiSidecarNotificationKey = "pi-sidecar";
     private readonly SkillsViewModel _skills;
     private readonly Func<HttpClient>? _byokHttpFactory;
     private readonly ProviderRegistry? _providerRegistry;
@@ -98,7 +101,7 @@ public partial class SettingsWindow : MolaWindow
         ImageGenerationTool? imageGenerationTool = null,
         PythonRuntimeManager? pythonRuntime = null,
         PiSidecarRuntimeManager? piSidecar = null,
-        AppStatusService? appStatus = null,
+        NotificationCenter? notifications = null,
         SkillsViewModel? skills = null,
         Func<HttpClient>? byokHttpFactory = null,
         ProviderRegistry? providerRegistry = null,
@@ -115,7 +118,7 @@ public partial class SettingsWindow : MolaWindow
         _imageGenerationTool = imageGenerationTool;
         _pythonRuntime = pythonRuntime;
         _piSidecar = piSidecar;
-        _appStatus = appStatus;
+        _notifications = notifications;
         _skills = skills ?? new SkillsViewModel();
         _byokHttpFactory = byokHttpFactory;
         _providerRegistry = providerRegistry;
@@ -135,9 +138,6 @@ public partial class SettingsWindow : MolaWindow
 
         PART_Nav.SelectionChanged += (_, _) => ShowSelectedPage();
         PART_Nav.SelectedIndex = 1;
-        PART_Header.PointerPressed += OnHeaderPointerPressed;
-        PART_Close.Click += (_, _) => Close();
-
         BuildThemeChoices();
         BuildSearchProviderChoices();
         BuildPermissionChoices();
@@ -344,12 +344,6 @@ public partial class SettingsWindow : MolaWindow
         if (page != 2) CloseProviderEditor();
         if (page == 2) RefreshProviders();
         if (page == 11 && _agentStatus is not null) _ = _agentStatus.LoadAsync();
-    }
-
-    private void OnHeaderPointerPressed(object? sender, PointerPressedEventArgs e)
-    {
-        if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
-            BeginMoveDrag(e);
     }
 
     // ---- choice lists ------------------------------------------------------
@@ -1741,7 +1735,11 @@ public partial class SettingsWindow : MolaWindow
         if (_pythonRuntime is null) return;
 
         PART_PythonRuntimeStatus.Text = "正在准备 MolaGPT 专用 Python 环境...";
-        _appStatus?.Publish("Syncing", "正在后台下载 Python 环境");
+
+        // The banner is what makes this survive closing the settings window:
+        // the row below only exists while this page is open, and a 200 MB
+        // download outlives it.
+        _notifications?.Progress(PythonRuntimeNotificationKey, "正在配置 Python 环境", "获取清单…");
         try
         {
             var progress = new Progress<PythonRuntimeProgress>(item =>
@@ -1749,17 +1747,21 @@ public partial class SettingsWindow : MolaWindow
                 PART_PythonRuntimeStatus.Text = string.IsNullOrWhiteSpace(item.Message)
                     ? $"正在配置 Python 运行时 {item.Progress:P0}"
                     : item.Message;
-                _appStatus?.Publish("Syncing", item.Message);
+                _notifications?.Progress(
+                    PythonRuntimeNotificationKey,
+                    string.IsNullOrWhiteSpace(item.Message) ? "正在配置 Python 环境" : item.Message,
+                    string.IsNullOrWhiteSpace(item.Stage) ? null : item.Stage,
+                    item.Progress > 0 ? item.Progress : null);
             });
             var runtime = await _pythonRuntime.DownloadAndInstallAsync(progress, CancellationToken.None);
             _settings.PythonToolEnabled = true;
             _settings.PythonToolExecutablePath = runtime.PythonExecutablePath;
-            _appStatus?.Publish("Success", "Python 环境已可用");
+            _notifications?.Success("Python 环境已就绪", $"Python {runtime.Version}", PythonRuntimeNotificationKey);
         }
         catch (Exception ex)
         {
             PART_PythonRuntimeStatus.Text = "配置失败：" + ex.Message;
-            _appStatus?.Publish("Error", "Python 环境配置失败");
+            _notifications?.Error("Python 环境配置失败", ex.Message, PythonRuntimeNotificationKey);
         }
     }
 
@@ -1767,7 +1769,7 @@ public partial class SettingsWindow : MolaWindow
     {
         if (_piSidecar is null) return;
 
-        _appStatus?.Publish("Syncing", "正在下载 Agent 运行环境");
+        _notifications?.Progress(PiSidecarNotificationKey, "正在下载 Agent 运行环境");
         try
         {
             var progress = new Progress<SandboxProgress>(item =>
@@ -1775,16 +1777,20 @@ public partial class SettingsWindow : MolaWindow
                 PART_PiSidecarStatus.Text = string.IsNullOrWhiteSpace(item.Message)
                     ? $"正在配置 Agent 运行环境 {item.Fraction:P0}"
                     : item.Message;
-                _appStatus?.Publish("Syncing", item.Message);
+                _notifications?.Progress(
+                    PiSidecarNotificationKey,
+                    string.IsNullOrWhiteSpace(item.Message) ? "正在下载 Agent 运行环境" : item.Message,
+                    progress: item.Fraction > 0 ? item.Fraction : null);
             });
             var installed = await _piSidecar.DownloadAndInstallAsync(progress, CancellationToken.None);
             PART_PiSidecarStatus.Text = $"Agent 运行环境 {installed.Version} 已下载，重启应用后生效";
-            _appStatus?.Publish("Success", "Agent 运行环境已下载，重启后生效");
+            _notifications?.Success(
+                "Agent 运行环境已下载", $"{installed.Version} · 重启后生效", PiSidecarNotificationKey);
         }
         catch (Exception ex)
         {
             PART_PiSidecarStatus.Text = "配置失败：" + ex.Message;
-            _appStatus?.Publish("Error", "Agent 运行环境配置失败");
+            _notifications?.Error("Agent 运行环境配置失败", ex.Message, PiSidecarNotificationKey);
         }
     }
 
@@ -1820,7 +1826,7 @@ public partial class SettingsWindow : MolaWindow
             PART_PythonRuntimeStatus.Text = _pythonRuntime.IsManagedInterpreterPath(picked)
                 ? $"已选择 {version}：{picked}"
                 : $"已选择外部 {version}：{picked}。该解释器不受 MolaGPT 基础环境隔离保护。";
-            _appStatus?.Publish("Success", "Python 解释器已就绪");
+            _notifications?.Success("Python 解释器已就绪", key: PythonRuntimeNotificationKey);
         }
         catch (Exception ex)
         {
@@ -1854,12 +1860,12 @@ public partial class SettingsWindow : MolaWindow
                 _settings.PythonToolExecutablePath = string.Empty;
                 _settings.PythonToolEnabled = false;
             }
-            _appStatus?.Publish("Success", "Python 环境已重置");
+            _notifications?.Success("Python 环境已重置", key: PythonRuntimeNotificationKey);
         }
         catch (Exception ex)
         {
             PART_PythonRuntimeStatus.Text = "重置失败：" + ex.Message;
-            _appStatus?.Publish("Error", "Python 环境重置失败");
+            _notifications?.Error("Python 环境重置失败", ex.Message, PythonRuntimeNotificationKey);
         }
         await RefreshRuntimeStatusAsync();
     }
@@ -1879,7 +1885,7 @@ public partial class SettingsWindow : MolaWindow
         try
         {
             _piSidecar.Delete();
-            _appStatus?.Publish("Success", "Agent 运行环境已移除，重启后生效");
+            _notifications?.Success("Agent 运行环境已移除", "重启后生效", PiSidecarNotificationKey);
         }
         catch (Exception ex)
         {

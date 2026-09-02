@@ -87,7 +87,11 @@ public static partial class PythonExecutionRiskAnalyzer
         var deniedImports = SplitList(options.DeniedImports);
         var allowedImports = MergeLists(DefaultAllowedImports, options.AllowedImports);
         var allowedPathPrefixes = SplitList(options.AllowedPathPrefixes);
-        var deniedPathPrefixes = SplitList(options.DeniedPathPrefixes);
+        // Built-ins first, and unconditionally: the deny layer is the one check
+        // that still runs under FullAccess, so this is where the credential store
+        // has to be named. Advisory only — a literal path is all this analyzer can
+        // see — but it costs nothing and removes the obvious spelling.
+        var deniedPathPrefixes = ProtectedPaths.Combine(SplitList(options.DeniedPathPrefixes));
 
         var blocked = false;
         string? blockReason = null;

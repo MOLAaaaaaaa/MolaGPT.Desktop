@@ -4,18 +4,17 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
 using Avalonia.Media;
 using MolaGPT.App.Rendering.Tex;
+using CSharpMathView = CSharpMath.Avalonia.MathView;
 
 namespace MolaGPT.App.Rendering;
 
 /// <summary>
 /// A typeset LaTeX formula, with the source as a fallback.
 ///
-/// Wraps AvaloniaMath's <see cref="FormulaBlock"/> rather than using it
-/// directly for one reason: models emit invalid LaTeX regularly — a stray
-/// <c>\mbox</c>, an unbalanced brace, a macro the engine does not know — and an
-/// unguarded FormulaBlock throws out of Measure, which takes down the layout
-/// pass for the whole transcript row. Here a parse failure degrades to showing
-/// the source, which is what the old WPF renderer did too.
+/// AvaloniaMath is the primary engine because it draws text through Avalonia's
+/// native glyph path. CSharpMath remains a compatibility fallback for formulas
+/// AvaloniaMath cannot parse. Invalid or half-streamed input degrades to
+/// readable source text.
 ///
 /// The formula is validated by parsing it before it is ever handed to the
 /// control, so the failure is caught somewhere it can be handled rather than
@@ -73,9 +72,10 @@ public sealed class MathView : TemplatedControl
             return;
         }
 
-        if (TryBuildFormula(latex) is { } formula)
+        var prepared = LatexNormalizer.Prepare(latex);
+        if (TryBuildFormula(prepared.Formula) is { } formula)
         {
-            _host.Content = formula;
+            _host.Content = prepared.DrawBox ? WrapBox(formula) : formula;
             return;
         }
 
@@ -98,7 +98,43 @@ public sealed class MathView : TemplatedControl
     /// unbounded size to settle whether the formula is valid while the answer
     /// can still change what gets shown.
     /// </summary>
-    private Control? TryBuildFormula(string latex)
+    private Control? TryBuildFormula(string latex) =>
+        TryBuildAvaloniaMathFormula(latex) ?? TryBuildCSharpMathFormula(latex);
+
+    private Control? TryBuildCSharpMathFormula(string latex)
+    {
+        try
+        {
+            var formula = new CSharpMathView
+            {
+                LaTeX = LatexNormalizer.ForCSharpMath(latex),
+                FontSize = (float)FormulaSize,
+                DisplayErrorInline = false,
+                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                // CSharpMathView's own Padding does not extend its measured
+                // size in this Avalonia port — verified by measuring the same
+                // "P" with and without it, both came back identical — so it
+                // cannot stop a lone inline P's right-side italic overhang
+                // from being painted over by the prose that follows. Avalonia
+                // Margin does grow DesiredSize, so it is what actually
+                // reserves that space.
+                Margin = new Thickness(1, 1, 3, 1)
+            };
+            if (Foreground is ISolidColorBrush solid) formula.TextColor = solid.Color;
+
+            formula.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            if (!string.IsNullOrEmpty(formula.ErrorMessage)) return null;
+            if (formula.DesiredSize.Width < 1 || formula.DesiredSize.Height < 1) return null;
+            return formula;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private Control? TryBuildAvaloniaMathFormula(string latex)
     {
         try
         {
@@ -125,4 +161,14 @@ public sealed class MathView : TemplatedControl
             return null;
         }
     }
+
+    private Control WrapBox(Control formula) => new Border
+    {
+        Child = formula,
+        BorderBrush = Foreground ?? Brushes.Black,
+        BorderThickness = new Thickness(1),
+        CornerRadius = new CornerRadius(2),
+        Padding = new Thickness(6, 3),
+        HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left
+    };
 }

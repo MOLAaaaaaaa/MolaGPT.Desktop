@@ -1,4 +1,4 @@
-<views:MolaWindow xmlns="https://github.com/avaloniaui"
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:views="clr-namespace:MolaGPT.App.Views"
         x:Class="MolaGPT.App.Views.BridgePrivacyWindow"
@@ -10,19 +10,21 @@
         FontFamily="{DynamicResource Font.UI}"
         FontSize="{DynamicResource Font.Size.Body}"
         Foreground="{DynamicResource Brush.Text.Primary}">
-  <Grid RowDefinitions="Auto,*,Auto">
-        <Border Grid.Row="0"
+  <views:MolaContentWindow.Header>
+        <Border
                 Name="PART_Header"
-                PointerPressed="OnHeaderPointerPressed"
                 Padding="22,16"
+                Background="Transparent"
                 BorderBrush="{DynamicResource Brush.Divider}"
                 BorderThickness="0,0,0,1">
           <TextBlock Text="启用远程桥接 · 隐私说明"
                      FontSize="{DynamicResource Font.Size.Heading}"
                      FontWeight="Bold" />
         </Border>
+  </views:MolaContentWindow.Header>
 
-        <StackPanel Grid.Row="1" Margin="24,18,24,0">
+  <Grid RowDefinitions="*,Auto">
+        <StackPanel Grid.Row="0" Margin="24,18,24,0">
           <TextBlock TextWrapping="Wrap"
                      LineHeight="23"
                      Classes="secondary"
@@ -39,7 +41,7 @@
                      Text="默认关闭。可以随时在「设置 → Agent Bridge」中停用。" />
         </StackPanel>
 
-        <StackPanel Grid.Row="2"
+        <StackPanel Grid.Row="1"
                     Orientation="Horizontal"
                     HorizontalAlignment="Right"
                     Margin="24,20,24,22">
@@ -47,4 +49,4 @@
           <Button Name="PART_Confirm" Classes="pillprimary" Padding="16,8" Margin="10,0,0,0" Content="我已知晓，启用" />
         </StackPanel>
   </Grid>
-</views:MolaWindow>
+</views:MolaContentWindow>

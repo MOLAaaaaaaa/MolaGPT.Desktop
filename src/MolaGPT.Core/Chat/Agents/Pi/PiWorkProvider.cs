@@ -1,6 +1,7 @@
 using MolaGPT.Core.Chat.Providers;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.LocalTools;
@@ -22,7 +23,7 @@ namespace MolaGPT.Core.Chat.Agents.Pi;
 /// behaviour. Wiring it into DI / Work routing behind a feature flag is brick #2.
 /// The mechanism is the one proven end-to-end by the M0 PoC (see <c>pi-sidecar/</c>).
 /// </summary>
-public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
+public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IAsyncDisposable
 {
     /// <summary>Provider id the sidecar extension registers (must match the value
     /// passed on the <c>pi --provider</c> flag and to <c>set_model</c>).</summary>
@@ -50,6 +51,11 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
     /// not keep paying it; the next turn simply respawns (lazily, as on first use).</summary>
     private static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan IdleSweepInterval = TimeSpan.FromMinutes(1);
+
+    /// <summary>How long to keep retrying the transcript rewrite while the sidecar
+    /// we just killed still holds the file open.</summary>
+    private const int FileRetryLimit = 5;
+    private static readonly TimeSpan FileRetryDelay = TimeSpan.FromMilliseconds(120);
 
     public PiWorkProvider(PiWorkProviderConfig config, IChatToolHost toolHost, HttpClient http, Action<string>? log = null)
     {
@@ -252,6 +258,70 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
     {
         if (_sessions.TryRemove(conversationId ?? "draft", out var holder) && holder.Session is not null)
             await holder.Session.DisposeAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Forget the newest exchange so the retry that follows regenerates it.
+    ///
+    /// Pi owns the transcript, so the composer trimming its own message list buys
+    /// nothing here: without this, a retry arrives as an ordinary next turn and the
+    /// model answers it with the attempt being replaced — and that attempt's tool
+    /// results — still in view.
+    ///
+    /// Both copies of the turn have to go. The sidecar holds it in memory, and
+    /// <c>--session-id</c> means a fresh sidecar resumes from the file rather than
+    /// starting clean, so trimming one without the other just moves the problem.
+    /// </summary>
+    public async Task<bool> ForgetLastTurnAsync(string? conversationId, CancellationToken ct = default)
+    {
+        var key = conversationId ?? "draft";
+
+        // Cheap: the next turn respawns and resumes from what we leave on disk,
+        // which is exactly the mechanism being used here.
+        await CloseConversationAsync(key).ConfigureAwait(false);
+
+        var file = FindSessionFile(key);
+        if (file is null) return false;
+
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                var lines = await File.ReadAllLinesAsync(file, ct).ConfigureAwait(false);
+                var keep = PiSessionRewind.KeepCountBeforeLastUserTurn(lines);
+                if (keep < 0) return false;
+
+                var trimmed = new StringBuilder();
+                for (var i = 0; i < keep; i++) trimmed.Append(lines[i]).Append('\n');
+                await File.WriteAllTextAsync(file, trimmed.ToString(), ct).ConfigureAwait(false);
+
+                _log?.Invoke($"[pi-work] 回退最后一轮：{key}（{lines.Length} → {keep} 行）");
+                return true;
+            }
+            // Kill() returns before Windows has actually torn the process down, so
+            // the first read can still meet the sidecar's own handle.
+            catch (IOException) when (attempt < FileRetryLimit)
+            {
+                await Task.Delay(FileRetryDelay, ct).ConfigureAwait(false);
+            }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
+    }
+
+    /// <summary>Locate a conversation's transcript. Matched the way
+    /// <see cref="PiWorkSessionSweeper"/> matches it — by containment, because Pi
+    /// decorates the id it is handed (<c>&lt;timestamp&gt;_&lt;id&gt;.jsonl</c>).</summary>
+    private string? FindSessionFile(string key)
+    {
+        var root = _config.SessionRoot;
+        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root)) return null;
+
+        var id = SanitizeSessionId(key);
+        return Directory.EnumerateFiles(root, "*.jsonl", SearchOption.AllDirectories)
+            .Where(f => Path.GetFileNameWithoutExtension(f).Contains(id, StringComparison.Ordinal))
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .FirstOrDefault();
     }
 
     private ChatChunk? MapLine(
@@ -603,12 +673,12 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
                     parts.Add(text.GetString() ?? "");
             }
             if (parts.Count > 0)
-                return Truncate(PrettyJson(string.Join("\n", parts)), ResultPreviewLimit);
+                return PrettyJson(string.Join("\n", parts));
         }
 
         // Unrecognised shape (a future Pi change, a non-text part): the raw value
         // beats showing nothing.
-        return Truncate(result.GetRawText(), ResultPreviewLimit);
+        return result.GetRawText();
     }
 
     /// <summary>Indent the tool's JSON output for the card, the way the direct
@@ -633,14 +703,8 @@ public sealed class PiWorkProvider : IChatProvider, IAsyncDisposable
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
-    /// <summary>Matches the direct provider's preview budget, so the same result is
-    /// not cut short just because it arrived through Pi.</summary>
-    private const int ResultPreviewLimit = 1600;
-
     private static string Str(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) ? v.GetString() ?? "" : "";
-
-    private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max];
 
     public async ValueTask DisposeAsync()
     {

@@ -647,6 +647,11 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
     /// looks the same whichever engine ran it — the labels, the summary, the
     /// duration and exit code lifted out of the result — rather than each path
     /// growing its own approximation of the card.
+    ///
+    /// The result goes in whole. It used to be cut to 1600 characters, which lost
+    /// the tail of every search and every directory listing permanently, since
+    /// the cut copy is what gets persisted with the conversation. How much of it
+    /// a card shows at once is a layout question, and it is answered in the card.
     /// </summary>
     internal static ToolCallDelta BuildToolDelta(
         string id,
@@ -664,7 +669,7 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
             BuildToolSummary(name, args),
             BuildToolDetail(name, args, options, status, resultJson),
             PrettyJson(args),
-            resultJson is null ? null : BuildResultPreview(resultJson),
+            resultJson is null ? null : PrettyJson(resultJson),
             name == "search_web" ? SearchProviderLabel(options?.SearchProvider) : null);
     }
 
@@ -873,12 +878,6 @@ public sealed partial class OpenAICompatibleProvider : IChatProvider
         {
             return json;
         }
-    }
-
-    private static string BuildResultPreview(string json)
-    {
-        var preview = PrettyJson(json);
-        return preview.Length <= 1600 ? preview : preview[..1600] + "\n...";
     }
 
     private static string SearchProviderLabel(string? provider) =>

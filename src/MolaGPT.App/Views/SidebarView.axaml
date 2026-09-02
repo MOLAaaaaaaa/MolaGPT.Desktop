@@ -148,7 +148,7 @@
                      VerticalAlignment="Center"
                      Foreground="{DynamicResource Brush.Text.Secondary}" />
           <Border Grid.Column="2" Classes="countpill">
-            <TextBlock Text="{Binding ByokCount}" FontSize="10" FontWeight="SemiBold"
+            <TextBlock Text="{Binding ByokCount}" FontSize="11" FontWeight="SemiBold"
                        Foreground="{DynamicResource Brush.Text.Muted}" />
           </Border>
         </Grid>
@@ -187,7 +187,7 @@
                      VerticalAlignment="Center"
                      Foreground="{DynamicResource Brush.Text.Secondary}" />
           <Border Grid.Column="2" Classes="countpill">
-            <TextBlock Text="{Binding MolaGptConversationCount}" FontSize="10" FontWeight="SemiBold"
+            <TextBlock Text="{Binding MolaGptConversationCount}" FontSize="11" FontWeight="SemiBold"
                        Foreground="{DynamicResource Brush.Text.Muted}" />
           </Border>
         </Grid>

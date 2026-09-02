@@ -52,15 +52,16 @@
          migration exists to avoid. -->
     <PackageReference Include="TextMateSharp" Version="2.0.4" />
     <PackageReference Include="TextMateSharp.Grammars" Version="2.0.4" />
-    <!-- LaTeX typesetting. This is the Avalonia half of XAML-Math, the same
-         project the WPF build used as WpfMath, so formulae render from the same
-         engine and the same Computer Modern fonts.
+    <!-- LaTeX typesetting. CSharpMath covers common AMS environments on
+         Avalonia 12; AvaloniaMath remains as the complementary parser and
+         drawing path for commands the two engines support differently.
 
-         NU1608 is suppressed deliberately: the package declares
+         NU1608 is suppressed deliberately for AvaloniaMath: the package declares
          Avalonia < 12.0.0, but it was verified against 12.1.1 headless —
          parse, measure and arrange all succeed. Revisit when an Avalonia 12
          build ships. -->
     <PackageReference Include="AvaloniaMath" Version="2.1.0" />
+    <PackageReference Include="Sylinko.CSharpMath.Avalonia" Version="12.0.0" />
   </ItemGroup>
 
   <ItemGroup>

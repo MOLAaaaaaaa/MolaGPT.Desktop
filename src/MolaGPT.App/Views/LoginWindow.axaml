@@ -1,4 +1,4 @@
-<views:MolaWindow xmlns="https://github.com/avaloniaui"
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:views="clr-namespace:MolaGPT.App.Views"
         x:Class="MolaGPT.App.Views.LoginWindow"
@@ -11,9 +11,9 @@
         FontSize="{DynamicResource Font.Size.Body}"
         Foreground="{DynamicResource Brush.Text.Primary}">
 
-  <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="28">
-        <Grid Grid.Row="0" Margin="0,0,0,18"
-              Name="PART_Header" PointerPressed="OnHeaderPointerPressed">
+  <views:MolaContentWindow.Header>
+        <Grid Margin="28,28,28,18" Background="Transparent"
+              Name="PART_Header">
           <TextBlock Text="登录 MolaGPT"
                      FontSize="{DynamicResource Font.Size.Heading}"
                      FontWeight="SemiBold"
@@ -25,8 +25,10 @@
             <TextBlock Classes="icon" Text="&#xE711;" FontSize="14" />
           </Button>
         </Grid>
+  </views:MolaContentWindow.Header>
 
-        <StackPanel Grid.Row="1">
+  <Grid RowDefinitions="Auto,*,Auto" Margin="28,0,28,28">
+        <StackPanel Grid.Row="0">
           <TextBlock Text="用户名" Classes="fieldlabel" />
           <TextBox Name="PART_Username"
                    Classes="logininput"
@@ -75,7 +77,7 @@
           </Grid>
         </StackPanel>
 
-        <Border Grid.Row="2"
+        <Border Grid.Row="1"
                 Name="PART_StatusPanel"
                 Margin="0,14,0,0"
                 Padding="10,8"
@@ -94,7 +96,7 @@
           </ScrollViewer>
         </Border>
 
-        <Grid Grid.Row="3" Margin="0,18,0,0" ColumnDefinitions="*,Auto,Auto">
+        <Grid Grid.Row="2" Margin="0,18,0,0" ColumnDefinitions="*,Auto,Auto">
           <Button Grid.Column="1"
                   Name="PART_Cancel"
                   Classes="outline"
@@ -129,4 +131,4 @@
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
     </Style>
   </Window.Styles>
-</views:MolaWindow>
+</views:MolaContentWindow>

@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using Avalonia.Controls;
-using Avalonia.Input;
 using Avalonia.Threading;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
@@ -9,7 +8,7 @@ using MolaGPT.Desktop.Services;
 
 namespace MolaGPT.App.Views;
 
-public partial class LoginWindow : MolaWindow
+public partial class LoginWindow : MolaContentWindow
 {
     private readonly MolaGptAuthService _auth;
     private readonly MolaGptProxyProvider _proxy;
@@ -47,12 +46,6 @@ public partial class LoginWindow : MolaWindow
         ExternalLoginCompleted += OnExternalLoginCompleted;
         Closed += (_, _) => ExternalLoginCompleted -= OnExternalLoginCompleted;
         Opened += (_, _) => PART_Username.Focus();
-    }
-
-    private void OnHeaderPointerPressed(object? sender, PointerPressedEventArgs e)
-    {
-        if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
-            BeginMoveDrag(e);
     }
 
     private async void OnLoginClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)

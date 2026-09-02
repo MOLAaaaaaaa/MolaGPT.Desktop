@@ -22,10 +22,17 @@ internal static class Program
     public static AppBuilder BuildAvaloniaApp() =>
         AppBuilder.Configure<App>()
             .UsePlatformDetect()
-            // DWM needs a redirection surface for native window transitions.
+            // The DXGI path follows the display refresh rate and keeps the DWM
+            // redirection bitmap used by native window transitions. Popups stay
+            // in the parent overlay because this swap chain has no popup alpha.
             .With(new Win32PlatformOptions
             {
-                CompositionMode = [Win32CompositionMode.RedirectionSurface]
+                OverlayPopups = true,
+                CompositionMode =
+                [
+                    Win32CompositionMode.LowLatencyDxgiSwapChain,
+                    Win32CompositionMode.RedirectionSurface
+                ]
             })
             .LogToTrace();
 }

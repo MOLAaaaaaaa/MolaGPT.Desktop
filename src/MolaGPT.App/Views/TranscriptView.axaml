@@ -56,7 +56,7 @@
                capped (see the MolaGptMarkupBlockView selector below). -->
           <ScrollViewer Grid.Row="1" Classes="codescroll"
                         HorizontalScrollBarVisibility="Auto">
-            <r:CodeTextBlock Code="{Binding Code}" Language="{Binding Language}"
+            <r:CodeTextBlock Language="{Binding Language}" Code="{Binding Code}"
                              Classes="code" Margin="12,6,12,10" />
           </ScrollViewer>
         </Grid>
@@ -81,9 +81,8 @@
       </Border>
     </DataTemplate>
 
-    <!-- Typeset by AvaloniaMath (the Avalonia half of XAML-Math, same engine and
-         Computer Modern fonts the WPF build used via WpfMath). MathView falls
-         back to the LaTeX source when a formula will not parse. -->
+    <!-- MathView uses CSharpMath first and AvaloniaMath for complementary
+         commands, then falls back to source when neither parser accepts it. -->
     <DataTemplate DataType="p:MathBlock">
       <Border Classes="mathpanel">
         <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
@@ -144,7 +143,7 @@
                                      Foreground="{DynamicResource Brush.Text.Secondary}" />
                         </Panel>
                       </Border>
-                      <TextBlock Text="{Binding Label}" FontSize="11" VerticalAlignment="Center"
+                      <TextBlock Text="{Binding Label}" FontSize="12" VerticalAlignment="Center"
                                  TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
                                  MaxWidth="150" />
                     </StackPanel>
@@ -243,6 +242,87 @@
       <Border Classes="assistantcol toolcard"
               Classes.compact="{Binding !Tool.HasHeaderArgPreview}">
         <Expander Classes="toolbody" IsExpanded="{Binding IsExpanded, Mode=TwoWay}">
+          <Expander.Resources>
+            <DataTemplate x:Key="ToolBodyTemplate" x:DataType="r:ToolRow">
+              <StackPanel Spacing="8" Margin="0,10,0,0">
+                <!-- search_web: one chip per query -->
+                <ItemsControl ItemsSource="{Binding Tool.ArgsView.SearchQueries}"
+                              IsVisible="{Binding Tool.ArgsView.HasSearchQueries}">
+                  <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                  </ItemsControl.ItemsPanel>
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="cc:ToolSearchQueryView">
+                      <Border Classes="argchip">
+                        <StackPanel Classes="inlinerow compact" Orientation="Horizontal" Spacing="6">
+                          <TextBlock Classes="icon" Text="&#xE721;" FontSize="10" Opacity="0.6"
+                                     VerticalAlignment="Center" />
+                          <TextBlock Text="{Binding Text}" FontSize="12" VerticalAlignment="Center" />
+                        </StackPanel>
+                      </Border>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- execute_python_code and friends: the actual source, highlighted -->
+                <Border Classes="codepanel" Margin="0"
+                        IsVisible="{Binding Tool.ArgsView.HasCodeArg}">
+                  <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
+                                MaxHeight="260">
+                    <r:CodeTextBlock Language="{Binding Tool.ArgsView.CodeArg.Language}"
+                                     Code="{Binding Tool.ArgsView.CodeArg.Code}"
+                                     Classes="code" Margin="12,10" />
+                  </ScrollViewer>
+                </Border>
+
+                <!-- web_fetch / read_file / a single text argument -->
+                <Border Classes="argchip" HorizontalAlignment="Left"
+                        IsVisible="{Binding Tool.ArgsView.HasPrimaryArg}">
+                  <TextBlock Text="{Binding Tool.ArgsView.PrimaryArg.Value}"
+                             FontFamily="{DynamicResource Font.Mono}"
+                             FontSize="12"
+                             TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                </Border>
+
+                <ItemsControl ItemsSource="{Binding Tool.ArgsView.KeyValueArgs}"
+                              IsVisible="{Binding Tool.ArgsView.HasKeyValueArgs}">
+                  <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                  </ItemsControl.ItemsPanel>
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="cc:ToolKeyValueView">
+                      <Border Classes="argchip">
+                        <StackPanel Classes="inlinerow compact" Orientation="Horizontal" Spacing="5">
+                          <TextBlock Text="{Binding Key}" FontSize="12" FontWeight="SemiBold"
+                                     Foreground="{DynamicResource Brush.Text.Muted}"
+                                     VerticalAlignment="Center" />
+                          <TextBlock Text="{Binding Value}" FontSize="12" VerticalAlignment="Center"
+                                     TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                        </StackPanel>
+                      </Border>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <TextBlock Text="{Binding Tool.Detail}" IsVisible="{Binding Tool.HasDetail}"
+                           Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}"
+                           TextWrapping="Wrap" />
+
+                <!-- Raw payloads last, and only for tools whose arguments the card
+                     has no typed view for. Both are complete; RawPayloadView bounds
+                     the height and offers the rest behind a toggle. -->
+                <Border Classes="rawfold" IsVisible="{Binding Tool.ShowArgumentsFold}">
+                  <r:RawPayloadView Text="{Binding Tool.DisplayArgumentsJson}"
+                                    IsExpanded="{Binding IsArgumentsExpanded, Mode=TwoWay}" />
+                </Border>
+                <Border Classes="rawfold" IsVisible="{Binding Tool.HasResultPreview}">
+                  <r:RawPayloadView Text="{Binding Tool.DisplayResultPreviewJson}"
+                                    IsExpanded="{Binding IsResultExpanded, Mode=TwoWay}" />
+                </Border>
+              </StackPanel>
+            </DataTemplate>
+          </Expander.Resources>
+
           <Expander.Header>
             <Grid ColumnDefinitions="Auto,10,*,Auto">
               <Border Grid.Column="0" Classes="toolicon"
@@ -269,88 +349,13 @@
               <Border Grid.Column="3" Classes="statuschip"
                       Classes.errored="{Binding Tool.IsError}"
                       Classes.done="{Binding Tool.IsCompleted}">
-                <TextBlock Text="{Binding Tool.StatusText}" FontSize="10" FontWeight="SemiBold" />
+                <TextBlock Text="{Binding Tool.StatusText}" FontSize="11" FontWeight="SemiBold" />
               </Border>
             </Grid>
           </Expander.Header>
 
-          <StackPanel Spacing="8" Margin="0,10,0,0">
-            <!-- search_web: one chip per query -->
-            <ItemsControl ItemsSource="{Binding Tool.ArgsView.SearchQueries}"
-                          IsVisible="{Binding Tool.ArgsView.HasSearchQueries}">
-              <ItemsControl.ItemsPanel>
-                <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
-              </ItemsControl.ItemsPanel>
-              <ItemsControl.ItemTemplate>
-                <DataTemplate x:DataType="cc:ToolSearchQueryView">
-                  <Border Classes="argchip">
-                    <StackPanel Classes="inlinerow compact" Orientation="Horizontal" Spacing="6">
-                      <TextBlock Classes="icon" Text="&#xE721;" FontSize="10" Opacity="0.6"
-                                 VerticalAlignment="Center" />
-                      <TextBlock Text="{Binding Text}" FontSize="12" VerticalAlignment="Center" />
-                    </StackPanel>
-                  </Border>
-                </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
-
-            <!-- execute_python_code and friends: the actual source, highlighted -->
-            <Border Classes="codepanel" Margin="0"
-                    IsVisible="{Binding Tool.ArgsView.HasCodeArg}">
-              <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
-                            MaxHeight="260">
-                <r:CodeTextBlock Code="{Binding Tool.ArgsView.CodeArg.Code}"
-                                 Language="{Binding Tool.ArgsView.CodeArg.Language}"
-                                 Classes="code" Margin="12,10" />
-              </ScrollViewer>
-            </Border>
-
-            <!-- web_fetch / read_file / a single text argument -->
-            <Border Classes="argchip" HorizontalAlignment="Left"
-                    IsVisible="{Binding Tool.ArgsView.HasPrimaryArg}">
-              <TextBlock Text="{Binding Tool.ArgsView.PrimaryArg.Value}"
-                         FontFamily="{DynamicResource Font.Mono}"
-                         FontSize="12"
-                         TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-            </Border>
-
-            <ItemsControl ItemsSource="{Binding Tool.ArgsView.KeyValueArgs}"
-                          IsVisible="{Binding Tool.ArgsView.HasKeyValueArgs}">
-              <ItemsControl.ItemsPanel>
-                <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
-              </ItemsControl.ItemsPanel>
-              <ItemsControl.ItemTemplate>
-                <DataTemplate x:DataType="cc:ToolKeyValueView">
-                  <Border Classes="argchip">
-                    <StackPanel Classes="inlinerow compact" Orientation="Horizontal" Spacing="5">
-                      <TextBlock Text="{Binding Key}" FontSize="11" FontWeight="SemiBold"
-                                 Foreground="{DynamicResource Brush.Text.Muted}"
-                                 VerticalAlignment="Center" />
-                      <TextBlock Text="{Binding Value}" FontSize="12" VerticalAlignment="Center"
-                                 TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-                    </StackPanel>
-                  </Border>
-                </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
-
-            <TextBlock Text="{Binding Tool.Detail}" IsVisible="{Binding Tool.HasDetail}"
-                       Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}"
-                       TextWrapping="Wrap" />
-
-            <!-- Raw payloads last, and only for tools whose arguments the card
-                 has no typed view for. -->
-            <Border Classes="rawfold" IsVisible="{Binding Tool.ShowArgumentsFold}">
-              <SelectableTextBlock Text="{Binding Tool.DisplayArgumentsJson}"
-                                   FontFamily="{DynamicResource Font.Mono}" FontSize="11"
-                                   TextWrapping="Wrap" MaxHeight="180" />
-            </Border>
-            <Border Classes="rawfold" IsVisible="{Binding Tool.HasResultPreview}">
-              <SelectableTextBlock Text="{Binding Tool.DisplayResultPreviewJson}"
-                                   FontFamily="{DynamicResource Font.Mono}" FontSize="11"
-                                   TextWrapping="Wrap" MaxHeight="180" />
-            </Border>
-          </StackPanel>
+          <ContentControl Content="{Binding BodyContent}"
+                          ContentTemplate="{StaticResource ToolBodyTemplate}" />
         </Expander>
       </Border>
     </DataTemplate>
@@ -391,9 +396,9 @@
                       ToolTip.Tip="{Binding Url}">
                 <StackPanel Classes="inlinerow compact" Orientation="Horizontal" Spacing="6">
                   <Border Classes="sourceindex">
-                    <TextBlock Text="{Binding Id}" FontSize="10" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding Id}" FontSize="11" FontWeight="SemiBold" />
                   </Border>
-                  <TextBlock Text="{Binding Title}" FontSize="11" VerticalAlignment="Center"
+                  <TextBlock Text="{Binding Title}" FontSize="12" VerticalAlignment="Center"
                              TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
                              MaxWidth="240" />
                 </StackPanel>
@@ -899,11 +904,36 @@
       <Setter Property="Padding" Value="10,8" />
     </Style>
 
-    <!-- Thinking card body: prose one step down from the answer's weight, so a
+    <!-- "显示全部 N 行" under a cropped payload. Reads as a link rather than a
+         button: it sits inside the fold it belongs to, and a second filled
+         control there would compete with the card's own chrome. -->
+    <Style Selector="Button.rawtoggle">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+    </Style>
+    <Style Selector="Button.rawtoggle:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="TextElement.Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <Style Selector="Button.rawtoggle:pressed /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+
+    <!-- Thinking card body: prose smaller than the answer's weight, so a
          long reasoning block never competes with the answer for attention. -->
-    <Style Selector="r|ThinkBlockView r|MarkdownTextBlock.prose">
-      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
-      <Setter Property="LineHeight" Value="22" />
+    <Style Selector="r|ThinkBlockView SelectableTextBlock.prose">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="LineHeight" Value="21" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <Style Selector="r|ThinkBlockView r|MarkdownListView.listview">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="LineHeight" Value="21" />
       <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
     </Style>
     <Style Selector="Ellipse.pulsing">

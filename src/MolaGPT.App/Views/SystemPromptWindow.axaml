@@ -1,4 +1,4 @@
-<views:MolaWindow xmlns="https://github.com/avaloniaui"
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:views="clr-namespace:MolaGPT.App.Views"
         x:Class="MolaGPT.App.Views.SystemPromptWindow"
@@ -9,8 +9,8 @@
          ShowInTaskbar="False"
          FontFamily="{DynamicResource Font.UI}"
          Foreground="{DynamicResource Brush.Text.Primary}">
-  <Grid RowDefinitions="48,*,Auto">
-      <Border Grid.Row="0" Name="PART_Header" Background="{DynamicResource Brush.Bg.Tertiary}"
+  <views:MolaContentWindow.Header>
+      <Border Height="48" Name="PART_Header" Background="{DynamicResource Brush.Bg.Tertiary}"
               BorderBrush="{DynamicResource Brush.Divider}" BorderThickness="0,0,0,1"
               Padding="20,0">
         <Grid ColumnDefinitions="*,Auto">
@@ -19,15 +19,17 @@
                        Foreground="{DynamicResource Brush.Primary}" />
             <TextBlock Text="会话提示词" FontWeight="SemiBold" FontSize="14" />
             <TextBlock Text="为当前对话临时改写系统提示词" Classes="muted"
-                       Margin="10,0,0,0" FontSize="11" />
+                       Margin="10,0,0,0" FontSize="12" />
           </StackPanel>
           <Button Grid.Column="1" Name="PART_Close" Classes="headericon">
             <TextBlock Classes="icon" Text="&#xE711;" FontSize="14" />
           </Button>
         </Grid>
       </Border>
+  </views:MolaContentWindow.Header>
 
-      <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
+  <Grid RowDefinitions="*,Auto">
+      <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto"
                     HorizontalScrollBarVisibility="Disabled">
         <StackPanel Margin="22,18,22,16">
           <Border Background="{DynamicResource Brush.Primary.Soft}"
@@ -38,10 +40,10 @@
                          VerticalAlignment="Center" Margin="0,0,12,0" />
               <StackPanel Grid.Column="1">
                 <StackPanel Classes="inlinerow compact" Orientation="Horizontal">
-                  <TextBlock Text="当前角色 · " Classes="muted" FontSize="11" />
+                  <TextBlock Text="当前角色 · " Classes="muted" FontSize="12" />
                   <TextBlock Name="PART_PersonaName" FontSize="13" FontWeight="SemiBold" />
                 </StackPanel>
-                <TextBlock Name="PART_PersonaHint" Classes="muted" FontSize="11"
+                <TextBlock Name="PART_PersonaHint" Classes="muted" FontSize="12"
                            TextWrapping="Wrap" Margin="0,2,0,0" />
               </StackPanel>
             </Grid>
@@ -55,7 +57,7 @@
                          Content="在角色提示词之后追加" Margin="0,0,0,4" />
             <RadioButton Name="PART_Override" GroupName="PromptMode"
                          Content="完全替换为下方文本" />
-            <TextBlock Name="PART_ModeHint" Classes="muted" FontSize="11"
+            <TextBlock Name="PART_ModeHint" Classes="muted" FontSize="12"
                        TextWrapping="Wrap" Margin="0,6,0,0" />
           </StackPanel>
 
@@ -78,7 +80,7 @@
           </Border>
 
           <WrapPanel Margin="0,8,0,0" VerticalAlignment="Center">
-            <TextBlock Text="可用变量：" Classes="muted" FontSize="11"
+            <TextBlock Text="可用变量：" Classes="muted" FontSize="12"
                        VerticalAlignment="Center" Margin="0,0,6,4" />
             <Button Classes="hintchip" Tag="{}{{date}}" Content="{}{{date}}" Click="OnInsertVariable" />
             <Button Classes="hintchip" Tag="{}{{time}}" Content="{}{{time}}" Click="OnInsertVariable" />
@@ -104,7 +106,7 @@
         </StackPanel>
       </ScrollViewer>
 
-      <Border Grid.Row="2" BorderBrush="{DynamicResource Brush.Divider}"
+      <Border Grid.Row="1" BorderBrush="{DynamicResource Brush.Divider}"
               BorderThickness="0,1,0,0" Padding="22,12,22,16">
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
           <Button Name="PART_Reset" Content="恢复默认" Classes="outline" Margin="0,0,8,0" />
@@ -125,4 +127,4 @@
       <Setter Property="FontSize" Value="11" />
     </Style>
   </Window.Styles>
-</views:MolaWindow>
+</views:MolaContentWindow>

@@ -1,13 +1,12 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
 using Avalonia.Controls;
-using Avalonia.Input;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat.Providers;
 
 namespace MolaGPT.App.Views;
 
-public partial class AccountWindow : MolaWindow
+public partial class AccountWindow : MolaContentWindow
 {
     private readonly MolaGptAuthService _auth;
     private readonly MolaGptProxyProvider _proxy;
@@ -23,12 +22,6 @@ public partial class AccountWindow : MolaWindow
         PART_Close.Click += (_, _) => Close(false);
         PART_Logout.Click += OnLogoutClick;
         Opened += async (_, _) => await RefreshAsync();
-    }
-
-    private void OnHeaderPointerPressed(object? sender, PointerPressedEventArgs e)
-    {
-        if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
-            BeginMoveDrag(e);
     }
 
     private async Task RefreshAsync()

@@ -24,7 +24,7 @@
 
       <!-- Brand -->
       <Color x:Key="Color.Primary">#FFBE727F</Color>
-      <Color x:Key="Color.Primary.Hover">#FFA05A66</Color>
+      <Color x:Key="Color.Primary.Hover">#FF9A5662</Color>
       <Color x:Key="Color.Primary.Active">#FF8E4F5A</Color>
       <Color x:Key="Color.Primary.Soft">#1ABE727F</Color>
       <Color x:Key="Color.Primary.Tint">#14BE727F</Color>
@@ -44,7 +44,7 @@
       <!-- Text -->
       <Color x:Key="Color.Text.Primary">#FF212529</Color>
       <Color x:Key="Color.Text.Secondary">#FF6C757D</Color>
-      <Color x:Key="Color.Text.Muted">#FF8B95A2</Color>
+      <Color x:Key="Color.Text.Muted">#FF707A86</Color>
       <Color x:Key="Color.Text.OnPrimary">#FFFFFFFF</Color>
 
       <!-- Border -->
@@ -244,16 +244,16 @@
        renders most body copy, and Font.Icon / Font.FA.Solid supply the glyphs
        the original views address by code point. -->
   <FontFamily x:Key="Font.Latin">avares://MolaGPT.Desktop/Assets/Fonts#Geist,Segoe UI Variable,Segoe UI,Helvetica Neue,Arial,sans-serif</FontFamily>
-  <FontFamily x:Key="Font.Cjk">Noto Sans CJK SC,Noto Sans SC,PingFang SC,Hiragino Sans GB,Microsoft YaHei UI,Microsoft YaHei,SimHei,Segoe UI,sans-serif</FontFamily>
-  <FontFamily x:Key="Font.UI">avares://MolaGPT.Desktop/Assets/Fonts#Geist,Noto Sans SC,Noto Sans CJK SC,PingFang SC,Hiragino Sans GB,Microsoft YaHei UI,Microsoft YaHei,Segoe UI Variable,Segoe UI,Helvetica Neue,Arial,sans-serif</FontFamily>
+  <FontFamily x:Key="Font.Cjk">avares://MolaGPT.Desktop/Assets/Fonts#Noto Sans SC,PingFang SC,Hiragino Sans GB,Microsoft YaHei UI,Microsoft YaHei,SimHei,Segoe UI,sans-serif</FontFamily>
+  <FontFamily x:Key="Font.UI">avares://MolaGPT.Desktop/Assets/Fonts#Geist,avares://MolaGPT.Desktop/Assets/Fonts#Noto Sans SC,PingFang SC,Hiragino Sans GB,Microsoft YaHei UI,Microsoft YaHei,Segoe UI Variable,Segoe UI,Helvetica Neue,Arial,sans-serif</FontFamily>
   <FontFamily x:Key="Font.Mono">SFMono-Regular,Consolas,Liberation Mono,Menlo,Cascadia Code,Cascadia Mono,Courier,monospace</FontFamily>
   <FontFamily x:Key="Font.Icon">Segoe Fluent Icons,Segoe MDL2 Assets</FontFamily>
   <FontFamily x:Key="Font.FA.Solid">avares://MolaGPT.Desktop/Assets/fa-solid-900.ttf#Font Awesome 5 Free</FontFamily>
 
-  <x:Double x:Key="Font.Size.XSmall">11</x:Double>
+  <x:Double x:Key="Font.Size.XSmall">12</x:Double>
   <x:Double x:Key="Font.Size.Small">12</x:Double>
   <x:Double x:Key="Font.Size.Body">14</x:Double>
-  <x:Double x:Key="Font.Size.BodyLg">15</x:Double>
+  <x:Double x:Key="Font.Size.BodyLg">16</x:Double>
   <x:Double x:Key="Font.Size.Heading">18</x:Double>
   <x:Double x:Key="Font.Size.Title">24</x:Double>
   <x:Double x:Key="Font.Size.Welcome">28</x:Double>

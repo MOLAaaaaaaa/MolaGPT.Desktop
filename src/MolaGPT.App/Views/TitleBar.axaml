@@ -60,7 +60,7 @@
             <StackPanel>
               <TextBlock Text="MolaGPT Chat" FontSize="12" HorizontalAlignment="Center"
                          Foreground="{Binding $parent[Button].Foreground}" />
-              <TextBlock Text="网页版对话" FontSize="9" Opacity="0.7" HorizontalAlignment="Center"
+              <TextBlock Text="网页版对话" FontSize="10" Opacity="0.7" HorizontalAlignment="Center"
                          Foreground="{Binding $parent[Button].Foreground}" />
             </StackPanel>
           </Button>
@@ -68,7 +68,7 @@
             <StackPanel>
               <TextBlock Text="MolaGPT Work" FontSize="12" HorizontalAlignment="Center"
                          Foreground="{Binding $parent[Button].Foreground}" />
-              <TextBlock Text="本地对话" FontSize="9" Opacity="0.7" HorizontalAlignment="Center"
+              <TextBlock Text="本地对话" FontSize="10" Opacity="0.7" HorizontalAlignment="Center"
                          Foreground="{Binding $parent[Button].Foreground}" />
             </StackPanel>
           </Button>

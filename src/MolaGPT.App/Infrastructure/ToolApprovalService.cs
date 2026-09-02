@@ -277,7 +277,7 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
                 {
                     new TextBlock
                     {
-                        Text = "此次调用将读取本次对话工作目录以外的位置：",
+                        Text = "将读取以下位置：",
                         TextWrapping = TextWrapping.Wrap
                     },
                     // The resolved path, not the argument the model wrote:
@@ -589,9 +589,18 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
 
         if (chips.Count > 0)
         {
+            // Name the folder when it is the only thing being granted. "允许并记住
+            // 「桌面」" tells the user what they are agreeing to without making them
+            // map a checkbox to a button; with several rules on offer there is no
+            // single subject to name, so the generic label is the honest one.
+            var soleFolder = chips.Count == 1
+                    && chips[0].Tag is ApprovalRule { IsImport: false } only
+                ? FriendlyFolderName(only.Subject)
+                : null;
+
             var rememberButton = new Button
             {
-                Content = "允许并记住 ▾",
+                Content = soleFolder is null ? "允许并记住 ▾" : $"允许并记住「{soleFolder}」▾",
                 Classes = { "outline" },
                 Padding = new Thickness(16, 7)
             };
@@ -658,23 +667,45 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
         {
             banners.Add(Banner("danger", new TextBlock
             {
-                Text = "此次执行涉及删除、移动或覆盖文件，无法撤销",
+                Text = "包含删除、移动或覆盖文件的操作，不可撤销",
                 TextWrapping = TextWrapping.Wrap
             }));
         }
 
-        var outside = OutsidePaths(request);
-        if (outside.Count > 0)
+        // The model said up front which folders it needs. That is a stronger
+        // statement than anything inferred from the source, so it leads — and it
+        // is phrased as the grant the user is about to make, not as a finding.
+        var requested = RequestedPaths(request);
+        if (requested.Count > 0)
+        {
+            var lines = new List<string> { "此次执行申请写入以下位置：" };
+            lines.AddRange(requested.Take(4).Select(p => "　" + p));
+            if (requested.Count > 4) lines.Add($"　等 {requested.Count - 4} 项");
+
+            banners.Add(Banner("warning", new TextBlock
+            {
+                Text = string.Join("\n", lines),
+                TextWrapping = TextWrapping.Wrap
+            }));
+        }
+
+        // Paths the analyzer spotted in the source that the model did not declare.
+        // Suppressed once a declaration covers them, so one folder never produces
+        // two banners saying the same thing.
+        var outside = OutsidePaths(request)
+            .Where(p => !requested.Any(r => WorkspaceScope.Covers(r, p)))
+            .ToArray();
+        if (outside.Length > 0)
         {
             var lines = new List<string>
             {
-                // Not "读取". Static analysis cannot tell a read from a write
-                // here, so the prompt states the capability rather than guessing
-                // the intent — see PythonExecutionRiskAnalyzer.
-                "此次执行将访问工作目录以外的位置（Python 对这些位置可读、可写、可删）："
+                // "完全访问" rather than "读取": static analysis cannot tell a read
+                // from a write here, and naming the weaker one would be the wrong
+                // guess to make — see PythonExecutionRiskAnalyzer.
+                "以下位置将被完全访问："
             };
             lines.AddRange(outside.Take(4).Select(p => "　" + p));
-            if (outside.Count > 4) lines.Add($"　等 {outside.Count - 4} 项");
+            if (outside.Length > 4) lines.Add($"　等 {outside.Length - 4} 项");
 
             banners.Add(Banner("warning", new TextBlock
             {
@@ -688,6 +719,45 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
 
     private static Border Banner(string tone, Control child) =>
         new() { Classes = { "banner", tone }, Child = child };
+
+    /// <summary>
+    /// What to call a folder in a button. The user's own folders get the name
+    /// they see in Explorer; anything else gets its leaf name, and the full path
+    /// is on screen in the banner and the chip either way.
+    /// </summary>
+    private static string FriendlyFolderName(string path)
+    {
+        foreach (var (folder, label) in new[]
+                 {
+                     (Environment.SpecialFolder.DesktopDirectory, "桌面"),
+                     (Environment.SpecialFolder.MyDocuments, "文档"),
+                     (Environment.SpecialFolder.MyPictures, "图片"),
+                     (Environment.SpecialFolder.MyMusic, "音乐"),
+                     (Environment.SpecialFolder.MyVideos, "视频"),
+                 })
+        {
+            string known;
+            try { known = Environment.GetFolderPath(folder); }
+            catch { continue; }
+
+            if (!string.IsNullOrWhiteSpace(known)
+                && string.Equals(
+                    WorkspaceScope.Normalize(known),
+                    WorkspaceScope.Normalize(path),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return label;
+            }
+        }
+
+        var leaf = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return string.IsNullOrWhiteSpace(leaf) ? path : leaf;
+    }
+
+    /// <summary>Folders the model declared it needs to write to, already resolved
+    /// and already filtered to the ones not yet writable.</summary>
+    private static IReadOnlyList<string> RequestedPaths(PythonExecutionApprovalRequest request) =>
+        request.RequestedPaths ?? Array.Empty<string>();
 
     /// <summary>The literal paths outside the working directory this run named.</summary>
     private static IReadOnlyList<string> OutsidePaths(PythonExecutionApprovalRequest request) =>
@@ -720,11 +790,14 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
     /// will open.
     /// </summary>
     private static IReadOnlyList<string> GetFolderCandidates(PythonExecutionApprovalRequest request) =>
-        OutsidePaths(request)
-            .Where(Path.IsPathRooted)
-            .Select(WorkspaceScope.FolderPrefix)
-            .Where(f => !string.IsNullOrWhiteSpace(f))
-            .Select(f => f!)
+        // Declared folders first: they are already resolved and already known to
+        // be the thing being granted, so they are the offer most worth making.
+        RequestedPaths(request)
+            .Concat(OutsidePaths(request)
+                .Where(Path.IsPathRooted)
+                .Select(WorkspaceScope.FolderPrefix)
+                .Where(f => !string.IsNullOrWhiteSpace(f))
+                .Select(f => f!))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(4)
             .ToArray();
@@ -749,7 +822,7 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
             .ToList();
 
         if (rest.Count == 0)
-            builder.AppendLine("未发现其他需要关注的操作");
+            builder.AppendLine("无其他敏感操作");
         else
             foreach (var flag in rest)
                 builder.Append("· ").AppendLine(DescribeFlag(flag));
@@ -761,18 +834,18 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
     /// analyzer's own wording for anything not worth a hand-written line.</summary>
     private static string DescribeFlag(PythonRiskFlag flag) => flag.Code switch
     {
-        "package_install" => "涉及安装或修改 Python 包",
-        "process_execution" => "涉及运行系统程序等敏感操作",
-        "network_call" => "涉及网络访问",
-        "environment_access" => "涉及读取环境变量或用户目录",
-        "dynamic_execution" => "涉及动态执行代码",
-        "restricted_import" => $"涉及 {flag.Subject} 模块，可执行系统程序等敏感操作",
-        "network_import" => $"涉及网络模块 {flag.Subject}",
-        "system_import" => $"涉及系统模块 {flag.Subject}",
-        "unknown_import" => $"涉及非常用模块 {flag.Subject}",
-        "denied_import" => $"涉及已被规则禁用的模块 {flag.Subject}",
-        "denied_path" => $"涉及已被规则禁用的路径 {flag.Subject}",
-        "outside_workspace" => $"涉及工作目录以外的路径 {flag.Subject}",
+        "package_install" => "安装或修改 Python 包",
+        "process_execution" => "运行系统程序",
+        "network_call" => "网络访问",
+        "environment_access" => "读取环境变量或用户目录",
+        "dynamic_execution" => "动态执行代码",
+        "restricted_import" => $"{flag.Subject} 模块，可运行系统程序",
+        "network_import" => $"网络模块 {flag.Subject}",
+        "system_import" => $"系统模块 {flag.Subject}",
+        "unknown_import" => $"非常用模块 {flag.Subject}",
+        "denied_import" => $"已禁用的模块 {flag.Subject}",
+        "denied_path" => $"已禁用的路径 {flag.Subject}",
+        "outside_workspace" => $"工作目录以外的路径 {flag.Subject}",
         _ => flag.Message,
     };
 

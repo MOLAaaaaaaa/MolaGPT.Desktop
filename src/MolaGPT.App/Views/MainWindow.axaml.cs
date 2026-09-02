@@ -43,17 +43,19 @@ public partial class MainWindow : MolaWindow
     private readonly MessageRepository _messageRepository;
     private readonly PythonRuntimeManager _pythonRuntime;
     private readonly PiSidecarRuntimeManager _piSidecar;
-    private readonly AppStatusService _appStatus;
+    private readonly NotificationCenter _notifications;
     private readonly SkillsViewModel _skills;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IChatToolHost _toolHost;
     private readonly PiByokProviderFactory _piByokProviderFactory;
-    private readonly AppNotificationService? _notificationService;
 
     private bool _sidebarCollapsed;
     private SettingsWindow? _settingsWindow;
     private AboutWindow? _aboutWindow;
     private ImageGenerationWorkbenchView? _imageWorkbench;
+
+    /// <summary>The in-app banner stack. <see cref="NotificationRouter"/> drives it.</summary>
+    public NotificationHost Notifications => PART_Notifications;
 
     public MainWindow(
         MainViewModel main,
@@ -75,12 +77,11 @@ public partial class MainWindow : MolaWindow
         MessageRepository messageRepository,
         PythonRuntimeManager pythonRuntime,
         PiSidecarRuntimeManager piSidecar,
-        AppStatusService appStatus,
+        NotificationCenter notifications,
         SkillsViewModel skills,
         IHttpClientFactory httpClientFactory,
         IChatToolHost toolHost,
-        PiByokProviderFactory piByokProviderFactory,
-        AppNotificationService? notificationService = null)
+        PiByokProviderFactory piByokProviderFactory)
     {
         _main = main;
         _chat = chat;
@@ -101,12 +102,11 @@ public partial class MainWindow : MolaWindow
         _messageRepository = messageRepository;
         _pythonRuntime = pythonRuntime;
         _piSidecar = piSidecar;
-        _appStatus = appStatus;
+        _notifications = notifications;
         _skills = skills;
         _httpClientFactory = httpClientFactory;
         _toolHost = toolHost;
         _piByokProviderFactory = piByokProviderFactory;
-        _notificationService = notificationService;
 
         InitializeComponent();
         DataContext = _main;
@@ -432,7 +432,7 @@ public partial class MainWindow : MolaWindow
             conversationId,
             (title, modelId) => _conversations.CreateImageWorkbenchConversation(title, modelId),
             (id, generating) => _conversations.SetGenerating(id, generating),
-            _notificationService);
+            _notifications);
         workbench.CloseRequested += (_, _) =>
         {
             workbench.NotifyHiddenWhileGenerating();
@@ -463,7 +463,7 @@ public partial class MainWindow : MolaWindow
 
         var window = new SettingsWindow(
             _settings, _auth, _cloudSync, _conversations, _agentStatus, _main.Personas, _mcpHttpClient,
-            _imageGenerationTool, _pythonRuntime, _piSidecar, _appStatus, _skills,
+            _imageGenerationTool, _pythonRuntime, _piSidecar, _notifications, _skills,
             () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory);
         window.AccountRequested += async (_, _) =>
         {

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace MolaGPT.App.Infrastructure;
 
@@ -74,7 +75,7 @@ internal sealed class AppAutoUpdateService(HttpClient http)
             "MolaGPT Desktop", "Updates");
         Directory.CreateDirectory(logDirectory);
         var logPath = Path.Combine(logDirectory, "update-installer.log");
-        File.WriteAllText(scriptPath, InstallerScript);
+        File.WriteAllText(scriptPath, InstallerScript, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
 
         var startInfo = new ProcessStartInfo
         {
@@ -84,6 +85,7 @@ internal sealed class AppAutoUpdateService(HttpClient http)
             WindowStyle = ProcessWindowStyle.Hidden
         };
         startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-STA");
         startInfo.ArgumentList.Add("-ExecutionPolicy");
         startInfo.ArgumentList.Add("Bypass");
         startInfo.ArgumentList.Add("-File");
@@ -121,19 +123,238 @@ function Write-UpdateLog([string]$Message) {
     Add-Content -LiteralPath $LogPath -Value "$stamp $Message" -Encoding UTF8
 }
 
-try {
-    Write-UpdateLog "waiting for parent pid $ParentPid"
-    Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
-    Write-UpdateLog "starting installer: $Installer"
-    $process = Start-Process -FilePath $Installer -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" -Wait -PassThru
-    Write-UpdateLog "installer exit code: $($process.ExitCode)"
-    if ($process.ExitCode -eq 0 -and (Test-Path -LiteralPath $AppExe)) {
-        Start-Process -FilePath $AppExe
+function Test-ProcessRunning([int]$ProcessId) {
+    try {
+        $process = [System.Diagnostics.Process]::GetProcessById($ProcessId)
+        $running = -not $process.HasExited
+        $process.Dispose()
+        return $running
+    } catch [System.ArgumentException] {
+        return $false
     }
+}
+
+try {
+    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Drawing
+
+    [xml]$xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="MolaGPT Desktop"
+        Width="544" Height="236"
+        WindowStyle="None" ResizeMode="NoResize"
+        AllowsTransparency="True" Background="Transparent"
+        WindowStartupLocation="CenterScreen" ShowInTaskbar="True"
+        FontFamily="Microsoft YaHei UI"
+        TextOptions.TextFormattingMode="Display"
+        SnapsToDevicePixels="True">
+  <Grid Background="Transparent">
+    <Border Width="488" Height="180" Margin="28"
+            Background="#FFFFFFFF" BorderBrush="#FFCBD2DB" BorderThickness="1"
+            CornerRadius="20">
+      <Border.Effect>
+        <DropShadowEffect Color="#16202A" BlurRadius="30" ShadowDepth="10" Opacity="0.24" />
+      </Border.Effect>
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="52" />
+          <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border x:Name="TitleBar" BorderBrush="#FFEEF1F4" BorderThickness="0,0,0,1">
+          <Grid Margin="18,0,10,0">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto" />
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Image x:Name="TitleLogo" Width="22" Height="22" Margin="0,0,14,0"
+                   Stretch="Uniform" VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1" Text="MolaGPT Desktop" FontSize="14" FontWeight="SemiBold"
+                       Foreground="#FF212529" VerticalAlignment="Center" />
+            <Button x:Name="CaptionButton" Grid.Column="2" Width="34" Height="32"
+                    Background="Transparent" BorderThickness="0" ToolTip="最小化">
+              <Button.Template>
+                <ControlTemplate TargetType="Button">
+                  <Border x:Name="ButtonBackground" Background="{TemplateBinding Background}" CornerRadius="6">
+                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True">
+                      <Setter TargetName="ButtonBackground" Property="Background" Value="#FFF1F3F5" />
+                    </Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </Button.Template>
+              <TextBlock x:Name="CaptionIcon" Text="&#xE921;" FontFamily="Segoe Fluent Icons"
+                         FontSize="13" Foreground="#FF6C757D" />
+            </Button>
+          </Grid>
+        </Border>
+
+        <Grid Grid.Row="1" Margin="18,29,34,27">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="22" />
+            <ColumnDefinition Width="14" />
+            <ColumnDefinition Width="*" />
+          </Grid.ColumnDefinitions>
+          <Grid x:Name="Spinner" Width="22" Height="22" VerticalAlignment="Center">
+            <Ellipse Stroke="#FFF1F3F5" StrokeThickness="3" />
+            <Ellipse Stroke="#FFBE727F" StrokeThickness="3" StrokeDashArray="14,8"
+                     StrokeDashCap="Round" RenderTransformOrigin="0.5,0.5">
+              <Ellipse.RenderTransform>
+                <RotateTransform x:Name="SpinnerRotation" />
+              </Ellipse.RenderTransform>
+            </Ellipse>
+          </Grid>
+          <StackPanel Grid.Column="2" VerticalAlignment="Center">
+            <TextBlock x:Name="StatusTitle" Text="正在安装更新" FontSize="20" FontWeight="SemiBold"
+                       Foreground="#FF212529" LineHeight="29" />
+            <TextBlock x:Name="StatusDescription" Text="安装完成后，MolaGPT 会自动重新启动。"
+                       Margin="0,7,0,0" FontSize="13" Foreground="#FF6C757D" LineHeight="19" />
+          </StackPanel>
+        </Grid>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
+'@
+
+    $reader = [System.Xml.XmlNodeReader]::new($xaml)
+    $window = [System.Windows.Markup.XamlReader]::Load($reader)
+    $titleBar = $window.FindName("TitleBar")
+    $titleLogo = $window.FindName("TitleLogo")
+    $captionButton = $window.FindName("CaptionButton")
+    $captionIcon = $window.FindName("CaptionIcon")
+    $spinner = $window.FindName("Spinner")
+    $rotation = $window.FindName("SpinnerRotation")
+    $statusTitle = $window.FindName("StatusTitle")
+    $statusDescription = $window.FindName("StatusDescription")
+
+    $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($AppExe)
+    if ($null -ne $icon) {
+        $iconSource = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon(
+            $icon.Handle,
+            [System.Windows.Int32Rect]::Empty,
+            [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
+        $iconSource.Freeze()
+        $titleLogo.Source = $iconSource
+        $window.Icon = $iconSource
+        $icon.Dispose()
+    }
+
+    if ([System.Windows.SystemParameters]::ClientAreaAnimation) {
+        $animation = [System.Windows.Media.Animation.DoubleAnimation]::new()
+        $animation.From = 0
+        $animation.To = 360
+        $animation.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(850))
+        $animation.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        $rotation.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $animation)
+    }
+
+    $script:AllowClose = $false
+    $script:Phase = "WaitingForParent"
+    $script:InstallerProcess = $null
+    $script:Timer = [System.Windows.Threading.DispatcherTimer]::new()
+    $script:Timer.Interval = [TimeSpan]::FromMilliseconds(100)
+
+    function Show-InstallFailure([string]$Message) {
+        $script:Timer.Stop()
+        $script:Phase = "Failed"
+        $script:AllowClose = $true
+        $spinner.Visibility = [System.Windows.Visibility]::Collapsed
+        $statusTitle.Text = "更新安装失败"
+        $statusDescription.Text = $Message
+        $captionIcon.Text = [char]0xE711
+        $captionButton.ToolTip = "关闭"
+    }
+
+    $titleBar.Add_MouseLeftButtonDown({
+        param($sender, $eventArgs)
+        if ($eventArgs.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
+            $window.DragMove()
+        }
+    })
+
+    $captionButton.Add_Click({
+        if ($script:AllowClose) {
+            $window.Close()
+        } else {
+            $window.WindowState = [System.Windows.WindowState]::Minimized
+        }
+    })
+
+    $window.Add_Closing({
+        param($sender, $eventArgs)
+        if (-not $script:AllowClose) {
+            $eventArgs.Cancel = $true
+            $window.WindowState = [System.Windows.WindowState]::Minimized
+        }
+    })
+
+    $script:Timer.Add_Tick({
+        try {
+            if ($script:Phase -eq "WaitingForParent") {
+                if (Test-ProcessRunning $ParentPid) { return }
+
+                Write-UpdateLog "starting installer: $Installer"
+                $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+                $startInfo.FileName = $Installer
+                $startInfo.Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-"
+                $startInfo.UseShellExecute = $false
+                $script:InstallerProcess = [System.Diagnostics.Process]::Start($startInfo)
+                if ($null -eq $script:InstallerProcess) {
+                    throw "installer process did not start"
+                }
+                $script:Phase = "Installing"
+                return
+            }
+
+            if ($script:Phase -ne "Installing" -or -not $script:InstallerProcess.HasExited) {
+                return
+            }
+
+            $script:InstallerProcess.WaitForExit()
+            $exitCode = $script:InstallerProcess.ExitCode
+            Write-UpdateLog "installer exit code: $exitCode"
+            if ($exitCode -ne 0) {
+                Show-InstallFailure "安装程序未能完成，请重新打开 MolaGPT 后重试。"
+                return
+            }
+            if (-not (Test-Path -LiteralPath $AppExe)) {
+                throw "application executable was not found after installation"
+            }
+
+            $script:Phase = "Restarting"
+            $statusTitle.Text = "更新安装完成"
+            $statusDescription.Text = "正在重新启动 MolaGPT，请稍候。"
+            $appStartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $appStartInfo.FileName = $AppExe
+            $appStartInfo.WorkingDirectory = [System.IO.Path]::GetDirectoryName($AppExe)
+            $appStartInfo.UseShellExecute = $true
+            Write-UpdateLog "restarting application: $AppExe"
+            [void][System.Diagnostics.Process]::Start($appStartInfo)
+            $script:AllowClose = $true
+            $window.Close()
+        } catch {
+            Write-UpdateLog "failed: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+            Show-InstallFailure "更新未能完成，请重新打开 MolaGPT 后重试。"
+        }
+    })
+
+    Write-UpdateLog "update helper started for parent pid $ParentPid"
+    $script:Timer.Start()
+    [void]$window.ShowDialog()
 } catch {
     Write-UpdateLog "failed: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
     throw
 } finally {
+    if ($null -ne $script:Timer) {
+        $script:Timer.Stop()
+    }
+    if ($null -ne $script:InstallerProcess) {
+        $script:InstallerProcess.Dispose()
+    }
     Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 }
 """;

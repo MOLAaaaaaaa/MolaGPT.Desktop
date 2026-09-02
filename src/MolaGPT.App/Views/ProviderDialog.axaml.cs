@@ -15,7 +15,7 @@ namespace MolaGPT.App.Views;
 /// "cancel" mean anything: nothing the user typed touches the registry until the
 /// save button assembles a new entry.
 /// </summary>
-public partial class ProviderDialog : MolaWindow
+public partial class ProviderDialog : MolaContentWindow
 {
     private static readonly string[] Types = ["openai-compat", "anthropic", "gemini"];
 
@@ -34,7 +34,6 @@ public partial class ProviderDialog : MolaWindow
         _sortOrder = existing?.SortOrder ?? 0;
 
         Title = existing is null ? "添加模型服务" : $"编辑「{existing.Name}」";
-        PART_TitleBar.TitleText = Title;
 
         PART_Type.SelectedIndex = Math.Max(0, Array.IndexOf(Types, existing?.Type ?? Types[0]));
         PART_Name.Text = existing?.Name ?? string.Empty;

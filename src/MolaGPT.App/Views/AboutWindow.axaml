@@ -1,4 +1,4 @@
-<views:MolaWindow xmlns="https://github.com/avaloniaui"
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:views="clr-namespace:MolaGPT.App.Views"
         x:Class="MolaGPT.App.Views.AboutWindow"
@@ -10,10 +10,10 @@
           FontFamily="{DynamicResource Font.UI}"
           Foreground="{DynamicResource Brush.Text.Primary}">
 
-  <DockPanel>
+  <views:MolaContentWindow.Header>
       <Border Name="PART_Header"
-              DockPanel.Dock="Top"
               Padding="24,14"
+              Background="Transparent"
               BorderBrush="{DynamicResource Brush.Divider}"
               BorderThickness="0,0,0,1">
         <Grid>
@@ -25,6 +25,7 @@
           </Button>
         </Grid>
       </Border>
+  </views:MolaContentWindow.Header>
 
       <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="34,28,34,32">
@@ -120,7 +121,6 @@
           </Expander>
         </StackPanel>
       </ScrollViewer>
-  </DockPanel>
 
   <Window.Styles>
     <Style Selector="TextBlock.section">
@@ -142,4 +142,4 @@
       <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
     </Style>
   </Window.Styles>
-</views:MolaWindow>
+</views:MolaContentWindow>

@@ -556,17 +556,18 @@ public sealed partial class MainViewModel : ObservableObject
         UpdateTooltip = string.IsNullOrWhiteSpace(message) ? "更新下载失败，点击重试" : message;
     }
 
+    /// <summary>
+    /// Drives the header chip, which is now purely a "syncing right now" light.
+    /// Outcomes (成功 / 失败) are events and belong to the notification banners —
+    /// left on the chip, a success message parked in the header forever, because
+    /// nothing ever published an idle state to clear it.
+    /// </summary>
     public void UpdateCloudSyncStatus(string kind, string message, DateTimeOffset timestamp)
     {
         CloudSyncStatusKind = string.IsNullOrWhiteSpace(kind) ? "Idle" : kind;
         CloudSyncStatusText = string.IsNullOrWhiteSpace(message) ? "云同步待机" : message;
         CloudSyncStatusToolTip = $"{CloudSyncStatusText} · {timestamp:HH:mm:ss}";
-        CloudSyncStatusVisible = CloudSyncStatusKind is "Syncing" or "Success" or "Error";
-    }
-
-    public void HideCloudSyncStatus()
-    {
-        CloudSyncStatusVisible = false;
+        CloudSyncStatusVisible = CloudSyncStatusKind is "Syncing";
     }
 
     partial void OnCloudSyncStatusVisibleChanged(bool value) =>

@@ -60,7 +60,21 @@ public sealed record QuoteBlock : RenderBlock
 /// <param name="Depth">0 for a top-level item, 1 for the first nesting, and so on.</param>
 /// <param name="Ordered">Whether this item's immediate parent list is numbered.</param>
 /// <param name="Number">1-based position within its parent, for ordered lists.</param>
-public readonly record struct ListItem(string Markdown, int Depth, bool Ordered, int Number);
+/// <param name="IsContinuation">A further block belonging to the item above it —
+/// a second paragraph, or text that resumes after a nested list. Drawn at the
+/// same indent but with no marker, because it is not a new entry.
+///
+/// One entry per block, rather than one entry per item with the item's blocks
+/// concatenated, is what keeps this list's rendering cost proportional to the
+/// paragraph that changed instead of to the whole item. A reasoning model
+/// writing one numbered point with forty indented paragraphs under it used to
+/// produce a single entry tens of thousands of characters long.</param>
+public readonly record struct ListItem(
+    string Markdown,
+    int Depth,
+    bool Ordered,
+    int Number,
+    bool IsContinuation = false);
 
 public sealed record ListBlock : RenderBlock
 {

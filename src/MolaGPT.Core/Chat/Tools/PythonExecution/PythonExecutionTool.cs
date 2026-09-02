@@ -17,6 +17,10 @@ public sealed class PythonExecutionTool
     /// it does not look like something the user's code produced.</summary>
     private const string StdoutOverflowFileName = "stdout.full.log";
     private const string StderrOverflowFileName = "stderr.full.log";
+
+    /// <summary>Where the audit hook records what a run touched. Read and deleted
+    /// at the end of every run, and excluded from artifact reporting.</summary>
+    private const string SandboxReportFileName = ".sandbox-report.jsonl";
     private const long MaxArtifactBytes = 50L * 1024L * 1024L;
 
     // Timestamp skew applied when deciding which files a run produced. Absorbs
@@ -68,21 +72,16 @@ public sealed class PythonExecutionTool
             function = new
             {
                 name = ToolName,
-                description = "Run Python code locally on the user's computer. This is a general-purpose local execution tool, similar to a bash/shell: prefer it whenever a task is better done by running code than by answering from memory. "
-                    + "Use it for, but not limited to: math and data analysis; reading, writing, creating, moving and inspecting local files and folders; converting or generating documents, spreadsheets, images and plots; inspecting the system and environment; automating multi-step local tasks; and calling operating-system facilities via the standard library (e.g. os, pathlib, shutil, subprocess) when the task needs them. "
-                    + "It runs real Python on the local machine with the user's privileges and a persistent filesystem, not a throwaway image-analysis sandbox. "
-                    + "Within one conversation, every call shares the SAME working directory: files you create in one call (downloaded images, generated charts, data files) are still there in later calls under the same name. Read and write using normal relative paths in the current working directory, and reuse files from earlier steps directly — do NOT copy them from other directories or hard-code full filesystem locations from previous runs. "
+                // What this tool IS, and nothing else. How the workspace behaves —
+                // shared directory, artifacts, pip, approvals, network — is stated
+                // once in the system prompt's environment block instead of being
+                // repeated in every tool schema.
+                description = "Run Python code locally on the user's computer. This is a general-purpose local execution tool, similar to a bash/shell: prefer it whenever a task is better done by running code than by answering from memory — math and data analysis, reading and writing local files and folders, converting or generating documents, spreadsheets, images and plots, inspecting the system, and automating multi-step local tasks through the standard library (os, pathlib, shutil, subprocess). "
+                    + "It runs real Python on the local machine with the user's own privileges and a persistent working directory, not a throwaway cloud sandbox. "
                     + "Print results and short progress to stdout so the user and you can see them. "
-                    + "When you produce plots or images, save them as PNG/JPG files in the current working directory; matplotlib is set up for headless rendering with common Chinese fonts when available. "
-                    + "After execution, follow the returned display_instructions: show images with the exact artifact relative_path in Markdown, and never invent external image URLs or local file-system locations. "
-                    + $"Current execution permission mode is {options.PermissionMode}; risky actions may require the user to approve them before they run. "
                     + (requiresPurpose
-                        ? "Approval mode is active: always provide the `description` argument, because the user must read it and approve before the code runs. "
-                        : string.Empty)
-                    + "Packages installed with pip go into this conversation's own directory and stay available for later calls in the SAME conversation only; a new conversation starts empty. Command-line tools they provide (pyinstaller, black, …) are on PATH, so invoke them by name rather than hunting for the executable. "
-                    + (options.AllowNetwork
-                        ? "Network access is allowed by the user's tool settings."
-                        : "Network access is disabled by default; do not rely on downloading packages or fetching URLs unless the user explicitly enables network."),
+                        ? "Risky actions need the user's approval first, so always provide the `description` argument: they read it before deciding."
+                        : $"Current execution permission mode is {options.PermissionMode}."),
                 parameters = new
                 {
                     type = "object",
@@ -102,6 +101,12 @@ public sealed class PythonExecutionTool
                         {
                             type = "integer",
                             description = "Seconds to allow this run before it is killed (optional). Raise it for work you expect to be slow; the host clamps it to a safe range."
+                        },
+                        paths = new
+                        {
+                            type = "array",
+                            items = new { type = "string" },
+                            description = "Folders outside the working directory this code needs to WRITE to, including the user's own folders such as the desktop (optional, but declare them whenever you already know them). Only the working directory is writable by default; declaring a folder turns what would otherwise be a failed run into one up-front question, and the user's answer is remembered. Reading is already allowed across the machine and never needs to be declared. An undeclared write fails with the refused path named — relay that to the user instead of retrying."
                         }
                     },
                     required = requiresPurpose ? new[] { "code", "description" } : new[] { "code" }
@@ -119,7 +124,7 @@ public sealed class PythonExecutionTool
         if (options?.Enabled != true)
             return Error("Python tool is not enabled.");
 
-        var (code, description, requestedTimeout) = ParseArguments(argumentsJson);
+        var (code, description, requestedTimeout, declaredPaths) = ParseArguments(argumentsJson);
         if (string.IsNullOrWhiteSpace(code))
             return Error("A non-empty Python code string is required.");
 
@@ -132,7 +137,25 @@ public sealed class PythonExecutionTool
         // its own script" from "writes into the user's Documents folder".
         var workspaceRoot = ResolveSessionDirectory(conversationId);
         var risk = PythonExecutionRiskAnalyzer.Analyze(code!, effectiveOptions, workspaceRoot);
-        var permission = await ResolvePermissionAsync(code!, description, effectiveOptions, risk, ct).ConfigureAwait(false);
+
+        // Which declared folders the run cannot already write to. Anything the
+        // seed or an earlier grant already covers is not worth a question — the
+        // model naming the desktop should not produce a prompt when the desktop
+        // was already writable.
+        var grantedPrefixes = SplitPrefixes(effectiveOptions.AllowedPathPrefixes);
+        var seededWritable = PythonSandboxScope.DefaultWritableRoots(workspaceRoot, grantedPrefixes);
+        var newScopeRequests = effectiveOptions.PermissionMode == PythonPermissionMode.FullAccess
+            ? Array.Empty<string>()
+            : declaredPaths
+                .Select(ResolveDeclaredPath)
+                .Where(p => p is not null)
+                .Select(p => p!)
+                .Where(p => !seededWritable.Any(root => WorkspaceScope.Covers(root, p)))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+        var permission = await ResolvePermissionAsync(
+            code!, description, effectiveOptions, risk, newScopeRequests, ct).ConfigureAwait(false);
         if (!permission.Approved)
         {
             return Error(
@@ -163,6 +186,24 @@ public sealed class PythonExecutionTool
             // and clock jitter. This is what keeps a reused (per-conversation)
             // working directory from re-reporting every earlier turn's images.
             var runStartUtc = DateTime.UtcNow - ArtifactFreshnessSkew;
+
+            // Folders the user granted earlier extend the seeded scope, so a
+            // "记住这个文件夹" decision keeps meaning the same thing here as it
+            // does to the analyzer.
+            // Approved declarations join the grants for this run. Re-reading the
+            // grant store here is deliberate: the user may have ticked "记住"
+            // in the dialog above, and that folder should take effect now rather
+            // than on the next call.
+            var scope = effectiveOptions.PermissionMode == PythonPermissionMode.FullAccess
+                ? PythonSandboxScope.DenyOnly(options.AllowNetwork)
+                : PythonSandboxScope.CreateDefault(
+                    sessionDir,
+                    python.FileName,
+                    options.AllowNetwork,
+                    grantedWritable: SplitPrefixes(effectiveOptions.AllowedPathPrefixes)
+                        .Concat(_grants?.WritablePathPrefixes ?? Array.Empty<string>())
+                        .Concat(newScopeRequests));
+
             var startedAt = Stopwatch.StartNew();
             var run = await RunPythonAsync(
                 python,
@@ -171,8 +212,10 @@ public sealed class PythonExecutionTool
                 timeout,
                 maxOutput,
                 options.AllowNetwork,
+                scope,
                 ct).ConfigureAwait(false);
             startedAt.Stop();
+            var sandbox = ReadSandboxReport(sessionDir);
 
             var scannedArtifacts = ScanArtifacts(sessionDir, runStartUtc);
             var artifacts = scannedArtifacts
@@ -207,7 +250,13 @@ public sealed class PythonExecutionTool
                 stderr_full_file = run.StderrFullFile,
                 exit_code = run.ExitCode,
                 duration_ms = (long)startedAt.Elapsed.TotalMilliseconds,
-                timed_out = run.TimedOut
+                timed_out = run.TimedOut,
+                // What the run actually touched, and what it was refused. The
+                // refusals matter most: they are the model's cue to explain what
+                // it needs rather than retry the same call, and they are where a
+                // payload that went looking for something becomes visible.
+                sandbox_accessed = sandbox.Allowed,
+                sandbox_denied = sandbox.Denied
             }, JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -216,11 +265,33 @@ public sealed class PythonExecutionTool
         }
     }
 
+    /// <summary>
+    /// Expands a declared path into an absolute one. <c>~</c> is resolved against
+    /// the real profile — the same place the interpreter now resolves it — so a
+    /// model writing "~/Desktop" asks for the folder the user would recognise.
+    /// </summary>
+    private static string? ResolveDeclaredPath(string declared)
+    {
+        var value = declared.Trim().Trim('"', '\'');
+        if (value.Length == 0) return null;
+
+        if (value == "~" || value.StartsWith("~/", StringComparison.Ordinal) || value.StartsWith(@"~\", StringComparison.Ordinal))
+        {
+            var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (string.IsNullOrWhiteSpace(profile)) return null;
+            value = value.Length <= 1 ? profile : Path.Combine(profile, value[2..]);
+        }
+
+        var expanded = Environment.ExpandEnvironmentVariables(value);
+        return Path.IsPathRooted(expanded) ? WorkspaceScope.Normalize(expanded) : null;
+    }
+
     private async Task<PermissionDecision> ResolvePermissionAsync(
         string code,
         string? description,
         PythonExecutionOptions options,
         PythonExecutionRiskAnalysis risk,
+        IReadOnlyList<string> newScopeRequests,
         CancellationToken ct)
     {
         // Layered permission filter (deny -> full-access -> auto-allow -> ask),
@@ -241,7 +312,7 @@ public sealed class PythonExecutionTool
                 return new PermissionDecision(false, "包安装需要审批，但审批服务不可用");
 
             var installDecision = await _approval.RequestApprovalAsync(
-                new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk)),
+                new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk), newScopeRequests),
                 ct).ConfigureAwait(false);
             return installDecision == PythonExecutionApprovalDecision.Approved
                 ? new PermissionDecision(true, "用户已批准包安装")
@@ -256,7 +327,7 @@ public sealed class PythonExecutionTool
                 return new PermissionDecision(false, "该文件操作需要审批，但审批服务不可用");
 
             var destructiveDecision = await _approval.RequestApprovalAsync(
-                new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk)),
+                new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk), newScopeRequests),
                 ct).ConfigureAwait(false);
             return destructiveDecision == PythonExecutionApprovalDecision.Approved
                 ? new PermissionDecision(true, "用户已批准该文件操作")
@@ -267,8 +338,10 @@ public sealed class PythonExecutionTool
         if (options.PermissionMode == PythonPermissionMode.FullAccess)
             return new PermissionDecision(true, "完全权限模式已放行");
 
-        // [3] Allow layer: nothing risky found -> auto-approve without a prompt.
-        if (risk.AutoApprovable)
+        // [3] Allow layer: nothing risky found and nothing new to grant ->
+        // auto-approve without a prompt. A declared folder the run could already
+        // write to is not "something new", so naming the desktop stays silent.
+        if (risk.AutoApprovable && newScopeRequests.Count == 0)
             return new PermissionDecision(true, "未发现需要审批的操作，已自动放行");
 
         // [4] Everything else needs an explicit user decision.
@@ -276,7 +349,7 @@ public sealed class PythonExecutionTool
             return new PermissionDecision(false, "需要审批，但审批服务不可用");
 
         var decision = await _approval.RequestApprovalAsync(
-            new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk)),
+            new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk), newScopeRequests),
             ct).ConfigureAwait(false);
         return decision == PythonExecutionApprovalDecision.Approved
             ? new PermissionDecision(true, "用户已批准本次执行")
@@ -392,9 +465,12 @@ public sealed class PythonExecutionTool
         TimeSpan timeout,
         int maxOutputCharacters,
         bool allowNetwork,
+        PythonSandboxScope? scope,
         CancellationToken ct)
     {
         using var process = CreateProcess(candidate, new[] { "-I", "-X", "utf8", "-u", runnerScriptPath }, workingDirectory, allowNetwork);
+        if (scope is not null)
+            process.StartInfo.Environment["MOLAGPT_SANDBOX_SCOPE"] = scope.ToJson();
         using var stdout = new BoundedTextCollector(
             maxOutputCharacters, Path.Combine(workingDirectory, StdoutOverflowFileName));
         using var stderr = new BoundedTextCollector(
@@ -494,9 +570,15 @@ public sealed class PythonExecutionTool
         var pythonDirectory = Path.GetDirectoryName(Path.GetFullPath(candidate.FileName))!;
         var scriptsDirectory = Path.Combine(pythonDirectory, "Scripts");
         var systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+
+        // Windows PowerShell lives beside system32 rather than in it, so a PATH of
+        // just system32 left a bare `powershell` raising FileNotFoundError — the
+        // one CLI a model on Windows reaches for first. Nothing is gained by
+        // making it hunt for the full path: it can shell out either way.
+        var powerShellDirectory = Path.Combine(systemDirectory, "WindowsPowerShell", "v1.0");
         process.StartInfo.Environment["PATH"] = string.Join(
             Path.PathSeparator,
-            new[] { pythonDirectory, scriptsDirectory, systemDirectory }
+            new[] { pythonDirectory, scriptsDirectory, systemDirectory, powerShellDirectory }
                 .Where(Directory.Exists)
                 .Distinct(StringComparer.OrdinalIgnoreCase));
 
@@ -512,8 +594,28 @@ public sealed class PythonExecutionTool
             Directory.CreateDirectory(localAppDataDirectory);
             process.StartInfo.Environment["TEMP"] = tempDirectory;
             process.StartInfo.Environment["TMP"] = tempDirectory;
-            process.StartInfo.Environment["HOME"] = workingDirectory;
-            process.StartInfo.Environment["USERPROFILE"] = workingDirectory;
+
+            // The user's OWN folders stay real. Pointing HOME/USERPROFILE at the
+            // sandbox bought no security — a child process can set whatever
+            // environment it likes, and absolute paths reached the real disk
+            // regardless — while breaking every intuition a model has: `~`,
+            // Path.home() and expanduser("~/Desktop") all silently resolved into
+            // an empty sandbox folder. "Save it to my desktop" therefore wrote a
+            // file nobody could find, and no approval dialog appeared, because a
+            // path assembled at runtime is invisible to the analyzer. Real values
+            // make the honest failure (a prompt, or an error) replace the silent
+            // one, and cost nothing that was ever actually being protected.
+            CopyEnvironmentIfPresent(process.StartInfo, "USERPROFILE");
+            CopyEnvironmentIfPresent(process.StartInfo, "HOMEDRIVE");
+            CopyEnvironmentIfPresent(process.StartInfo, "HOMEPATH");
+            CopyEnvironmentIfPresent(process.StartInfo, "USERNAME");
+            var realHome = Environment.GetEnvironmentVariable("USERPROFILE");
+            if (!string.IsNullOrWhiteSpace(realHome))
+                process.StartInfo.Environment["HOME"] = realHome;
+
+            // Program configuration directories stay redirected. No ordinary task
+            // reads or writes them, so containing library config churn here costs
+            // the model nothing — this is the half of the redirect that pays.
             process.StartInfo.Environment["APPDATA"] = appDataDirectory;
             process.StartInfo.Environment["LOCALAPPDATA"] = localAppDataDirectory;
             process.StartInfo.Environment["PIP_TARGET"] = packageDirectory;
@@ -578,6 +680,7 @@ public sealed class PythonExecutionTool
 
     private static string BuildRunnerScript() =>
         """
+        import json
         import os
         import runpy
         import site
@@ -586,6 +689,129 @@ public sealed class PythonExecutionTool
         os.environ.setdefault("PYTHONIOENCODING", "utf-8")
         os.environ.setdefault("PYTHONUTF8", "1")
         os.environ.setdefault("MPLBACKEND", "Agg")
+
+        # ---- sandbox scope -------------------------------------------------
+        # Enforced here, inside the interpreter, because this is the only place
+        # the real path is known. Static analysis of the source sees the literal
+        # "Desktop" in os.path.join(os.environ["USERPROFILE"], "Desktop", name)
+        # and cannot tell it is a path at all; the audit hook is handed the
+        # finished string at the moment the file is opened.
+        #
+        # Not a security boundary: code in this process could reach around the
+        # hook with ctypes. It stops mistakes and ordinary injected payloads,
+        # which is what it is for.
+        _scope = json.loads(os.environ.get("MOLAGPT_SANDBOX_SCOPE") or "{}")
+        _readable = tuple(_scope.get("readable") or ())
+        _writable = tuple(_scope.get("writable") or ())
+        _denied = tuple(_scope.get("denied") or ())
+        _allow_network = bool(_scope.get("allow_network"))
+        # Two independent switches. Full-access runs carry a deny list and no
+        # path scope: the user turned prompting off, so a scope violation would
+        # have no way to be granted and would strand the task — but "never this
+        # file" still holds, because that one is not a prompt in any mode.
+        _enforce_scope = bool(_readable or _writable)
+        _enforce = _enforce_scope or bool(_denied)
+
+        # Report file opened BEFORE the hook exists, and written afterwards with
+        # os.write on the raw descriptor. Using open() from inside the hook would
+        # fire the hook again.
+        _report_fd = -1
+        if _enforce:
+            try:
+                _report_fd = os.open(
+                    os.path.join(os.getcwd(), ".sandbox-report.jsonl"),
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+            except OSError:
+                _report_fd = -1
+
+        _seen = set()
+
+        def _norm(value):
+            try:
+                return os.path.normcase(os.path.abspath(os.fspath(value)))
+            except Exception:
+                return None
+
+        def _under(path, roots):
+            for root in roots:
+                r = os.path.normcase(root)
+                if path == r or path.startswith(r.rstrip("\\/") + os.sep):
+                    return True
+            return False
+
+        def _record(kind, target, allowed):
+            key = (kind, target, allowed)
+            if key in _seen:
+                return
+            _seen.add(key)
+            if _report_fd < 0:
+                return
+            try:
+                line = json.dumps(
+                    {"kind": kind, "target": target, "allowed": allowed},
+                    ensure_ascii=False) + "\n"
+                os.write(_report_fd, line.encode("utf-8", "replace"))
+            except Exception:
+                pass
+
+        # open() reports (path, mode, flags). A missing mode means a read path
+        # inside CPython internals; treat anything without a write intent as a
+        # read so the narrower list is never applied by accident.
+        _WRITE_CHARS = ("w", "a", "x", "+")
+
+        def _check_path(target, writing, label):
+            path = _norm(target)
+            if path is None:
+                return
+            if _under(path, _denied):
+                _record(label, path, False)
+                raise PermissionError(
+                    "MolaGPT 沙盒：该文件受保护，不可访问\n  " + str(target))
+            if not _enforce_scope:
+                return
+            roots = _writable if writing else _readable
+            if _under(path, roots):
+                _record(label, path, True)
+                return
+            _record(label, path, False)
+            raise PermissionError(
+                "MolaGPT 沙盒：路径超出本次批准范围\n"
+                "  尝试" + ("写入" if writing else "读取") + "：" + str(target) + "\n"
+                "  已批准" + ("写入" if writing else "读取") + "：\n    "
+                + "\n    ".join(roots or ("（无）",))
+                + "\n请说明需要访问该位置的原因，由用户授权后重试。")
+
+        def _hook(event, args):
+            if not _enforce:
+                return
+            if event == "open":
+                target, mode, _flags = args
+                writing = bool(mode) and any(c in mode for c in _WRITE_CHARS)
+                _check_path(target, writing, "write" if writing else "read")
+            elif event in ("os.remove", "os.rmdir", "os.unlink", "os.truncate"):
+                _check_path(args[0], True, "delete")
+            elif event == "os.rename" or event == "os.replace":
+                _check_path(args[0], True, "delete")
+                _check_path(args[1], True, "write")
+            elif event == "os.mkdir":
+                _check_path(args[0], True, "write")
+            elif event in ("shutil.copyfile", "shutil.copymode", "shutil.copystat"):
+                _check_path(args[0], False, "read")
+                _check_path(args[1], True, "write")
+            elif event == "shutil.move":
+                _check_path(args[0], True, "delete")
+                _check_path(args[1], True, "write")
+            elif event == "shutil.rmtree":
+                _check_path(args[0], True, "delete")
+            elif event in ("os.listdir", "os.scandir"):
+                if args and args[0] is not None:
+                    _check_path(args[0], False, "read")
+            elif event == "socket.connect" and not _allow_network:
+                _record("network", "socket.connect", False)
+                raise PermissionError("MolaGPT 沙盒：网络未启用")
+
+        if _enforce:
+            sys.addaudithook(_hook)
 
         workspace = os.getcwd()
         packages = os.path.join(workspace, ".packages")
@@ -639,7 +865,11 @@ public sealed class PythonExecutionTool
     /// <summary>Names of the runtime scaffolding scripts written into the session
     /// directory; artifact scanners exclude these.</summary>
     public static IReadOnlyCollection<string> RuntimeScriptFileNames { get; } =
-        new[] { UserScriptFileName, RunnerScriptFileName, StdoutOverflowFileName, StderrOverflowFileName };
+        new[]
+        {
+            UserScriptFileName, RunnerScriptFileName,
+            StdoutOverflowFileName, StderrOverflowFileName, SandboxReportFileName
+        };
 
     private static string ResolveSessionDirectory(string? conversationId)
     {
@@ -750,6 +980,67 @@ public sealed class PythonExecutionTool
         return Convert.ToHexString(bytes, 0, 8).ToLowerInvariant();
     }
 
+    private static IReadOnlyList<string> SplitPrefixes(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? Array.Empty<string>()
+            : value.Split([',', ';', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    /// <summary>
+    /// Reads what the audit hook recorded for this run and deletes the file, so
+    /// the next run starts clean and the report never shows up as an artifact.
+    /// Best effort throughout: a missing or malformed report means the run has
+    /// nothing to say about itself, never that the run failed.
+    /// </summary>
+    private static SandboxReport ReadSandboxReport(string sessionDir)
+    {
+        var path = Path.Combine(sessionDir, SandboxReportFileName);
+        if (!File.Exists(path)) return SandboxReport.Empty;
+
+        var allowed = new List<object>();
+        var denied = new List<object>();
+        try
+        {
+            foreach (var line in File.ReadLines(path))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(line);
+                    var root = doc.RootElement;
+                    var entry = new
+                    {
+                        kind = root.TryGetProperty("kind", out var k) ? k.GetString() : null,
+                        target = root.TryGetProperty("target", out var t) ? t.GetString() : null
+                    };
+                    var ok = root.TryGetProperty("allowed", out var a) && a.ValueKind == JsonValueKind.True;
+                    (ok ? allowed : denied).Add(entry);
+                }
+                catch (JsonException)
+                {
+                    // One torn line (a run killed mid-write) is not worth losing
+                    // the rest of the report over.
+                }
+            }
+        }
+        catch (IOException)
+        {
+            return SandboxReport.Empty;
+        }
+
+        try { File.Delete(path); } catch { /* best effort */ }
+
+        // The allowed list is the long one — every stdlib file an import touched
+        // is in it — and the model does not need it enumerated. Denials are the
+        // actionable half, so they are never trimmed.
+        return new SandboxReport(allowed.Take(24).ToArray(), denied.ToArray());
+    }
+
+    private sealed record SandboxReport(IReadOnlyList<object> Allowed, IReadOnlyList<object> Denied)
+    {
+        public static SandboxReport Empty { get; } =
+            new(Array.Empty<object>(), Array.Empty<object>());
+    }
+
     private static IReadOnlyList<PythonArtifact> ScanArtifacts(string sessionDir, DateTime runStartUtc)
     {
         if (!Directory.Exists(sessionDir))
@@ -851,20 +1142,53 @@ public sealed class PythonExecutionTool
         _ => "application/octet-stream"
     };
 
-    private static (string? Code, string? Description, int? TimeoutSeconds) ParseArguments(string argumentsJson)
+    private static (string? Code, string? Description, int? TimeoutSeconds, IReadOnlyList<string> Paths) ParseArguments(
+        string argumentsJson)
     {
         if (string.IsNullOrWhiteSpace(argumentsJson))
-            return (null, null, null);
+            return (null, null, null, Array.Empty<string>());
 
         using var doc = JsonDocument.Parse(argumentsJson);
         var root = doc.RootElement;
         if (root.ValueKind != JsonValueKind.Object)
-            return (null, null, null);
+            return (null, null, null, Array.Empty<string>());
 
         return (
             ReadString(root, "code") ?? ReadString(root, "python") ?? ReadString(root, "script"),
             ReadString(root, "description") ?? ReadString(root, "purpose"),
-            ReadInt(root, "timeout_seconds") ?? ReadInt(root, "timeout"));
+            ReadInt(root, "timeout_seconds") ?? ReadInt(root, "timeout"),
+            ReadStringArray(root, "paths"));
+    }
+
+    /// <summary>
+    /// Reads a declared-paths array, tolerating the single string some models
+    /// send instead of a one-element array.
+    /// </summary>
+    private static IReadOnlyList<string> ReadStringArray(JsonElement obj, string name)
+    {
+        foreach (var prop in obj.EnumerateObject())
+        {
+            if (!string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase)) continue;
+
+            if (prop.Value.ValueKind == JsonValueKind.String)
+            {
+                var single = prop.Value.GetString();
+                return string.IsNullOrWhiteSpace(single) ? Array.Empty<string>() : new[] { single! };
+            }
+
+            if (prop.Value.ValueKind == JsonValueKind.Array)
+            {
+                return prop.Value.EnumerateArray()
+                    .Where(e => e.ValueKind == JsonValueKind.String)
+                    .Select(e => e.GetString())
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .Select(s => s!)
+                    .Take(8)
+                    .ToArray();
+            }
+        }
+
+        return Array.Empty<string>();
     }
 
     private static string? ReadString(JsonElement obj, string name)

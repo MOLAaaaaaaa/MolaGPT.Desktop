@@ -1284,13 +1284,18 @@ public sealed partial class ComposerViewModel : ObservableObject
             merged = string.IsNullOrWhiteSpace(modelPrompt) ? null : modelPrompt;
         }
 
-        var skillCatalog = BuildSkillCatalogHint();
+        // Appended after whatever the user configured: the environment block says
+        // how this machine's workspace behaves, the skill catalog says what is
+        // available in it. Both must reach the model even when there is no
+        // persona / conversation / model prompt, so they are folded in after
+        // interpolation rather than gated behind the merged-prompt early return.
+        var appendices = new[] { BuildPythonEnvironmentHint(), BuildSkillCatalogHint() }
+            .Where(hint => !string.IsNullOrWhiteSpace(hint))
+            .Select(hint => hint!)
+            .ToArray();
 
-        // The skill catalog must reach the model even when there is no persona /
-        // conversation / model prompt, so it is appended after interpolation
-        // rather than gated behind the merged-prompt early return.
         if (string.IsNullOrWhiteSpace(merged))
-            return skillCatalog; // null when there are no skills to inject either
+            return appendices.Length == 0 ? null : string.Join("\n\n", appendices);
 
         var vars = new PromptVariables
         {
@@ -1301,9 +1306,43 @@ public sealed partial class ComposerViewModel : ObservableObject
             Username = _settings?.MolaGptUsername
         };
         var interpolated = SystemPromptInterpolator.Interpolate(merged, vars);
-        return string.IsNullOrWhiteSpace(skillCatalog)
-            ? interpolated
-            : AppendHiddenSystemHint(interpolated, skillCatalog!);
+        return appendices.Aggregate(interpolated, AppendHiddenSystemHint);
+    }
+
+    /// <summary>
+    /// The few facts about the local Python workspace a model cannot guess and
+    /// otherwise burns turns rediscovering: where its files live, how images get
+    /// shown, what pip does, and what raises an approval dialog.
+    ///
+    /// Deliberately four lines. The environment itself is kept honest — real user
+    /// folders resolve normally, <c>~</c> means what it says — so anything a model
+    /// would already assume correctly is left out rather than restated here.
+    /// </summary>
+    private string? BuildPythonEnvironmentHint()
+    {
+        if (!CanUseByokPythonTool || _settings is null) return null;
+
+        var options = _settings.BuildPythonExecutionOptions();
+        var lines = new List<string>
+        {
+            "本对话有专属工作目录，你的代码在其中运行，文件跨轮次保留——用相对路径读写，上一轮生成的文件直接按原名复用。",
+            "生成的图表存为 PNG/JPG 放在工作目录，按 display_instructions 给的相对路径展示，不要编造 URL 或绝对路径。",
+            "pip 装的包只在本对话有效，它们的命令行工具已在 PATH 上，按名字直接调用。"
+        };
+
+        // Nothing prompts under full access, and no path scope applies there, so
+        // stating either would be a lie that also discourages the model from
+        // acting.
+        if (options.PermissionMode != PythonPermissionMode.FullAccess)
+        {
+            lines.Add("默认只有工作目录可写，全盘可读。要写到别处（含桌面、文档、下载），在 paths 参数里声明该文件夹，用户确认一次后长期有效；未声明就写会直接报错并列出已批准范围，此时向用户说明需要哪个位置、为什么，不要反复重试。");
+            lines.Add("删除移动文件、装包、起子进程需要用户确认，合并成一次执行并在 description 里说清意图。");
+        }
+
+        if (!options.AllowNetwork)
+            lines.Add("网络默认关闭，不要依赖下载文件或抓取网页。");
+
+        return "<运行环境>\n" + string.Join("\n", lines) + "\n</运行环境>";
     }
 
     /// <summary>
@@ -1348,10 +1387,50 @@ public sealed partial class ComposerViewModel : ObservableObject
         assistantMsg.StartPending(IsRoutesModel(activeModel));
         IsSending = true;
         _chat.IsStreaming = true;
-        _cts = new CancellationTokenSource();
+
+        var cts = new CancellationTokenSource();
+        _cts = cts;
+        _activeAssistantMsg = assistantMsg;
+
+        var conversationId = _chat.ConversationId ?? string.Empty;
+        var sessionId = Guid.NewGuid().ToString("N");
+
+        // A retry runs through the same machinery as a first send, and for the same
+        // reasons: it is what publishes the completion notification, what lets the
+        // user switch conversations without stranding the stream, and what tells
+        // cloud sync the conversation moved. Doing it by hand here is how a retry
+        // ended up finishing in silence.
+        var streamContext = new BackgroundStreamTask
+        {
+            ConversationId = conversationId,
+            ConversationTitle = _chat.ConversationTitle,
+            ModelLabel = assistantMsg.ModelLabel,
+            ModelId = activeModel.Id,
+            ProviderId = activeProvider.Id,
+            ProviderKind = activeProvider.Kind,
+            AssistantMessage = assistantMsg,
+            Cts = cts,
+            StreamTask = Task.CompletedTask,
+            SessionId = sessionId,
+            IsRegeneration = true
+        };
+        _activeTask = streamContext;
+        var wasCancelled = false;
 
         try
         {
+            // Providers that keep the transcript themselves have to be told this is
+            // a do-over. Pruning the message list below does nothing for them: they
+            // read only the newest turn and answer from their own history, which
+            // still holds the attempt being replaced.
+            //
+            // Deliberately before the stream rather than after a successful one: if
+            // the retry then fails, the provider has forgotten a turn the UI still
+            // shows, which is recoverable. The other order leaves the old attempt
+            // in the model's context, which is the bug.
+            if (activeProvider is IStatefulHistoryProvider stateful)
+                await stateful.ForgetLastTurnAsync(conversationId, cts.Token);
+
             var backfillHistory = activeProvider.Kind != ProviderKind.MolaGptProxy;
             var msgs = _chat.Messages
                 .Take(index)
@@ -1376,21 +1455,21 @@ public sealed partial class ComposerViewModel : ObservableObject
                 ModelId: activeModel.Id,
                 Messages: msgs,
                 ConversationId: _chat.ConversationId,
-                SessionId: Guid.NewGuid().ToString("N"),
+                SessionId: sessionId,
                 UseThinking: EnableThinking,
                 ReasoningEffort: IsReasoningEffortVisible ? ReasoningEffort : null,
                 ExtraBody: extras,
                 ThinkingBudgetTokens: EnableThinking ? ThinkingBudgetTokens : null,
                 ThinkingParamKind: thinkingKind);
 
-            await foreach (var chunk in activeProvider.StreamChatAsync(req, _cts.Token).WithCancellation(_cts.Token))
-            {
-                ApplyStreamChunk(assistantMsg, chunk);
-                if (chunk.FinishReason is not null) break;
-            }
+            var streamTask = RunStreamLoopAsync(activeProvider, req, assistantMsg, cts, streamContext);
+            streamContext.StreamTask = streamTask;
+            _activeStreamTask = streamTask;
+            await streamTask;
         }
         catch (OperationCanceledException)
         {
+            wasCancelled = true;
             // Same as the first-send path: a stopped retry keeps its action bar
             // and says why it is empty, instead of becoming a blank version.
             assistantMsg.WasStopped = true;
@@ -1398,21 +1477,35 @@ public sealed partial class ComposerViewModel : ObservableObject
         catch (Exception ex)
         {
             assistantMsg.AppendDelta($"\n\n> ❌ **错误**: {ex.Message}");
+            ClassifyActionableError(assistantMsg, ex);
         }
         finally
         {
+            // Ahead of CompleteStreamContext, which persists: the stored meta and
+            // the version switcher both read RetryAttempts, and capturing an
+            // attempt means capturing the text — so the deltas have to be flushed
+            // and the artifact links resolved before the snapshot is taken, or the
+            // saved version keeps the links this attempt showed on screen only
+            // until it finished. (CompleteStreamContext rewrites again; the second
+            // pass sees absolute URLs and leaves them alone.)
             assistantMsg.StopPending();
             assistantMsg.FlushPendingDelta();
-            RewritePythonArtifactMarkdownLinks(assistantMsg);
-            _pythonArtifactContexts.Remove(assistantMsg);
             assistantMsg.IsStreaming = false;
             assistantMsg.StopThinking();
+            RewritePythonArtifactMarkdownLinks(assistantMsg);
             assistantMsg.CommitRetryAttempt();
-            _chat.UpdatePersistedMessage(assistantMsg);
-            IsSending = false;
-            _chat.IsStreaming = false;
-            _cts?.Dispose();
-            _cts = null;
+
+            CompleteStreamContext(streamContext, publishNotification: !wasCancelled);
+            if (ReferenceEquals(_activeTask, streamContext))
+            {
+                IsSending = false;
+                _chat.IsStreaming = false;
+                _activeStreamTask = null;
+                _activeAssistantMsg = null;
+                _activeTask = null;
+                _cts = null;
+            }
+            cts.Dispose();
         }
     }
 
@@ -1627,8 +1720,8 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// Streams normally remove their own entry when they finish; this safety net
     /// (run on conversation switch) catches entries stranded by a stream that
     /// never terminated or whose completion path threw before the removal.
-    /// Anything foreground-active, background-registered, or still streaming
-    /// (e.g. an in-flight retry, which sets neither) is left alone.
+    /// Anything foreground-active, background-registered, or still streaming is
+    /// left alone.
     /// </summary>
     private void PruneOrphanedArtifactContexts()
     {
@@ -1686,7 +1779,13 @@ public sealed partial class ComposerViewModel : ObservableObject
     {
         RewritePythonArtifactMarkdownLinks(streamContext.AssistantMessage);
         _pythonArtifactContexts.Remove(streamContext.AssistantMessage);
-        _chat.FinalizeAssistantMessage(streamContext.ConversationId, streamContext.AssistantMessage);
+
+        // A regeneration's bubble is already a row; finalizing it the normal way
+        // would insert a second one.
+        if (streamContext.IsRegeneration)
+            _chat.CompleteRetriedAssistantMessage(streamContext.ConversationId, streamContext.AssistantMessage);
+        else
+            _chat.FinalizeAssistantMessage(streamContext.ConversationId, streamContext.AssistantMessage);
 
         if (publishNotification)
         {

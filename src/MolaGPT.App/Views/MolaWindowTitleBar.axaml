@@ -1,5 +1,6 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:chrome="using:Avalonia.Controls.Chrome"
              x:Class="MolaGPT.App.Views.MolaWindowTitleBar"
              x:CompileBindings="False"
              Name="PART_Root"
@@ -8,7 +9,8 @@
           Padding="18,0,10,0"
           Background="{DynamicResource Brush.Bg.Elevated}"
           BorderBrush="{DynamicResource Brush.Divider}"
-          BorderThickness="0,0,0,1">
+          BorderThickness="0,0,0,1"
+          chrome:WindowDecorationProperties.ElementRole="TitleBar">
     <Grid ColumnDefinitions="Auto,*,Auto">
       <Image Width="22" Height="22"
              Margin="0,0,10,0"
@@ -26,6 +28,7 @@
               Name="PART_Close"
               Classes="headericon"
               IsVisible="{Binding ShowCloseButton, ElementName=PART_Root}"
+              chrome:WindowDecorationProperties.ElementRole="User"
               ToolTip.Tip="关闭">
         <TextBlock Classes="icon" Text="&#xE711;" FontSize="14" />
       </Button>

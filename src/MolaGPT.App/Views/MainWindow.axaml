@@ -32,6 +32,7 @@
   -->
 
   <LayoutTransformControl Name="PART_UiScale">
+    <Panel>
     <DockPanel Name="PART_Root">
 
     <!-- ============================ title bar ============================ -->
@@ -151,7 +152,7 @@
                                                IsVisible="{Binding IsImage}" />
                           <Border Background="{DynamicResource Brush.Primary.Tint}"
                                   IsVisible="{Binding !IsImage}">
-                            <TextBlock Text="{Binding Extension}" FontSize="9" FontWeight="SemiBold"
+                            <TextBlock Text="{Binding Extension}" FontSize="10" FontWeight="SemiBold"
                                        Foreground="{DynamicResource Brush.Primary}"
                                        TextWrapping="NoWrap"
                                        HorizontalAlignment="Center" VerticalAlignment="Center" />
@@ -164,7 +165,7 @@
                              chance and long names broke across two lines. -->
                         <TextBlock Text="{Binding FileName}" FontSize="12"
                                    TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
-                        <TextBlock Text="{Binding SizeLabel}" Classes="muted" FontSize="10"
+                        <TextBlock Text="{Binding SizeLabel}" Classes="muted" FontSize="11"
                                    TextWrapping="NoWrap" Margin="0,2,0,0" />
                       </StackPanel>
                     </Grid>
@@ -177,6 +178,13 @@
       </Border>
     </Grid>
     </DockPanel>
+
+    <!-- Notification banners float over the whole shell, anchored just under
+         the title bar at the window's right edge. They sit outside the body
+         grid so they do not move with the sidebar or the artifact panel. -->
+    <views:NotificationHost Name="PART_Notifications" ZIndex="80"
+                            Margin="0,58,30,0" />
+    </Panel>
   </LayoutTransformControl>
 
   <Window.Styles>

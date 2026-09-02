@@ -1,4 +1,4 @@
-<views:MolaWindow xmlns="https://github.com/avaloniaui"
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:views="clr-namespace:MolaGPT.App.Views"
         x:Class="MolaGPT.App.Views.TrayClosePromptWindow"
@@ -9,8 +9,9 @@
         FontFamily="{DynamicResource Font.UI}"
         FontSize="{DynamicResource Font.Size.Body}"
         Foreground="{DynamicResource Brush.Text.Primary}">
-  <DockPanel>
-        <Border Name="PART_Header" DockPanel.Dock="Top" Padding="22,16"
+  <views:MolaContentWindow.Header>
+        <Border Name="PART_Header" Padding="22,16"
+                Background="Transparent"
                 BorderBrush="{DynamicResource Brush.Divider}"
                 BorderThickness="0,0,0,1">
           <Grid ColumnDefinitions="*,Auto">
@@ -23,6 +24,7 @@
             </Button>
           </Grid>
         </Border>
+  </views:MolaContentWindow.Header>
 
         <StackPanel Margin="28,24,28,28">
           <TextBlock Text="点击右上角关闭按钮时，要怎么处理？"
@@ -36,5 +38,4 @@
                     Content="关闭软件" Padding="14,10" />
           </Grid>
         </StackPanel>
-  </DockPanel>
-</views:MolaWindow>
+</views:MolaContentWindow>

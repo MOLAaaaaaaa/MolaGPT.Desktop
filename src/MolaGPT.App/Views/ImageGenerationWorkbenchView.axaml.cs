@@ -9,6 +9,7 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using MolaGPT.App.Infrastructure;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
+using MolaGPT.Desktop.Services;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels;
@@ -24,7 +25,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
     private readonly MessageRepository _messageRepo;
     private readonly Func<string, string?, string> _createConversation;
     private readonly Action<string, bool> _onGeneratingChanged;
-    private readonly AppNotificationService? _notificationService;
+    private readonly NotificationCenter? _notifications;
     private readonly ObservableCollection<ImageWorkbenchResult> _results = new();
     private readonly ObservableCollection<ImageWorkbenchResult> _gallery = new();
     private CancellationTokenSource? _cts;
@@ -43,7 +44,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         string? conversationId,
         Func<string, string?, string> createConversation,
         Action<string, bool> onGeneratingChanged,
-        AppNotificationService? notificationService = null)
+        NotificationCenter? notifications = null)
     {
         _settings = settings;
         _imageGeneration = imageGeneration;
@@ -53,7 +54,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         _conversationId = conversationId;
         _createConversation = createConversation;
         _onGeneratingChanged = onGeneratingChanged;
-        _notificationService = notificationService;
+        _notifications = notifications;
 
         InitializeComponent();
         PART_Results.ItemsSource = _results;
@@ -167,6 +168,21 @@ public partial class ImageGenerationWorkbenchView : UserControl
                 ReplacePending(pending, ImageWorkbenchResult.Error(
                     prompt, taskTitle, isEdit, "未返回图片，请调整描述后重试。", modelLabel, modelId, providerId));
                 PART_Status.Text = "未返回图片，请调整描述后重试。";
+
+                // Still a terminal state: without it the 「正在后台生成」 banner
+                // for this key would stay up for good.
+                if (!string.IsNullOrWhiteSpace(_conversationId))
+                {
+                    _notifications?.Notify(new AppNotification
+                    {
+                        Key = "image-" + _conversationId,
+                        Kind = NotifyKind.Warning,
+                        Title = string.IsNullOrWhiteSpace(taskTitle) ? "未返回图片" : $"「{taskTitle}」未返回图片",
+                        Body = "请调整描述后重试。",
+                        ConversationId = _conversationId,
+                        IsAnswerCompleted = true
+                    });
+                }
                 return;
             }
 
@@ -191,8 +207,15 @@ public partial class ImageGenerationWorkbenchView : UserControl
             PART_Status.Text = isEdit
                 ? $"编辑完成，共 {added} 张图片。"
                 : $"生成完成，共 {added} 张图片。";
-            _notificationService?.ShowImageGenerationCompleted(
-                _conversationId!, taskTitle, added, force: _hiddenWhileGenerating || !IsVisible);
+            _notifications?.Notify(new AppNotification
+            {
+                Key = "image-" + _conversationId,
+                Kind = NotifyKind.Success,
+                Title = string.IsNullOrWhiteSpace(taskTitle) ? "图像生成完成" : $"「{taskTitle}」生成完成",
+                Body = added > 0 ? $"已生成 {added} 张图片" : null,
+                ConversationId = _conversationId,
+                IsAnswerCompleted = true
+            });
             ScrollResultsToEnd();
         }
         catch (OperationCanceledException)
@@ -202,12 +225,16 @@ public partial class ImageGenerationWorkbenchView : UserControl
             ReplacePending(pending, error);
             Persist(prompt, error);
             PART_Status.Text = "已取消本次生成。";
-            if (_notificationService is not null
-                && !string.IsNullOrWhiteSpace(_conversationId)
-                && (_hiddenWhileGenerating || !IsVisible))
+            if (!string.IsNullOrWhiteSpace(_conversationId))
             {
-                _notificationService.ShowImageGenerationFailed(
-                    _conversationId, taskTitle, "已取消本次生成。", force: true);
+                _notifications?.Notify(new AppNotification
+                {
+                    Key = "image-" + _conversationId,
+                    Kind = NotifyKind.Warning,
+                    Title = string.IsNullOrWhiteSpace(taskTitle) ? "图像生成已取消" : $"「{taskTitle}」已取消",
+                    ConversationId = _conversationId,
+                    IsAnswerCompleted = true
+                });
             }
         }
         catch (Exception ex)
@@ -217,10 +244,16 @@ public partial class ImageGenerationWorkbenchView : UserControl
             ReplacePending(pending, error);
             Persist(prompt, error);
             PART_Status.Text = "生成失败：" + ex.Message;
-            if (_notificationService is not null && !string.IsNullOrWhiteSpace(_conversationId))
+            if (!string.IsNullOrWhiteSpace(_conversationId))
             {
-                _notificationService.ShowImageGenerationFailed(
-                    _conversationId, taskTitle, ex.Message, force: _hiddenWhileGenerating || !IsVisible);
+                _notifications?.Notify(new AppNotification
+                {
+                    Key = "image-" + _conversationId,
+                    Kind = NotifyKind.Error,
+                    Title = string.IsNullOrWhiteSpace(taskTitle) ? "图像生成失败" : $"「{taskTitle}」生成失败",
+                    Body = ex.Message,
+                    ConversationId = _conversationId
+                });
             }
         }
         finally
@@ -582,7 +615,15 @@ public partial class ImageGenerationWorkbenchView : UserControl
         if (_cts is null || _hiddenNotificationShown) return;
 
         _hiddenWhileGenerating = true;
-        _notificationService?.ShowImageGenerationStarted(_conversationId ?? string.Empty, CurrentTaskTitle());
+        var pendingTitle = CurrentTaskTitle();
+        _notifications?.Notify(new AppNotification
+        {
+            Key = "image-" + _conversationId,
+            Kind = NotifyKind.Progress,
+            Title = "图像正在后台生成",
+            Body = string.IsNullOrWhiteSpace(pendingTitle) ? "完成后会通知你" : $"「{pendingTitle}」完成后会通知你",
+            ConversationId = _conversationId
+        });
         _hiddenNotificationShown = true;
     }
 

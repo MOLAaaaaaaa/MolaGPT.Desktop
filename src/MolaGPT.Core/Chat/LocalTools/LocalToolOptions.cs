@@ -34,11 +34,17 @@ public sealed record LocalToolOptions(
         || ImageGeneration?.Enabled == true
         || Python?.Enabled == true;
 
-    /// <summary>Denied path prefixes as a list (split from the comma string).</summary>
+    /// <summary>
+    /// Denied path prefixes as a list (split from the comma string), with the
+    /// always-denied built-ins folded in. Derived rather than stored so that no
+    /// caller — settings page, wire payload, or a future one — can hand the file
+    /// tools a list with the credential store missing from it.
+    /// </summary>
     public IReadOnlyList<string> DeniedPathPrefixList =>
-        string.IsNullOrWhiteSpace(DeniedPathPrefixes)
-            ? Array.Empty<string>()
-            : DeniedPathPrefixes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        ProtectedPaths.Combine(
+            string.IsNullOrWhiteSpace(DeniedPathPrefixes)
+                ? Array.Empty<string>()
+                : DeniedPathPrefixes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
 
     /// <summary>
     /// Directories the read-only tools may reach without asking, on top of the

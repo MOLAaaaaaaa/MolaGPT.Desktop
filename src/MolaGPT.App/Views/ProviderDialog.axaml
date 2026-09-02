@@ -1,4 +1,4 @@
-<v:MolaWindow xmlns="https://github.com/avaloniaui"
+<v:MolaContentWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:v="clr-namespace:MolaGPT.App.Views"
         x:Class="MolaGPT.App.Views.ProviderDialog"
@@ -21,9 +21,7 @@
     silent, so they are checkboxes on the row rather than something inferred.
   -->
 
-  <DockPanel>
-    <v:MolaWindowTitleBar DockPanel.Dock="Top" Name="PART_TitleBar" TitleText="模型服务" />
-    <DockPanel Margin="20">
+  <DockPanel Margin="20">
     <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal"
                 HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">
       <Button Name="PART_Cancel" Content="取消" Padding="18,7" />
@@ -142,7 +140,6 @@
                    Foreground="{DynamicResource Brush.Error}" />
       </StackPanel>
     </ScrollViewer>
-    </DockPanel>
   </DockPanel>
 
   <Window.Styles>
@@ -194,4 +191,4 @@
       <Setter Property="Padding" Value="4,2" />
     </Style>
   </Window.Styles>
-</v:MolaWindow>
+</v:MolaContentWindow>

@@ -5,7 +5,6 @@ using Avalonia.Controls.Templates;
 using Avalonia.Layout;
 using Avalonia.Media;
 using MolaGPT.Presentation;
-using System.Text.RegularExpressions;
 
 namespace MolaGPT.App.Rendering;
 
@@ -61,19 +60,20 @@ public sealed class MarkdownListView : TemplatedControl
 
     private const double IndentPerLevel = 22;
     private const double MarkerColumn = 22;
-    private static readonly Regex DisplayMath = new(
-        @"\\\[(?<formula>.*?)\\\]",
-        RegexOptions.Singleline | RegexOptions.CultureInvariant);
 
     private readonly StackPanel _host = new();
+
+    /// <summary>The items the rows in <see cref="_host"/> were built from, index
+    /// for index. Compared against the next block to find what actually changed.</summary>
+    private IReadOnlyList<ListItem> _rows = Array.Empty<ListItem>();
 
     static MarkdownListView()
     {
         BlockProperty.Changed.AddClassHandler<MarkdownListView>((x, _) => x.Rebuild());
-        AccentBrushProperty.Changed.AddClassHandler<MarkdownListView>((x, _) => x.Rebuild());
-        CodeBackgroundProperty.Changed.AddClassHandler<MarkdownListView>((x, _) => x.Rebuild());
-        FontSizeProperty.Changed.AddClassHandler<MarkdownListView>((x, _) => x.Rebuild());
-        LineHeightProperty.Changed.AddClassHandler<MarkdownListView>((x, _) => x.Rebuild());
+        AccentBrushProperty.Changed.AddClassHandler<MarkdownListView>((x, _) => x.RebuildAll());
+        CodeBackgroundProperty.Changed.AddClassHandler<MarkdownListView>((x, _) => x.RebuildAll());
+        FontSizeProperty.Changed.AddClassHandler<MarkdownListView>((x, _) => x.RebuildAll());
+        LineHeightProperty.Changed.AddClassHandler<MarkdownListView>((x, _) => x.RebuildAll());
     }
 
     public MarkdownListView()
@@ -89,19 +89,49 @@ public sealed class MarkdownListView : TemplatedControl
 
     private void Rebuild()
     {
+        var items = Block?.Items ?? (IReadOnlyList<ListItem>)Array.Empty<ListItem>();
+
+        // A streamed list grows at its end: the last entry gains characters and
+        // new entries appear after it. Clearing every row for that re-created
+        // the whole visual tree on each delta, which for a reasoning block
+        // running to tens of thousands of characters was most of a frame.
+        // ListItem is a record struct, so the shared prefix is a value compare.
+        var shared = 0;
+        var max = Math.Min(Math.Min(_rows.Count, items.Count), _host.Children.Count);
+        while (shared < max && _rows[shared] == items[shared]) shared++;
+
+        while (_host.Children.Count > shared)
+            _host.Children.RemoveAt(_host.Children.Count - 1);
+
+        for (var i = shared; i < items.Count; i++)
+            _host.Children.Add(BuildRow(items[i]));
+
+        _rows = items;
+    }
+
+    /// <summary>
+    /// Typography and brushes are baked into every row when it is built, so a
+    /// change to them cannot reuse anything.
+    /// </summary>
+    private void RebuildAll()
+    {
+        _rows = Array.Empty<ListItem>();
         _host.Children.Clear();
+        Rebuild();
+    }
 
-        var block = Block;
-        if (block is null || block.Items.Count == 0) return;
-
-        foreach (var item in block.Items)
+    private Control BuildRow(ListItem item)
+    {
+        var row = new Grid
         {
-            var row = new Grid
-            {
-                Margin = new Thickness(item.Depth * IndentPerLevel, 0, 0, 3),
-                ColumnDefinitions = new ColumnDefinitions($"{MarkerColumn},*")
-            };
+            Margin = new Thickness(item.Depth * IndentPerLevel, 0, 0, 3),
+            ColumnDefinitions = new ColumnDefinitions($"{MarkerColumn},*")
+        };
 
+        // A continuation keeps the entry's indent but takes no marker: it is the
+        // same bullet's next paragraph, not a new entry.
+        if (!item.IsContinuation)
+        {
             var marker = new TextBlock
             {
                 Text = Marker(item),
@@ -115,13 +145,13 @@ public sealed class MarkdownListView : TemplatedControl
             };
             Grid.SetColumn(marker, 0);
             row.Children.Add(marker);
-
-            var content = BuildItemContent(item.Markdown);
-            Grid.SetColumn(content, 1);
-            row.Children.Add(content);
-
-            _host.Children.Add(row);
         }
+
+        var content = BuildItemContent(item.Markdown);
+        Grid.SetColumn(content, 1);
+        row.Children.Add(content);
+
+        return row;
     }
 
     private Control BuildItemContent(string markdown)
@@ -137,18 +167,18 @@ public sealed class MarkdownListView : TemplatedControl
             TextWrapping = TextWrapping.Wrap
         };
 
-        var matches = DisplayMath.Matches(markdown);
-        if (matches.Count == 0) return Prose(markdown);
+        var spans = LatexDisplayParser.Find(markdown);
+        if (spans.Count == 0) return Prose(markdown);
 
         var host = new StackPanel { Spacing = 3 };
         var cursor = 0;
 
-        foreach (Match match in matches)
+        foreach (var span in spans)
         {
-            var before = markdown[cursor..match.Index].Trim();
+            var before = markdown[cursor..span.Start].Trim();
             if (before.Length > 0) host.Children.Add(Prose(before));
 
-            var formula = match.Groups["formula"].Value.Trim();
+            var formula = markdown.Substring(span.FormulaStart, span.FormulaLength).Trim();
             if (formula.Length > 0)
             {
                 host.Children.Add(new ScrollViewer
@@ -166,7 +196,7 @@ public sealed class MarkdownListView : TemplatedControl
                 });
             }
 
-            cursor = match.Index + match.Length;
+            cursor = span.Start + span.Length;
         }
 
         var after = markdown[cursor..].Trim();

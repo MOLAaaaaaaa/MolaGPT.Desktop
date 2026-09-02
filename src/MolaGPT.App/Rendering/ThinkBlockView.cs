@@ -4,6 +4,7 @@ using Avalonia.Animation.Easings;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Shapes;
+using Avalonia.Controls.Templates;   // FindDataTemplate
 using Avalonia.Input.Platform;      // ClipboardExtensions.SetTextAsync
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -70,12 +71,19 @@ public sealed class ThinkBlockView : TemplatedControl
     private readonly Ellipse _dot;
     private readonly TextBlock _status;
     private readonly TextBlock _chevron;
-    private readonly ItemsControl _body;
+    private readonly StackPanel _body;
     private readonly RevealPresenter _reveal;
     private readonly Button _header;
     private readonly Border _stripe;
     private readonly Border _shell;
-    private bool _bodyBuilt;
+
+    /// <summary>The blocks <see cref="_body"/>'s children were built from, index
+    /// for index. Compared against the next parse to find what actually changed.</summary>
+    private readonly List<RenderBlock> _rendered = new();
+
+    /// <summary>Last parse, so a delta re-parses only the trailing blocks.</summary>
+    private RenderDocument? _document;
+    private bool _bodyStale = true;
 
     static ThinkBlockView()
     {
@@ -142,8 +150,13 @@ public sealed class ThinkBlockView : TemplatedControl
         };
         _header.Click += (_, _) => IsExpanded = !IsExpanded;
 
-        _body = new ItemsControl { Margin = new Thickness(12, 0, 12, 10) };
-        _reveal = new RevealPresenter { Child = _body, IsOpen = true };
+        _body = new StackPanel { Margin = new Thickness(12, 0, 12, 10) };
+        _reveal = new RevealPresenter
+        {
+            Child = _body,
+            IsOpen = true,
+            PerformanceLabel = "thinking"
+        };
 
         var column = new StackPanel();
         column.Children.Add(_header);
@@ -185,6 +198,12 @@ public sealed class ThinkBlockView : TemplatedControl
         base.OnAttachedToVisualTree(e);
         ApplyBrushes();
         ActualThemeVariantChanged += OnVariantChanged;
+
+        // The block templates are shared with the transcript's own rows and are
+        // therefore found by walking up from here. A body built before the card
+        // was attached would have found none of them, so the first real build
+        // has to wait for this.
+        if (IsExpanded) BuildBody();
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
@@ -249,7 +268,7 @@ public sealed class ThinkBlockView : TemplatedControl
 
     private void Invalidate()
     {
-        _bodyBuilt = false;
+        _bodyStale = true;
         if (IsExpanded) BuildBody();
     }
 
@@ -265,21 +284,127 @@ public sealed class ThinkBlockView : TemplatedControl
     }
 
     /// <summary>
-    /// Parses on first expand and caches. The reasoning text is often longer
-    /// than the answer, and the card starts collapsed once the model is done, so
-    /// parsing eagerly would pay for markdown nobody asked to see.
+    /// Parses on first expand and again on each delta while open, reusing
+    /// whatever the last parse already established. The card starts collapsed
+    /// once the model is done, so a finished block nobody opens still costs
+    /// nothing.
+    ///
+    /// Reasoning routinely runs far longer than the answer it precedes, and it
+    /// arrives as one markdown block far more often than the answer does — a
+    /// numbered point with indented paragraphs under it is a single list no
+    /// matter how long it grows. So neither the transcript's row virtualization
+    /// nor its per-block reuse bounds the work here, and this method has to.
     /// </summary>
     private void BuildBody()
     {
-        if (_bodyBuilt) return;
-        _bodyBuilt = true;
+        if (!_bodyStale) return;
+
+        // Detached: the templates below are found through the tree, so anything
+        // built now would render as raw source. Stay stale; the attach handler
+        // comes back for this.
+        if (VisualRoot is null) return;
+        _bodyStale = false;
+        var traceStarted = AnimationPerformanceTrace.Timestamp();
 
         if (Source is not { Length: > 0 } source)
         {
-            _body.ItemsSource = null;
+            _document = null;
+            _rendered.Clear();
+            _body.Children.Clear();
+            AnimationPerformanceTrace.ThinkingBodyBuilt(traceStarted, 0, 0);
             return;
         }
 
-        _body.ItemsSource = MessageDocumentParser.Parse(source).Blocks;
+        // Incremental, not Parse: a full re-read of the whole segment on every
+        // delta is quadratic over a segment that streams for a minute.
+        _document = MessageDocumentParser.ParseIncremental(_document, source);
+        SyncBody(_document.Blocks);
+        AnimationPerformanceTrace.ThinkingBodyBuilt(
+            traceStarted,
+            source.Length,
+            _document.Blocks.Count);
     }
+
+    /// <summary>
+    /// Brings the body's children to <paramref name="next"/> with the least work.
+    ///
+    /// Three cases, cheapest first:
+    ///
+    ///   key unchanged  — the block is final; its child never hears about the
+    ///                    delta at all.
+    ///   same type      — the block grew. The child already there is handed the
+    ///                    new value through its DataContext, so a view that can
+    ///                    update itself cheaply gets the chance to; a long list
+    ///                    then rebuilds the one row that changed.
+    ///   different type — half-streamed markdown changed its mind (a paragraph
+    ///                    became a heading, a fence closed). Rebuild that child.
+    ///
+    /// An <see cref="ItemsControl"/> cannot express the middle case: replacing an
+    /// item discards its container, so the growing block's control was rebuilt
+    /// from nothing on every delta however cheap its own update would have been.
+    /// </summary>
+    private void SyncBody(IReadOnlyList<RenderBlock> next)
+    {
+        for (var i = 0; i < next.Count; i++)
+        {
+            var block = next[i];
+
+            if (i >= _rendered.Count)
+            {
+                _body.Children.Add(BuildChild(block));
+                _rendered.Add(block);
+                continue;
+            }
+
+            if (string.Equals(_rendered[i].Key, block.Key, StringComparison.Ordinal)) continue;
+
+            if (_rendered[i].GetType() == block.GetType())
+                _body.Children[i].DataContext = block;
+            else
+                _body.Children[i] = BuildChild(block);
+
+            _rendered[i] = block;
+        }
+
+        while (_rendered.Count > next.Count)
+        {
+            _rendered.RemoveAt(_rendered.Count - 1);
+            _body.Children.RemoveAt(_body.Children.Count - 1);
+        }
+    }
+
+    /// <summary>
+    /// The block templates live on the transcript, shared with the answer's own
+    /// rows, so they are looked up rather than duplicated here. The DataContext
+    /// is set explicitly because nothing else is going to: this is the panel a
+    /// ContentPresenter would otherwise be standing in for.
+    /// </summary>
+    private Control BuildChild(RenderBlock block)
+    {
+        if (this.FindDataTemplate(block)?.Build(block) is { } templated)
+        {
+            templated.DataContext = block;
+            return templated;
+        }
+
+        // No templates in scope — the card is being hosted outside the
+        // transcript. Show the block's own source rather than nothing, and keep
+        // it updating from the DataContext like every other child, because
+        // SyncBody's reuse rule assumes exactly that.
+        var fallback = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        fallback.DataContextChanged += (sender, _) =>
+        {
+            var target = (TextBlock)sender!;
+            target.Text = target.DataContext is RenderBlock current ? SourceOf(current) : null;
+        };
+        fallback.DataContext = block;
+        return fallback;
+    }
+
+    private string SourceOf(RenderBlock block) =>
+        Source is { } source
+        && block.SourceStart >= 0
+        && block.SourceStart + block.SourceLength <= source.Length
+            ? source.Substring(block.SourceStart, block.SourceLength)
+            : string.Empty;
 }

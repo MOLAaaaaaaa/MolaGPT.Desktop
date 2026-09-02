@@ -1,0 +1,61 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:views="clr-namespace:MolaGPT.App.Views"
+             x:Class="MolaGPT.App.Views.NotificationHost"
+             HorizontalAlignment="Right" VerticalAlignment="Top">
+
+  <!--
+    Anchored under the 46px title bar at the window's right edge, floating over
+    the chat card. No Background is set anywhere: the host sizes to its banners,
+    so the rest of the corner stays clickable.
+  -->
+  <StackPanel Spacing="10" HorizontalAlignment="Right">
+    <StackPanel Name="PART_Stack" Spacing="10" HorizontalAlignment="Right" />
+    <Button Name="PART_More" Classes="overflowchip"
+            HorizontalAlignment="Right" IsVisible="False" />
+  </StackPanel>
+
+  <UserControl.Styles>
+    <!--
+      Slides in from the right edge it is anchored to, 240ms CubicEaseOut.
+
+      Deliberately no Opacity track. This app renders through a low-latency
+      swap chain that stops producing frames when nothing else is moving, so an
+      animation can freeze a hair short of its last keyframe and stay there —
+      which left banners parked at ~0.96 opacity with the header buttons
+      showing through them. A stalled translate is a couple of stray pixels;
+      a stalled fade is a see-through card.
+    -->
+    <Style Selector="views|NotificationBanner">
+      <Style.Animations>
+        <Animation Duration="0:0:0.24" Easing="CubicEaseOut" FillMode="Forward">
+          <KeyFrame Cue="0%">
+            <Setter Property="TranslateTransform.X" Value="18" />
+          </KeyFrame>
+          <KeyFrame Cue="100%">
+            <Setter Property="TranslateTransform.X" Value="0" />
+          </KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+
+    <Style Selector="Button.overflowchip">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Strong}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="Padding" Value="12,5" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <!-- BoxShadow lives on the template's Border, not on the Button. -->
+    <Style Selector="Button.overflowchip /template/ Border#PART_Root">
+      <Setter Property="BoxShadow" Value="0 10 30 0 #3D16202A" />
+    </Style>
+    <Style Selector="Button.overflowchip:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+  </UserControl.Styles>
+</UserControl>

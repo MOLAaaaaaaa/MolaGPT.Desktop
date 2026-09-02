@@ -230,9 +230,6 @@ internal static class AppServices
             sp.GetRequiredService<MolaGptProxyProvider>()));
         services.AddSingleton<AccountSessionCoordinator>();
         services.AddSingleton(sp => new AppNotificationService(
-            sp.GetRequiredService<BackgroundStreamService>(),
-            sp.GetRequiredService<SettingsViewModel>(),
-            () => sp.GetRequiredService<ChatViewModel>().ConversationId,
             conversationId =>
             {
                 var conversations = sp.GetRequiredService<ConversationListViewModel>();
@@ -251,7 +248,7 @@ internal static class AppServices
         services.AddSingleton(sp => new PythonRuntimeManager(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
             Environment.GetEnvironmentVariable("MOLAGPT_PYTHON_RUNTIME_MANIFEST_URL")));
-        services.AddSingleton<AppStatusService>();
+        services.AddSingleton<NotificationCenter>();
 
         var provider = services.BuildServiceProvider(new ServiceProviderOptions
         {

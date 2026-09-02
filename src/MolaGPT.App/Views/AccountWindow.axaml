@@ -1,4 +1,4 @@
-<views:MolaWindow xmlns="https://github.com/avaloniaui"
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:views="using:MolaGPT.App.Views"
         x:Class="MolaGPT.App.Views.AccountWindow"
@@ -11,11 +11,11 @@
         FontSize="{DynamicResource Font.Size.Body}"
         Foreground="{DynamicResource Brush.Text.Primary}">
 
-  <Grid RowDefinitions="Auto,Auto,*,Auto">
-        <Border Grid.Row="0"
+  <views:MolaContentWindow.Header>
+        <Border
                 Name="PART_Header"
-                PointerPressed="OnHeaderPointerPressed"
                 Padding="20,18,16,12"
+                Background="Transparent"
                 BorderBrush="{DynamicResource Brush.Divider}"
                 BorderThickness="0,0,0,1">
           <Grid>
@@ -55,8 +55,10 @@
             </Button>
           </Grid>
         </Border>
+  </views:MolaContentWindow.Header>
 
-        <StackPanel Grid.Row="1" Margin="20,14,20,8">
+  <Grid RowDefinitions="Auto,*,Auto">
+        <StackPanel Grid.Row="0" Margin="20,14,20,8">
           <TextBlock Name="PART_SectionTitle"
                      Text="今日使用情况"
                      FontSize="{DynamicResource Font.Size.Small}"
@@ -118,7 +120,7 @@
           </StackPanel>
         </StackPanel>
 
-        <ScrollViewer Grid.Row="2"
+        <ScrollViewer Grid.Row="1"
                       Margin="20,0,12,0"
                       Padding="0,0,8,0"
                       VerticalScrollBarVisibility="Auto"
@@ -167,7 +169,7 @@
                       <TextBlock Text="{Binding Detail}"
                                  IsVisible="{Binding HasDetail}"
                                  Classes="muted"
-                                 FontSize="11"
+                                 FontSize="12"
                                  Margin="0,3,0,0" />
 
                       <StackPanel IsVisible="{Binding HasLegacyUsage}" Margin="0,8,0,0" Spacing="7">
@@ -206,14 +208,14 @@
             <TextBlock Name="PART_EstimateHint"
                        Text="次数按平均对话长度估算，实际随对话长短浮动。"
                        IsVisible="False"
-                       FontSize="11"
+                       FontSize="12"
                        Foreground="{DynamicResource Brush.Text.Muted}"
                        TextWrapping="Wrap"
                        Margin="0,2,0,12" />
           </StackPanel>
         </ScrollViewer>
 
-        <Border Grid.Row="3"
+        <Border Grid.Row="2"
                 BorderBrush="{DynamicResource Brush.Divider}"
                 BorderThickness="0,1,0,0"
                 Padding="20,12,20,18">
@@ -254,4 +256,4 @@
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Error}" />
     </Style>
   </Window.Styles>
-</views:MolaWindow>
+</views:MolaContentWindow>

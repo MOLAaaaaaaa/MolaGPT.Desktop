@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
@@ -21,6 +22,8 @@ public partial class TranscriptView : UserControl
     private const double ScrollSettleEpsilon = 0.75;
     private const double ScrollSettleVelocity = 40;
     private const double ScrollMaxFrameSeconds = 0.05;
+    private const double ScrollWriteEpsilon = 0.25;
+    private const double ScrollCorrectionEpsilon = 0.5;
     private const double BottomStickTolerance = 48;
     private const double OlderLoadTrigger = 240;
     private const int OlderLoadBatch = 20;
@@ -51,7 +54,7 @@ public partial class TranscriptView : UserControl
     private double _wheelCurrent;
     private double _wheelVelocity;
     private double _wheelTarget;
-    private DateTime _wheelLastFrame;
+    private long _wheelLastFrame;
     private bool _olderLoadQueued;
     private bool _loadingOlder;
     private bool _jumping;
@@ -214,13 +217,13 @@ public partial class TranscriptView : UserControl
 
         if (_loadingOlder) return;
 
-        // ScrollViewer can clamp an offset against an extent that is still
-        // changing, so an animation's landed value does not always equal the
-        // value it requested. While our animation owns the viewport, its
-        // ScrollChanged events are not user input.
+        // Realizing a virtual row can revise the extent and make ScrollViewer
+        // move the offset to preserve its anchor. That correction is external to
+        // the animation even though it arrives while the animation owns ordinary
+        // offset writes, so carry it into the animation's coordinate system.
         if (_wheelAnimating || _jumping)
         {
-            _expectedOffset = null;
+            RebaseAnimationForScrollCorrection(e);
             return;
         }
 
@@ -259,6 +262,38 @@ public partial class TranscriptView : UserControl
         }
 
         QueueMaybeLoadOlderMessages();
+    }
+
+    private void RebaseAnimationForScrollCorrection(ScrollChangedEventArgs e)
+    {
+        if (_scroll is null) return;
+
+        double correction;
+        if (_expectedOffset is { } expected)
+        {
+            correction = _scroll.Offset.Y - expected;
+            _expectedOffset = null;
+        }
+        else
+        {
+            // A separate extent/anchor event can follow the event for our own
+            // write. In that case OffsetDelta is the correction itself.
+            correction = Math.Abs(e.ExtentDelta.Y) > ScrollCorrectionEpsilon
+                ? e.OffsetDelta.Y
+                : 0;
+        }
+
+        if (Math.Abs(correction) <= ScrollCorrectionEpsilon)
+            return;
+
+        if (_wheelAnimating)
+        {
+            _wheelCurrent += correction;
+            _wheelTarget += correction;
+        }
+
+        if (_jumping)
+            _jumpFrom += correction;
     }
 
     private void QueueMaybeLoadOlderMessages()
@@ -321,12 +356,18 @@ public partial class TranscriptView : UserControl
     private void AnimateWheelTo(double target)
     {
         _wheelTarget = target;
+        AnimationPerformanceTrace.UpdateWheelTarget(target);
         if (_wheelAnimating) return;
 
         _wheelCurrent = _scroll?.Offset.Y ?? target;
         _wheelVelocity = 0;
-        _wheelLastFrame = DateTime.UtcNow;
+        _wheelLastFrame = Stopwatch.GetTimestamp();
         _wheelAnimating = true;
+        AnimationPerformanceTrace.BeginWheel(
+            _chat?.ConversationId,
+            _wheelCurrent,
+            target,
+            _rows?.Count ?? 0);
         RequestWheelFrame();
     }
 
@@ -348,9 +389,11 @@ public partial class TranscriptView : UserControl
         _wheelFrameRequested = false;
         if (!_wheelAnimating || _scroll is null) return;
 
-        var now = DateTime.UtcNow;
-        var dt = Math.Clamp((now - _wheelLastFrame).TotalSeconds, 0, ScrollMaxFrameSeconds);
+        var now = Stopwatch.GetTimestamp();
+        var rawInterval = Stopwatch.GetElapsedTime(_wheelLastFrame, now).TotalSeconds;
+        var dt = Math.Clamp(rawInterval, 0, ScrollMaxFrameSeconds);
         _wheelLastFrame = now;
+        AnimationPerformanceTrace.WheelFrame(rawInterval * 1000);
 
         var scrollable = Math.Max(0, _scroll.Extent.Height - _scroll.Viewport.Height);
         var target = Math.Clamp(_wheelTarget, 0, scrollable);
@@ -366,7 +409,7 @@ public partial class TranscriptView : UserControl
             && Math.Abs(_wheelVelocity) <= ScrollSettleVelocity)
         {
             SetScrollOffset(target);
-            CancelWheelAnimation();
+            CancelWheelAnimation("settled");
             return;
         }
 
@@ -382,15 +425,20 @@ public partial class TranscriptView : UserControl
     private void SetScrollOffset(double offset)
     {
         if (_scroll is null) return;
+        if (Math.Abs(_scroll.Offset.Y - offset) <= ScrollWriteEpsilon) return;
         _expectedOffset = offset;
         _scroll.Offset = _scroll.Offset.WithY(offset);
+        AnimationPerformanceTrace.WheelOffsetWritten();
     }
 
-    private void CancelWheelAnimation()
+    private void CancelWheelAnimation(string reason = "cancelled")
     {
+        var wasWheelAnimating = _wheelAnimating;
         _wheelAnimating = false;
         _wheelVelocity = 0;
         _jumping = false;
+        if (wasWheelAnimating)
+            AnimationPerformanceTrace.EndWheel(_scroll?.Offset.Y ?? _wheelCurrent, reason);
     }
 
     private static bool IsScrollBarPart(object? source) =>

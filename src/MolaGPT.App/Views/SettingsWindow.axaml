@@ -1,4 +1,4 @@
-<v:MolaWindow xmlns="https://github.com/avaloniaui"
+<v:MolaContentWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
         xmlns:v="clr-namespace:MolaGPT.App.Views"
@@ -8,6 +8,7 @@
         x:Class="MolaGPT.App.Views.SettingsWindow"
         x:DataType="vm:SettingsViewModel"
         Title="设置 — MolaGPT"
+        HeaderTitle="设置"
         Width="1044" Height="704"
         CanResize="False"
         WindowStartupLocation="CenterOwner"
@@ -54,31 +55,6 @@
     <Border Background="{DynamicResource Brush.Bg.Elevated}"
             ClipToBounds="True">
       <DockPanel>
-        <Border Name="PART_Header"
-                DockPanel.Dock="Top"
-                Padding="24,15"
-                BorderBrush="{DynamicResource Brush.Divider}"
-                BorderThickness="0,0,0,1">
-          <Grid ColumnDefinitions="Auto,*,Auto">
-            <Image Grid.Column="0"
-                   Width="22" Height="22"
-                   Margin="0,0,10,0"
-                   Source="avares://MolaGPT.Desktop/Assets/app-logo.png"
-                   RenderOptions.BitmapInterpolationMode="HighQuality" />
-            <TextBlock Grid.Column="1"
-                       Text="设置"
-                       FontSize="{DynamicResource Font.Size.Heading}"
-                       FontWeight="Bold"
-                       VerticalAlignment="Center" />
-            <Button Grid.Column="2"
-                    Name="PART_Close"
-                    Classes="headericon"
-                    ToolTip.Tip="关闭">
-              <TextBlock Classes="icon" Text="&#xE711;" />
-            </Button>
-          </Grid>
-        </Border>
-
         <Grid ColumnDefinitions="208,*">
           <Border Grid.Column="0"
                   Background="{DynamicResource Brush.Bg.Secondary}"
@@ -1822,4 +1798,4 @@
       <Setter Property="Padding" Value="4,2" />
     </Style>
   </Window.Styles>
-</v:MolaWindow>
+</v:MolaContentWindow>

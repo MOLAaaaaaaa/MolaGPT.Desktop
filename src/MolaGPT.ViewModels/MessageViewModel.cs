@@ -173,6 +173,14 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     private System.Threading.Timer? _streamFlushTimer;
     private readonly System.Threading.Lock _streamLock = new();
     private readonly System.Text.StringBuilder _pendingDelta = new();
+    private System.Threading.Timer? _thinkingFlushTimer;
+    private readonly System.Threading.Lock _thinkingLock = new();
+    private readonly System.Text.StringBuilder _pendingThinking = new();
+    private bool _thinkingFlushScheduled;
+
+    /// <summary>Whether the active segment currently shows anything. Tracked so a
+    /// delta only rebuilds the display blocks when that answer changes.</summary>
+    private bool _activeThinkingVisible;
     private readonly SynchronizationContext? _syncContext;
     private ThinkingSegmentViewModel? _activeThinkingSegment;
     private int _nextDisplaySequence;
@@ -234,10 +242,16 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     /// Commit any queued streaming text immediately. Called before final
     /// markdown render and before persistence so the database never misses
     /// the tail that was waiting for the next UI frame.
+    ///
+    /// Reasoning is queued the same way the answer is, so it is flushed here
+    /// too rather than at each of this method's call sites — a caller that
+    /// remembered one and forgot the other would silently persist a truncated
+    /// chain of thought.
     /// </summary>
     public void FlushPendingDelta()
     {
         if (_disposed) return;
+        FlushPendingThinking();
         var pending = TakeAllPendingDelta();
         if (pending.Length > 0) Content += pending;
     }
@@ -313,17 +327,18 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
 
     public void AppendThinking(string delta)
     {
-        if (string.IsNullOrEmpty(delta)) return;
+        if (_disposed || string.IsNullOrEmpty(delta)) return;
         StopPending();
-        Thinking = (Thinking ?? string.Empty) + delta;
-        OnPropertyChanged(nameof(HasThinking));
 
+        // Opening a segment is structural — the card has to appear on the first
+        // delta — so it is never deferred. Only the text is.
         if (_thinkingStartedAt is null)
         {
             _thinkingStartedAt = DateTimeOffset.UtcNow;
             ThinkingElapsedSeconds = 0;
             IsThinkingActive = true;
             _activeThinkingSegment = CreateThinkingSegment();
+            _activeThinkingVisible = false;
             EnsureElapsedTimer();
         }
         else if (_activeThinkingSegment is null)
@@ -331,10 +346,117 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             _activeThinkingSegment = CreateThinkingSegment();
             _activeThinkingSegment.IsThinking = IsThinkingActive;
             _activeThinkingSegment.ElapsedSeconds = ThinkingElapsedSeconds;
+            _activeThinkingVisible = false;
         }
 
-        _activeThinkingSegment.Append(delta);
+        // Reasoning arrives token by token and is the longest text in the turn,
+        // so it gets the same coalescing the answer has always had. Without it
+        // every token re-rendered the whole segment: a minute of reasoning at a
+        // few hundred characters a second means thousands of full re-renders of
+        // a body that ends up tens of thousands of characters long.
+        if (!IsStreaming)
+        {
+            CommitThinking(delta);
+            return;
+        }
+
+        lock (_thinkingLock)
+        {
+            _pendingThinking.Append(delta);
+            if (_thinkingFlushScheduled) return;
+
+            _thinkingFlushScheduled = true;
+            _thinkingFlushTimer ??= new System.Threading.Timer(
+                _ => PostFlushPendingThinkingFrame(), null,
+                Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            _thinkingFlushTimer.Change(StreamFlushInterval, Timeout.InfiniteTimeSpan);
+        }
+    }
+
+    private void PostFlushPendingThinkingFrame()
+    {
+        if (_disposed) return;
+        if (_syncContext is not null) _syncContext.Post(_ => FlushPendingThinkingFrame(), null);
+        else FlushPendingThinkingFrame();
+    }
+
+    private void FlushPendingThinkingFrame() => CommitThinking(TakeFramePendingThinking());
+
+    private string TakeFramePendingThinking()
+    {
+        lock (_thinkingLock)
+        {
+            _thinkingFlushScheduled = false;
+            if (_pendingThinking.Length == 0) return string.Empty;
+
+            var take = Math.Min(GetAdaptiveStreamBatchSize(_pendingThinking.Length), _pendingThinking.Length);
+            var pending = _pendingThinking.ToString(0, take);
+            _pendingThinking.Remove(0, take);
+            if (_pendingThinking.Length > 0 && !_disposed)
+            {
+                _thinkingFlushScheduled = true;
+                _thinkingFlushTimer?.Change(StreamFlushInterval, Timeout.InfiniteTimeSpan);
+            }
+            return pending;
+        }
+    }
+
+    private string TakeAllPendingThinking()
+    {
+        lock (_thinkingLock)
+        {
+            _thinkingFlushScheduled = false;
+            if (_pendingThinking.Length == 0) return string.Empty;
+            var pending = _pendingThinking.ToString();
+            _pendingThinking.Clear();
+            return pending;
+        }
+    }
+
+    /// <summary>
+    /// Applies queued reasoning text to the aggregate and to the segment it
+    /// belongs to.
+    ///
+    /// The display-block list is deliberately not rebuilt here. Growing a
+    /// segment's text changes no block's identity, offset or count, so the list
+    /// is already correct — and rebuilding it re-sorted every tool call and
+    /// segment and re-scanned all of their text, which over a long reasoning
+    /// turn cost more than the rendering did. The one thing a delta can change
+    /// is whether a segment holding nothing but hidden markup has become
+    /// visible, or a half-streamed marker has just closed and hidden it.
+    /// </summary>
+    private void CommitThinking(string text)
+    {
+        if (_disposed || text.Length == 0) return;
+
+        Thinking = (Thinking ?? string.Empty) + text;
+        OnPropertyChanged(nameof(HasThinking));
+
+        if (_activeThinkingSegment is not { } segment) return;
+        segment.Append(text);
+
+        // Visibility can only move when a marker character is in play: a
+        // construct that hides a segment has to open with '<' and close with
+        // '>'. Ordinary reasoning arriving at a segment that is already showing
+        // cannot change the answer, and skipping the check there keeps four
+        // regex passes over the longest text in the turn off the streaming path
+        // — reasoning that happens to discuss markup would otherwise land on
+        // the slow path for every delta.
+        if (_activeThinkingVisible && !text.AsSpan().ContainsAny('<', '>')) return;
+
+        var visible = IsThinkingSegmentVisible(segment);
+        if (visible == _activeThinkingVisible) return;
+
+        _activeThinkingVisible = visible;
         RebuildDisplayBlocks();
+    }
+
+    /// <summary>Commit any queued reasoning immediately, so persistence and the
+    /// finished card never miss the tail waiting for the next frame.</summary>
+    public void FlushPendingThinking()
+    {
+        if (_disposed) return;
+        CommitThinking(TakeAllPendingThinking());
     }
 
     /// <summary>Freeze the elapsed counter and clear active state. Called
@@ -371,7 +493,9 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         ThinkingSegments.Clear();
         ToolCalls.Clear();
         DisplayBlocks.Clear();
+        TakeAllPendingThinking();
         _activeThinkingSegment = null;
+        _activeThinkingVisible = false;
         _thinkingStartedAt = null;
         _nextDisplaySequence = 0;
         ThinkingElapsedSeconds = 0;
@@ -747,6 +871,12 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         var source = thinking.Source;
         if (string.IsNullOrWhiteSpace(source)) return false;
 
+        // Every marker that can hide a segment opens with '<', and ordinary
+        // reasoning contains none. Reasoning is also the longest text in a turn,
+        // so the fast path is what stops four regex passes over tens of
+        // thousands of characters from running on the streaming path.
+        if (!source.Contains('<')) return true;
+
         var visible = ImageGenDsAnalysisRegex().Replace(source, string.Empty);
         visible = HiddenDsAnalysisRegex().Replace(visible, string.Empty);
         visible = EmptyDsAnalysisRegex().Replace(visible, string.Empty);
@@ -886,6 +1016,8 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         _pendingTimer = null;
         _streamFlushTimer?.Dispose();
         _streamFlushTimer = null;
+        _thinkingFlushTimer?.Dispose();
+        _thinkingFlushTimer = null;
     }
 }
 

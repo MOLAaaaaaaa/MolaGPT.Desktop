@@ -32,7 +32,12 @@ public partial class App : Application
     private TrayIconHost? _tray;
     private CancellationTokenSource? _agentRelayCts;
     private Task? _agentRelayTask;
+    private const string UpdateNotificationKey = "app-update";
+    private const string CloudSyncNotificationKey = "cloud-sync";
+
     private string? _pendingUpdateInstallerPath;
+    private NotificationRouter? _notificationRouter;
+    private NotificationCenter? _notifications;
 
     public override void Initialize() => AvaloniaXamlLoader.Load(this);
 
@@ -57,6 +62,8 @@ public partial class App : Application
             var agentStatus = _services.GetRequiredService<AgentBridgeStatusViewModel>();
             var updateCheck = _services.GetRequiredService<UpdateCheckService>();
             var autoUpdate = _services.GetRequiredService<AppAutoUpdateService>();
+            var notifications = _services.GetRequiredService<NotificationCenter>();
+            _notifications = notifications;
 
             if (!string.IsNullOrEmpty(auth.CurrentJwt)
                 && !auth.IsJwtValidForUa(UserAgentProvider.FixedUa))
@@ -85,7 +92,11 @@ public partial class App : Application
                 Dispatcher.UIThread.Post(() => _ = main.ConversationList.ReloadAsync(), DispatcherPriority.Background);
             cloudSync.StatusChanged += (_, status) =>
                 Dispatcher.UIThread.Post(
-                    () => main.UpdateCloudSyncStatus(status.State.ToString(), status.Message, status.Timestamp),
+                    () =>
+                    {
+                        main.UpdateCloudSyncStatus(status.State.ToString(), status.Message, status.Timestamp);
+                        PublishCloudSyncNotification(notifications, main, status);
+                    },
                     DispatcherPriority.Background);
             main.CloudSyncRequested = async () =>
             {
@@ -112,13 +123,26 @@ public partial class App : Application
                  _services.GetRequiredService<MessageRepository>(),
                  _services.GetRequiredService<PythonRuntimeManager>(),
                 _services.GetRequiredService<PiSidecarRuntimeManager>(),
-                _services.GetRequiredService<AppStatusService>(),
+                notifications,
                 _services.GetRequiredService<SkillsViewModel>(),
                  _services.GetRequiredService<IHttpClientFactory>(),
                  _services.GetRequiredService<IChatToolHost>(),
-                 _services.GetRequiredService<PiByokProviderFactory>(),
-                 _services.GetRequiredService<AppNotificationService>());
+                 _services.GetRequiredService<PiByokProviderFactory>());
             desktop.MainWindow = window;
+
+            // One router owns "banner, Windows toast, or wait" for every source.
+            // The workbench counts as the current conversation while it is open,
+            // so finishing an image you are watching stays silent.
+            _notificationRouter = new NotificationRouter(
+                notifications,
+                _services.GetRequiredService<BackgroundStreamService>(),
+                settings,
+                window.Notifications,
+                _services.GetRequiredService<AppNotificationService>(),
+                window,
+                () => main.IsImageWorkbenchVisible
+                    ? main.ConversationList.SelectedId
+                    : main.Chat.ConversationId);
 
             main.UpdateActionRequested = async (version, notes, downloadUrl, actionText, installerSha256) =>
             {
@@ -179,11 +203,12 @@ public partial class App : Application
                 () => _ = RunStartupAccountRefreshAsync(
                     auth, providers, proxy, localTools, accountSession, window),
                 DispatcherPriority.Background);
-            _ = RunUpdateCheckAsync(main, updateCheck);
+            _ = RunUpdateCheckAsync(main, updateCheck, notifications);
 
             desktop.ShutdownRequested += (_, _) =>
             {
                 cloudSync.StopPeriodicSync();
+                _notificationRouter?.Dispose();
                 StopAgentRelayAsync().GetAwaiter().GetResult();
                 _tray?.Dispose();
                 var services = _services;
@@ -241,15 +266,55 @@ public partial class App : Application
         if (main.UpdateState == "Downloading") return;
 
         main.BeginUpdateDownload();
+        _notifications?.Progress(UpdateNotificationKey, $"正在下载 {package.Version}", "0%", 0);
+
         try
         {
-            var progress = new Progress<double>(main.ReportUpdateDownloadProgress);
+            // Reported per chunk; the banner only redraws when the whole
+            // percent moves, which is the most a 344px card can show anyway.
+            var lastPercent = -1;
+            var progress = new Progress<double>(value =>
+            {
+                main.ReportUpdateDownloadProgress(value);
+
+                var percent = Math.Clamp((int)(value * 100), 0, 100);
+                if (percent == lastPercent) return;
+                lastPercent = percent;
+                _notifications?.Progress(
+                    UpdateNotificationKey, $"正在下载 {package.Version}", $"{percent}%", value);
+            });
+
             _pendingUpdateInstallerPath = await autoUpdate.DownloadAndVerifyAsync(package, progress);
-            await Dispatcher.UIThread.InvokeAsync(main.MarkUpdateReady);
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                main.MarkUpdateReady();
+                _notifications?.Notify(new AppNotification
+                {
+                    Key = UpdateNotificationKey,
+                    Kind = NotifyKind.Success,
+                    Title = "更新已就绪",
+                    Body = $"{package.Version} 校验通过，重启后完成安装",
+                    ActionText = "重启安装",
+                    Action = () => main.UpdateInstallReadyRequested?.Invoke(),
+                    Sticky = true
+                });
+            });
         }
         catch (Exception ex)
         {
-            await Dispatcher.UIThread.InvokeAsync(() => main.MarkUpdateFailed("更新下载失败：" + ex.Message));
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                main.MarkUpdateFailed("更新下载失败：" + ex.Message);
+                _notifications?.Notify(new AppNotification
+                {
+                    Key = UpdateNotificationKey,
+                    Kind = NotifyKind.Error,
+                    Title = "更新下载失败",
+                    Body = ex.Message,
+                    ActionText = "重试",
+                    Action = () => _ = main.UpdateBackgroundDownloadRequested?.Invoke()
+                });
+            });
         }
     }
 
@@ -274,18 +339,87 @@ public partial class App : Application
         return true;
     }
 
-    private static async Task RunUpdateCheckAsync(MainViewModel main, UpdateCheckService updateCheck)
+    private static async Task RunUpdateCheckAsync(
+        MainViewModel main,
+        UpdateCheckService updateCheck,
+        NotificationCenter notifications)
     {
         await Task.Delay(TimeSpan.FromSeconds(5));
         var info = await updateCheck.CheckAsync();
         if (info is null) return;
 
-        Dispatcher.UIThread.Post(() => main.AnnounceUpdate(
-            info.LatestVersion,
-            info.DownloadUrl,
-            info.Notes,
-            info.ActionText,
-            info.InstallerSha256));
+        Dispatcher.UIThread.Post(() =>
+        {
+            main.AnnounceUpdate(
+                info.LatestVersion,
+                info.DownloadUrl,
+                info.Notes,
+                info.ActionText,
+                info.InstallerSha256);
+
+            // "An update exists" is a state and stays on the header chip. The
+            // banner only marks the moment it was found, and sticks because a
+            // release the user never saw is the same as no release at all.
+            notifications.Notify(new AppNotification
+            {
+                Key = UpdateNotificationKey,
+                Kind = NotifyKind.Info,
+                Title = $"发现新版本 {info.LatestVersion}",
+                Body = FirstLine(info.Notes),
+                ActionText = string.IsNullOrWhiteSpace(info.ActionText) ? "查看" : info.ActionText,
+                Action = () => main.OpenUpdateDownloadCommand.Execute(null),
+                Sticky = true
+            });
+        });
+    }
+
+    private static string? FirstLine(string? notes)
+    {
+        if (string.IsNullOrWhiteSpace(notes)) return null;
+        var line = notes.ReplaceLineEndings("\n")
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => l.Trim(' ', '-', '*', '#'))
+            .FirstOrDefault(l => l.Length > 0);
+        return string.IsNullOrWhiteSpace(line) ? null : line;
+    }
+
+    /// <summary>
+    /// Sync is mostly unattended, so only a sync the user asked for narrates
+    /// itself. Failures always surface — silently not syncing is the one
+    /// outcome worth interrupting for.
+    /// </summary>
+    private static void PublishCloudSyncNotification(
+        NotificationCenter notifications,
+        MainViewModel main,
+        CloudSyncStatusChangedEventArgs status)
+    {
+        switch (status.State)
+        {
+            case CloudSyncState.Error:
+                notifications.Notify(new AppNotification
+                {
+                    Key = CloudSyncNotificationKey,
+                    Kind = NotifyKind.Error,
+                    Title = "云同步失败",
+                    Body = status.Message,
+                    ActionText = "重试",
+                    Action = () => main.SyncCloudCommand.Execute(null)
+                });
+                return;
+
+            case CloudSyncState.Syncing when status.IsUserInitiated:
+                notifications.Progress(CloudSyncNotificationKey, status.Message);
+                return;
+
+            case CloudSyncState.Success when status.IsUserInitiated:
+                notifications.Success(status.Message, key: CloudSyncNotificationKey);
+                return;
+
+            case CloudSyncState.Idle:
+            case CloudSyncState.Disabled:
+                notifications.Dismiss(CloudSyncNotificationKey);
+                return;
+        }
     }
 
     private static async Task RunStartupCloudSyncAsync(
@@ -293,7 +427,8 @@ public partial class App : Application
         ConversationListViewModel conversations)
     {
         await Task.Delay(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
-        await cloudSync.RequestForegroundSyncAsync().ConfigureAwait(false);
+        // Nobody asked for this one, so it stays silent unless it fails.
+        await cloudSync.RequestForegroundSyncAsync(userInitiated: false).ConfigureAwait(false);
         await conversations.ReloadAsync().ConfigureAwait(false);
     }
 

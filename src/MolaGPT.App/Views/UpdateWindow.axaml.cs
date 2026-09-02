@@ -1,11 +1,10 @@
 using System.Diagnostics;
 using Avalonia.Controls;
-using Avalonia.Input;
 using MolaGPT.App.Infrastructure;
 
 namespace MolaGPT.App.Views;
 
-public partial class UpdateWindow : MolaWindow
+public partial class UpdateWindow : MolaContentWindow
 {
     private readonly string? _downloadUrl;
     private readonly AppAutoUpdateService.UpdatePackage? _package;
@@ -38,7 +37,6 @@ public partial class UpdateWindow : MolaWindow
         PART_Close.Click += (_, _) => Close(false);
         PART_Later.Click += (_, _) => Close(false);
         PART_Action.Click += OnAction;
-        PART_Header.PointerPressed += OnHeaderPointerPressed;
     }
 
     private async void OnAction(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -54,11 +52,6 @@ public partial class UpdateWindow : MolaWindow
         if (!string.IsNullOrWhiteSpace(_downloadUrl))
             Process.Start(new ProcessStartInfo(_downloadUrl) { UseShellExecute = true });
         Close(true);
-    }
-
-    private void OnHeaderPointerPressed(object? sender, PointerPressedEventArgs e)
-    {
-        if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) BeginMoveDrag(e);
     }
 
     private static bool CanAutoInstall(string version, string? url, string? sha256) =>

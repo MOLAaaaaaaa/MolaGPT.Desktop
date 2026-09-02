@@ -1,0 +1,69 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="MolaGPT.App.Views.NotificationBanner"
+             Width="344">
+
+  <!--
+    One transient event. The floating recipe is Border.flyoutsurface verbatim
+    (Bg.Elevated + Border.Strong 1px + Radius.Md + the same box shadow), so a
+    banner reads as the same class of object as a flyout rather than as a new
+    kind of surface.
+
+    Semantic colour lives on the icon and nowhere else: four kinds of tinted
+    344px card turn the top-right corner into an advert, and a left colour bar
+    is a second emphasis for something the icon already says.
+  -->
+  <Border Name="PART_Card"
+          Background="{DynamicResource Brush.Bg.Elevated}"
+          BorderBrush="{DynamicResource Brush.Border.Strong}"
+          BorderThickness="1"
+          CornerRadius="{DynamicResource Radius.Md}"
+          BoxShadow="0 10 30 0 #3D16202A"
+          ClipToBounds="True">
+    <Panel>
+      <Grid Margin="14,12,12,12" ColumnDefinitions="20,*,Auto">
+
+        <TextBlock Grid.Column="0" Name="PART_Icon" Classes="icon"
+                   FontSize="15" HorizontalAlignment="Center"
+                   VerticalAlignment="Top" Margin="0,1,0,0" />
+
+        <StackPanel Grid.Column="1" Margin="10,0,0,0">
+          <TextBlock Name="PART_Title"
+                     FontSize="13" FontWeight="SemiBold"
+                     TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                     Foreground="{DynamicResource Brush.Text.Primary}" />
+
+          <TextBlock Name="PART_Body"
+                     FontSize="12" Margin="0,3,0,0" MaxLines="2"
+                     TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
+                     Foreground="{DynamicResource Brush.Text.Secondary}" />
+
+          <ProgressBar Name="PART_Progress"
+                       Margin="0,9,0,0" Height="3" MinWidth="0"
+                       Minimum="0" Maximum="1"
+                       Foreground="{DynamicResource Brush.Primary}"
+                       Background="{DynamicResource Brush.Bg.Tertiary}" />
+
+          <Button Name="PART_Action" Classes="pillprimary"
+                  Margin="0,9,0,0" Padding="13,5" MinHeight="0"
+                  FontSize="12" HorizontalAlignment="Left" />
+        </StackPanel>
+
+        <!-- Kept invisible until the pointer is over the banner: three stacked
+             cards each showing a close glyph outweigh the content itself. -->
+        <Button Grid.Column="2" Name="PART_Close" Classes="inlineaction"
+                Width="22" Height="22" Padding="0" FontSize="10"
+                VerticalAlignment="Top" Opacity="0"
+                ToolTip.Tip="关闭">
+          <TextBlock Classes="icon" Text="&#xE8BB;" FontSize="10" />
+        </Button>
+      </Grid>
+
+      <!-- Auto-dismiss countdown. Without it a banner vanishing on its own
+           looks like a glitch; with it, the disappearance was announced. -->
+      <Border Name="PART_Timer" Height="2" Width="0"
+              VerticalAlignment="Bottom" HorizontalAlignment="Left"
+              Opacity="0.28" IsVisible="False" />
+    </Panel>
+  </Border>
+</UserControl>
