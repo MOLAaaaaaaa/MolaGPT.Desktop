@@ -111,7 +111,7 @@ public sealed class MolaGptLocalToolsRegistrar
                 assets.NodePath,
                 assets.CliJsPath,
                 assets.ExtensionPath,
-                assets.WorkingDirectory,
+                PiWorkSidecarLocator.SessionRoot,
                 // Pi's own session files live beside MolaGPT's other state, one per
                 // conversation, so a sidecar can be pointed at any of them.
                 PiWorkSidecarLocator.SessionRoot,

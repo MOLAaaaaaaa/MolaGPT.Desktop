@@ -134,7 +134,7 @@ public sealed class AgentTranscriptReducer
 
                 case AgentEventKind.Error:
                     EndTurn();
-                    _blocks.Add(AgentBlockDto.AssistantText("⚠ " + (ev.ErrorMessage ?? "出错了"), streaming: false));
+                    _blocks.Add(AgentBlockDto.AssistantText(ev.ErrorMessage ?? "出错了", streaming: false));
                     break;
             }
         }

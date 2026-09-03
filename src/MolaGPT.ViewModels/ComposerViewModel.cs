@@ -518,7 +518,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             }
             catch (Exception ex)
             {
-                assistantMsg.AppendDelta($"\n\n> ❌ **附件上传失败**: {ex.Message}");
+                assistantMsg.AppendDelta($"\n\n> **附件上传失败**：{ex.Message}");
                 assistantMsg.FlushPendingDelta();
                 assistantMsg.IsStreaming = false;
                 assistantMsg.StopThinking();
@@ -600,7 +600,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 // step, so reaching here means something systemic. Send the text
                 // anyway rather than losing the user's message, and say what was
                 // lost instead of silently dropping the attachments.
-                assistantMsg.AppendDelta($"\n\n> ⚠️ **附件处理失败**: {ex.Message}（本轮仅发送了文字部分）");
+                assistantMsg.AppendDelta($"\n\n> **附件处理失败**：{ex.Message}（本轮仅发送文字）");
                 assistantMsg.FlushPendingDelta();
                 outgoingAttachments = outgoingAttachments
                     .Where(a => a.Kind != AttachmentKind.File)
@@ -680,7 +680,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         catch (MolaGptAuthExpiredException ex)
         {
-            assistantMsg.AppendDelta($"\n\n> ⚠️ {ex.Message}");
+            assistantMsg.AppendDelta($"\n\n> {ex.Message}");
             try
             {
                 if (MolaGptProviderIds.IsMolaGptAccount(provider.Id) && _chat.ActiveProvider?.Id == provider.Id)
@@ -694,7 +694,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            assistantMsg.AppendDelta($"\n\n> ❌ **错误**: {ex.Message}");
+            assistantMsg.AppendDelta($"\n\n> **错误**：{ex.Message}");
             ClassifyActionableError(assistantMsg, ex);
         }
         finally
@@ -820,7 +820,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                task.AssistantMessage.AppendDelta($"\n\n> ❌ **恢复错误**: {ex.Message}");
+                task.AssistantMessage.AppendDelta($"\n\n> **恢复失败**：{ex.Message}");
             }
             finally
             {
@@ -1489,7 +1489,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            assistantMsg.AppendDelta($"\n\n> ❌ **错误**: {ex.Message}");
+            assistantMsg.AppendDelta($"\n\n> **错误**：{ex.Message}");
             ClassifyActionableError(assistantMsg, ex);
         }
         finally

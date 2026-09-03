@@ -154,7 +154,7 @@ public sealed class PiByokProviderFactory
                 assets.NodePath,
                 assets.CliJsPath,
                 assets.ExtensionPath,
-                assets.WorkingDirectory,
+                PiWorkSidecarLocator.SessionRoot,
                 PiWorkSidecarLocator.SessionRoot,
                 PiModelCatalog.BuildJson(models, shape.Api, displayName, endpoint),
                 models[0].Id,

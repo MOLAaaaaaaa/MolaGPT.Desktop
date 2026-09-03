@@ -2,6 +2,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace MolaGPT.Core.Chat.Agents.Pi;
 
@@ -61,6 +62,7 @@ public sealed class PiSidecarSession : IAsyncDisposable
             StandardOutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
         };
         Directory.CreateDirectory(_launch.SessionRoot);
+        Directory.CreateDirectory(_launch.WorkingDirectory);
 
         foreach (var arg in new[]
                  {
@@ -166,7 +168,12 @@ public sealed class PiSidecarSession : IAsyncDisposable
         try
         {
             var wasAlive = IsAlive;
-            await Task.Run(EnsureStarted, ct).ConfigureAwait(false);
+            await Task.Run(() =>
+            {
+                EnsureStarted();
+                if (RepairMissingSessionWorkingDirectory(sessionPath, _launch.WorkingDirectory))
+                    _log?.Invoke("[pi] 已迁移会话工作目录：" + sessionPath);
+            }, ct).ConfigureAwait(false);
             await RequestAsync("switch_session", new { sessionPath }, ct).ConfigureAwait(false);
             _activeModel = null;
             _activeThinkingLevel = null;
@@ -177,6 +184,58 @@ public sealed class PiSidecarSession : IAsyncDisposable
         {
             _turnGate.Release();
         }
+    }
+
+    /// <summary>
+    /// Older MolaGPT builds launched Pi from the downloaded runtime directory, so
+    /// Pi persisted that versioned directory in every session header. Replacing a
+    /// runtime removes the old directory and Pi then refuses to open the transcript.
+    /// Only the stale header field is changed; every transcript entry is preserved.
+    /// </summary>
+    internal static bool RepairMissingSessionWorkingDirectory(
+        string sessionPath,
+        string workingDirectory)
+    {
+        if (!File.Exists(sessionPath)) return false;
+
+        var lines = File.ReadAllLines(sessionPath);
+        if (lines.Length == 0 || string.IsNullOrWhiteSpace(lines[0])) return false;
+
+        JsonObject? header;
+        try
+        {
+            header = JsonNode.Parse(lines[0]) as JsonObject;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        if (header is null
+            || header["type"]?.GetValue<string>() != "session"
+            || header["cwd"] is not JsonValue cwdValue
+            || !cwdValue.TryGetValue<string>(out var storedWorkingDirectory)
+            || string.IsNullOrWhiteSpace(storedWorkingDirectory)
+            || Directory.Exists(storedWorkingDirectory))
+        {
+            return false;
+        }
+
+        header["cwd"] = workingDirectory;
+        lines[0] = header.ToJsonString(CommandJsonOptions);
+
+        var temporaryPath = sessionPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllLines(temporaryPath, lines, new UTF8Encoding(false));
+            File.Move(temporaryPath, sessionPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
+        }
+
+        return true;
     }
 
     /// <summary>Send one command and read until its response arrives, discarding

@@ -42,7 +42,7 @@ public sealed class PiWorkSidecarLocator
     public PiSidecarAssets? TryResolve() =>
         _installed?.Invoke() is { } managed
             ? new PiSidecarAssets(
-                managed.NodePath, managed.CliJsPath, managed.ExtensionPath, managed.Directory)
+                managed.NodePath, managed.CliJsPath, managed.ExtensionPath)
             : null;
 }
 
@@ -50,5 +50,4 @@ public sealed class PiWorkSidecarLocator
 public sealed record PiSidecarAssets(
     string NodePath,
     string CliJsPath,
-    string ExtensionPath,
-    string WorkingDirectory);
+    string ExtensionPath);
