@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using MolaGPT.Core.Models;
 
 namespace MolaGPT.Core.Chat;
@@ -16,8 +16,7 @@ public sealed record ChatChunk(
     IReadOnlyList<SourceReference>? Sources = null,
     PendingStatusDelta? Pending = null,
     ToolCallDelta? Tool = null,
-    string? RawJson = null,
-    string? OpenAiWireHistoryJson = null);
+    string? RawJson = null);
 
 public sealed record PendingStatusDelta(
     string Label,

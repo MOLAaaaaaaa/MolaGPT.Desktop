@@ -29,7 +29,7 @@ public static class ThinkingEffortLevels
         ThinkingParamKind.OpenAiReasoningEffort => ["minimal", "low", "medium", "high", "xhigh"],
         ThinkingParamKind.AnthropicAdaptive => ["low", "medium", "high", "xhigh", "max"],
         ThinkingParamKind.DeepSeekV4 => ["high", "max"],
-        ThinkingParamKind.GeminiThinkingLevel => ["minimal", "low", "medium", "high"],
+        ThinkingParamKind.GeminiThinkingLevel => ["low", "medium", "high"],
         ThinkingParamKind.AnthropicBudget or ThinkingParamKind.GeminiBudget or ThinkingParamKind.QwenThinkingBudget
             => ["low", "medium", "high"],
         _ => ["low", "medium", "high"]

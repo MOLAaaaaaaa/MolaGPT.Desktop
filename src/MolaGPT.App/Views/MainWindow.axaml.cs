@@ -43,6 +43,7 @@ public partial class MainWindow : MolaWindow
     private readonly MessageRepository _messageRepository;
     private readonly PythonRuntimeManager _pythonRuntime;
     private readonly PiSidecarRuntimeManager _piSidecar;
+    private readonly PiWorkSidecarLocator _piSidecarLocator;
     private readonly NotificationCenter _notifications;
     private readonly SkillsViewModel _skills;
     private readonly IHttpClientFactory _httpClientFactory;
@@ -53,6 +54,10 @@ public partial class MainWindow : MolaWindow
     private SettingsWindow? _settingsWindow;
     private AboutWindow? _aboutWindow;
     private ImageGenerationWorkbenchView? _imageWorkbench;
+    private Task<bool>? _agentRuntimeSetupTask;
+    private bool _agentRuntimeActivated;
+
+    private const string AgentRuntimeNotificationKey = "pi-sidecar";
 
     /// <summary>The in-app banner stack. <see cref="NotificationRouter"/> drives it.</summary>
     public NotificationHost Notifications => PART_Notifications;
@@ -77,6 +82,7 @@ public partial class MainWindow : MolaWindow
         MessageRepository messageRepository,
         PythonRuntimeManager pythonRuntime,
         PiSidecarRuntimeManager piSidecar,
+        PiWorkSidecarLocator piSidecarLocator,
         NotificationCenter notifications,
         SkillsViewModel skills,
         IHttpClientFactory httpClientFactory,
@@ -102,11 +108,13 @@ public partial class MainWindow : MolaWindow
         _messageRepository = messageRepository;
         _pythonRuntime = pythonRuntime;
         _piSidecar = piSidecar;
+        _piSidecarLocator = piSidecarLocator;
         _notifications = notifications;
         _skills = skills;
         _httpClientFactory = httpClientFactory;
         _toolHost = toolHost;
         _piByokProviderFactory = piByokProviderFactory;
+        _composer.EnsureAgentRuntimeAsync = EnsureAgentRuntimeForSendAsync;
 
         InitializeComponent();
         DataContext = _main;
@@ -288,6 +296,8 @@ public partial class MainWindow : MolaWindow
             : AppMode.Work;
         var fromMode = _chat.CurrentMode;
 
+        if (target == AppMode.Work && !await EnsureAgentRuntimeAsync()) return;
+
         // Clicking "Work" while already in an agent mode is a no-op, matching
         // MainViewModel.SwitchMode.
         if (target == AppMode.Work && _chat.CurrentMode.IsLocalAgent()) return;
@@ -313,6 +323,113 @@ public partial class MainWindow : MolaWindow
         _main.IsImageWorkbenchVisible = false;
         SyncChrome();
         if (target == AppMode.Work) _main.WorkSetupRequested?.Invoke();
+    }
+
+    private async Task<bool> EnsureAgentRuntimeAsync()
+    {
+        if (_piSidecarLocator.TryResolve() is not null)
+        {
+            // "No agent provider registered yet" is the trigger, but it is also the
+            // *outcome* when the account has no Work models and no BYOK row is
+            // configured — so without this latch every send would re-register every
+            // row and re-fetch the account's model list. Cleared by
+            // DeactivateAgentRuntime, which is what settings calls after a change
+            // that could produce a different answer.
+            if (!_agentRuntimeActivated
+                && !_providers.Providers.Any(provider => provider.Kind != ProviderKind.MolaGptProxy))
+            {
+                _agentRuntimeActivated = true;
+                await ActivateAgentRuntimeAsync();
+            }
+            return true;
+        }
+        if (_agentRuntimeSetupTask is { } running) return await running;
+
+        var setup = DownloadAgentRuntimeAsync();
+        _agentRuntimeSetupTask = setup;
+        try
+        {
+            return await setup;
+        }
+        finally
+        {
+            if (ReferenceEquals(_agentRuntimeSetupTask, setup))
+                _agentRuntimeSetupTask = null;
+        }
+    }
+
+    private async Task<bool> EnsureAgentRuntimeForSendAsync()
+    {
+        if (!await EnsureAgentRuntimeAsync()) return false;
+        if (_chat.ActiveProvider is not null && _chat.ActiveModel is not null) return true;
+
+        OpenSettings();
+        return false;
+    }
+
+    private async Task<bool> DownloadAgentRuntimeAsync()
+    {
+        var updating = _piSidecar.GetInstalled() is not null;
+        if (!await Confirm.AskAsync(
+                this,
+                updating ? "更新 Agent 运行环境？" : "下载 Agent 运行环境？",
+                "使用 Work 与 BYOK 前需要此环境。",
+                updating ? "更新" : "下载"))
+        {
+            return false;
+        }
+
+        _notifications.Progress(AgentRuntimeNotificationKey, "正在准备 Agent 运行环境");
+        try
+        {
+            var progress = new Progress<SandboxProgress>(item =>
+                _notifications.Progress(
+                    AgentRuntimeNotificationKey,
+                    "正在准备 Agent 运行环境",
+                    item.Message,
+                    item.Fraction > 0 ? item.Fraction : null));
+            var installed = await _piSidecar.DownloadAndInstallAsync(progress);
+            await ActivateAgentRuntimeAsync();
+            _notifications.Success("Agent 运行环境已就绪", installed.Version, AgentRuntimeNotificationKey);
+            return _piSidecarLocator.TryResolve() is not null;
+        }
+        catch (Exception ex)
+        {
+            _notifications.Error("Agent 运行环境下载失败", ex.Message, AgentRuntimeNotificationKey);
+            return false;
+        }
+    }
+
+    private async Task ActivateAgentRuntimeAsync()
+    {
+        _agentRuntimeActivated = true;
+        foreach (var entry in _settings.Providers)
+        {
+            try
+            {
+                ProviderRestorer.ApplyEntry(
+                    entry,
+                    _providers,
+                    () => _httpClientFactory.CreateClient(HttpClientNames.Byok),
+                    _toolHost,
+                    _piByokProviderFactory);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Write("pi-byok", $"注册 {entry.Name} 失败：{ex.Message}");
+            }
+        }
+
+        try { await _localToolsRegistrar.RefreshAsync(); }
+        catch (Exception ex) { DiagnosticLog.Write("pi-work", "刷新 Work 失败：" + ex.Message); }
+    }
+
+    private void DeactivateAgentRuntime()
+    {
+        _agentRuntimeActivated = false;
+        _localToolsRegistrar.Deactivate();
+        foreach (var entry in _settings.Providers)
+            ProviderRestorer.RemoveEntry(entry.Id, _providers, _piByokProviderFactory);
     }
 
     private async Task OpenAccountAsync()
@@ -464,7 +581,8 @@ public partial class MainWindow : MolaWindow
         var window = new SettingsWindow(
             _settings, _auth, _cloudSync, _conversations, _agentStatus, _main.Personas, _mcpHttpClient,
             _imageGenerationTool, _pythonRuntime, _piSidecar, _notifications, _skills,
-            () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory);
+            () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory,
+            ActivateAgentRuntimeAsync, DeactivateAgentRuntime);
         window.AccountRequested += async (_, _) =>
         {
             if (await OpenLoginAsync(window)) window.RefreshAccountUi();

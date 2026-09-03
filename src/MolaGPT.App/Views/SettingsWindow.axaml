@@ -1052,8 +1052,6 @@
                               Content="移除" Padding="14,7" IsVisible="False"
                               Click="OnRemovePiSidecar" />
                     </Grid>
-                    <TextBlock Classes="hint" Margin="16,0,16,14" TextWrapping="Wrap"
-                               Text="未配置时，本地 Agent 使用内置引擎运行，功能不受影响。配置或移除后需重启应用生效。" />
                   </StackPanel>
                 </Border>
 

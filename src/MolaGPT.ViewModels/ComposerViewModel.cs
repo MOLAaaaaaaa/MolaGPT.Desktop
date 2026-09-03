@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -23,7 +23,7 @@ namespace MolaGPT.ViewModels;
 /// Bottom composer view model. Owns the in-flight CancellationTokenSource so
 /// the Stop button can abort a streaming generation. Send is enabled only when
 /// (a) there's text, (b) we're not already sending, (c) a provider+model is
-/// active.
+/// active or the desktop host can prepare the Agent runtime on demand.
 ///
 /// Tracks composer toolbar state for reasoning, network tools, webpage
 /// reading, and attachments. Visibility is derived from the selected model's
@@ -84,6 +84,17 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// <summary>Generates a title for the first successful turn of a local
     /// BYOK/Work conversation. The desktop host supplies the persistence service.</summary>
     public Func<string, string?, string?, CancellationToken, Task<string?>>? LocalConversationTitleAsync { get; set; }
+
+    private Func<Task<bool>>? _ensureAgentRuntimeAsync;
+    public Func<Task<bool>>? EnsureAgentRuntimeAsync
+    {
+        get => _ensureAgentRuntimeAsync;
+        set
+        {
+            _ensureAgentRuntimeAsync = value;
+            SendCommand.NotifyCanExecuteChanged();
+        }
+    }
 
     private readonly ChatViewModel _chat;
     private readonly BackgroundStreamService? _backgroundStreams;
@@ -433,6 +444,10 @@ public sealed partial class ComposerViewModel : ObservableObject
     public async Task SendAsync()
     {
         if (string.IsNullOrWhiteSpace(Text) && Attachments.Count == 0) return;
+        if (_chat.ActiveProvider is null || _chat.ActiveModel is null)
+        {
+            if (EnsureAgentRuntimeAsync is null || !await EnsureAgentRuntimeAsync()) return;
+        }
         if (_chat.ActiveProvider is null || _chat.ActiveModel is null) return;
         if (HasUnsupportedImages(Attachments, _chat.ActiveProvider, _chat.ActiveModel))
             return;
@@ -610,8 +625,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 Attachments: ReferenceEquals(m, userMsg)
                     ? (requestAttachments.Count > 0 ? requestAttachments : null)
                     : (backfillHistory && m.Role == ChatMessage.RoleUser ? BuildHistoryAttachments(m) : null),
-                ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null,
-                OpenAiWireHistoryJson: m.Role == ChatMessage.RoleAssistant ? m.OpenAiWireHistoryJson : null))
+                ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null))
             .ToList();
 
         var systemPrompt = ResolveSystemPrompt();
@@ -1440,8 +1454,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                     Attachments: backfillHistory && m.Role == ChatMessage.RoleUser
                         ? BuildHistoryAttachments(m)
                         : null,
-                    ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null,
-                    OpenAiWireHistoryJson: m.Role == ChatMessage.RoleAssistant ? m.OpenAiWireHistoryJson : null))
+                    ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null))
                 .ToList();
 
             var systemPrompt = ResolveSystemPrompt();
@@ -1526,13 +1539,15 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
     }
 
-    private bool CanSend() =>
-        !IsSending &&
-        (!string.IsNullOrWhiteSpace(Text) || Attachments.Count > 0) &&
-        (!(IsImageGenerationAvailable && IsImageGenerationMode) || !string.IsNullOrWhiteSpace(Text)) &&
-        _chat.ActiveProvider is not null &&
-        _chat.ActiveModel is not null &&
-        !HasUnsupportedImages(Attachments, _chat.ActiveProvider, _chat.ActiveModel);
+    private bool CanSend()
+    {
+        var providerReady = _chat.ActiveProvider is not null && _chat.ActiveModel is not null;
+        return !IsSending
+               && (!string.IsNullOrWhiteSpace(Text) || Attachments.Count > 0)
+               && (!(IsImageGenerationAvailable && IsImageGenerationMode) || !string.IsNullOrWhiteSpace(Text))
+               && (providerReady || EnsureAgentRuntimeAsync is not null)
+               && (!providerReady || !HasUnsupportedImages(Attachments, _chat.ActiveProvider, _chat.ActiveModel));
+    }
 
     private bool CanStop() => IsSending;
     private bool CanRetry(MessageViewModel? message) =>
@@ -1590,8 +1605,6 @@ public sealed partial class ComposerViewModel : ObservableObject
             assistantMsg.Sources = chunk.Sources;
         if (chunk.Usage is not null)
             assistantMsg.Usage = chunk.Usage;
-        if (!string.IsNullOrWhiteSpace(chunk.OpenAiWireHistoryJson))
-            assistantMsg.OpenAiWireHistoryJson = chunk.OpenAiWireHistoryJson;
         if (chunk.DeltaText is { Length: > 0 } t)
         {
             t = RewritePythonArtifactMarkdownLinks(t, assistantMsg);

@@ -123,12 +123,15 @@ public sealed class ImageGenerationTool
     public async Task<string> ExecuteToolAsync(
         string argumentsJson,
         ImageGenerationOptions? options,
+        string? workspaceRoot,
         CancellationToken ct)
     {
         if (options?.Enabled != true)
             return Error("Image generation is not enabled.");
         if (_saveAttachment is null)
             return Error("Image attachment storage is not available.");
+        if (string.IsNullOrWhiteSpace(workspaceRoot))
+            return Error("The conversation workspace is not available.");
 
         var prompt = ParsePrompt(argumentsJson);
         if (string.IsNullOrWhiteSpace(prompt))
@@ -137,13 +140,19 @@ public sealed class ImageGenerationTool
         try
         {
             var images = await GenerateAsync(options, prompt!, ct).ConfigureAwait(false);
+            Directory.CreateDirectory(workspaceRoot);
             var saved = images.Select((image, index) =>
             {
                 var fileName = $"generated-image-{index + 1}{ExtensionFor(image.MimeType)}";
-                var localName = _saveAttachment(image.Bytes, image.MimeType, fileName);
+                var localName = _saveAttachment(image.Bytes, image.MimeType, fileName)
+                    ?? throw new InvalidOperationException("Generated image could not be saved.");
+                var imagePath = Path.Combine(workspaceRoot, localName);
+                if (!File.Exists(imagePath))
+                    File.WriteAllBytes(imagePath, image.Bytes);
                 return new
                 {
                     local_name = localName,
+                    image_path = localName,
                     file_name = fileName,
                     mime_type = image.MimeType,
                     revised_prompt = image.RevisedPrompt
@@ -154,7 +163,8 @@ public sealed class ImageGenerationTool
             {
                 success = saved.Length > 0,
                 source = "image_generation",
-                image_path = saved.FirstOrDefault()?.local_name,
+                image_path = saved.FirstOrDefault()?.image_path,
+                local_name = saved.FirstOrDefault()?.local_name,
                 revised_prompt = images.FirstOrDefault()?.RevisedPrompt,
                 images = saved
             });

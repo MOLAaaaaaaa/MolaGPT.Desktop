@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents;
+using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Agents.Relay;
 using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.LocalTools;
@@ -102,22 +103,29 @@ internal static class AppServices
             sp.GetRequiredService<MessageRepository>(),
             sp.GetRequiredService<ProviderRegistry>(),
             sp.GetRequiredService<SettingsRepository>(),
+            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
             (userText, assistantText, ct) =>
                 sp.GetRequiredService<CloudSyncService>()
-                    .GenerateMolaGptTitleAsync(userText, assistantText, ct)));
+                    .GenerateMolaGptTitleAsync(userText, assistantText, ct),
+            message => DiagnosticLog.Write("title", message)));
 
         // ---- local tool gateway (Work mode) --------------------------------
         services.AddSingleton(sp => new PiSidecarRuntimeManager(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt)));
         services.AddSingleton(sp => new PiWorkSidecarLocator(
-            sp.GetRequiredService<SettingsRepository>(),
-            () => sp.GetRequiredService<PiSidecarRuntimeManager>().GetInstalled()));
+            () => sp.GetRequiredService<PiSidecarRuntimeManager>().GetCompatibleInstalled()));
+        // One runtime for the whole app: it owns the loopback shim, the tool bridge
+        // and the capped sidecar pool. Per-provider runtimes would put the memory
+        // ceiling back where it was, since nothing would bound the total.
+        services.AddSingleton(sp => new PiRuntime(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            line => DiagnosticLog.Write("pi-runtime", line)));
         services.AddSingleton<MolaGptLocalToolsRegistrar>();
         services.AddSingleton(sp => new PiByokProviderFactory(
-            sp.GetRequiredService<SettingsRepository>(),
             sp.GetRequiredService<PiWorkSidecarLocator>(),
             sp.GetRequiredService<IChatToolHost>(),
             sp.GetRequiredService<IHttpClientFactory>(),
+            sp.GetRequiredService<PiRuntime>(),
             line => DiagnosticLog.Write("pi-byok", line)));
 
         services.AddSingleton<BackgroundStreamService>();
@@ -161,6 +169,7 @@ internal static class AppServices
         // Skia handles image normalization without a UI-framework imaging type.
         services.AddSingleton(sp => new ImageAnalysisTool(
             sp.GetRequiredService<ProviderRegistry>(),
+            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
             (bytes, mime, name) =>
             {
                 var processed = SkiaImageNormalizer.Process(bytes, mime, name);

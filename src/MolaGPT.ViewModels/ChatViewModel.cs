@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -618,7 +618,6 @@ public sealed partial class ChatViewModel : ObservableObject
             IReadOnlyList<MessageAttempt>? retryAttempts = null;
             IReadOnlyList<ToolCallDelta>? toolCalls = null;
             IReadOnlyList<ThinkingSegmentDelta>? thinkingSegments = null;
-            string? openAiWireHistoryJson = null;
             var retryCurrent = 0;
             var wasStopped = false;
             if (!string.IsNullOrEmpty(row.Meta))
@@ -640,7 +639,6 @@ public sealed partial class ChatViewModel : ObservableObject
                     sources = ParseSources(doc.RootElement);
                     attachments = ParseAttachments(doc.RootElement);
                     contentPartsJson = ParseContentPartsJson(doc.RootElement);
-                    openAiWireHistoryJson = ParseJsonObjectProperty(doc.RootElement, "openai_wire_history");
                     if (index == latestAssistantIndex)
                         (retryAttempts, retryCurrent) = ParseRetry(doc.RootElement);
                     toolCalls = ParseToolCalls(doc.RootElement);
@@ -695,7 +693,6 @@ public sealed partial class ChatViewModel : ObservableObject
                 retryCurrent,
                 toolCalls,
                 thinkingSegments,
-                openAiWireHistoryJson,
                 wasStopped));
         }
 
@@ -713,7 +710,6 @@ public sealed partial class ChatViewModel : ObservableObject
             Sources = prepared.Sources,
             Attachments = prepared.Attachments,
             ContentPartsJson = prepared.ContentPartsJson,
-            OpenAiWireHistoryJson = prepared.OpenAiWireHistoryJson,
             RetryAttempts = prepared.RetryAttempts,
             RetryCurrentIndex = prepared.RetryCurrentIndex,
             WasStopped = prepared.WasStopped,
@@ -752,7 +748,6 @@ public sealed partial class ChatViewModel : ObservableObject
         int RetryCurrentIndex,
         IReadOnlyList<ToolCallDelta>? ToolCalls,
         IReadOnlyList<ThinkingSegmentDelta>? ThinkingSegments,
-        string? OpenAiWireHistoryJson,
         bool WasStopped);
 
     /// <summary>
@@ -1005,15 +1000,6 @@ public sealed partial class ChatViewModel : ObservableObject
             }
             catch (JsonException) { }
         }
-        if (!string.IsNullOrWhiteSpace(vm.OpenAiWireHistoryJson))
-        {
-            try
-            {
-                if (JsonNode.Parse(vm.OpenAiWireHistoryJson!) is JsonObject history)
-                    meta["openai_wire_history"] = history;
-            }
-            catch (JsonException) { }
-        }
         if (vm.RetryAttempts is { Count: > 1 })
         {
             meta["retry"] = new JsonObject
@@ -1094,7 +1080,6 @@ public sealed partial class ChatViewModel : ObservableObject
             ["model_label"] = attempt.ModelLabel,
             ["response_stats"] = attempt.Usage is null ? (JsonNode?)null : BuildUsageJson(attempt.Usage),
             ["sources"] = attempt.Sources is null ? (JsonNode?)null : BuildSourcesJson(attempt.Sources),
-            ["openai_wire_history"] = ParseJsonObjectNode(attempt.OpenAiWireHistoryJson),
             ["stopped"] = attempt.WasStopped ? true : (JsonNode?)null
         };
         if (!string.IsNullOrWhiteSpace(attempt.Thinking))
@@ -1460,7 +1445,6 @@ public sealed partial class ChatViewModel : ObservableObject
                 modelLabel,
                 ParseUsage(item, "response_stats"),
                 ParseSources(item),
-                ParseJsonObjectProperty(item, "openai_wire_history"),
                 item.TryGetProperty("stopped", out var stoppedNode) && stoppedNode.ValueKind == JsonValueKind.True,
                 thinking,
                 thinkingSegments,

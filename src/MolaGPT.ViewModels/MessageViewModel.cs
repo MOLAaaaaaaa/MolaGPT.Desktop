@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -76,7 +76,6 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [ObservableProperty] private IReadOnlyList<SourceReference>? _sources;
     [ObservableProperty] private IReadOnlyList<AttachmentChip>? _attachments;
     [ObservableProperty] private string? _contentPartsJson;
-    [ObservableProperty] private string? _openAiWireHistoryJson;
     [ObservableProperty] private IReadOnlyList<MessageAttempt>? _retryAttempts;
     [ObservableProperty] private int _retryCurrentIndex;
     [ObservableProperty] private bool _isLatestAssistant;
@@ -489,7 +488,6 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         Content = string.Empty;
         Thinking = null;
         WasStopped = false;
-        OpenAiWireHistoryJson = null;
         ThinkingSegments.Clear();
         ToolCalls.Clear();
         DisplayBlocks.Clear();
@@ -547,7 +545,6 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             ModelLabel,
             Usage,
             Sources,
-            OpenAiWireHistoryJson,
             WasStopped,
             Thinking,
             thinkingSegments,
@@ -583,7 +580,6 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         ModelLabel = attempt.ModelLabel;
         Usage = attempt.Usage;
         Sources = attempt.Sources;
-        OpenAiWireHistoryJson = attempt.OpenAiWireHistoryJson;
         WasStopped = attempt.WasStopped;
         if (attempt.ToolCalls is { Count: > 0 })
         {
@@ -1031,7 +1027,6 @@ public sealed record MessageAttempt(
     string? ModelLabel,
     Usage? Usage,
     IReadOnlyList<SourceReference>? Sources,
-    string? OpenAiWireHistoryJson = null,
     bool WasStopped = false,
     string? Thinking = null,
     IReadOnlyList<ThinkingSegmentDelta>? ThinkingSegments = null,

@@ -26,20 +26,26 @@ public sealed class ConversationTitleService
     private readonly MessageRepository _messages;
     private readonly ProviderRegistry _providers;
     private readonly SettingsRepository _settings;
+    private readonly Func<HttpClient> _httpFactory;
     private readonly Func<string, string, CancellationToken, Task<string?>>? _generateMolaGptTitle;
+    private readonly Action<string>? _log;
 
     public ConversationTitleService(
         ConversationRepository conversations,
         MessageRepository messages,
         ProviderRegistry providers,
         SettingsRepository settings,
-        Func<string, string, CancellationToken, Task<string?>>? generateMolaGptTitle = null)
+        Func<HttpClient> httpFactory,
+        Func<string, string, CancellationToken, Task<string?>>? generateMolaGptTitle = null,
+        Action<string>? log = null)
     {
         _conversations = conversations;
         _messages = messages;
         _providers = providers;
         _settings = settings;
+        _httpFactory = httpFactory;
         _generateMolaGptTitle = generateMolaGptTitle;
+        _log = log;
     }
 
     /// <summary>
@@ -117,6 +123,7 @@ public sealed class ConversationTitleService
                         target.Value.Provider,
                         target.Value.Model,
                         prompt,
+                        _httpFactory,
                         timeoutCts.Token)
                     .ConfigureAwait(false);
                 title = ConversationTitleText.CleanGeneratedTitle(raw);
@@ -148,8 +155,15 @@ public sealed class ConversationTitleService
         {
             return null;
         }
-        catch
+        catch (Exception ex)
         {
+            // Not surfaced to the user — the first-message fallback is still a
+            // usable title — but it has to leave a trace. A provider that rejects
+            // the request (a reasoning level it does not accept, an expired key)
+            // is otherwise indistinguishable from "the model chose not to rename
+            // this", and every conversation just keeps its fallback title forever.
+            _log?.Invoke(
+                $"[title] {turnProviderId ?? "?"}/{turnModelId ?? "?"} 生成标题失败：{ex.Message}");
             return null;
         }
     }
@@ -190,54 +204,45 @@ public sealed class ConversationTitleService
         return target;
     }
 
+    /// <summary>
+    /// Naming a conversation is not a conversation. It goes out as one plain HTTP
+    /// call rather than through the provider's streaming path, so it never starts
+    /// an agent runtime — which for the agent providers meant a sidecar spawn and
+    /// teardown (measured ~2.7s and ~95MB) to produce a dozen characters.
+    /// </summary>
     private static async Task<string> RequestByokTitleAsync(
         IChatProvider provider,
         ProviderModel model,
         string prompt,
+        Func<HttpClient> httpFactory,
         CancellationToken ct)
     {
-        var titleConversationId = $"title-{Guid.NewGuid():N}";
-        var request = new ChatRequest(
-            ModelId: model.Id,
-            Messages: [new ChatMessage(ChatMessage.RoleUser, prompt)],
-            Temperature: 0.2,
-            Stream: true,
-            UseThinking: false,
-            ConversationId: titleConversationId,
-            SessionId: Guid.NewGuid().ToString("N"),
-            MaxTokens: provider.Kind == ProviderKind.Anthropic ? 80 : null,
-            ThinkingParamKind: model.ThinkingConfig?.Kind
-                               ?? ThinkingParamKindInference.InferFromModelId(model.Id));
-
-        var text = new StringBuilder();
-        try
+        if (provider is not IOneShotTarget describable
+            || describable.DescribeOneShot(model.Id) is not { } target)
         {
-            await foreach (var chunk in provider.StreamChatAsync(request, ct)
-                               .WithCancellation(ct)
-                               .ConfigureAwait(false))
-            {
-                if (!string.IsNullOrEmpty(chunk.DeltaText) && text.Length < 4096)
-                {
-                    var remaining = 4096 - text.Length;
-                    text.Append(chunk.DeltaText.AsSpan(0, Math.Min(remaining, chunk.DeltaText.Length)));
-                }
-
-                if (chunk.FinishReason is not null) break;
-            }
-        }
-        finally
-        {
-            // Pi-backed BYOK providers key sidecars by conversation id. The title
-            // request is intentionally isolated, so reclaim its temporary sidecar.
-            if (provider is PiWorkProvider piProvider)
-            {
-                try { await piProvider.CloseConversationAsync(titleConversationId).ConfigureAwait(false); }
-                catch { }
-            }
+            return string.Empty;
         }
 
-        return text.ToString();
+        var client = new OneShotCompletionClient(httpFactory());
+        var text = await client.CompleteAsync(
+            target,
+            model.Id,
+            [new ChatMessage(ChatMessage.RoleUser, prompt)],
+            temperature: 0.2,
+            // Deliberately uncapped rather than "a title is short, so cap it low":
+            // on a model whose reasoning cannot be switched off, thinking tokens
+            // count against the same budget and a tight cap truncates the answer
+            // before the title is ever emitted.
+            maxTokens: null,
+            useThinking: false,
+            thinkingKind: model.ThinkingConfig?.Kind
+                          ?? ThinkingParamKindInference.InferFromModelId(model.Id),
+            ct).ConfigureAwait(false);
+
+        return text.Length > TitleMaxChars ? text[..TitleMaxChars] : text;
     }
+
+    private const int TitleMaxChars = 4096;
 }
 
 public sealed record ConversationTitleMessage(string Role, string Text);

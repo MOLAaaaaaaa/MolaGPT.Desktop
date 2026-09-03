@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
@@ -43,23 +43,18 @@ public static class ProviderRestorer
                         : string.Empty;
 
                     var models = TryDeserializeModels(row.Models);
-                    var client = http.CreateClient(HttpClientNames.Byok);
                     var headers = CustomParamConverter.ToHeaderListFromJson(row.CustomHeaders);
-                    var toolHost = services.GetService<IChatToolHost>();
 
-                    IChatProvider? provider = CreateDirectProvider(
-                        row.Type, row.Id, row.Name, row.BaseUrl, row.ApiPath,
-                        apiKey, models, client, toolHost, headers);
-
-                    // Opt-in (pi.byok.enabled): re-host eligible BYOK providers on
-                    // the Pi harness under the same id. Falls through to the direct
-                    // provider whenever that is not possible.
-                    provider = services.GetService<PiByokProviderFactory>()
-                                   ?.TryWrap(row.Type, row.Id, row.Name, row.BaseUrl, row.ApiPath,
-                                       apiKey, models, headers)
-                               ?? provider;
+                    // The agent runtime is the only chat engine. A row that cannot be
+                    // carried is left unregistered rather than quietly downgraded —
+                    // an unusable model missing from the picker is a question the
+                    // user can act on; one that answers without tools is not.
+                    var provider = services.GetService<PiByokProviderFactory>()
+                        ?.TryWrap(row.Type, row.Id, row.Name, row.BaseUrl, row.ApiPath,
+                            apiKey, models, headers);
 
                     if (provider is not null) registry.Register(provider);
+                    else log?.Invoke($"Provider '{row.Name}' ({row.Type}) is not supported by the agent runtime; skipped.");
                 }
                 catch (Exception ex)
                 {
@@ -85,14 +80,9 @@ public static class ProviderRestorer
 
         var models = entry.Models.Select(ToProviderModel).ToList();
         var headers = CustomParamConverter.ToHeaderList(entry.CustomHeaders);
-        var provider = CreateDirectProvider(
+        var provider = pi?.TryWrap(
             entry.Type, entry.Id, entry.Name, entry.BaseUrl, entry.ApiPath,
-            entry.ApiKey ?? string.Empty, models, httpFactory(), toolHost, headers);
-
-        provider = pi?.TryWrap(
-                       entry.Type, entry.Id, entry.Name, entry.BaseUrl, entry.ApiPath,
-                       entry.ApiKey ?? string.Empty, models, headers)
-                   ?? provider;
+            entry.ApiKey ?? string.Empty, models, headers);
         if (provider is not null) registry.Register(provider);
     }
 
@@ -101,47 +91,6 @@ public static class ProviderRestorer
         registry.Unregister(id);
         pi?.Retire(id);
     }
-
-    private static IChatProvider? CreateDirectProvider(
-        string type,
-        string id,
-        string name,
-        string? baseUrl,
-        string? apiPath,
-        string apiKey,
-        IReadOnlyList<ProviderModel> models,
-        HttpClient client,
-        IChatToolHost? toolHost,
-        IReadOnlyList<KeyValuePair<string, string>>? headers) => type switch
-    {
-        "openai" => OpenAIProvider.Create(id, name, apiKey, models, client, baseUrl, apiPath, headers),
-
-        "openai-compat" => new OpenAICompatibleProvider(
-            id, name, baseUrl ?? OpenAIProvider.DefaultBaseUrl, apiKey, models, client, toolHost)
-        {
-            ChatPath = OpenAICompatibleProvider.ResolveChatPath(apiPath),
-            CustomHeaders = headers
-        },
-
-        "openai-response" => new OpenAICompatibleProvider(
-            id, name, baseUrl ?? OpenAIProvider.DefaultBaseUrl, apiKey, models, client, toolHost)
-        {
-            WireApi = OpenAiWireApi.Responses,
-            ChatPath = string.IsNullOrWhiteSpace(apiPath)
-                ? OpenAICompatibleProvider.DefaultResponsesPath
-                : apiPath.Trim(),
-            CustomHeaders = headers
-        },
-
-        "anthropic" => new AnthropicProvider(id, name, apiKey, models, client, baseUrl)
-        {
-            MessagesPath = string.IsNullOrWhiteSpace(apiPath) ? "v1/messages" : apiPath.Trim(),
-            CustomHeaders = headers
-        },
-
-        "gemini" => GeminiProvider.Create(id, name, apiKey, models, client, baseUrl, apiPath, headers),
-        _ => null
-    };
 
     public static List<ProviderModel> TryDeserializeModels(string json)
     {

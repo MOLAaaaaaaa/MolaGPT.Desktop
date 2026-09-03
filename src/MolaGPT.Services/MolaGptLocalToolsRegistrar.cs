@@ -1,4 +1,4 @@
-using System.Net.Http;
+﻿using System.Net.Http;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents.Pi;
@@ -19,6 +19,7 @@ public sealed class MolaGptLocalToolsRegistrar
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IChatToolHost _toolHost;
     private readonly PiWorkSidecarLocator _piLocator;
+    private readonly PiRuntime _runtime;
 
     /// <summary>The Pi provider currently registered, if any. Held so its sidecar
     /// processes and loopback listeners are torn down when Work is re-registered,
@@ -31,7 +32,8 @@ public sealed class MolaGptLocalToolsRegistrar
         ProviderRegistry registry,
         IHttpClientFactory httpClientFactory,
         IChatToolHost toolHost,
-        PiWorkSidecarLocator piLocator)
+        PiWorkSidecarLocator piLocator,
+        PiRuntime runtime)
     {
         _auth = auth;
         _proxy = proxy;
@@ -39,6 +41,7 @@ public sealed class MolaGptLocalToolsRegistrar
         _httpClientFactory = httpClientFactory;
         _toolHost = toolHost;
         _piLocator = piLocator;
+        _runtime = runtime;
     }
 
     public async Task<bool> RefreshAsync(CancellationToken ct = default)
@@ -46,80 +49,77 @@ public sealed class MolaGptLocalToolsRegistrar
         var jwt = _auth.CurrentJwt;
         if (string.IsNullOrWhiteSpace(jwt))
         {
-            _registry.Unregister(MolaGptProviderIds.LocalTools);
-            RetireActivePi();
+            Deactivate();
             return false;
         }
 
         var models = await _proxy.FetchLocalToolsModelsAsync(ct);
         if (models.Count == 0)
         {
-            _registry.Unregister(MolaGptProviderIds.LocalTools);
-            RetireActivePi();
+            Deactivate();
             return false;
         }
 
         if (TryRegisterPiWork(models))
             return true;
 
-        RetireActivePi();
-        var provider = new OpenAICompatibleProvider(
-            MolaGptProviderIds.LocalTools,
-            MolaGptProxyProvider.LocalToolsDisplayName,
-            ValidateMolaGptBaseUrl(_proxy.BaseUrl),
-            () => _auth.CurrentJwt,
-            models,
-            _httpClientFactory.CreateClient(HttpClientNames.MolaGpt),
-            _toolHost)
-        {
-            Kind = ProviderKind.MolaGptLocalTools,
-            ChatPath = MolaGptProxyProvider.LocalToolsChatPath,
-            UnauthorizedHandler = _ =>
-            {
-                _auth.Logout();
-                throw new MolaGptAuthExpiredException();
-            }
-        };
+        // No runtime, no Work. There is no second engine to fall back to, and
+        // pretending otherwise is what used to make this state invisible: the app
+        // silently ran a different agent and nothing said so.
+        Deactivate();
+        return false;
+    }
 
-        _registry.Register(provider);
-        return true;
+    public void Deactivate()
+    {
+        _registry.Unregister(MolaGptProviderIds.LocalTools);
+        RetireActivePi();
     }
 
     /// <summary>
-    /// Opt-in path: register Work backed by the Pi harness under the same provider
-    /// id, so the whole UI (mode slider, model picker, tool cards) is unchanged and
-    /// only the engine differs. Returns false — leaving the caller on the existing
-    /// provider — when the flag is off or the machine has no sidecar/Node.
+    /// Register Work backed by the Pi harness. Returns false when the machine has
+    /// no usable runtime, which the caller turns into a visible failure rather than
+    /// a quieter engine.
     /// </summary>
     private bool TryRegisterPiWork(IReadOnlyList<ProviderModel> models)
     {
-        if (!_piLocator.Enabled) return false;
-
         PiSidecarAssets? assets;
         try { assets = _piLocator.TryResolve(); }
         catch (Exception ex)
         {
-            DiagnosticLog.Write("pi-work", "定位 sidecar 失败，回退到内置 Work：" + ex.Message);
+            DiagnosticLog.Write("pi-work", "定位 Agent 运行时失败：" + ex.Message);
             return false;
         }
-        if (assets is null) return false;
+        if (assets is null)
+        {
+            DiagnosticLog.Write("pi-work", "未找到本地 Agent 运行时，Work 不可用。");
+            return false;
+        }
 
         // The relay URL and the account JWT stay in this process: the shim inside
         // PiWorkProvider stamps the live token per request, so nothing sensitive is
         // handed to the Node child. Model comes from the request, since it's baked
         // into the sidecar at spawn (a model switch respawns it).
         var endpoint = new Uri(new Uri(ValidateMolaGptBaseUrl(_proxy.BaseUrl)), MolaGptProxyProvider.LocalToolsChatPath).ToString();
+        const string api = "openai-completions";
         var config = new PiWorkProviderConfig(
             MolaGptProviderIds.LocalTools,
             MolaGptProxyProvider.LocalToolsDisplayName,
             models,
-            assets.NodePath,
-            assets.CliJsPath,
-            assets.ExtensionPath,
-            assets.WorkingDirectory,
-            // Pi's own session files live beside MolaGPT's other state, one per
-            // conversation, so a respawned sidecar resumes instead of forgetting.
-            PiWorkSidecarLocator.SessionRoot,
+            new PiSidecarSpec(
+                MolaGptProviderIds.LocalTools,
+                assets.NodePath,
+                assets.CliJsPath,
+                assets.ExtensionPath,
+                assets.WorkingDirectory,
+                // Pi's own session files live beside MolaGPT's other state, one per
+                // conversation, so a sidecar can be pointed at any of them.
+                PiWorkSidecarLocator.SessionRoot,
+                PiModelCatalog.BuildJson(models, api, MolaGptProxyProvider.LocalToolsDisplayName, endpoint),
+                models[0].Id,
+                api,
+                AuthHeader: true,
+                Reasoning: models.Any(m => m.SupportsThinking)),
             request => new PiProviderCreds(
                 endpoint,
                 _ => Task.FromResult(_auth.CurrentJwt),
@@ -130,6 +130,7 @@ public sealed class MolaGptLocalToolsRegistrar
             config,
             _toolHost,
             _httpClientFactory.CreateClient(HttpClientNames.MolaGpt),
+            _runtime,
             // To the diagnostic log, not just the debugger: Work is where sidecar
             // trouble actually shows up, and a line only a debugger can see is one
             // nobody can send us from a shipped build.

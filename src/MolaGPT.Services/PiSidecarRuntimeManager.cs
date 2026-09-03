@@ -24,31 +24,42 @@ public sealed class PiSidecarRuntimeManager
 {
     public const string DefaultManifestUrl =
         "https://chatgpt.wljay.cn/v2/pi-sidecar-win-x64.json";
+    public const int RequiredContractVersion = 1;
 
     private const string RuntimeDirectoryName = "runtimes";
     private const string StampFileName = ".molagpt-pi-sidecar.json";
-    private const string Label = "Pi 沙箱";
+    private const string Label = "Agent 运行环境";
 
     private readonly HttpClient _http;
     private readonly string _manifestUrl;
+    private readonly string _baseDirectory;
 
-    public PiSidecarRuntimeManager(HttpClient http, string? manifestUrl = null)
+    public PiSidecarRuntimeManager(
+        HttpClient http,
+        string? manifestUrl = null,
+        string? baseDirectory = null)
     {
         _http = http;
         _manifestUrl = string.IsNullOrWhiteSpace(manifestUrl) ? DefaultManifestUrl : manifestUrl!;
+        _baseDirectory = baseDirectory ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "MolaGPT Desktop",
+            "PiSidecar");
     }
 
-    public string BaseDirectory => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "MolaGPT Desktop",
-        "PiSidecar");
+    public string BaseDirectory => _baseDirectory;
 
     public string RuntimeRootDirectory => Path.Combine(BaseDirectory, RuntimeDirectoryName);
 
     /// <summary>The installed component, or null when it has never been installed
     /// (or the install is incomplete — a half-extracted directory reads as absent
     /// rather than as something to launch).</summary>
-    public InstalledPiSidecar? GetInstalled()
+    public InstalledPiSidecar? GetInstalled() => FindInstalled(contractVersion: null);
+
+    public InstalledPiSidecar? GetCompatibleInstalled() =>
+        FindInstalled(RequiredContractVersion);
+
+    private InstalledPiSidecar? FindInstalled(int? contractVersion)
     {
         if (!Directory.Exists(RuntimeRootDirectory)) return null;
 
@@ -68,8 +79,15 @@ public sealed class PiSidecarRuntimeManager
             var extension = Path.Combine(dir, stamp.Extension ?? "");
             if (!File.Exists(node) || !File.Exists(cli) || !File.Exists(extension)) continue;
 
-            var candidate = new InstalledPiSidecar(stamp.Version, dir, node, cli, extension);
-            if (newest is null || string.CompareOrdinal(candidate.Version, newest.Version) > 0)
+            var installedContract = stamp.ContractVersion ?? 0;
+            if (contractVersion is { } minimumContract && installedContract < minimumContract) continue;
+
+            var candidate = new InstalledPiSidecar(
+                stamp.Version, dir, node, cli, extension, installedContract);
+            if (newest is null
+                || string.CompareOrdinal(candidate.Version, newest.Version) > 0
+                || (string.Equals(candidate.Version, newest.Version, StringComparison.Ordinal)
+                    && candidate.ContractVersion > newest.ContractVersion))
                 newest = candidate;
         }
         return newest;
@@ -91,6 +109,8 @@ public sealed class PiSidecarRuntimeManager
             .ConfigureAwait(false)
             ?? throw new InvalidOperationException($"{Label}清单为空。");
         manifest.Validate();
+        if (manifest.ContractVersion < RequiredContractVersion)
+            throw new InvalidOperationException("Agent 运行环境需要更新。");
         return manifest;
     }
 
@@ -100,10 +120,11 @@ public sealed class PiSidecarRuntimeManager
     {
         try
         {
-            var installed = GetInstalled();
+            var installed = GetCompatibleInstalled();
             if (installed is null) return true;
             var manifest = await FetchManifestAsync(ct).ConfigureAwait(false);
-            return !string.Equals(installed.Version, manifest.Version, StringComparison.Ordinal);
+            return !string.Equals(installed.Version, manifest.Version, StringComparison.Ordinal)
+                   || installed.ContractVersion < manifest.ContractVersion;
         }
         catch
         {
@@ -115,20 +136,27 @@ public sealed class PiSidecarRuntimeManager
         IProgress<SandboxProgress>? progress = null,
         CancellationToken ct = default)
     {
-        progress?.Report(new SandboxProgress("manifest", 0, $"正在获取{Label}清单…"));
+        progress?.Report(new SandboxProgress("manifest", 0, $"正在检查 {Label}…"));
         var manifest = await FetchManifestAsync(ct).ConfigureAwait(false);
 
-        var installed = GetInstalled();
-        if (installed is not null && string.Equals(installed.Version, manifest.Version, StringComparison.Ordinal))
+        var downloadDir = Path.Combine(BaseDirectory, "archives");
+        var archivePath = Path.Combine(downloadDir, SafeFileName(manifest.FileName!));
+
+        var installed = GetCompatibleInstalled();
+        if (installed is not null
+            && string.Equals(installed.Version, manifest.Version, StringComparison.Ordinal)
+            && installed.ContractVersion >= manifest.ContractVersion)
         {
+            // Also on the no-op path, so a machine that updated before this reclaim
+            // existed still gets its stranded copy back rather than keeping it until
+            // the next version bump.
+            Reclaim(keepRuntimeDirectory: installed.Directory, keepArchive: archivePath);
             progress?.Report(new SandboxProgress("done", 1, $"已是最新版本 {installed.Version}"));
             return installed;
         }
 
         Directory.CreateDirectory(BaseDirectory);
-        var downloadDir = Path.Combine(BaseDirectory, "archives");
         Directory.CreateDirectory(downloadDir);
-        var archivePath = Path.Combine(downloadDir, SafeFileName(manifest.FileName!));
 
         if (!await SandboxArchive.VerifySha256Async(archivePath, manifest.Sha256!, ct).ConfigureAwait(false))
         {
@@ -145,7 +173,9 @@ public sealed class PiSidecarRuntimeManager
         }
 
         progress?.Report(new SandboxProgress("extract", 0.88, "正在解压…"));
-        var target = Path.Combine(RuntimeRootDirectory, manifest.Version!);
+        var target = Path.Combine(
+            RuntimeRootDirectory,
+            SafeFileName($"{manifest.Version}-contract-{manifest.ContractVersion}"));
         var staging = target + ".staging";
         if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
         Directory.CreateDirectory(staging);
@@ -165,7 +195,7 @@ public sealed class PiSidecarRuntimeManager
             File.WriteAllText(
                 Path.Combine(staging, StampFileName),
                 JsonSerializer.Serialize(new PiSidecarStamp(
-                    manifest.Version, manifest.NodeExecutable, manifest.CliJs, manifest.Extension,
+                    manifest.Version, manifest.ContractVersion, manifest.NodeExecutable, manifest.CliJs, manifest.Extension,
                     DateTimeOffset.UtcNow)));
 
             if (Directory.Exists(target)) Directory.Delete(target, recursive: true);
@@ -179,13 +209,60 @@ public sealed class PiSidecarRuntimeManager
             }
         }
 
+        // Only once the new copy is in place, and never before: a reclaim that ran
+        // first would leave the machine with nothing if the extract then failed.
+        // Superseded copies are ~180MB of runtime plus a ~56MB archive each, and
+        // nothing else ever revisits them — raising the contract version alone
+        // strands one on every existing install.
+        Reclaim(keepRuntimeDirectory: target, keepArchive: archivePath);
+
         progress?.Report(new SandboxProgress("done", 1, $"{Label} {manifest.Version} 已配置完成"));
-        return GetInstalled() ?? throw new InvalidOperationException($"{Label}安装后仍不可用。");
+        return GetCompatibleInstalled() ?? throw new InvalidOperationException($"{Label}安装后仍不可用。");
     }
+
+    /// <summary>Delete every installed runtime and cached archive except the pair
+    /// just installed. Best effort throughout: a directory still held by a running
+    /// sidecar simply survives to the next install.</summary>
+    private void Reclaim(string keepRuntimeDirectory, string keepArchive)
+    {
+        if (Directory.Exists(RuntimeRootDirectory))
+        {
+            // Materialised before deleting: the lazy enumerator walks the same
+            // directory this loop is removing entries from.
+            foreach (var dir in Directory.GetDirectories(RuntimeRootDirectory))
+            {
+                if (PathEquals(dir, keepRuntimeDirectory)) continue;
+                // Drop the stamp first so a directory we cannot remove — a sidecar
+                // may still hold node.exe open — stops advertising itself as an
+                // installed runtime instead of competing with the new one.
+                TryDelete(Path.Combine(dir, StampFileName));
+                try { Directory.Delete(dir, recursive: true); } catch { /* in use — next time */ }
+            }
+        }
+
+        var archives = Path.Combine(BaseDirectory, "archives");
+        if (!Directory.Exists(archives)) return;
+        foreach (var file in Directory.GetFiles(archives))
+        {
+            if (!PathEquals(file, keepArchive)) TryDelete(file);
+        }
+    }
+
+    private static bool PathEquals(string left, string right) =>
+        string.Equals(
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
+            StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Remove every installed version and the download cache.</summary>
     public void Delete()
     {
+        if (Directory.Exists(RuntimeRootDirectory))
+        {
+            foreach (var dir in Directory.EnumerateDirectories(RuntimeRootDirectory))
+                TryDelete(Path.Combine(dir, StampFileName));
+        }
+
         foreach (var dir in new[] { RuntimeRootDirectory, Path.Combine(BaseDirectory, "archives") })
         {
             if (!Directory.Exists(dir)) continue;
@@ -234,6 +311,7 @@ public sealed class PiSidecarRuntimeManager
 
     private sealed record PiSidecarStamp(
         [property: JsonPropertyName("version")] string? Version,
+        [property: JsonPropertyName("contract_version")] int? ContractVersion,
         [property: JsonPropertyName("node_executable")] string? NodeExecutable,
         [property: JsonPropertyName("cli_js")] string? CliJs,
         [property: JsonPropertyName("extension")] string? Extension,
@@ -245,13 +323,15 @@ public sealed record InstalledPiSidecar(
     string Directory,
     string NodePath,
     string CliJsPath,
-    string ExtensionPath);
+    string ExtensionPath,
+    int ContractVersion = 0);
 
 /// <summary>Install progress for one sandbox component.</summary>
 public sealed record SandboxProgress(string Stage, double Fraction, string Message);
 
 public sealed record PiSidecarManifest(
     [property: JsonPropertyName("version")] string? Version,
+    [property: JsonPropertyName("contract_version")] int ContractVersion,
     [property: JsonPropertyName("url")] string? Url,
     [property: JsonPropertyName("sha256")] string? Sha256,
     [property: JsonPropertyName("size_bytes")] long? SizeBytes,
@@ -263,6 +343,7 @@ public sealed record PiSidecarManifest(
     public void Validate()
     {
         if (string.IsNullOrWhiteSpace(Version)) throw new InvalidOperationException("清单缺少 version。");
+        if (ContractVersion < 1) throw new InvalidOperationException("清单缺少 contract_version。");
         if (string.IsNullOrWhiteSpace(Url)) throw new InvalidOperationException("清单缺少 url。");
         if (string.IsNullOrWhiteSpace(Sha256)) throw new InvalidOperationException("清单缺少 sha256。");
         if (string.IsNullOrWhiteSpace(FileName)) throw new InvalidOperationException("清单缺少 file_name。");

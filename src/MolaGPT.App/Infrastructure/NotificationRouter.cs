@@ -179,7 +179,7 @@ internal sealed class NotificationRouter : IDisposable
         {
             Key = BackgroundSummaryKey,
             Kind = NotifyKind.Info,
-            Title = $"后台完成了 {items.Count} 件事",
+            Title = $"共 {items.Count} 个通知",
             Body = string.Join(" · ", items.Select(i => i.Title))
         });
     }

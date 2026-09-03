@@ -76,6 +76,18 @@
     <AvaloniaResource Include="Assets\**" />
   </ItemGroup>
 
+  <!-- SkiaSharp 3.119.4 and HarfBuzzSharp 8.3.1.3 started shipping native .pdb
+       files beside their DLLs; the versions before them did not. That is 100 MB
+       (libSkiaSharp.pdb 80.1 + libHarfBuzzSharp.pdb 19.9) which lands in the
+       installer and the portable zip, because the [Files] rule takes the whole
+       publish directory. DebugType=None only suppresses managed symbols, so it
+       never touched these. -->
+  <Target Name="TrimNativeSymbols" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Extension)' == '.pdb'" />
+    </ItemGroup>
+  </Target>
+
   <!-- Built-in Agent Skills shipped next to the app; SkillManager scans <AppDir>/skills. -->
   <ItemGroup>
     <Content Include="..\skills\**\*">

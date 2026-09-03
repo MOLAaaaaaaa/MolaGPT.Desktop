@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -35,33 +36,45 @@ public sealed class PiWorkToolBridge : IDisposable
     /// every persona the user picked is ignored.</summary>
     public delegate string? SystemPrompt();
 
+    /// <summary>What one sidecar is allowed to do for the turn it is running.</summary>
+    public sealed record TurnBinding(
+        ToolDispatcher Dispatcher,
+        ToolCatalog Catalog,
+        SystemPrompt SystemPrompt);
+
     private readonly HttpListener _listener = new();
     private readonly CancellationTokenSource _cts = new();
-    private volatile ToolDispatcher? _dispatcher;
-    private volatile ToolCatalog? _catalog;
-    private volatile SystemPrompt? _systemPrompt;
+
+    /// <summary>
+    /// Per-sidecar bindings, keyed by that sidecar's throwaway token — the same key
+    /// <see cref="PiWorkLlmShim"/> routes on.
+    ///
+    /// These used to be three fields swapped per turn, which was safe only because
+    /// a gate allowed one turn at a time. With a pool that gate is gone, and a
+    /// shared "current dispatcher" would let one conversation's tool call execute
+    /// against another conversation's workspace and approvals.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, TurnBinding> _bindings = new(StringComparer.Ordinal);
 
     public string Url { get; }
-    public string Token { get; }
 
     public PiWorkToolBridge(Action<string>? log = null)
     {
         var port = FreeTcpPort();
         Url = $"http://127.0.0.1:{port}";
-        Token = Guid.NewGuid().ToString("N");
         _listener.Prefixes.Add($"{Url}/");
         _listener.Start();
         _ = Task.Run(() => AcceptLoopAsync(log));
     }
 
-    /// <summary>Point the bridge at the dispatcher for the turn about to run.</summary>
-    public void SetDispatcher(ToolDispatcher? dispatcher) => _dispatcher = dispatcher;
-
-    /// <summary>Point the bridge at the tool catalogue for the turn about to run.</summary>
-    public void SetCatalog(ToolCatalog? catalog) => _catalog = catalog;
-
-    /// <summary>Point the bridge at the system prompt for the turn about to run.</summary>
-    public void SetSystemPrompt(SystemPrompt? provider) => _systemPrompt = provider;
+    /// <summary>Bind one sidecar's callbacks for the turn it is about to run, or
+    /// pass null to unbind. Calls arriving without a binding are refused rather
+    /// than served from whatever ran last.</summary>
+    public void SetBinding(string sidecarToken, TurnBinding? binding)
+    {
+        if (binding is null) _bindings.TryRemove(sidecarToken, out _);
+        else _bindings[sidecarToken] = binding;
+    }
 
     private async Task AcceptLoopAsync(Action<string>? log)
     {
@@ -80,47 +93,34 @@ public sealed class PiWorkToolBridge : IDisposable
         string responseJson;
         try
         {
-            var dispatcher = _dispatcher;
             using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
             var body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
             var segments = ctx.Request.Url?.AbsolutePath.Trim('/').Split('/') ?? Array.Empty<string>();
+            var token = ctx.Request.Headers["x-mola-token"];
 
-            if (ctx.Request.Headers["x-mola-token"] != Token)
+            if (string.IsNullOrEmpty(token) || !_bindings.TryGetValue(token, out var binding))
             {
+                // Either something else on the box found the port, or the sidecar
+                // outlived its turn. Both are "not now", never "use the last one".
                 status = 403;
                 responseJson = "{\"error\":\"bad token\"}";
             }
             else if (segments is ["tools"])
             {
                 // GET /tools — the sidecar asks what MolaGPT can do right now.
-                var catalog = _catalog;
-                if (catalog is null)
-                {
-                    status = 409;
-                    responseJson = "{\"error\":\"no active turn\"}";
-                }
-                else
-                {
-                    responseJson = catalog();
-                }
+                responseJson = binding.Catalog();
             }
             else if (segments is ["system-prompt"])
             {
-                var prompt = _systemPrompt?.Invoke();
-                responseJson = JsonSerializer.Serialize(new { prompt });
-            }
-            else if (dispatcher is null)
-            {
-                status = 409;
-                responseJson = "{\"error\":\"no active turn\"}";
+                responseJson = JsonSerializer.Serialize(new { prompt = binding.SystemPrompt() });
             }
             else
             {
                 // POST /tools/<name>
                 var name = segments.Length >= 2 ? segments[1] : "";
                 var argsJson = ExtractArgs(body);
-                var output = await dispatcher(name, argsJson, _cts.Token).ConfigureAwait(false);
+                var output = await binding.Dispatcher(name, argsJson, _cts.Token).ConfigureAwait(false);
                 responseJson = JsonSerializer.Serialize(new { output });
             }
         }

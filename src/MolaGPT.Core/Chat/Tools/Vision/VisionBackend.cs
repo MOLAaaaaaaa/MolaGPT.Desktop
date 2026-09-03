@@ -27,8 +27,13 @@ internal sealed record VisionAnswer(string? Text, string? ModelId, string? Error
 internal sealed class VisionBackend
 {
     private readonly ProviderRegistry _registry;
+    private readonly Func<HttpClient> _httpFactory;
 
-    public VisionBackend(ProviderRegistry registry) => _registry = registry;
+    public VisionBackend(ProviderRegistry registry, Func<HttpClient> httpFactory)
+    {
+        _registry = registry;
+        _httpFactory = httpFactory;
+    }
 
     public async Task<VisionAnswer> AskAsync(
         VisionProxyOptions options,
@@ -42,19 +47,35 @@ internal sealed class VisionBackend
             return VisionAnswer.Failed("No usable vision backend is configured.");
 
         var (provider, model) = resolved.Value;
-        var request = new ChatRequest(
-            ModelId: model.Id,
-            Messages:
-            [
-                new ChatMessage(ChatMessage.RoleSystem, systemPrompt),
-                new ChatMessage(ChatMessage.RoleUser, userPrompt, Attachments: [image])
-            ],
-            UseThinking: false,
-            ThinkingParamKind: ResolveThinkingKind(model));
+
+        // Deliberately a one-shot HTTP call rather than the provider's streaming
+        // path. This runs *inside* a tool callback of a turn that is already in
+        // flight, so going back through the agent runtime would queue behind the
+        // very turn waiting on this answer — and, for the agent providers, costs a
+        // sidecar spawn to look at one picture.
+        if (provider is not IOneShotTarget describable
+            || describable.DescribeOneShot(model.Id) is not { } target)
+        {
+            return VisionAnswer.Failed(
+                $"Vision provider '{provider.DisplayName}' cannot serve a direct request.");
+        }
 
         try
         {
-            var text = await CollectAsync(provider, request, ct).ConfigureAwait(false);
+            var client = new OneShotCompletionClient(_httpFactory());
+            var text = await client.CompleteAsync(
+                target,
+                model.Id,
+                [
+                    new ChatMessage(ChatMessage.RoleSystem, systemPrompt),
+                    new ChatMessage(ChatMessage.RoleUser, userPrompt, Attachments: [image])
+                ],
+                // Describing a picture in 300 characters is not worth a reasoning
+                // pass, and the caller shows this answer inside a tool card where a
+                // thinking preamble has nowhere to go.
+                useThinking: false,
+                thinkingKind: ResolveThinkingKind(model),
+                ct: ct).ConfigureAwait(false);
             return new VisionAnswer(text, model.Id, null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -76,18 +97,5 @@ internal sealed class VisionBackend
     {
         var kind = model.ThinkingConfig?.Kind ?? ThinkingParamKindInference.InferFromModelId(model.Id);
         return kind == ThinkingParamKind.None ? null : kind;
-    }
-
-    private static async Task<string> CollectAsync(IChatProvider provider, ChatRequest request, CancellationToken ct)
-    {
-        var parts = new List<string>();
-        await foreach (var chunk in provider.StreamChatAsync(request, ct).WithCancellation(ct))
-        {
-            if (!string.IsNullOrEmpty(chunk.DeltaText))
-                parts.Add(chunk.DeltaText);
-            if (chunk.FinishReason is not null)
-                break;
-        }
-        return string.Concat(parts).Trim();
     }
 }

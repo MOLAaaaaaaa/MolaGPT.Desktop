@@ -1,5 +1,4 @@
-using MolaGPT.Core.Chat.Providers;
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -11,19 +10,17 @@ using MolaGPT.Core.Models;
 namespace MolaGPT.Core.Chat.Agents.Pi;
 
 /// <summary>
-/// Drop-in <see cref="IChatProvider"/> that runs MolaGPT <b>Work</b> on top of the
-/// Pi harness instead of the in-process 64-turn ReAct loop. Pi owns the loop,
-/// context compaction, tree sessions, retry and multi-provider plumbing; MolaGPT
-/// keeps its own billing endpoint (account quota / BYOK), its sandboxed tools, and
-/// its approval flow. Pi runs as a persistent per-conversation Node sidecar; the
-/// LLM stream comes back over JSONL RPC and is translated to <see cref="ChatChunk"/>
-/// so the existing WPF chat UI consumes it unchanged.
+/// The chat engine for <b>Work</b> and every BYOK provider — there is no second
+/// one. Pi owns the agent loop, context compaction and retry; MolaGPT keeps the
+/// billing endpoint (account quota / BYOK), the sandboxed tools and the approval
+/// flow. The LLM stream comes back over JSONL RPC and is translated to
+/// <see cref="ChatChunk"/> so the chat UI consumes it unchanged.
 ///
-/// M1 brick #1: additive and NOT yet registered — building it changes no product
-/// behaviour. Wiring it into DI / Work routing behind a feature flag is brick #2.
-/// The mechanism is the one proven end-to-end by the M0 PoC (see <c>pi-sidecar/</c>).
+/// This type is thin on purpose: it shapes one turn and hands it to
+/// <see cref="PiRuntime"/>, which owns the processes. Only <c>molagpt-proxy</c>
+/// (Chat mode) bypasses it, because Chat has no agent loop to run.
 /// </summary>
-public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IAsyncDisposable
+public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IOneShotTarget, IAsyncDisposable
 {
     /// <summary>Provider id the sidecar extension registers (must match the value
     /// passed on the <c>pi --provider</c> flag and to <c>set_model</c>).</summary>
@@ -32,68 +29,26 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
     private readonly PiWorkProviderConfig _config;
     private readonly IChatToolHost _toolHost;
     private readonly HttpClient _http;
+    private readonly PiRuntime _runtime;
     private readonly Action<string>? _log;
 
-    private readonly PiWorkToolBridge _bridge;
-    private readonly PiWorkLlmShim _shim;
-    private readonly ConcurrentDictionary<string, SessionHolder> _sessions = new(StringComparer.Ordinal);
-    private readonly SemaphoreSlim _bridgeGate = new(1, 1);
-    private readonly Timer _idleSweep;
-    private int _sidecarsCreated;
-
-    /// <summary>How many sidecar processes this provider has started. Sidecars are
-    /// the expensive part (~110 MB and a cold start each), so this is the number to
-    /// watch when reasoning about whether something is churning them.</summary>
-    public int SidecarsCreated => Volatile.Read(ref _sidecarsCreated);
-
-    /// <summary>How long a conversation's sidecar may sit unused before it is
-    /// reclaimed. Node+Pi costs ~80–150 MB resident, so an abandoned Work chat must
-    /// not keep paying it; the next turn simply respawns (lazily, as on first use).</summary>
-    private static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan IdleSweepInterval = TimeSpan.FromMinutes(1);
-
     /// <summary>How long to keep retrying the transcript rewrite while the sidecar
-    /// we just killed still holds the file open.</summary>
+    /// we just evicted still holds the file open.</summary>
     private const int FileRetryLimit = 5;
     private static readonly TimeSpan FileRetryDelay = TimeSpan.FromMilliseconds(120);
 
-    public PiWorkProvider(PiWorkProviderConfig config, IChatToolHost toolHost, HttpClient http, Action<string>? log = null)
+    public PiWorkProvider(
+        PiWorkProviderConfig config,
+        IChatToolHost toolHost,
+        HttpClient http,
+        PiRuntime runtime,
+        Action<string>? log = null)
     {
         _config = config;
         _toolHost = toolHost;
         _http = http;
+        _runtime = runtime;
         _log = log;
-        _bridge = new PiWorkToolBridge(log);
-        _shim = new PiWorkLlmShim(http, log);
-        _idleSweep = new Timer(_ => SweepIdleSessions(), null, IdleSweepInterval, IdleSweepInterval);
-    }
-
-    /// <summary>Reclaim sidecars for conversations nobody has spoken to recently.
-    /// A session driving a turn is never swept, however long that turn runs — an
-    /// agent loop can legitimately think for longer than the idle timeout, and
-    /// killing it mid-stream would surface as a mysterious failure.</summary>
-    private void SweepIdleSessions()
-    {
-        var cutoff = DateTime.UtcNow - IdleTimeout;
-        foreach (var (key, holder) in _sessions)
-        {
-            PiSidecarSession? victim = null;
-            lock (holder.Gate)
-            {
-                if (holder.InUse || holder.LastUsedUtc > cutoff || holder.Session is null) continue;
-                if (!_sessions.TryRemove(new KeyValuePair<string, SessionHolder>(key, holder))) continue;
-                victim = holder.Session;
-                holder.Session = null;
-            }
-
-            if (victim is null) continue;
-            _log?.Invoke($"[pi-work] 回收空闲 sidecar：{key}");
-            _ = Task.Run(async () =>
-            {
-                try { await victim.DisposeAsync().ConfigureAwait(false); }
-                catch (Exception ex) { _log?.Invoke("[pi-work] 回收失败：" + ex.Message); }
-            });
-        }
     }
 
     public string Id => _config.ProviderId;
@@ -140,124 +95,107 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
 
         var creds = _config.ResolveCreds(request);
 
-        // Reasoning settings ride in on the body merge rather than Pi's own
-        // set_thinking_level: providers disagree about how to ask for reasoning
-        // (DeepSeek's thinking:{type}, Qwen's enable_thinking + budget, everyone
-        // else's reasoning_effort), and Pi's mapping is not MolaGPT's. Reusing the
-        // shared table is the only way the Pi path asks for exactly what the direct
-        // path asks for.
-        creds = creds with { ExtraBody = MergeThinking(creds.ExtraBody, request) };
+        // Reasoning is asked for twice, on purpose, because neither half covers the
+        // other:
+        //
+        //  · Pi's thinking level is what its own loop reads, and the only way to
+        //    reach a nested config like Google's generationConfig.thinkingConfig —
+        //    a merged body only ever lands top-level keys.
+        //  · The body merge carries the dialect the user picked per model
+        //    (ThinkingParamKind). Pi cannot infer that: the shim hides the real
+        //    endpoint from its compatibility detection, so it would fall back to
+        //    plain reasoning_effort and a model configured for Qwen's
+        //    enable_thinking + budget would quietly stop honouring the setting.
+        var thinkingLevel = ResolveThinkingLevel(request, creds.Api);
+        if (TakesOpenAiThinkingDialect(creds.Api))
+            creds = creds with { ExtraBody = MergeThinking(creds.ExtraBody, request) };
 
-        // Only one turn drives the shared bridge + shim at a time (Work is sequential).
-        await _bridgeGate.WaitAsync(ct).ConfigureAwait(false);
-
-        // Claimed (InUse) before the gate is released, so the idle sweep can never
-        // reclaim the sidecar this turn is about to stream from. The tool set is
-        // deliberately NOT part of the identity: the extension re-reads this
-        // catalogue on every turn (before_agent_start) and reconciles Pi's tools in
-        // place, so toggling 联网搜索 / 视觉 / MCP costs nothing but a catalogue fetch.
-        var holder = ClaimSession(request.ConversationId, creds);
         // Personas and per-model prompts arrive as system messages. Pi substitutes
         // its own coding-assistant prompt when nobody says otherwise, so failing to
         // forward these would quietly discard whatever the user selected.
         var systemPrompt = ExtractSystemPrompt(request.Messages);
 
-        _bridge.SetCatalog(() => toolCatalogJson);
-        _bridge.SetSystemPrompt(() => systemPrompt);
-        _bridge.SetDispatcher((name, argsJson, toolCt) =>
-            _toolHost.ExecuteAsync(name, argsJson, toolContext, options, toolCt));
-        _shim.SetTarget(new PiWorkLlmShim.ForwardTarget(creds.Endpoint, creds.TokenProvider, creds.OnUnauthorized, creds.Headers, creds.ExtraBody, creds.Auth));
+        // The tool set is deliberately NOT part of the sidecar's identity: the
+        // extension re-reads this catalogue every turn (before_agent_start) and
+        // reconciles Pi's tools in place, so toggling 联网搜索 / 视觉 / MCP costs a
+        // catalogue fetch rather than a respawn.
+        var binding = new PiWorkToolBridge.TurnBinding(
+            (name, argsJson, toolCt) => _toolHost.ExecuteAsync(name, argsJson, toolContext, options, toolCt),
+            () => toolCatalogJson,
+            () => systemPrompt);
 
-        // A cold sidecar costs a Node boot (~1.5s) before the model is even asked
-        // anything. Saying so beats a generic "等待模型回答" that makes the wait look
-        // like the model being slow.
-        if (holder.Session?.IsAlive != true)
+        var target = new PiWorkLlmShim.ForwardTarget(
+            creds.Endpoint,
+            creds.TokenProvider,
+            creds.OnUnauthorized,
+            creds.Headers,
+            creds.ExtraBody,
+            creds.Auth,
+            creds.DropBodyKeys ?? PiEndpointQuirks.DropBodyKeysFor(creds.Endpoint),
+            creds.PathMode);
+
+        // Waits when every slot is busy, which is the point: three turns really are
+        // in flight and a fourth process costs more than the wait.
+        await using var lease = await _runtime.AcquireAsync(
+            _config.Spec,
+            request.ConversationId ?? PiRuntime.DraftKey,
+            target,
+            binding,
+            ct).ConfigureAwait(false);
+
+        // A cold sidecar costs a Node boot (~2.7s measured) before the model is even
+        // asked anything. Saying so beats a generic "等待模型回答" that makes the wait
+        // look like the model being slow.
+        if (!lease.WasWarm)
         {
             yield return new ChatChunk(Pending: new PendingStatusDelta(
-                "启动 Agent 运行时", "本次对话首次运行，正在拉起本地 Agent"));
+                "启动 Agent 运行时", "正在拉起本地 Agent 运行时"));
         }
 
         string? errorMessage = null;
         var pendingArgs = new Dictionary<string, string>(StringComparer.Ordinal);
         var preview = new ToolPreviewTracker();
-        try
+        await foreach (var line in lease.Session
+                           .SendTurnAsync(creds.Model, thinkingLevel, userText, images, ct)
+                           .ConfigureAwait(false))
         {
-            await foreach (var line in holder.Session!.SendTurnAsync(userText, images, ct).ConfigureAwait(false))
-            {
-                var chunk = MapLine(line, options, pendingArgs, preview, ref errorMessage);
-                if (chunk is not null) yield return chunk;
-            }
-        }
-        finally
-        {
-            lock (holder.Gate)
-            {
-                holder.InUse = false;
-                holder.LastUsedUtc = DateTime.UtcNow; // idle clock starts when the turn ends
-            }
-            _bridge.SetDispatcher(null);
-            _bridge.SetCatalog(null);
-            _bridge.SetSystemPrompt(null);
-            _shim.SetTarget(null);
-            _bridgeGate.Release();
+            var chunk = MapLine(line, options, pendingArgs, preview, ref errorMessage);
+            if (chunk is not null) yield return chunk;
         }
 
         if (errorMessage is not null)
             throw new InvalidOperationException(errorMessage);
     }
 
-    /// <summary>Get (or lazily spawn) the conversation's sidecar and mark it in use
-    /// for the turn about to run. The caller MUST clear <see cref="SessionHolder.InUse"/>
-    /// when the turn finishes.</summary>
-    private SessionHolder ClaimSession(string? conversationId, PiProviderCreds creds)
+    /// <summary>
+    /// Hand out this provider's upstream target so a one-shot call (conversation
+    /// title, vision lookup) can reach the same endpoint without paying for a
+    /// sidecar. The creds resolver is the single source of truth for where a turn
+    /// bills to, so a one-shot answer can never come from a different endpoint
+    /// than the conversation it belongs to.
+    /// </summary>
+    public OneShotTarget? DescribeOneShot(string modelId)
     {
-        var key = conversationId ?? "draft";
-        var signature = creds.Signature;
-        while (true)
-        {
-            var holder = _sessions.GetOrAdd(key, _ => new SessionHolder());
-            lock (holder.Gate)
+        if (Models.All(m => !m.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase)))
+            return null;
+
+        var creds = _config.ResolveCreds(new ChatRequest(modelId, Array.Empty<ChatMessage>()));
+        var endpoint = creds.Api == "google-generative-ai"
+            ? $"{creds.Endpoint.TrimEnd('/')}/models/{Uri.EscapeDataString(modelId)}:generateContent"
+            : creds.Endpoint;
+        return new OneShotTarget(
+            endpoint,
+            creds.TokenProvider,
+            DisplayName,
+            creds.Api switch
             {
-                // The holder may have been retired (conversation closed / idle swept)
-                // between GetOrAdd and the lock; if so it is no longer the registered
-                // one, and reusing it would hand back a session nobody will dispose.
-                if (!_sessions.TryGetValue(key, out var current) || !ReferenceEquals(current, holder))
-                    continue;
-
-                holder.LastUsedUtc = DateTime.UtcNow;
-                holder.InUse = true;
-
-                // Reuse the live session unless the model/creds/tool set changed
-                // (all baked into the process at spawn).
-                if (holder.Session is { IsAlive: true } && holder.Signature == signature)
-                    return holder;
-
-                if (holder.Session is not null)
-                    _ = holder.Session.DisposeAsync().AsTask();
-
-                // The sidecar is pointed at the local shim, never at the real
-                // endpoint: no credential (JWT or BYOK key) is ever baked into the
-                // Node process env. Its "api key" is the shim's throwaway token.
-                var launch = new PiSidecarLaunchOptions(
-                    _config.NodePath, _config.CliJsPath, _config.ExtensionPath, _config.WorkingDirectory,
-                    SanitizeSessionId(key), _config.SessionRoot,
-                    _shim.BaseUrl, _shim.Token, creds.Model, creds.Api, AuthHeader: true, creds.Reasoning,
-                    _bridge.Url, _bridge.Token);
-                holder.Session = new PiSidecarSession(launch, _log);
-                holder.Signature = signature;
-                Interlocked.Increment(ref _sidecarsCreated);
-                return holder;
-            }
-        }
-    }
-
-    /// <summary>Tear down a conversation's sidecar (call when the conversation is
-    /// closed/deleted, or on idle timeout — the memory-conscious teardown that
-    /// keeps the Node footprint scoped to active Work conversations).</summary>
-    public async Task CloseConversationAsync(string? conversationId)
-    {
-        if (_sessions.TryRemove(conversationId ?? "draft", out var holder) && holder.Session is not null)
-            await holder.Session.DisposeAsync().ConfigureAwait(false);
+                "anthropic-messages" => OneShotWireApi.AnthropicMessages,
+                "openai-responses" => OneShotWireApi.OpenAiResponses,
+                "google-generative-ai" => OneShotWireApi.GoogleGenerativeAi,
+                _ => OneShotWireApi.OpenAiCompletions,
+            },
+            creds.Headers,
+            creds.ExtraBody);
     }
 
     /// <summary>
@@ -268,20 +206,20 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
     /// model answers it with the attempt being replaced — and that attempt's tool
     /// results — still in view.
     ///
-    /// Both copies of the turn have to go. The sidecar holds it in memory, and
-    /// <c>--session-id</c> means a fresh sidecar resumes from the file rather than
-    /// starting clean, so trimming one without the other just moves the problem.
+    /// Both copies of the turn have to go. A sidecar holds it in memory and the
+    /// next turn resumes from the file, so trimming one without the other just
+    /// moves the problem.
     /// </summary>
     public async Task<bool> ForgetLastTurnAsync(string? conversationId, CancellationToken ct = default)
     {
-        var key = conversationId ?? "draft";
+        var key = conversationId ?? PiRuntime.DraftKey;
 
-        // Cheap: the next turn respawns and resumes from what we leave on disk,
-        // which is exactly the mechanism being used here.
-        await CloseConversationAsync(key).ConfigureAwait(false);
+        // Evict before rewriting: a process still holding this transcript would
+        // keep its own in-memory copy of the turn being erased, and write it back.
+        await _runtime.EvictConversationAsync(key).ConfigureAwait(false);
 
-        var file = FindSessionFile(key);
-        if (file is null) return false;
+        var file = PiRuntime.ResolveSessionPath(_config.Spec.SessionRoot, key);
+        if (!File.Exists(file)) return false;
 
         for (var attempt = 0; ; attempt++)
         {
@@ -307,21 +245,6 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
             catch (IOException) { return false; }
             catch (UnauthorizedAccessException) { return false; }
         }
-    }
-
-    /// <summary>Locate a conversation's transcript. Matched the way
-    /// <see cref="PiWorkSessionSweeper"/> matches it — by containment, because Pi
-    /// decorates the id it is handed (<c>&lt;timestamp&gt;_&lt;id&gt;.jsonl</c>).</summary>
-    private string? FindSessionFile(string key)
-    {
-        var root = _config.SessionRoot;
-        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root)) return null;
-
-        var id = SanitizeSessionId(key);
-        return Directory.EnumerateFiles(root, "*.jsonl", SearchOption.AllDirectories)
-            .Where(f => Path.GetFileNameWithoutExtension(f).Contains(id, StringComparison.Ordinal))
-            .OrderByDescending(File.GetLastWriteTimeUtc)
-            .FirstOrDefault();
     }
 
     private ChatChunk? MapLine(
@@ -356,7 +279,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
                         // showed nothing at all until execution began — the model
                         // looked hung when it was busy typing.
                         if (kind is "toolcall_start" or "toolcall_delta")
-                            return BuildPreparingCard(ev, options, preview, _log);
+                            return BuildPreparingCard(ev, options, preview);
 
                         // The finished block is where the call's id is certain to be
                         // present, whatever order the model streamed it in. It is what
@@ -374,7 +297,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
                     // Pi reports the arguments when a call starts but not when it
                     // ends, and the finished card needs them — hold on to them.
                     pendingArgs[startId] = startArgs;
-                    return new ChatChunk(Tool: OpenAICompatibleProvider.BuildToolDelta(
+                    return new ChatChunk(Tool: ToolDeltaBuilder.BuildToolDelta(
                         preview.CardIdFor(startId), Str(root, "toolName"), startArgs, options, "running"));
                 }
 
@@ -388,7 +311,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
                     // Built by the same function the direct provider uses, so the
                     // duration, exit code and permission labels that live inside the
                     // tool's own result reach the card here too.
-                    var delta = OpenAICompatibleProvider.BuildToolDelta(
+                    var delta = ToolDeltaBuilder.BuildToolDelta(
                         preview.CardIdFor(endId),
                         Str(root, "toolName"),
                         endArgs ?? "{}",
@@ -402,11 +325,32 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
                 }
 
                 case "agent_end":
+                {
+                    // One agent run is many model calls, so the turn's cost is the
+                    // sum rather than the last message's. Pi has been counting all
+                    // along — including cache hits and reasoning tokens, which the
+                    // chat-completions path never reported.
+                    var input = 0;
+                    var output = 0;
+                    var total = 0;
+                    var counted = false;
                     if (root.TryGetProperty("messages", out var msgs) && msgs.ValueKind == JsonValueKind.Array)
+                    {
                         foreach (var mm in msgs.EnumerateArray())
+                        {
                             if (mm.TryGetProperty("stopReason", out var sr) && sr.GetString() == "error")
                                 errorMessage = mm.TryGetProperty("errorMessage", out var em) ? em.GetString() : "Pi agent error";
-                    return null;
+
+                            if (!mm.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
+                                continue;
+                            counted = true;
+                            input += Int(usage, "input") + Int(usage, "cacheRead") + Int(usage, "cacheWrite");
+                            output += Int(usage, "output") + Int(usage, "reasoning");
+                            total += Int(usage, "totalTokens");
+                        }
+                    }
+                    return counted ? new ChatChunk(Usage: new Usage(input, output, total)) : null;
+                }
 
                 case "agent_settled":
                     return new ChatChunk(FinishReason: "stop");
@@ -418,10 +362,22 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
     }
 
     /// <summary>
+    /// Whether this wire shape understands the top-level thinking keys
+    /// <see cref="ThinkingParams"/> produces (<c>reasoning_effort</c>,
+    /// <c>enable_thinking</c>, <c>thinking</c>).
+    ///
+    /// Google's native API does not, and does not ignore them either: it validates
+    /// the payload and rejects the whole request over one unknown field. There the
+    /// thinking level is the only correct expression, and reaching for both is a
+    /// 400 rather than a belt-and-braces.
+    /// </summary>
+    internal static bool TakesOpenAiThinkingDialect(string api) =>
+        api is not ("google-generative-ai" or "openai-responses");
+
+    /// <summary>
     /// Fold the turn's thinking parameters into the model's custom parameters, so
     /// the shim sends both. Custom parameters win on a clash: they are the user's
-    /// explicit override, exactly as in the direct provider where ApplyCustomBody
-    /// runs after the thinking block.
+    /// explicit override.
     /// </summary>
     private static IReadOnlyDictionary<string, JsonElement>? MergeThinking(
         IReadOnlyDictionary<string, JsonElement>? custom,
@@ -438,6 +394,34 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
             foreach (var (key, value) in custom)
                 merged[key] = value;
         return merged;
+    }
+
+    /// <summary>
+    /// The turn's reasoning setting as one of Pi's thinking levels, which is what
+    /// Pi's own loop reads.
+    ///
+    /// MolaGPT offers two levels Pi does not — <c>xhigh</c> and <c>max</c> — and Pi
+    /// only accepts those from a model that declares a <c>thinkingLevelMap</c>,
+    /// which ours do not. They are folded into <c>high</c> here rather than sent
+    /// and silently clamped somewhere further down. Google's level-only Gemini
+    /// models reject Pi's <c>off</c>/<c>minimal</c> value, so <c>low</c> is their
+    /// supported floor.
+    /// </summary>
+    internal static string ResolveThinkingLevel(ChatRequest request, string api)
+    {
+        var google = api == "google-generative-ai";
+        if (request.UseThinking == false) return google ? "low" : "off";
+
+        var effort = request.ReasoningEffort?.Trim().ToLowerInvariant();
+        return effort switch
+        {
+            "minimal" when google => "low",
+            "minimal" or "low" or "medium" or "high" => effort,
+            "xhigh" or "max" => "high",
+            // Thinking on without a chosen effort, or a level from a vocabulary Pi
+            // does not share: take its middle rather than guessing at an extreme.
+            _ => request.UseThinking == true ? "medium" : "off",
+        };
     }
 
     /// <summary>Join the turn's system messages, in order. Null when there are
@@ -590,8 +574,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
     private static ChatChunk? BuildPreparingCard(
         JsonElement ev,
         LocalToolOptions options,
-        ToolPreviewTracker preview,
-        Action<string>? log)
+        ToolPreviewTracker preview)
     {
         if (!ev.TryGetProperty("contentIndex", out var idx) || idx.ValueKind != JsonValueKind.Number)
             return null;
@@ -629,21 +612,14 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
         // the card is the very one the execution events go on to update; otherwise
         // mint a key, keep it, and let the label fill itself in when the name lands.
         if (state.CardId.Length == 0)
-        {
             state.CardId = state.Id.Length > 0 ? state.Id : "pi-call-" + Guid.NewGuid().ToString("N");
-            // Which shape the model used is worth knowing from a real conversation,
-            // since it decides whether the card can carry its proper label from the
-            // first frame. One line per call, not per delta.
-            if (state.Id.Length == 0)
-                log?.Invoke($"工具调用未在开头带上 id/name（名称：{(state.Name.Length == 0 ? "未知" : state.Name)}），预览卡改用临时标识");
-        }
 
         var now = DateTime.UtcNow.Ticks;
         if (!state.ShouldEmit(now)) return null;
         state.LastEmittedLength = state.Arguments.Length;
         state.LastEmittedTicks = now;
 
-        return new ChatChunk(Tool: OpenAICompatibleProvider.BuildToolDelta(
+        return new ChatChunk(Tool: ToolDeltaBuilder.BuildToolDelta(
             state.CardId, state.Name, state.Arguments.ToString(), options, "preparing"));
     }
 
@@ -706,44 +682,25 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IA
     private static string Str(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) ? v.GetString() ?? "" : "";
 
-    public async ValueTask DisposeAsync()
-    {
-        await _idleSweep.DisposeAsync().ConfigureAwait(false);
-        foreach (var holder in _sessions.Values)
-            if (holder.Session is not null)
-                await holder.Session.DisposeAsync().ConfigureAwait(false);
-        _sessions.Clear();
-        _bridge.Dispose();
-        _shim.Dispose();
-        _bridgeGate.Dispose();
-    }
+    private static int Int(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n)
+            ? n
+            : 0;
 
-    private sealed class SessionHolder
-    {
-        public object Gate { get; } = new();
-        public PiSidecarSession? Session { get; set; }
-        public string? Signature { get; set; }
-
-        /// <summary>A turn is currently streaming from this session — do not reclaim.</summary>
-        public bool InUse { get; set; }
-
-        /// <summary>When the last turn finished; the idle sweep measures from here.</summary>
-        public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
-    }
+    /// <summary>Retiring a provider drops the sidecars shaped for it. The runtime
+    /// itself outlives every provider — it is shared — so this deliberately does
+    /// not tear it down.</summary>
+    public ValueTask DisposeAsync() => new(_runtime.RetireSpecAsync(_config.Spec));
 }
 
-/// <summary>Static config for the provider: identity, models, and how to find node
-/// + the sidecar assets. <see cref="ResolveCreds"/> is called per request so the
-/// account-quota JWT (or a BYOK key) can be supplied live by the DI wiring (brick #2).</summary>
+/// <summary>Static config for the provider: identity, models, and the shape of the
+/// sidecar it needs. <see cref="ResolveCreds"/> is called per request so the
+/// account-quota JWT (or a BYOK key) can be supplied live by the DI wiring.</summary>
 public sealed record PiWorkProviderConfig(
     string ProviderId,
     string DisplayName,
     IReadOnlyList<ProviderModel> Models,
-    string NodePath,
-    string CliJsPath,
-    string ExtensionPath,
-    string WorkingDirectory,
-    string SessionRoot,
+    PiSidecarSpec Spec,
     Func<ChatRequest, PiProviderCreds> ResolveCreds);
 
 /// <summary>Per-request billing target. Account-quota → the MolaGPT relay URL +
@@ -753,6 +710,9 @@ public sealed record PiWorkProviderConfig(
 /// <param name="Endpoint">Absolute URL of the real chat-completions endpoint.</param>
 /// <param name="TokenProvider">Resolves the bearer token at request time, so a
 /// rotating account JWT is always current without respawning the sidecar.</param>
+/// <param name="DropBodyKeys">Request-body keys this endpoint rejects outright.
+/// See <see cref="PiEndpointQuirks"/> for why the sidecar cannot work these out
+/// for itself.</param>
 public sealed record PiProviderCreds(
     string Endpoint,
     Func<CancellationToken, Task<string?>> TokenProvider,
@@ -762,10 +722,6 @@ public sealed record PiProviderCreds(
     Action? OnUnauthorized = null,
     IReadOnlyList<KeyValuePair<string, string>>? Headers = null,
     IReadOnlyDictionary<string, JsonElement>? ExtraBody = null,
-    PiWorkLlmShim.AuthStyle Auth = PiWorkLlmShim.AuthStyle.Bearer)
-{
-    /// <summary>Identity used to decide whether a live sidecar can be reused or
-    /// must be respawned. Only values baked into the process at spawn time count —
-    /// notably <em>not</em> the token, which the shim now injects per request.</summary>
-    public string Signature => $"{Endpoint}|{Model}|{Api}|{Reasoning}";
-}
+    PiWorkLlmShim.AuthStyle Auth = PiWorkLlmShim.AuthStyle.Bearer,
+    IReadOnlyList<string>? DropBodyKeys = null,
+    PiWorkLlmShim.TargetPathMode PathMode = PiWorkLlmShim.TargetPathMode.Fixed);

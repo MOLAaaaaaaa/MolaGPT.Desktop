@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Net.Http.Headers;
@@ -49,6 +49,8 @@ public partial class SettingsWindow : MolaContentWindow
     private readonly ProviderRegistry? _providerRegistry;
     private readonly IChatToolHost? _toolHost;
     private readonly PiByokProviderFactory? _piByokProviderFactory;
+    private readonly Func<Task>? _agentRuntimeInstalled;
+    private readonly Action? _agentRuntimeRemoving;
     private readonly StackPanel[] _pages;
     private readonly ObservableCollection<ModelRow> _providerModels = [];
     private readonly ObservableCollection<HeaderRow> _providerHeaders = [];
@@ -62,6 +64,21 @@ public partial class SettingsWindow : MolaContentWindow
     private bool _applyingProviderPreset;
     private string _editingProviderPurpose = "chat";
 
+    /// <summary>A completed scan doubles as the cache. Opening the window fires
+    /// <c>Opened</c> and <c>Activated</c> back to back and every refocus
+    /// refreshes again, but the 15k-file walk only has to happen once per open.</summary>
+    private Task<PythonRuntimeStorageUsage>? _storageScan;
+
+    /// <summary>Bumped by every runtime refresh and by every operation that
+    /// writes its own text into the runtime rows, so a scan that lands late
+    /// cannot overwrite whatever replaced it.</summary>
+    private int _runtimeStatusGeneration;
+
+    /// <summary>Set while a download / reset / probe owns the runtime rows.
+    /// Refreshes now paint synchronously, so without this a stray window
+    /// activation would wipe out a download's progress text instantly.</summary>
+    private bool _sandboxOperationRunning;
+
     private static readonly ProviderPresetRow[] ProviderPresets =
     [
         new("openrouter", "OpenRouter", "openai-compat", "https://openrouter.ai/api/", "v1/models",
@@ -70,21 +87,33 @@ public partial class SettingsWindow : MolaContentWindow
             ThinkingParamKind.DeepSeekV4),
         new("moonshot", "Moonshot (Kimi)", "openai-compat", "https://api.moonshot.cn/", "v1/models",
             ThinkingParamKind.None),
-        new("openai", "OpenAI", "openai-compat", OpenAIProvider.DefaultBaseUrl, "v1/models",
+        new("openai", "OpenAI", "openai-compat", OpenAiBaseUrl, "v1/models",
             ThinkingParamKind.OpenAiReasoningEffort),
-        new("openai-response", "OpenAI (Responses API)", "openai-response", OpenAIProvider.DefaultBaseUrl,
+        new("openai-response", "OpenAI (Responses API)", "openai-response", OpenAiBaseUrl,
             "v1/models", ThinkingParamKind.OpenAiReasoningEffort, ApiPath: "v1/responses"),
-        new("anthropic", "Anthropic (Claude)", "anthropic", AnthropicProvider.DefaultBaseUrl, "v1/models",
+        new("anthropic", "Anthropic (Claude)", "anthropic", AnthropicBaseUrl, "v1/models",
             ThinkingParamKind.AnthropicAdaptive),
-        new("gemini", "Google Gemini", "gemini", GeminiProvider.DefaultBaseUrl, "models",
+        new("gemini", "Google Gemini", "gemini", GeminiCompatBaseUrl, "models",
             ThinkingParamKind.GeminiThinkingLevel),
         new("custom-openai", "自定义（OpenAI 兼容）", "openai-compat", "https://api.openai.com/", "v1/models",
             ThinkingParamKind.OpenAiReasoningEffort),
         new("openrouter-images", "OpenRouter 图像", "openai-compat", "https://openrouter.ai/api/", "v1/models",
             ThinkingParamKind.None, "image", "v1/chat/completions", ImageFormat: "openai-chat-image"),
-        new("openai-images", "OpenAI 图像", "openai-compat", OpenAIProvider.DefaultBaseUrl, "v1/models",
+        new("openai-images", "OpenAI 图像", "openai-compat", OpenAiBaseUrl, "v1/models",
             ThinkingParamKind.None, "image", "v1/images/generations", "v1/images/edits", "openai-images")
     ];
+
+    // Endpoint defaults for the provider presets and the connection test. These
+    // used to live on the direct provider classes; with the agent runtime as the
+    // only engine, the settings page is the last thing that needs them.
+    private const string OpenAiBaseUrl = "https://api.openai.com/";
+    private const string AnthropicBaseUrl = "https://api.anthropic.com/";
+    private const string AnthropicVersion = "2023-06-01";
+
+    /// <summary>Google's OpenAI-compatibility root — right for listing models and
+    /// testing the key from this page. The agent runtime drives the native API
+    /// instead; see <c>PiByokProviderFactory</c> for why.</summary>
+    private const string GeminiCompatBaseUrl = "https://generativelanguage.googleapis.com/v1beta/openai/";
 
     /// <summary>Nav index → page. The rail has non-selectable group headings in
     /// it, so the mapping is explicit rather than positional arithmetic.</summary>
@@ -106,7 +135,9 @@ public partial class SettingsWindow : MolaContentWindow
         Func<HttpClient>? byokHttpFactory = null,
         ProviderRegistry? providerRegistry = null,
         IChatToolHost? toolHost = null,
-        PiByokProviderFactory? piByokProviderFactory = null)
+        PiByokProviderFactory? piByokProviderFactory = null,
+        Func<Task>? agentRuntimeInstalled = null,
+        Action? agentRuntimeRemoving = null)
     {
         _settings = settings;
         _auth = auth;
@@ -124,6 +155,8 @@ public partial class SettingsWindow : MolaContentWindow
         _providerRegistry = providerRegistry;
         _toolHost = toolHost;
         _piByokProviderFactory = piByokProviderFactory;
+        _agentRuntimeInstalled = agentRuntimeInstalled;
+        _agentRuntimeRemoving = agentRuntimeRemoving;
 
         InitializeComponent();
         DataContext = _settings;
@@ -1247,7 +1280,7 @@ public partial class SettingsWindow : MolaContentWindow
         if (entry.Type == "anthropic")
         {
             request.Headers.TryAddWithoutValidation("x-api-key", entry.ApiKey ?? string.Empty);
-            request.Headers.TryAddWithoutValidation("anthropic-version", AnthropicProvider.AnthropicVersion);
+            request.Headers.TryAddWithoutValidation("anthropic-version", AnthropicVersion);
         }
         else if (entry.Type == "gemini")
         {
@@ -1270,9 +1303,9 @@ public partial class SettingsWindow : MolaContentWindow
 
     private static string DefaultProviderBaseUrl(string type) => type switch
     {
-        "anthropic" => AnthropicProvider.DefaultBaseUrl,
-        "gemini" => GeminiProvider.DefaultBaseUrl,
-        _ => OpenAIProvider.DefaultBaseUrl
+        "anthropic" => AnthropicBaseUrl,
+        "gemini" => GeminiCompatBaseUrl,
+        _ => OpenAiBaseUrl
     };
 
     private static string DefaultTestModel(string type) => type switch
@@ -1618,81 +1651,123 @@ public partial class SettingsWindow : MolaContentWindow
 
     // ---- sandbox -----------------------------------------------------------
 
-    private async Task RefreshRuntimeStatusAsync()
+    /// <summary>
+    /// Paints the runtime rows in two passes. Everything the stamp files answer
+    /// goes up immediately; only the disk-usage suffix waits for the scan. That
+    /// scan walks ~15k files and takes seconds even warm, and awaiting it before
+    /// the first assignment left the whole card blank for as long as it ran —
+    /// these six TextBlocks have no text until this method gives them one.
+    /// </summary>
+    private async Task RefreshRuntimeStatusAsync(bool rescanStorage = false)
     {
         if (_pythonRuntime is null || _piSidecar is null)
         {
-            PART_SandboxStatus.Text = "沙箱环境不可用";
+            PART_SandboxStatus.Text = "运行环境不可用";
             PART_SandboxDetail.Text = string.Empty;
             PART_PythonRuntimeStatus.Text = "Python 运行环境不可用";
             PART_PythonRuntimeDetail.Text = string.Empty;
-            PART_PiSidecarStatus.Text = "本地 Agent 运行环境不可用";
+            PART_PiSidecarStatus.Text = "Agent 运行环境不可用";
             PART_PiSidecarDetail.Text = string.Empty;
             return;
         }
 
+        if (_sandboxOperationRunning) return;
+        var generation = ++_runtimeStatusGeneration;
+
         var python = _pythonRuntime.GetInstalledRuntime();
-        var sidecar = _piSidecar.GetInstalled();
-        var storage = await Task.Run(_pythonRuntime.GetStorageUsage);
+        var installedSidecar = _piSidecar.GetInstalled();
+        var sidecar = _piSidecar.GetCompatibleInstalled();
 
         PART_SandboxStatus.Text = (python is not null, sidecar is not null) switch
         {
-            (true, true) => "沙箱环境已就绪",
-            (false, false) => "沙箱环境未配置",
-            _ => "沙箱环境部分就绪"
+            (true, true) => "运行环境已就绪",
+            (false, false) => "尚未配置运行环境",
+            _ => "运行环境部分就绪"
         };
         PART_SandboxDetail.Text = (python is not null, sidecar is not null) switch
         {
-            (true, true) => "Python 执行与本地 Agent 均可使用。",
-            (true, false) => "Python 执行可用；本地 Agent 运行环境尚未下载。",
-            (false, true) => "本地 Agent 运行环境可用；Python 执行尚未配置。",
-            _ => "下载后即可在对话中运行 Python 代码，并启用更完善的本地 Agent。"
+            (true, true) => "Python、Work 与 BYOK 可用",
+            (true, false) => "Python 可用",
+            (false, true) => "Work 与 BYOK 可用",
+            _ => "按需配置所需环境"
         };
-        PART_ConfigureSandbox.Content = python is not null && sidecar is not null ? "检查更新" : "一键配置";
+        PART_ConfigureSandbox.Content = python is not null && sidecar is not null
+            ? "检查更新"
+            : installedSidecar is not null && sidecar is null ? "更新" : "一键配置";
 
-        var storageText = $"占用 {FormatBytes(storage.TotalBytes)} · 运行时 {FormatBytes(storage.RuntimeBytes)} · 会话依赖 {FormatBytes(storage.SessionEnvironmentBytes)}";
+        if (python is null) ClearMissingManagedPythonPath();
+
+        if (sidecar is null)
+        {
+            PART_PiSidecarStatus.Text = installedSidecar is null
+                ? "Agent 运行环境未下载"
+                : "Agent 运行环境需要更新";
+            PART_PiSidecarDetail.Text = installedSidecar is null
+                ? "Work 与 BYOK 需要此环境"
+                : "更新后可使用 Work 与 BYOK";
+            PART_RemovePiSidecar.IsVisible = installedSidecar is not null;
+        }
+        else
+        {
+            PART_PiSidecarStatus.Text = $"Agent 运行环境 · {sidecar.Version}";
+            PART_PiSidecarDetail.Text = "Work 与 BYOK 可用";
+            PART_RemovePiSidecar.IsVisible = true;
+        }
+
+        var cached = _storageScan is { IsCompletedSuccessfully: true } done && !rescanStorage
+            ? done.Result
+            : null;
+        ApplyPythonRuntimeRow(python, cached);
+        PART_ResetPythonRuntime.IsVisible = python is not null || cached is { TotalBytes: > 0 };
+        RefreshPythonBrowseButton();
+        if (cached is not null) return;
+
+        // A failed scan must not stay in the field, or it would rethrow on
+        // every later refresh instead of being retried.
+        if (rescanStorage || _storageScan is { IsFaulted: true } or { IsCanceled: true })
+            _storageScan = null;
+        var storage = await (_storageScan ??= Task.Run(_pythonRuntime.GetStorageUsage));
+        if (generation != _runtimeStatusGeneration || _sandboxOperationRunning) return;
+
+        ApplyPythonRuntimeRow(python, storage);
+        PART_ResetPythonRuntime.IsVisible = python is not null || storage.TotalBytes > 0;
+    }
+
+    /// <summary>Writes the Python row. <paramref name="storage"/> is null while
+    /// the disk scan is still running — the line reads fine without it, so the
+    /// size just appears a moment later instead of holding the row hostage.</summary>
+    private void ApplyPythonRuntimeRow(InstalledPythonRuntime? python, PythonRuntimeStorageUsage? storage)
+    {
+        var storageText = storage is null
+            ? null
+            : $"占用 {FormatBytes(storage.TotalBytes)} · 运行时 {FormatBytes(storage.RuntimeBytes)} · 会话依赖 {FormatBytes(storage.SessionEnvironmentBytes)}";
+
+        var details = new List<string>();
         if (python is null)
         {
-            ClearMissingManagedPythonPath();
             var external = NormalizedPythonPath();
             if (!string.IsNullOrWhiteSpace(external) && File.Exists(external))
             {
                 PART_PythonRuntimeStatus.Text = "外部 Python（无基础环境隔离）";
-                PART_PythonRuntimeDetail.Text = external + " · " + storageText;
+                details.Add(external);
             }
             else
             {
                 PART_PythonRuntimeStatus.Text = "尚未配置专属 Python";
-                PART_PythonRuntimeDetail.Text = "点击「一键配置」下载 MolaGPT 托管版本，或在下方选择外部解释器 · " + storageText;
+                details.Add("点击「一键配置」下载 MolaGPT 托管版本，或在下方选择外部解释器");
             }
         }
         else
         {
             var packages = python.Packages.Count == 0 ? string.Empty : string.Join(", ", python.Packages.Take(8));
-            var details = new List<string>();
             if (packages.Length > 0) details.Add(packages);
             if (!string.Equals(NormalizedPythonPath(), python.PythonExecutablePath, StringComparison.OrdinalIgnoreCase))
                 details.Add("当前未选择此解释器");
-            details.Add(storageText);
             PART_PythonRuntimeStatus.Text = $"Python {python.Version} · {python.Runtime}";
-            PART_PythonRuntimeDetail.Text = string.Join(" · ", details);
         }
 
-        if (sidecar is null)
-        {
-            PART_PiSidecarStatus.Text = "本地 Agent 运行环境未配置";
-            PART_PiSidecarDetail.Text = "约 57 MB，配置后本地 Agent 获得上下文压缩与更完善的循环控制。";
-            PART_RemovePiSidecar.IsVisible = false;
-        }
-        else
-        {
-            PART_PiSidecarStatus.Text = $"本地 Agent 运行环境 · {sidecar.Version}";
-            PART_PiSidecarDetail.Text = sidecar.Directory;
-            PART_RemovePiSidecar.IsVisible = true;
-        }
-
-        PART_ResetPythonRuntime.IsVisible = python is not null || storage.TotalBytes > 0;
-        RefreshPythonBrowseButton();
+        if (storageText is not null) details.Add(storageText);
+        PART_PythonRuntimeDetail.Text = string.Join(" · ", details);
     }
 
     private void ClearMissingManagedPythonPath()
@@ -1716,6 +1791,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_ResetPythonRuntime.IsEnabled = false;
         PART_RemovePiSidecar.IsEnabled = false;
         PART_ConfigureSandbox.Content = "配置中...";
+        BeginSandboxOperation();
         try
         {
             await ConfigurePythonRuntimeAsync();
@@ -1726,8 +1802,23 @@ public partial class SettingsWindow : MolaContentWindow
             PART_ConfigureSandbox.IsEnabled = true;
             PART_ResetPythonRuntime.IsEnabled = true;
             PART_RemovePiSidecar.IsEnabled = true;
-            await RefreshRuntimeStatusAsync();
+            EndSandboxOperation();
+            await RefreshRuntimeStatusAsync(rescanStorage: true);
         }
+    }
+
+    /// <summary>Hands the runtime rows to a download / reset / probe: refreshes
+    /// stand down, and a scan already in flight loses its right to repaint.</summary>
+    private void BeginSandboxOperation()
+    {
+        _sandboxOperationRunning = true;
+        _runtimeStatusGeneration++;
+    }
+
+    private void EndSandboxOperation()
+    {
+        _sandboxOperationRunning = false;
+        _runtimeStatusGeneration++;
     }
 
     private async Task ConfigurePythonRuntimeAsync()
@@ -1783,9 +1874,10 @@ public partial class SettingsWindow : MolaContentWindow
                     progress: item.Fraction > 0 ? item.Fraction : null);
             });
             var installed = await _piSidecar.DownloadAndInstallAsync(progress, CancellationToken.None);
-            PART_PiSidecarStatus.Text = $"Agent 运行环境 {installed.Version} 已下载，重启应用后生效";
-            _notifications?.Success(
-                "Agent 运行环境已下载", $"{installed.Version} · 重启后生效", PiSidecarNotificationKey);
+            if (_agentRuntimeInstalled is not null)
+                await _agentRuntimeInstalled();
+            PART_PiSidecarStatus.Text = $"Agent 运行环境 · {installed.Version}";
+            _notifications?.Success("Agent 运行环境已就绪", installed.Version, PiSidecarNotificationKey);
         }
         catch (Exception ex)
         {
@@ -1811,6 +1903,7 @@ public partial class SettingsWindow : MolaContentWindow
         if (files.FirstOrDefault()?.TryGetLocalPath() is not { Length: > 0 } picked) return;
 
         PART_BrowsePython.IsEnabled = false;
+        BeginSandboxOperation();
         PART_PythonRuntimeStatus.Text = "正在校验所选 Python...";
         try
         {
@@ -1835,6 +1928,7 @@ public partial class SettingsWindow : MolaContentWindow
         finally
         {
             PART_BrowsePython.IsEnabled = true;
+            EndSandboxOperation();
             RefreshPythonBrowseButton();
         }
     }
@@ -1851,6 +1945,7 @@ public partial class SettingsWindow : MolaContentWindow
             return;
         }
 
+        BeginSandboxOperation();
         try
         {
             var managed = _pythonRuntime.IsManagedInterpreterPath(_settings.PythonToolExecutablePath);
@@ -1867,7 +1962,8 @@ public partial class SettingsWindow : MolaContentWindow
             PART_PythonRuntimeStatus.Text = "重置失败：" + ex.Message;
             _notifications?.Error("Python 环境重置失败", ex.Message, PythonRuntimeNotificationKey);
         }
-        await RefreshRuntimeStatusAsync();
+        EndSandboxOperation();
+        await RefreshRuntimeStatusAsync(rescanStorage: true);
     }
 
     private async void OnRemovePiSidecar(object? sender, RoutedEventArgs e)
@@ -1876,21 +1972,24 @@ public partial class SettingsWindow : MolaContentWindow
         if (!await Confirm.AskAsync(
                 this,
                 "移除 Agent 运行环境？",
-                "移除后本地 Agent 将回到内置引擎运行，可随时重新配置。",
+                "Work 与 BYOK 将暂时不可用。",
                 "移除"))
         {
             return;
         }
 
+        BeginSandboxOperation();
         try
         {
+            _agentRuntimeRemoving?.Invoke();
             _piSidecar.Delete();
-            _notifications?.Success("Agent 运行环境已移除", "重启后生效", PiSidecarNotificationKey);
+            _notifications?.Success("Agent 运行环境已移除", key: PiSidecarNotificationKey);
         }
         catch (Exception ex)
         {
             PART_PiSidecarStatus.Text = "移除失败：" + ex.Message;
         }
+        EndSandboxOperation();
         await RefreshRuntimeStatusAsync();
     }
 

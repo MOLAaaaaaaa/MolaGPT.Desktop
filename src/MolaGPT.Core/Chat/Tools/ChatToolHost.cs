@@ -145,7 +145,8 @@ public sealed class ChatToolHost : IChatToolHost
                 "调用外部图像服务并在本地创建图片");
             if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.ImageGenerationPermissionMode), ct).ConfigureAwait(false))
                 return PermissionDenied(toolName);
-            return await _imageGeneration.ExecuteToolAsync(argumentsJson, options.ImageGeneration, ct).ConfigureAwait(false);
+            return await _imageGeneration.ExecuteToolAsync(
+                argumentsJson, options.ImageGeneration, options.WorkspaceRoot, ct).ConfigureAwait(false);
         }
 
         if (string.Equals(toolName, PythonExecutionTool.ToolName, StringComparison.Ordinal))

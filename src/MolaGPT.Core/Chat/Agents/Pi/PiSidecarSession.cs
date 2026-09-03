@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -6,11 +6,14 @@ using System.Text.Json;
 namespace MolaGPT.Core.Chat.Agents.Pi;
 
 /// <summary>
-/// Owns one persistent <c>pi --mode rpc</c> Node subprocess for a single
-/// conversation and speaks Pi's JSONL RPC over stdin/stdout. Long-lived and
-/// reused across turns (spawned lazily, torn down when the conversation closes
-/// or goes idle) so the ~80–150 MB Node+Pi footprint is paid once per active
-/// Work conversation — never per turn, never in Chat/BYOK-direct mode.
+/// Owns one persistent <c>pi --mode rpc</c> Node subprocess and speaks Pi's JSONL
+/// RPC over stdin/stdout.
+///
+/// Not tied to a conversation: <see cref="PiRuntime"/> leases the process out and
+/// points it at whichever transcript the turn needs. That matters because the
+/// process is the expensive part — measured at ~95 MB resident and ~2.7s to boot,
+/// against ~60ms to switch transcripts — so the pool keeps a couple of these warm
+/// instead of one per open chat.
 ///
 /// Validated end-to-end by the M0 PoC (see <c>pi-sidecar/</c>). This is the
 /// product port: same protocol, same four seams.
@@ -25,7 +28,9 @@ public sealed class PiSidecarSession : IAsyncDisposable
     private Process? _process;
     private StreamWriter? _stdin;
     private StreamReader? _stdout;
-    private bool _modelSet;
+    private string? _activeModel;
+    private string? _activeThinkingLevel;
+    private bool _autoRetryEnabled;
 
     public PiSidecarSession(PiSidecarLaunchOptions launch, Action<string>? log = null)
     {
@@ -55,21 +60,21 @@ public sealed class PiSidecarSession : IAsyncDisposable
             StandardInputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
             StandardOutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
         };
-        Directory.CreateDirectory(_launch.SessionDir);
+        Directory.CreateDirectory(_launch.SessionRoot);
 
         foreach (var arg in new[]
                  {
                      _launch.CliJsPath, "--mode", "rpc",
 
-                     // Persist Pi's own session, keyed by the MolaGPT conversation.
-                     // This is NOT optional bookkeeping: the provider only sends the
-                     // latest user message and lets Pi own the history, so an
-                     // ephemeral (--no-session) sidecar loses the entire conversation
-                     // whenever it respawns — on idle reclaim, a model switch, a tool
-                     // toggle, or an app restart. `--session-id` resumes if the file
-                     // exists and creates it otherwise.
-                     "--session-id", _launch.SessionId,
-                     "--session-dir", _launch.SessionDir,
+                     // Boots without a session on purpose. The transcript still has
+                     // to persist — the provider only sends the latest user message
+                     // and lets Pi own the history — but a sidecar is no longer tied
+                     // to one conversation: it is leased from a pool and pointed at
+                     // whichever conversation needs it via `switch_session`, which
+                     // takes an explicit path and creates the file lazily. Baking
+                     // `--session-id` in instead would mean one process per
+                     // conversation, which is what the pool exists to avoid.
+                     "--no-session",
 
                      "--provider", PiWorkProvider.SidecarProviderId,
                      "--model", _launch.Model, "-e", _launch.ExtensionPath,
@@ -103,13 +108,17 @@ public sealed class PiSidecarSession : IAsyncDisposable
         psi.Environment["MOLA_PROVIDER_REASONING"] = _launch.Reasoning ? "true" : "false";
         psi.Environment["MOLA_TOOL_CALLBACK_URL"] = _launch.ToolCallbackUrl;
         psi.Environment["MOLA_TOOL_TOKEN"] = _launch.ToolCallbackToken;
+        if (!string.IsNullOrWhiteSpace(_launch.ModelsJson))
+            psi.Environment["MOLA_PROVIDER_MODELS"] = _launch.ModelsJson!;
 
         var proc = Process.Start(psi)
             ?? throw new InvalidOperationException("无法启动 Pi sidecar（node 未找到？）");
         _process = proc;
         _stdin = proc.StandardInput;
         _stdout = proc.StandardOutput;
-        _modelSet = false;
+        _activeModel = null;
+        _activeThinkingLevel = null;
+        _autoRetryEnabled = false;
 
         // Drain stderr so the pipe never blocks; forward diagnostics to the log.
         _ = Task.Run(async () =>
@@ -142,6 +151,74 @@ public sealed class PiSidecarSession : IAsyncDisposable
     }
 
     /// <summary>
+    /// Point this sidecar at <paramref name="sessionPath"/>, spawning it first if
+    /// it is not running yet. Returns true when the process was already alive, so
+    /// the caller can tell a cold start from a warm hand-over.
+    ///
+    /// Pi opens the path whether or not it exists — a new conversation simply has
+    /// no file until something is written — so one call covers both resuming an
+    /// old transcript and starting a fresh one. Measured at ~60ms against a
+    /// 1.25 MB transcript, versus ~2.7s to boot another process.
+    /// </summary>
+    public async Task<bool> SwitchSessionAsync(string sessionPath, CancellationToken ct)
+    {
+        await _turnGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var wasAlive = IsAlive;
+            await Task.Run(EnsureStarted, ct).ConfigureAwait(false);
+            await RequestAsync("switch_session", new { sessionPath }, ct).ConfigureAwait(false);
+            _activeModel = null;
+            _activeThinkingLevel = null;
+            _autoRetryEnabled = false;
+            return wasAlive;
+        }
+        finally
+        {
+            _turnGate.Release();
+        }
+    }
+
+    /// <summary>Send one command and read until its response arrives, discarding
+    /// unrelated traffic. Only safe between turns — the caller must hold the turn
+    /// gate, since it shares the single stdout reader with the streaming path.</summary>
+    private async Task<JsonDocument> RequestAsync(string type, object payload, CancellationToken ct)
+    {
+        var id = Guid.NewGuid().ToString("N");
+        var command = new Dictionary<string, object?>(StringComparer.Ordinal) { ["type"] = type, ["id"] = id };
+        foreach (var property in payload.GetType().GetProperties())
+            command[property.Name] = property.GetValue(payload);
+        Send(command);
+
+        var reader = _stdout!;
+        while (true)
+        {
+            var line = await reader.ReadLineAsync(ct).ConfigureAwait(false)
+                       ?? throw new InvalidOperationException($"Pi sidecar 在响应 {type} 前退出。");
+            if (TryHandleUiRequest(line)) continue;
+
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(line); }
+            catch { continue; }
+
+            var root = doc.RootElement;
+            if (root.TryGetProperty("id", out var responseId)
+                && responseId.ValueKind == JsonValueKind.String
+                && responseId.GetString() == id)
+            {
+                if (root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False)
+                {
+                    var error = root.TryGetProperty("error", out var e) ? e.ToString() : "unknown";
+                    doc.Dispose();
+                    throw new InvalidOperationException($"Pi sidecar 拒绝了 {type}：{error}");
+                }
+                return doc;
+            }
+            doc.Dispose();
+        }
+    }
+
+    /// <summary>
     /// Send one user turn and stream the raw Pi RPC event lines (JSONL) until the
     /// run settles. Serialized: Work drives one turn at a time per conversation.
     /// Extension UI requests (e.g. select) are auto-cancelled so the agent never
@@ -149,6 +226,8 @@ public sealed class PiSidecarSession : IAsyncDisposable
     /// when the loopback callback executes, not over the RPC UI channel.
     /// </summary>
     public async IAsyncEnumerable<string> SendTurnAsync(
+        string modelId,
+        string thinkingLevel,
         string userText,
         IReadOnlyList<PiImage> images,
         [EnumeratorCancellation] CancellationToken ct)
@@ -163,14 +242,52 @@ public sealed class PiSidecarSession : IAsyncDisposable
             // waiting out the whole ~1.3s Node boot. Callers reach this from an
             // `await foreach`, whose iterator body runs on the caller's thread until
             // the first real suspension, so doing this inline froze the UI.
+            await Task.Run(EnsureStarted, ct).ConfigureAwait(false);
+
+            // Re-sent whenever the model changes — and after every session switch,
+            // which re-creates the runtime and forgets the selection. The whole
+            // model list is registered at spawn, so this is a selection rather than
+            // a reason to start another process.
+            //
+            // Deliberately awaited rather than fired off: an unregistered model is
+            // answered with an error the stream would otherwise swallow, and the
+            // turn would then run on whichever model the process booted with. A
+            // wrong-model answer that looks completely normal is worse than a
+            // failure, and it is exactly what an out-of-date sidecar extension —
+            // one that still registers a single model — would produce.
+            if (!string.Equals(_activeModel, modelId, StringComparison.Ordinal))
+            {
+                using (await RequestAsync(
+                           "set_model",
+                           new { provider = PiWorkProvider.SidecarProviderId, modelId },
+                           ct).ConfigureAwait(false))
+                {
+                }
+                _activeModel = modelId;
+            }
+
             await Task.Run(() =>
             {
-                EnsureStarted();
-                if (!_modelSet)
+                // Fire-and-forget, unlike set_model: getting these wrong degrades a
+                // setting, it does not produce an answer from the wrong model. Both
+                // are re-sent after a session switch, which rebuilds the runtime and
+                // forgets them.
+                if (!string.Equals(_activeThinkingLevel, thinkingLevel, StringComparison.Ordinal))
                 {
-                    Send(new { type = "set_model", provider = PiWorkProvider.SidecarProviderId, modelId = _launch.Model });
-                    _modelSet = true;
+                    Send(new { type = "set_thinking_level", level = thinkingLevel });
+                    _activeThinkingLevel = thinkingLevel;
                 }
+                if (!_autoRetryEnabled)
+                {
+                    // Let Pi ride out a provider hiccup instead of surfacing it as a
+                    // failed turn the user has to retry by hand.
+                    Send(new { type = "set_auto_retry", enabled = true });
+                    _autoRetryEnabled = true;
+                }
+            }, ct).ConfigureAwait(false);
+
+            await Task.Run(() =>
+            {
                 // Images ride on the prompt command rather than being flattened into
                 // text: dropping them would silently cost vision, which the direct
                 // provider supports.
@@ -224,6 +341,9 @@ public sealed class PiSidecarSession : IAsyncDisposable
         try
         {
             Send(new { type = "abort" });
+            // Auto-retry means the agent can be waiting to try again rather than
+            // running; aborting the turn alone leaves that timer to fire.
+            Send(new { type = "abort_retry" });
 
             using var cts = new CancellationTokenSource(AbortDrainTimeout);
             var reader = _stdout!;
@@ -305,18 +425,21 @@ public sealed record PiImage(string data, string mimeType)
     public string type => "image";
 }
 
-/// <summary>Everything needed to spawn one sidecar process.</summary>
-/// <param name="SessionId">Pi session id — the MolaGPT conversation id, sanitised
-/// (it becomes a <c>&lt;id&gt;.jsonl</c> filename). Stable across respawns so the
-/// conversation survives them.</param>
-/// <param name="SessionDir">Directory holding Pi's session files.</param>
+/// <summary>Everything needed to spawn one sidecar process. Deliberately carries
+/// nothing conversation-specific: which transcript the process is working on is
+/// chosen per turn with <see cref="PiSidecarSession.SwitchSessionAsync"/>.</summary>
+/// <param name="SessionRoot">Directory holding Pi's session files. Created up
+/// front so the first <c>switch_session</c> has somewhere to land.</param>
+/// <param name="ModelsJson">The provider's whole model list in Pi's
+/// <c>ProviderConfigInput.models</c> shape, carrying each model's wire api and
+/// compatibility profile. Registered up front so switching models mid-conversation
+/// is a <c>set_model</c> rather than a respawn.</param>
 public sealed record PiSidecarLaunchOptions(
     string NodePath,
     string CliJsPath,
     string ExtensionPath,
     string WorkingDirectory,
-    string SessionId,
-    string SessionDir,
+    string SessionRoot,
     string BaseUrl,
     string ApiKey,
     string Model,
@@ -324,4 +447,5 @@ public sealed record PiSidecarLaunchOptions(
     bool AuthHeader,
     bool Reasoning,
     string ToolCallbackUrl,
-    string ToolCallbackToken);
+    string ToolCallbackToken,
+    string? ModelsJson = null);

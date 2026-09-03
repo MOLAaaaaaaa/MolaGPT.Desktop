@@ -1,4 +1,4 @@
-namespace MolaGPT.Core.Models;
+﻿namespace MolaGPT.Core.Models;
 
 /// <summary>
 /// Single chat message shared by provider implementations.
@@ -8,8 +8,7 @@ public sealed record ChatMessage(
     object Content,
     string? Name = null,
     IReadOnlyList<Attachment>? Attachments = null,
-    string? ReasoningContent = null,
-    string? OpenAiWireHistoryJson = null)
+    string? ReasoningContent = null)
 {
     public const string RoleSystem = "system";
     public const string RoleUser = "user";

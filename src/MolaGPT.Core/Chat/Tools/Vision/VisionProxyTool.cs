@@ -14,7 +14,7 @@ public sealed class VisionProxyTool
 
     public VisionProxyTool(ProviderRegistry registry, Func<HttpClient> httpFactory)
     {
-        _backend = new VisionBackend(registry);
+        _backend = new VisionBackend(registry, httpFactory);
         _httpFactory = httpFactory;
     }
 
