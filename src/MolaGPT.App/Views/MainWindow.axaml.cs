@@ -59,6 +59,10 @@ public partial class MainWindow : MolaWindow
 
     private const string AgentRuntimeNotificationKey = "pi-sidecar";
 
+    /// <summary>Shared so that flipping sides twice in a row replaces the banner
+    /// instead of stacking two.</summary>
+    private const string ModeSwitchNotificationKey = "mode-switch";
+
     /// <summary>The in-app banner stack. <see cref="NotificationRouter"/> drives it.</summary>
     public NotificationHost Notifications => PART_Notifications;
 
@@ -133,7 +137,6 @@ public partial class MainWindow : MolaWindow
         PART_Transcript.DataContext = _chat;
         PART_Transcript.AttachAttachmentStore(_attachmentStore);
         PART_Composer.DataContext = _composer;
-        PART_Composer.ImageWorkbenchRequested += (_, _) => _main.OpenImageWorkbenchTask();
         PART_Composer.PersonaSettingsRequested += (_, startNew) => OpenPersonaSettings(startNew);
         _main.SystemPromptRequested = () => _ = OpenSystemPromptAsync();
         _main.ImageWorkbenchRequested = conversationId => OpenImageWorkbench(conversationId);
@@ -174,14 +177,23 @@ public partial class MainWindow : MolaWindow
         PART_Sidebar.CollapseRequested += (_, _) => SetSidebarCollapsed(true);
         PART_Header.ExpandSidebarRequested += (_, _) => SetSidebarCollapsed(false);
         PART_Sidebar.NewConversationRequested += (_, _) => NewConversation();
+        PART_Sidebar.NewImageTaskRequested += (_, _) => _main.OpenImageWorkbenchTask();
         PART_TitleBar.ModeRequested += (_, mode) => SwitchMode(mode);
 
         // Picking a model from the other side of the Chat ↔ local-agent boundary
         // cannot continue the current thread, so the header asks for a fresh one.
-        PART_Header.ModeBoundaryCrossed += (_, _) =>
+        // Reported after the fact rather than warned about in the picker: written
+        // on the picker's footer button, the consequence read as that button's.
+        // Not raised for the title-bar segments — there the user watched the mode
+        // move, and a banner restating it is noise.
+        PART_Header.ModeBoundaryCrossed += (_, mode) =>
         {
             _conversations.ClearSelection();
             _chat.StartDraftConversation();
+            _notifications.Info(
+                $"已切换到 {ModelSelectorRow.SideLabel(mode)}",
+                "已为你新建一个对话",
+                key: ModeSwitchNotificationKey);
         };
         PART_Transcript.HintChosen += (_, text) =>
         {
@@ -248,8 +260,18 @@ public partial class MainWindow : MolaWindow
 
         // Work stays lit for BYOK: the account-vs-own-key split is chosen in the
         // model selector, not in the title bar.
+        //
+        // Neither is lit while the image workbench is up. Both segments say
+        // 「…对话」 — they answer "where does this conversation run", and the
+        // workbench is not a conversation. Lighting one used to just leak
+        // whichever mode happened to be loaded behind it. Unlit, the pair reads
+        // as what it now is: the way back to a conversation. SyncModeThumb
+        // already handles the no-target case by hiding the capsule.
         var mode = _chat.CurrentMode;
-        PART_TitleBar.SetMode(mode == AppMode.Chat, mode is AppMode.Work or AppMode.Byok);
+        var inWorkbench = _main.IsImageWorkbenchVisible;
+        PART_TitleBar.SetMode(
+            !inWorkbench && mode == AppMode.Chat,
+            !inWorkbench && mode is AppMode.Work or AppMode.Byok);
         PART_Header.SetModeLabel(_chat.ActiveModeLabel);
     }
 
@@ -273,6 +295,14 @@ public partial class MainWindow : MolaWindow
             or nameof(MainViewModel.IsArtifactPanelAvailable))
         {
             SyncArtifactPanel();
+        }
+
+        // The mode segments read this flag, and entering or leaving the
+        // workbench does not touch ChatViewModel — so without this the capsule
+        // would only catch up on the next unrelated chat change.
+        if (e.PropertyName is nameof(MainViewModel.IsImageWorkbenchVisible))
+        {
+            SyncChrome();
         }
     }
 
@@ -539,6 +569,13 @@ public partial class MainWindow : MolaWindow
             PART_Header.RefreshSecondaryUi();
             return;
         }
+
+        // Replacing a workbench that is mid-generation orphans it: the run still
+        // finishes and still writes to the gallery, but its view is gone. Say so
+        // before it disappears — the same banner the close button raises, on the
+        // same key, so it collapses into one entry rather than stacking. The new
+        // sidebar button makes this one click away, where the old entry was three.
+        _imageWorkbench?.NotifyHiddenWhileGenerating();
 
         var workbench = new ImageGenerationWorkbenchView(
             _settings,

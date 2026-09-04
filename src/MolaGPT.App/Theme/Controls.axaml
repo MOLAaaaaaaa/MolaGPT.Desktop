@@ -456,6 +456,60 @@
     <Setter Property="RenderTransform" Value="scale(0.97)" />
   </Style>
 
+  <!-- StopButton is SendButton with the error fill. -->
+  <Style Selector="Button.send.stop /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Error}" />
+  </Style>
+
+  <!-- Send and stop occupy the same square, so the hand-off is the one moment
+       in the app where two controls swap under a stationary cursor. Brand fill
+       snapping to error red with no transition at all reads as a glitch rather
+       than as a change of meaning.
+
+       Opacity only, deliberately. These two carry the press-scale, which lives
+       on RenderTransform as a TransformOperations value; a keyframe on
+       ScaleTransform.ScaleX would replace that whole transform and leave the
+       transition interpolating between two incompatible kinds.
+
+       Lives here rather than in ComposerView because the image workbench runs
+       the same swap; two copies is how the two composers drifted apart. -->
+  <Style Selector="Button.send[IsVisible=True]">
+    <Style.Animations>
+      <Animation Duration="0:0:0.19" Easing="CubicEaseOut" FillMode="Forward">
+        <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0" /></KeyFrame>
+        <KeyFrame Cue="100%"><Setter Property="Opacity" Value="1" /></KeyFrame>
+      </Animation>
+    </Style.Animations>
+  </Style>
+
+  <Style Selector="Button.send:disabled /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+  </Style>
+  <Style Selector="Button.send:disabled TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+  </Style>
+
+  <!-- ============================== HintChip ============================ -->
+  <!-- Empty-state suggestion chips: the transcript's welcome hints and the
+       image workbench's prompt starters are the same offer ("pick one to get
+       started"), so they are the same control. SystemPromptWindow keeps a
+       local override for its much smaller {{variable}} tokens. -->
+  <Style Selector="Button.hintchip">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+    <Setter Property="Padding" Value="14,6" />
+    <Setter Property="Margin" Value="0,0,8,8" />
+    <Setter Property="FontFamily" Value="{DynamicResource Font.Cjk}" />
+    <Setter Property="FontSize" Value="13" />
+  </Style>
+  <Style Selector="Button.hintchip:pointerover /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+  </Style>
+
   <!-- ============================ OutlineButton ========================= -->
   <Style Selector="Button.outline">
     <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />

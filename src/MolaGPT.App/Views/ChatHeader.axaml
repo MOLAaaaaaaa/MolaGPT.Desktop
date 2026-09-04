@@ -60,7 +60,7 @@
           <Flyout Placement="BottomEdgeAlignedLeft" ShowMode="Standard"
                   FlyoutPresenterClasses="molaflyout">
             <Border Name="PART_ModelPanel" Classes="flyoutsurface modelpanel">
-              <Grid RowDefinitions="Auto,*" Width="380">
+              <Grid RowDefinitions="Auto,Auto,*,Auto" Width="380">
                 <Border Grid.Row="0" Classes="searchbox" Margin="0,0,0,8" Padding="12,7">
                   <Grid ColumnDefinitions="Auto,*">
                     <TextBlock Grid.Column="0" Classes="icon" Text="&#xE721;" FontSize="12"
@@ -73,7 +73,23 @@
                   </Grid>
                 </Border>
 
-                <ListBox Grid.Row="1" Name="PART_ModelList"
+                <!-- Caution strip for the far side of the Chat boundary. It sits
+                     above the rows it describes rather than on the footer button:
+                     on the button, "选择后将新建对话" read as what the button
+                     itself would do. Hidden entirely on the near side, where
+                     picking a model costs nothing. -->
+                <Border Grid.Row="1" Name="PART_CrossModeNotice" Classes="crossnotice"
+                        Margin="0,0,0,8" IsVisible="False">
+                  <DockPanel LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Left" Classes="icon" Text="&#xE7BA;" FontSize="13"
+                               VerticalAlignment="Center" Margin="0,0,8,0" />
+                    <TextBlock Name="PART_CrossModeNoticeText"
+                               FontSize="{DynamicResource Font.Size.XSmall}"
+                               TextWrapping="Wrap" VerticalAlignment="Center" />
+                  </DockPanel>
+                </Border>
+
+                <ListBox Grid.Row="2" Name="PART_ModelList"
                          MaxHeight="420"
                          Background="Transparent"
                          BorderThickness="0"
@@ -82,20 +98,14 @@
                   <ListBox.ItemTemplate>
                     <DataTemplate x:DataType="views:ModelSelectorRow">
                       <Panel>
-                        <!-- Header / hint / empty rows are not selectable content;
-                             they share the template so the list stays one flat
+                        <!-- Header / empty rows are not selectable content; they
+                             share the template so the list stays one flat
                              collection rather than nested groups. -->
                         <TextBlock Text="{Binding HeaderText}" IsVisible="{Binding IsHeader}"
                                    Margin="2,10,2,4"
                                    FontSize="{DynamicResource Font.Size.XSmall}"
                                    FontWeight="SemiBold"
                                    Foreground="{DynamicResource Brush.Text.Secondary}" />
-
-                        <TextBlock Text="{Binding HintText}" IsVisible="{Binding IsHint}"
-                                   Margin="2,0,2,6"
-                                   FontSize="{DynamicResource Font.Size.XSmall}"
-                                   TextWrapping="Wrap"
-                                   Foreground="{DynamicResource Brush.Text.Muted}" />
 
                         <TextBlock Text="{Binding EmptyText}" IsVisible="{Binding IsEmpty}"
                                    Margin="2,16" TextAlignment="Center"
@@ -125,6 +135,38 @@
                     </DataTemplate>
                   </ListBox.ItemTemplate>
                 </ListBox>
+
+                <!-- Swaps the list between the two sides of the Chat boundary.
+                     Deliberately NOT a row in the list above: as a ListBoxItem,
+                     clicking it replaced the very containers under the cursor
+                     mid-gesture, and the pointer-over that survived the swap
+                     landed on a neighbouring model. Out here it is also pinned,
+                     so the way back never scrolls away.
+
+                     Arrows sit on the side they point to — leaving reads right,
+                     coming back reads left — so the two states can't be mistaken
+                     for each other at a glance.
+
+                     One line, and only about where it goes. The cost of picking
+                     a model over there is announced by a banner afterwards: on
+                     this button it read as the button's own consequence. -->
+                <Button Grid.Row="3" Name="PART_OtherModes" Classes="modeswitch" Margin="0,8,0,0">
+                  <Grid ColumnDefinitions="Auto,*,Auto">
+                    <TextBlock Grid.Column="0" Name="PART_OtherModesBack"
+                               Classes="icon" Text="&#xE76B;" FontSize="10"
+                               Margin="0,0,8,0" VerticalAlignment="Center" Opacity="0.7"
+                               Foreground="{DynamicResource Brush.Primary}" />
+                    <TextBlock Grid.Column="1" Name="PART_OtherModesTitle"
+                               FontSize="{DynamicResource Font.Size.Small}"
+                               FontWeight="SemiBold" TextWrapping="Wrap"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource Brush.Primary}" />
+                    <TextBlock Grid.Column="2" Name="PART_OtherModesGo"
+                               Classes="icon" Text="&#xE76C;" FontSize="10"
+                               Margin="8,0,0,0" VerticalAlignment="Center" Opacity="0.7"
+                               Foreground="{DynamicResource Brush.Primary}" />
+                  </Grid>
+                </Button>
               </Grid>
             </Border>
           </Flyout>
@@ -207,7 +249,7 @@
         </Button>
 
         <Button Name="PART_SystemPrompt" Classes="headericon"
-                IsVisible="{Binding ConversationSystemPromptVisible}"
+                IsVisible="{Binding IsSystemPromptButtonVisible}"
                 ToolTip.Tip="会话提示词覆盖"
                 Command="{Binding OpenSystemPromptCommand}">
           <Grid>
@@ -225,6 +267,33 @@
   <UserControl.Styles>
     <Style Selector="Border.modelpanel">
       <Setter Property="Padding" Value="12" />
+    </Style>
+    <!-- Same tokens as ToolApprovalWindow's danger banner, so "this costs you
+         something" looks the same wherever the app says it. -->
+    <Style Selector="Border.crossnotice">
+      <Setter Property="Background" Value="{DynamicResource Brush.Danger.Surface}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Danger.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="10,7" />
+    </Style>
+    <Style Selector="Border.crossnotice TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Danger.Foreground}" />
+    </Style>
+
+    <Style Selector="Button.modeswitch">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="10,7" />
+      <Setter Property="MinHeight" Value="34" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.modeswitch:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Border}" />
     </Style>
     <Style Selector="Border.capbadge">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />

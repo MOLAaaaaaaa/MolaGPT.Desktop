@@ -52,14 +52,18 @@ public sealed class ImageGenerationTool
     {
         Validate(options, prompt);
 
+        // Size and style that this dialect has no field for are folded into the
+        // prompt here, once, so every caller gets the same behaviour.
+        var effectivePrompt = ImagePromptComposer.Compose(options, prompt, isEdit: false);
+
         if (ImageApiFormat.IsChatImage(options.Format))
-            return await GenerateViaChatAsync(options, prompt, inputImage: null, inputMime: null, ct).ConfigureAwait(false);
+            return await GenerateViaChatAsync(options, effectivePrompt, inputImage: null, inputMime: null, ct).ConfigureAwait(false);
 
         var endpoint = NetworkSecurity.CombineEndpoint(
             options.BaseUrl!, DefaultPath(options.GenerationPath, "v1/images/generations"), "图像服务接入地址");
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {
-            Content = JsonContent.Create(BuildRequestBody(options, prompt))
+            Content = JsonContent.Create(BuildRequestBody(options, effectivePrompt))
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
         OpenRouterAttribution.Apply(request, options.BaseUrl);
@@ -86,16 +90,18 @@ public sealed class ImageGenerationTool
         if (imageBytes.Length == 0)
             throw new InvalidOperationException("没有可编辑的图片。");
 
+        var effectivePrompt = ImagePromptComposer.Compose(options, prompt, isEdit: true);
+
         // Chat-completions dialects (OpenRouter / nano-banana) edit through the
         // same endpoint as generation, with the source image carried inline.
         if (ImageApiFormat.IsChatImage(options.Format))
-            return await GenerateViaChatAsync(options, prompt, imageBytes, imageMime, ct).ConfigureAwait(false);
+            return await GenerateViaChatAsync(options, effectivePrompt, imageBytes, imageMime, ct).ConfigureAwait(false);
 
         var endpoint = NetworkSecurity.CombineEndpoint(
             options.BaseUrl!, DefaultPath(options.EditPath, "v1/images/edits"), "图像服务接入地址");
         using var content = new MultipartFormDataContent();
         content.Add(new StringContent(options.Model!.Trim()), "model");
-        content.Add(new StringContent(prompt.Trim()), "prompt");
+        content.Add(new StringContent(effectivePrompt), "prompt");
         content.Add(new StringContent("1"), "n");
         if (!string.IsNullOrWhiteSpace(options.Size) && !string.Equals(options.Size, "auto", StringComparison.OrdinalIgnoreCase))
             content.Add(new StringContent(options.Size.Trim()), "size");
@@ -192,8 +198,14 @@ public sealed class ImageGenerationTool
         if (IsDallE(options.Model))
             body["response_format"] = "b64_json";
 
-        if (IsDallE3(options.Model) && !string.IsNullOrWhiteSpace(options.Style))
+        // Only DALL·E 3 has a style field; for everything else the composer has
+        // already put the style in the prompt, and sending it here too would
+        // ask twice.
+        if (ImagePromptComposer.Describe(options, isEdit: false).Style == ImageParameterChannel.Parameter
+            && !string.IsNullOrWhiteSpace(options.Style))
+        {
             body["style"] = options.Style.Trim();
+        }
 
         return body;
     }
@@ -380,9 +392,6 @@ public sealed class ImageGenerationTool
 
     private static bool IsDallE(string? model) =>
         model?.StartsWith("dall-e-", StringComparison.OrdinalIgnoreCase) == true;
-
-    private static bool IsDallE3(string? model) =>
-        string.Equals(model, "dall-e-3", StringComparison.OrdinalIgnoreCase);
 
     private static string MimeFromOutputFormat(string? format) =>
         format?.Trim().ToLowerInvariant() switch

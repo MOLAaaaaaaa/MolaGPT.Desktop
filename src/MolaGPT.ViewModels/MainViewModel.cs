@@ -219,6 +219,14 @@ public sealed partial class MainViewModel : ObservableObject
     public bool IsCloudSyncChipVisible =>
         CloudSyncStatusVisible && Chat.CurrentMode == AppMode.Chat;
 
+    /// <summary>
+    /// The override edits the system prompt of the *chat* conversation. The
+    /// image workbench has no system prompt — the button there would open an
+    /// editor writing to whichever chat happened to be loaded behind it.
+    /// </summary>
+    public bool IsSystemPromptButtonVisible =>
+        ConversationSystemPromptVisible && !IsImageWorkbenchVisible;
+
     public async Task RefreshQuotaAsync(CancellationToken ct = default)
     {
         var version = ++_quotaRefreshVersion;
@@ -395,20 +403,36 @@ public sealed partial class MainViewModel : ObservableObject
         // already in an agent mode (Work or BYOK) is a no-op — the specific wallet
         // (MolaGPT account vs custom API key) is chosen in the model selector.
         if (target == AppMode.Work && fromMode.IsLocalAgent())
+        {
+            // …unless the workbench is up, in which case leaving it is the whole
+            // point of the click. Neither segment is lit there, so both have to
+            // be a real exit; otherwise the one that happens to match
+            // Chat.CurrentMode silently does nothing, and which one that is
+            // depends on what was loaded before the workbench opened.
+            IsImageWorkbenchVisible = false;
             return;
+        }
 
         if (Chat.SwitchToMode(target, out var needsLogin))
         {
+            // Outside the boundary check for the same reason: clicking 「Chat」
+            // from the workbench while the chat behind it was already in Chat
+            // crosses nothing, and used to leave the user staring at the
+            // workbench wondering why the button was dead.
+            IsImageWorkbenchVisible = false;
             if (fromMode.CrossesChatBoundary(target))
             {
                 ConversationList.ClearSelection();
-                IsImageWorkbenchVisible = false;
                 Chat.StartDraftConversation();
             }
             if (target == AppMode.Work)
                 WorkSetupRequested?.Invoke();
             return;
         }
+
+        // Falls through to login / settings without closing the workbench: a
+        // click that ends in a dialog did not switch anything, so it should not
+        // throw away where the user was.
 
         // Target not ready: surface login when that's the gap (Chat / shared Work
         // need a signed-in account), otherwise open Settings to add a provider.
@@ -418,11 +442,19 @@ public sealed partial class MainViewModel : ObservableObject
             SettingsRequested?.Invoke();
     }
 
+    /// <summary>
+    /// Opens a fresh, unsaved image task. Selection is cleared for the same
+    /// reason <see cref="NewConversation"/> clears it: the entry point now sits
+    /// in the sidebar, so leaving the previous chat's row highlighted would
+    /// point at something the main pane is no longer showing. The task's own row
+    /// appears once the first prompt creates it.
+    /// </summary>
     public void OpenImageWorkbenchTask()
     {
         if (Composer.IsSending)
             Composer.DetachToBackground();
 
+        ConversationList.ClearSelection();
         IsImageWorkbenchVisible = true;
         ImageWorkbenchRequested?.Invoke(null);
     }
@@ -572,6 +604,12 @@ public sealed partial class MainViewModel : ObservableObject
 
     partial void OnCloudSyncStatusVisibleChanged(bool value) =>
         OnPropertyChanged(nameof(IsCloudSyncChipVisible));
+
+    partial void OnConversationSystemPromptVisibleChanged(bool value) =>
+        OnPropertyChanged(nameof(IsSystemPromptButtonVisible));
+
+    partial void OnIsImageWorkbenchVisibleChanged(bool value) =>
+        OnPropertyChanged(nameof(IsSystemPromptButtonVisible));
 
     private void RefreshActivePromptState()
     {

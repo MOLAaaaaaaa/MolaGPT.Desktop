@@ -548,12 +548,12 @@ public sealed partial class ConversationListViewModel : ObservableObject
             return;
         }
 
-        // Replace in place if title unchanged + position is already top;
-        // otherwise re-sort so recency-first ordering holds.
+        // Keep the existing row object when it is already first. Replacing it
+        // clears the ListBox selection even though SelectedId has not changed.
         var current = Items[existingIdx];
-        if (current.Title == normalized && existingIdx == 0)
+        if (existingIdx == 0)
         {
-            Items[existingIdx] = next;
+            current.UpdateFrom(next);
             return;
         }
         Items.RemoveAt(existingIdx);

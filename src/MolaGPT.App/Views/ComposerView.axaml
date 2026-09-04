@@ -104,23 +104,15 @@
                   <ScrollViewer Grid.Row="1" MaxHeight="360"
                                 VerticalScrollBarVisibility="Auto"
                                 HorizontalScrollBarVisibility="Disabled">
+                    <!-- 图像工作台 used to open from a row at the top of this
+                         list. It moved to the sidebar, beside 新建对话: this
+                         flyout is for personas, and hanging the workbench here
+                         tied its visibility to IsPersonaPickerVisible — which is
+                         false in MolaGPT proxy mode, so users on the hosted
+                         provider could not reach the workbench at all even with
+                         an image model configured. The workbench keeps its own
+                         provider settings and never depended on the chat's. -->
                     <StackPanel>
-                      <Button Name="PART_OpenImageWorkbench" Classes="personarow">
-                        <Grid ColumnDefinitions="Auto,*,Auto">
-                          <TextBlock Grid.Column="0" Classes="icon" Text="&#xE91B;"
-                                     FontSize="16" Width="28" TextAlignment="Center"
-                                     VerticalAlignment="Center" />
-                          <StackPanel Grid.Column="1" Margin="8,0,0,0">
-                            <TextBlock Text="图像创建" FontWeight="SemiBold" FontSize="13" />
-                            <TextBlock Text="打开图像工作台，继续生成和管理作品。"
-                                       Classes="muted" FontSize="12"
-                                       TextTrimming="CharacterEllipsis" />
-                          </StackPanel>
-                          <TextBlock Grid.Column="2" Classes="icon muted" Text="&#xE72A;"
-                                     FontSize="13" Margin="8,0,0,0" VerticalAlignment="Center" />
-                        </Grid>
-                      </Button>
-                      <Border Height="1" Margin="10,4" Background="{DynamicResource Brush.Divider}" />
                       <ItemsControl Name="PART_PersonaList">
                         <ItemsControl.ItemTemplate>
                           <DataTemplate x:DataType="views:PersonaSelectorRow">
@@ -497,34 +489,8 @@
       <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
     </Style>
 
-    <!-- StopButton is SendButton with the error fill. -->
-    <Style Selector="Button.send.stop /template/ Border#PART_Root">
-      <Setter Property="Background" Value="{DynamicResource Brush.Error}" />
-    </Style>
-
-    <!-- Send and stop occupy the same 36px square, so the hand-off is the one
-         moment in the app where two controls swap under a stationary cursor.
-         Brand fill snapping to error red with no transition at all reads as a
-         glitch rather than as a change of meaning.
-
-         Opacity only, deliberately. These two carry the press-scale, which
-         lives on RenderTransform as a TransformOperations value; a keyframe on
-         ScaleTransform.ScaleX would replace that whole transform and leave the
-         transition interpolating between two incompatible kinds. -->
-    <Style Selector="Button.send[IsVisible=True]">
-      <Style.Animations>
-        <Animation Duration="0:0:0.19" Easing="CubicEaseOut" FillMode="Forward">
-          <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0" /></KeyFrame>
-          <KeyFrame Cue="100%"><Setter Property="Opacity" Value="1" /></KeyFrame>
-        </Animation>
-      </Style.Animations>
-    </Style>
-
-    <Style Selector="Button.send:disabled /template/ Border#PART_Root">
-      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
-    </Style>
-    <Style Selector="Button.send:disabled TextBlock">
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
-    </Style>
+    <!-- Button.send / .stop, the swap animation and the disabled state moved to
+         Theme/Controls.axaml: the image workbench's composer runs the same
+         send↔stop hand-off and was drifting from this one. -->
   </UserControl.Styles>
 </UserControl>

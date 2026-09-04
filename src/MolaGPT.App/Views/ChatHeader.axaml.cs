@@ -12,6 +12,12 @@ public partial class ChatHeader : UserControl
     private ProviderRegistry? _registry;
     private MainViewModel? _main;
 
+    /// <summary>Whether the list is showing the far side of the Chat ↔ local-agent
+    /// boundary instead of the current side. Reset on every open: picking a model
+    /// over there costs the current conversation, so getting there should take a
+    /// deliberate click.</summary>
+    private bool _showingOtherSide;
+
     public ChatHeader()
     {
         InitializeComponent();
@@ -19,6 +25,7 @@ public partial class ChatHeader : UserControl
 
         PART_ModelSearch.TextChanged += (_, _) => RebuildModelList();
         PART_ModelList.SelectionChanged += OnModelPicked;
+        PART_OtherModes.Click += (_, _) => SwapModelSide();
         PART_WorkbenchSearch.TextChanged += (_, _) => RebuildWorkbenchModels();
         PART_WorkbenchModels.SelectionChanged += OnWorkbenchModelPicked;
 
@@ -79,6 +86,7 @@ public partial class ChatHeader : UserControl
 
     private void OnFlyoutOpened()
     {
+        _showingOtherSide = false;
         PART_ModelSearch.Text = string.Empty;
         RebuildModelList();
         Dispatcher.UIThread.Post(() => PART_ModelSearch.Focus());
@@ -89,6 +97,8 @@ public partial class ChatHeader : UserControl
         if (_registry is null || Chat is not { } chat)
         {
             PART_ModelList.ItemsSource = null;
+            PART_CrossModeNotice.IsVisible = false;
+            PART_OtherModes.IsVisible = false;
             return;
         }
 
@@ -96,7 +106,30 @@ public partial class ChatHeader : UserControl
         // SelectionChanged for the removal, and without the guard that reads as
         // the user picking a row.
         PART_ModelList.SelectedItem = null;
-        PART_ModelList.ItemsSource = ModelSelectorRow.Build(_registry, chat, PART_ModelSearch.Text);
+        var list = ModelSelectorRow.Build(_registry, chat, PART_ModelSearch.Text, _showingOtherSide);
+        PART_ModelList.ItemsSource = list.Rows;
+
+        PART_CrossModeNotice.IsVisible = list.NoticeText is not null;
+        PART_CrossModeNoticeText.Text = list.NoticeText ?? string.Empty;
+
+        PART_OtherModes.IsVisible = list.FooterTitle is not null;
+        PART_OtherModesTitle.Text = list.FooterTitle ?? string.Empty;
+        PART_OtherModesBack.IsVisible = _showingOtherSide;
+        PART_OtherModesGo.IsVisible = !_showingOtherSide;
+    }
+
+    private void SwapModelSide()
+    {
+        _showingOtherSide = !_showingOtherSide;
+        RebuildModelList();
+
+        // A different set of models, not a longer one — start it at the top
+        // instead of wherever the side we just left happened to be scrolled to.
+        // Deferred because the containers do not exist until layout has run.
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (PART_ModelList.ItemCount > 0) PART_ModelList.ScrollIntoView(0);
+        }, DispatcherPriority.Loaded);
     }
 
     private void OnModelPicked(object? sender, SelectionChangedEventArgs e)

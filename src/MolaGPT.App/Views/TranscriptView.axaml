@@ -992,21 +992,8 @@
     </Style>
 
     <!-- HintChip: Bg.Tertiary, Radius.Md, Padding 14,6, Margin 0,0,8,8 -->
-    <Style Selector="Button.hintchip">
-      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
-      <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
-      <Setter Property="Padding" Value="14,6" />
-      <Setter Property="Margin" Value="0,0,8,8" />
-      <Setter Property="FontFamily" Value="{DynamicResource Font.Cjk}" />
-      <Setter Property="FontSize" Value="13" />
-    </Style>
-    <Style Selector="Button.hintchip:pointerover /template/ Border#PART_Root">
-      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
-      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
-    </Style>
+    <!-- Button.hintchip moved to Theme/Controls.axaml — the image workbench's
+         empty-state prompt starters are the same offer and use the same chip. -->
 
     <Style Selector="Button.personacard">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />

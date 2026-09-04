@@ -100,7 +100,7 @@
               <StackPanel Name="PAGE_Account">
                 <TextBlock Classes="pagetitle" Text="账号与同步" />
                 <TextBlock Classes="pagesubtitle"
-                           Text="登录后可在桌面端使用网页端同款模型、对话同步与个性化能力。" />
+                           Text="登录后可在桌面端使用 MolaGPT 网页端的模型、对话同步与个性化能力。" />
 
                 <Border Classes="settingscard">
                   <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
@@ -124,7 +124,7 @@
                       <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
                         <TextBlock Classes="rowtitle" Text="对话云同步" />
                         <TextBlock Classes="hint"
-                                   Text="开启后，本机的对话会与 MolaGPT 网页端双向同步，自定义 API 的对话不会被上传。" />
+                                   Text="开启后，本机的 MolaGPT Chat 对话（Work、BYOK 对话除外）会与 MolaGPT 网页端双向同步。" />
                       </StackPanel>
                       <ToggleButton Grid.Column="1"
                                     Name="PART_SyncConversations"
@@ -156,7 +156,7 @@
                     <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
                       <TextBlock Classes="rowtitle" Text="启用个性化记忆" />
                       <TextBlock Classes="hint"
-                                 Text="MolaGPT 会从对话中学习你的偏好，让后续回复更贴合你的需求。关闭后不会记录个性化数据，仅在登录 MolaGPT 账号时生效。" />
+                                 Text="MolaGPT 会从对话中学习你的偏好，让后续回复更贴合你的需求。关闭后不会记录个性化数据，仅在登录 MolaGPT 账号时在 MolaGPT Chat 中生效。" />
                     </StackPanel>
                     <ToggleButton Grid.Column="1"
                                   Classes="settingtoggle"
@@ -176,7 +176,7 @@
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
                         <TextBlock Classes="rowtitle" Text="主题" />
-                        <TextBlock Classes="hint" Text="跟随系统会随 Windows 的明暗设置自动切换。" />
+                        <TextBlock Classes="hint" Text="切换软件内深浅色模式。" />
                       </StackPanel>
                       <ComboBox Grid.Column="1" Name="PART_Theme"
                                 Classes="settingsinput"
@@ -190,7 +190,7 @@
                     <Grid Classes="settingrow" ColumnDefinitions="*,240">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
                         <TextBlock Classes="rowtitle" Text="字号缩放" />
-                        <TextBlock Classes="hint" Text="同时调整正文和界面文字大小。" />
+                        <TextBlock Classes="hint" Text="调整正文和界面文字大小。" />
                       </StackPanel>
                       <ComboBox Grid.Column="1" Name="PART_FontScale"
                                 Classes="settingsinput" MinWidth="150"
@@ -205,7 +205,7 @@
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
                         <TextBlock Classes="rowtitle" Text="思考结束后自动收起" />
-                        <TextBlock Classes="hint" Text="关闭后，已完成的思考内容保持展开。" />
+                        <TextBlock Classes="hint" Text="控制已完成的思考内容是否保持展开。" />
                       </StackPanel>
                       <ToggleButton Grid.Column="1" Name="PART_AutoCollapseThinking"
                                     Classes="settingtoggle"
@@ -234,7 +234,7 @@
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
                         <TextBlock Classes="rowtitle" Text="后台回答完成时通知" />
-                        <TextBlock Classes="hint" Text="窗口最小化或切换到其他对话时，回答完成会弹出系统通知。" />
+                        <TextBlock Classes="hint" Text="回答生成结束时将会发出系统通知。" />
                       </StackPanel>
                       <ToggleButton Grid.Column="1" Classes="settingtoggle"
                                     IsChecked="{Binding EnableCompletionNotification, Mode=TwoWay}"
@@ -953,14 +953,14 @@
               <StackPanel Name="PAGE_Vision" IsVisible="False">
                 <TextBlock Classes="pagetitle" Text="视觉理解" />
                 <TextBlock Classes="pagesubtitle"
-                           Text="为不支持图片输入、但支持工具调用的模型，外挂一个视觉模型来识别图片。" />
+                           Text="为不支持多模态的模型提供图像理解能力。" />
 
                 <Border Classes="settingscard">
                   <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                     <StackPanel Grid.Column="0" Margin="0,0,20,0">
                       <TextBlock Classes="rowtitle" Text="启用外挂视觉" />
                       <TextBlock Classes="hint"
-                                 Text="当前模型不支持视觉时，自动用下方视觉模型解析图片，再把描述回传给主模型。" />
+                                 Text="启用后，不支持多模态的模型将自动调用下方视觉模型解析图片。" />
                     </StackPanel>
                     <ToggleButton Grid.Column="1" Classes="settingtoggle"
                                   IsChecked="{Binding VisionProxyEnabled, Mode=TwoWay}"

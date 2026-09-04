@@ -41,20 +41,46 @@
       </Button>
     </Grid>
 
-    <!-- New conversation -->
-    <Button DockPanel.Dock="Top"
-            Name="PART_NewChat"
-            Classes="pillprimary"
-            Margin="20,4,16,8">
-      <StackPanel Classes="inlinerow" Orientation="Horizontal" HorizontalAlignment="Center">
-        <TextBlock Classes="icon" Text="&#xE710;" FontSize="13" Margin="0,0,8,0"
-                   Foreground="{DynamicResource Brush.Text.OnPrimary}"
-                   VerticalAlignment="Center" />
-        <TextBlock Text="新建对话"
-                   Foreground="{DynamicResource Brush.Text.OnPrimary}"
-                   VerticalAlignment="Center" />
-      </StackPanel>
-    </Button>
+    <!-- New conversation / new image task.
+
+         Image tasks are already first-class rows in the list below (own glyph,
+         own 「图像」 badge), so creating one belongs beside 新建对话 rather than
+         three clicks deep inside the composer's persona flyout, which is where
+         it used to live. Both LobeHub and Cherry Studio reach image creation
+         from the top-level navigation for the same reason: it is a destination,
+         not a mode of the chat box.
+
+         Not gated on the image service being configured: the workbench keeps
+         its own provider/model settings, independent of whichever provider the
+         chat is on, and its right rail already says 「请在设置的模型服务中添加
+         图像服务」 with a button that goes there. Hiding the entry would make
+         the feature undiscoverable for exactly the users who have not set it
+         up yet. -->
+    <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="20,4,16,8">
+      <Button Grid.Column="0"
+              Name="PART_NewChat"
+              Classes="pillprimary">
+        <StackPanel Classes="inlinerow" Orientation="Horizontal" HorizontalAlignment="Center">
+          <TextBlock Classes="icon" Text="&#xE710;" FontSize="13" Margin="0,0,8,0"
+                     Foreground="{DynamicResource Brush.Text.OnPrimary}"
+                     VerticalAlignment="Center" />
+          <TextBlock Text="新建对话"
+                     Foreground="{DynamicResource Brush.Text.OnPrimary}"
+                     VerticalAlignment="Center" />
+        </StackPanel>
+      </Button>
+      <Button Grid.Column="1"
+              Name="PART_NewImageTask"
+              Classes="pillcompanion"
+              Margin="8,0,0,0"
+              ToolTip.Tip="新建图像任务：在图像工作台里生成、编辑和管理作品">
+        <StackPanel Classes="inlinerow" Orientation="Horizontal">
+          <TextBlock Classes="icon" Text="&#xE91B;" FontSize="13" Margin="0,0,6,0"
+                     VerticalAlignment="Center" />
+          <TextBlock Text="图像" VerticalAlignment="Center" />
+        </StackPanel>
+      </Button>
+    </Grid>
 
     <!-- Search -->
     <Border DockPanel.Dock="Top"
@@ -421,6 +447,34 @@
       <Setter Property="Background" Value="{DynamicResource Brush.Primary.Hover}" />
     </Style>
     <Style Selector="Button.pillprimary:pressed">
+      <Setter Property="RenderTransform" Value="scale(0.97)" />
+    </Style>
+
+    <!-- Rides beside the pill: same height and radius so the pair reads as one
+         row, but tinted rather than filled — 新建对话 stays the primary action. -->
+    <Style Selector="Button.pillcompanion">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="12,10" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.09" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.pillcompanion:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+    <Style Selector="Button.pillcompanion:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+    <Style Selector="Button.pillcompanion:pressed">
       <Setter Property="RenderTransform" Value="scale(0.97)" />
     </Style>
 

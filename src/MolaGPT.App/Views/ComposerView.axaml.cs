@@ -24,11 +24,6 @@ public partial class ComposerView : UserControl
         PART_Input.AddHandler(KeyDownEvent, OnInputKeyDown, RoutingStrategies.Tunnel);
         PART_Attach.Click += OnAttachClick;
         PART_ClearPersona.Click += (_, _) => ClearPersona();
-        PART_OpenImageWorkbench.Click += (_, _) =>
-        {
-            PART_Persona.Flyout?.Hide();
-            ImageWorkbenchRequested?.Invoke(this, EventArgs.Empty);
-        };
         PART_NewPersona.Click += (_, _) => OpenPersonaSettings(true);
         PART_ManagePersonas.Click += (_, _) => OpenPersonaSettings(false);
         if (PART_Persona.Flyout is { } personaFlyout)
@@ -45,7 +40,6 @@ public partial class ComposerView : UserControl
 
     public void FocusInput() => PART_Input.Focus();
 
-    public event EventHandler? ImageWorkbenchRequested;
     public event EventHandler<bool>? PersonaSettingsRequested;
 
     private void RefreshPersonaRows()

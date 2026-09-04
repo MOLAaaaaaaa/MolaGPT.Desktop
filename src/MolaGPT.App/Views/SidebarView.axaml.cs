@@ -52,6 +52,7 @@ public partial class SidebarView : UserControl
         PART_ByokHeader.Click += OnConversationGroupHeaderClick;
         PART_MolaGptHeader.Click += OnConversationGroupHeaderClick;
         PART_NewChat.Click += (_, _) => NewConversationRequested?.Invoke(this, EventArgs.Empty);
+        PART_NewImageTask.Click += (_, _) => NewImageTaskRequested?.Invoke(this, EventArgs.Empty);
         PART_Collapse.Click += (_, _) => CollapseRequested?.Invoke(this, EventArgs.Empty);
         DataContextChanged += (_, _) => Attach(DataContext as ConversationListViewModel);
         _conversationGroupLayoutRestoreTimer.Tick += (_, _) =>
@@ -64,6 +65,7 @@ public partial class SidebarView : UserControl
 
 
     public event EventHandler? NewConversationRequested;
+    public event EventHandler? NewImageTaskRequested;
     public event EventHandler? CollapseRequested;
 
     private void OnByokPointerWheelChanged(object? sender, PointerWheelEventArgs e) =>

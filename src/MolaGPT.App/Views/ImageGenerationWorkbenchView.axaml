@@ -4,7 +4,11 @@
              x:Class="MolaGPT.App.Views.ImageGenerationWorkbenchView"
              FontFamily="{DynamicResource Font.Cjk}"
              Foreground="{DynamicResource Brush.Text.Primary}">
-  <Grid RowDefinitions="*,Auto" Margin="22,4,22,22">
+  <!-- 40 / 24 rather than 22 / 22: the chat composer floats at Margin
+       40,0,40,24 inside the same card, so switching modes used to slide the
+       input box 18px sideways and change its width. Same card, same input,
+       same gutters. -->
+  <Grid RowDefinitions="*,Auto" Margin="40,4,40,24">
     <Grid Grid.Row="0" ColumnDefinitions="*,240" ColumnSpacing="14">
       <Border Grid.Column="0" Classes="workbenchcard">
         <Grid RowDefinitions="Auto,*">
@@ -21,7 +25,11 @@
                 <TextBlock Name="PART_GalleryCount" Text="0" Classes="muted" FontSize="11" />
               </StackPanel>
             </Button>
-            <Button Grid.Column="3" Name="PART_ClearResults" Classes="textlink" Content="清空结果"
+            <!-- 「收起」, not 「清空」: this only empties the current view. The images
+                 stay in the gallery and come back when the task is reopened, so
+                 a delete verb here would be a lie. -->
+            <Button Grid.Column="3" Name="PART_ClearResults" Classes="textlink" Content="收起结果"
+                    ToolTip.Tip="只清空当前视图，作品仍保留在画廊，重新打开任务会再次显示"
                     Padding="8,6" Margin="0,0,4,0" IsVisible="False" />
             <Button Grid.Column="4" Name="PART_NewTask" Classes="outline" Content="新任务"
                     Padding="12,6" Margin="0,0,6,0" />
@@ -32,20 +40,63 @@
 
           <Grid Grid.Row="1">
             <Grid Name="PART_CurrentPane">
-              <TextBlock Name="PART_EmptyResults" Text="生成的图片将显示在此处"
-                         Classes="muted" HorizontalAlignment="Center" VerticalAlignment="Center" />
+              <!-- An empty box with a caption under it does not answer the only
+                   question a blank prompt field raises. The starters are the
+                   cheap version of what Cherry Studio does with a template
+                   carousel: give the first prompt somewhere to come from. They
+                   fill the box rather than generating, so it stays an edit. -->
+              <StackPanel Name="PART_EmptyResults" MaxWidth="560"
+                          HorizontalAlignment="Center" VerticalAlignment="Center">
+                <!-- Same shape and wording as the transcript's welcome screen:
+                     a 20px line, one Body-size subtitle at 0.75, then hintchips. -->
+                <TextBlock Text="准备好了。"
+                           FontSize="20" FontWeight="Medium"
+                           HorizontalAlignment="Center"
+                           Foreground="{DynamicResource Brush.Text.Primary}" />
+                <TextBlock Text="描述你想要的画面，或者从下方挑一个开始。"
+                           FontSize="{DynamicResource Font.Size.Body}"
+                           HorizontalAlignment="Center"
+                           Margin="0,10,0,24"
+                           Opacity="0.75"
+                           Foreground="{DynamicResource Brush.Text.Secondary}" />
+                <WrapPanel Name="PART_PromptStarters" HorizontalAlignment="Center">
+                  <Button Classes="hintchip liftable" Content="人像写真"
+                          Tag="一位年轻女性的半身写真，柔和的自然光从侧面照来，浅景深，背景是虚化的城市街道，胶片颗粒质感"
+                          Click="OnPromptStarter" />
+                  <Button Classes="hintchip liftable" Content="产品图"
+                          Tag="一只哑光陶瓷马克杯放在浅色木质台面上，干净的白色背景，柔和顶光与轻微投影，电商主图构图"
+                          Click="OnPromptStarter" />
+                  <Button Classes="hintchip liftable" Content="插画"
+                          Tag="一只戴着围巾的狐狸坐在雪地里，扁平插画风格，有限配色，粗描边，柔和的纸张纹理"
+                          Click="OnPromptStarter" />
+                  <Button Classes="hintchip liftable" Content="海报"
+                          Tag="极简主义音乐节海报，大面积留白，粗体无衬线标题，两种撞色，几何图形构图"
+                          Click="OnPromptStarter" />
+                  <Button Classes="hintchip liftable" Content="场景概念图"
+                          Tag="黄昏时分的山谷小镇概念图，暖色天光，远处有薄雾，广角构图，写实渲染"
+                          Click="OnPromptStarter" />
+                  <Button Classes="hintchip liftable" Content="图标"
+                          Tag="一组线性风格的应用图标，圆角方形底，单色描边，统一的线宽，居中构图"
+                          Click="OnPromptStarter" />
+                </WrapPanel>
+              </StackPanel>
+              <!-- Collapsed rather than left empty on top: a zero-item scroller
+                   still covers the starters below it, and an unclickable chip is
+                   worse than no chip. -->
               <ScrollViewer Name="PART_ResultsScroll" VerticalScrollBarVisibility="Auto"
                             HorizontalScrollBarVisibility="Disabled">
                 <ItemsControl Name="PART_Results" ItemTemplate="{StaticResource WorkbenchResultTemplate}" />
               </ScrollViewer>
             </Grid>
 
-            <Grid Name="PART_GalleryPane" IsVisible="False">
-              <TextBlock Name="PART_EmptyGallery" Text="图像工作台的全部作品都会汇集于此"
+            <Grid Name="PART_GalleryPane" IsVisible="False" RowDefinitions="*,Auto">
+              <TextBlock Grid.RowSpan="2" Name="PART_EmptyGallery" Text="图像工作台的全部作品都会汇集于此"
                          Classes="muted" HorizontalAlignment="Center" VerticalAlignment="Center" />
-              <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+              <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                 <ItemsControl Name="PART_Gallery" ItemTemplate="{StaticResource WorkbenchResultTemplate}" />
               </ScrollViewer>
+              <TextBlock Grid.Row="1" Name="PART_GalleryLimitNote" Classes="muted" FontSize="11"
+                         HorizontalAlignment="Center" Margin="0,6,0,0" IsVisible="False" />
             </Grid>
           </Grid>
         </Grid>
@@ -62,24 +113,19 @@
               </Button>
             </Grid>
 
-            <TextBlock Text="画幅比例" Classes="label" Margin="0,0,0,6" />
-            <WrapPanel Name="PART_RatioChips" Margin="0,0,0,10">
+            <!-- One control, not two: the ratio chips and the size dropdown were
+                 the same setting twice. The chips carry the pixel size in their
+                 tag, and the caption below spells it out. -->
+            <TextBlock Text="画幅" Classes="label" Margin="0,0,0,6" />
+            <WrapPanel Name="PART_RatioChips" Margin="0,0,0,4">
               <Button Classes="optionchip" Content="1:1" Tag="1024x1024" Click="OnRatio" />
               <Button Classes="optionchip" Content="16:9" Tag="1792x1024" Click="OnRatio" />
               <Button Classes="optionchip" Content="9:16" Tag="1024x1792" Click="OnRatio" />
-              <Button Classes="optionchip" Content="4:3" Tag="1536x1024" Click="OnRatio" />
-              <Button Classes="optionchip" Content="3:4" Tag="1024x1536" Click="OnRatio" />
+              <Button Classes="optionchip" Content="3:2" Tag="1536x1024" Click="OnRatio" />
+              <Button Classes="optionchip" Content="2:3" Tag="1024x1536" Click="OnRatio" />
+              <Button Classes="optionchip" Content="auto" Tag="auto" Click="OnRatio" />
             </WrapPanel>
-
-            <TextBlock Text="尺寸" Classes="label" Margin="0,0,0,6" />
-            <ComboBox Name="PART_Size" Margin="0,0,0,10">
-              <ComboBoxItem Content="1024×1024 · 1:1" Tag="1024x1024" />
-              <ComboBoxItem Content="1536×1024 · 横图" Tag="1536x1024" />
-              <ComboBoxItem Content="1024×1536 · 竖图" Tag="1024x1536" />
-              <ComboBoxItem Content="1792×1024 · 宽屏" Tag="1792x1024" />
-              <ComboBoxItem Content="1024×1792 · 长图" Tag="1024x1792" />
-              <ComboBoxItem Content="auto" Tag="auto" />
-            </ComboBox>
+            <TextBlock Name="PART_SizeCaption" Classes="muted" FontSize="11" Margin="0,0,0,12" />
 
             <TextBlock Text="风格（可选）" Classes="label" Margin="0,0,0,6" />
             <WrapPanel Name="PART_StyleChips" Margin="0,0,0,6">
@@ -106,29 +152,88 @@
       </Border>
     </Grid>
 
-    <Border Grid.Row="1" Classes="workbenchcomposer" Margin="0,14,0,0">
-      <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto">
-        <Grid Grid.Row="0" Grid.ColumnSpan="2" ColumnDefinitions="Auto,*" Margin="0,0,0,6">
+    <Border Grid.Row="1" Name="PART_ComposerShell" Classes="workbenchcomposer" Margin="0,14,0,0"
+            DragDrop.AllowDrop="True">
+      <!-- Same shape as the chat composer: chips, then a full-width text area,
+           then an action row. The send button used to sit in a column beside the
+           box, which stole width from the input and left a 32px button alone in
+           an otherwise empty card. -->
+      <Grid RowDefinitions="Auto,Auto,Auto,Auto">
+        <!-- Two things of different kinds, and they must not read as peers: the
+             左边 pair is the mode (mutually exclusive, changes what a run does),
+             the 底图 chip is an action available in both modes. Segment vs
+             actionchip plus the divider is what carries that. -->
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,6">
           <StackPanel Grid.Column="0" Name="PART_EditModes" Orientation="Horizontal" IsVisible="False">
-            <Button Name="PART_ReferenceLatest" Classes="segment" Content="参考上图" Tag="reference" />
-            <Button Name="PART_FreshGenerate" Classes="segment" Content="直接生成" Tag="fresh" Margin="4,0,0,0" />
+            <Button Name="PART_SingleMode" Classes="segment" Content="生成模式"
+                    ToolTip.Tip="一次一张，互不影响。有底图时每次都从同一张底图出发。" />
+            <Button Name="PART_ConversationMode" Classes="segment" Content="对话模式" Margin="4,0,0,0"
+                    ToolTip.Tip="在上一张结果上继续修改，像对话一样往下迭代。" />
+
+            <Border Width="1" Height="18" Margin="10,0" VerticalAlignment="Center"
+                    Background="{DynamicResource Brush.Divider}" />
+
+            <Button Name="PART_UploadSource" Classes="actionchip" ToolTip.Tip="上传一张图片作为底图（也可以直接拖入或粘贴）">
+              <StackPanel Classes="inlinerow" Orientation="Horizontal">
+                <TextBlock Classes="icon" Text="&#xE723;" FontSize="12" Margin="0,0,6,0"
+                           VerticalAlignment="Center" />
+                <TextBlock Text="底图" VerticalAlignment="Center" />
+              </StackPanel>
+            </Button>
           </StackPanel>
-          <TextBlock Grid.Column="1" Name="PART_ModeLabel" Text="图像生成"
+
+          <TextBlock Grid.Column="2" Name="PART_ModeLabel" Text="本次：生成新图"
                      Classes="muted" FontSize="12" HorizontalAlignment="Right"
                      VerticalAlignment="Center" />
         </Grid>
 
-        <TextBox Grid.Row="1" Grid.Column="0" Name="PART_Prompt"
+        <Border Grid.Row="1" Name="PART_SourceChip" Classes="sourcechip"
+                IsVisible="False" Margin="0,0,0,8">
+          <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+            <Border Width="36" Height="36" ClipToBounds="True"
+                    CornerRadius="{DynamicResource Radius.Sm}"
+                    Background="{DynamicResource Brush.Bg.Tertiary}">
+              <Image Name="PART_SourceThumb" Stretch="UniformToFill" />
+            </Border>
+            <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
+              <TextBlock Name="PART_SourceName" FontSize="12.5" TextTrimming="CharacterEllipsis" />
+              <TextBlock Name="PART_SourceHint" Classes="muted" FontSize="11" Margin="0,2,0,0" />
+            </StackPanel>
+            <Button Grid.Column="2" Name="PART_ReplaceSource" Classes="headericon" ToolTip.Tip="换一张底图">
+              <TextBlock Classes="icon" Text="&#xE8B7;" />
+            </Button>
+            <Button Grid.Column="3" Name="PART_ClearSource" Classes="headericon" ToolTip.Tip="移除底图">
+              <TextBlock Classes="icon" Text="&#xE711;" />
+            </Button>
+          </Grid>
+        </Border>
+
+        <TextBox Grid.Row="2" Name="PART_Prompt"
                  PlaceholderText="描述你想要的画面…"
                  AcceptsReturn="True" TextWrapping="Wrap"
-                 MinHeight="54" MaxHeight="160" Padding="8,6"
-                 ScrollViewer.VerticalScrollBarVisibility="Auto" />
-        <Button Grid.Row="1" Grid.Column="1" Name="PART_Generate"
-                Classes="send" Margin="10,0,0,0" VerticalAlignment="Bottom"
-                ToolTip.Tip="生成">
-          <TextBlock Name="PART_GenerateIcon" Classes="icon" Text="&#xE724;"
-                     FontSize="14" Foreground="{DynamicResource Brush.Text.OnPrimary}" />
-        </Button>
+                 MinHeight="56" MaxHeight="240" Padding="6,4"
+                 FontSize="{DynamicResource Font.Size.BodyLg}"
+                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
+
+        <Grid Grid.Row="3" ColumnDefinitions="*,Auto" Margin="0,6,0,0">
+          <TextBlock Name="PART_Hint" Classes="muted" VerticalAlignment="Center"
+                     FontSize="{DynamicResource Font.Size.XSmall}" />
+          <!-- Two buttons that swap, not one that changes meaning — the chat
+               composer's rule, and this composer was the exception: the send
+               icon turned into a stop icon under a stationary cursor, and a
+               bare Enter mid-run cancelled the image it had just started. -->
+          <Panel Grid.Column="1">
+            <Button Name="PART_Generate" Classes="send" ToolTip.Tip="生成 (Ctrl+Enter)">
+              <TextBlock Classes="icon" Text="&#xE724;"
+                         FontSize="14" Foreground="{DynamicResource Brush.Text.OnPrimary}" />
+            </Button>
+            <Button Name="PART_Stop" Classes="send stop" IsVisible="False" ToolTip.Tip="停止">
+              <TextBlock Classes="icon" Text="&#xE71A;"
+                         FontSize="14" Foreground="{DynamicResource Brush.Text.OnPrimary}" />
+            </Button>
+          </Panel>
+        </Grid>
       </Grid>
     </Border>
   </Grid>
@@ -175,6 +280,9 @@
             <TextBlock Text="{Binding RevisedPromptDisplay}" Classes="muted" FontSize="12"
                        TextWrapping="Wrap" VerticalAlignment="Center" />
             <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="10,0,0,0">
+              <Button Classes="headericon" ToolTip.Tip="以这张图为底图继续编辑" Click="OnUseAsSource">
+                <TextBlock Classes="icon" Text="&#xE70F;" />
+              </Button>
               <Button Classes="headericon" ToolTip.Tip="预览" Click="OnPreviewResult">
                 <TextBlock Classes="icon" Text="&#xE71E;" />
               </Button>
@@ -196,12 +304,30 @@
       <Setter Property="CornerRadius" Value="{DynamicResource Radius.Xl}" />
       <Setter Property="Padding" Value="14" />
     </Style>
+    <!-- Border.composer's twin, down to the focus behaviour: the chat composer
+         tints its border while you type, and this one used to stay grey, so the
+         same box looked inert in one mode and live in the other. -->
     <Style Selector="Border.workbenchcomposer">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Strong}" />
       <Setter Property="BorderThickness" Value="1.5" />
       <Setter Property="CornerRadius" Value="{DynamicResource Radius.Xl}" />
       <Setter Property="Padding" Value="14,10" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.workbenchcomposer:focus-within">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+    <Style Selector="Border.sourcechip">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="8" />
     </Style>
     <Style Selector="Border.resultcard">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
@@ -239,14 +365,38 @@
       <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
       <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
+    <!-- Same metrics as ComposerView's toolchip: an action, deliberately not
+         shaped like the segment buttons next to it. -->
+    <Style Selector="Button.actionchip">
+      <Setter Property="Height" Value="30" />
+      <Setter Property="MinHeight" Value="30" />
+      <Setter Property="Padding" Value="10,0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="Button.actionchip:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Button.actionchip:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+
+    <!-- The chat composer's 画幅 / 风格 pickers are ListBox.chiplist items at
+         Padding 10,4 · 12px · Margin 0,0,5,4. These are the same two settings,
+         so they get the same metrics rather than a second, smaller size. -->
     <Style Selector="Button.optionchip">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
       <Setter Property="BorderThickness" Value="1" />
       <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
-      <Setter Property="Padding" Value="9,3" />
-      <Setter Property="Margin" Value="0,0,5,5" />
-      <Setter Property="FontSize" Value="11" />
+      <Setter Property="Padding" Value="10,4" />
+      <Setter Property="Margin" Value="0,0,5,4" />
+      <Setter Property="FontSize" Value="12" />
     </Style>
     <Style Selector="Button.optionchip.active">
       <Setter Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />

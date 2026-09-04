@@ -3,12 +3,14 @@ using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using MolaGPT.App.Infrastructure;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
+using MolaGPT.Core.Models;
 using MolaGPT.Desktop.Services;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
@@ -18,6 +20,10 @@ namespace MolaGPT.App.Views;
 
 public partial class ImageGenerationWorkbenchView : UserControl
 {
+    /// <summary>How many gallery entries are loaded at once. Every entry holds a
+    /// decoded thumbnail, so this is a memory ceiling, not a query nicety.</summary>
+    private const int GalleryLimit = 200;
+
     private readonly SettingsViewModel _settings;
     private readonly ImageGenerationTool _imageGeneration;
     private readonly AttachmentStore _attachmentStore;
@@ -31,9 +37,37 @@ public partial class ImageGenerationWorkbenchView : UserControl
     private CancellationTokenSource? _cts;
     private string? _conversationId;
     private bool _loading;
-    private bool _referenceLatest = true;
-    private bool _hiddenWhileGenerating;
+    private string _size = "1024x1024";
+    private WorkbenchMode _mode = WorkbenchMode.Conversation;
+    private byte[]? _baseBytes;
+    private string? _baseMime;
+    private string? _baseName;
+    private Bitmap? _baseThumbnail;
+
+    /// <summary>
+    /// True while the base image is newer than every result in the task, which
+    /// makes it the head of the 对话模式 chain. Without this, dropping a picture
+    /// into a task that already has results would load a base that nothing ever
+    /// edits.
+    /// </summary>
+    private bool _baseIsChainHead;
     private bool _hiddenNotificationShown;
+
+    /// <summary>
+    /// What a run does with the images already in the task. The base image is
+    /// *not* one of these — it is an input either mode can be given, which is
+    /// why it lives in its own fields rather than as a third mode.
+    /// </summary>
+    private enum WorkbenchMode
+    {
+        /// <summary>One shot. Each run starts from the same place: the base
+        /// image if there is one, otherwise nothing. Output never feeds back.</summary>
+        Single,
+
+        /// <summary>Iterative. Each run edits the newest image in the task —
+        /// the last result, or the base image before anything is generated.</summary>
+        Conversation
+    }
 
     public ImageGenerationWorkbenchView(
         SettingsViewModel settings,
@@ -66,16 +100,37 @@ public partial class ImageGenerationWorkbenchView : UserControl
         PART_Close.Click += (_, _) => CloseRequested?.Invoke(this, EventArgs.Empty);
         PART_OpenSettings.Click += (_, _) => OpenSettingsRequested?.Invoke(this, EventArgs.Empty);
         PART_Generate.Click += OnGenerate;
-        PART_ReferenceLatest.Click += (_, _) => SetReferenceMode(true);
-        PART_FreshGenerate.Click += (_, _) => SetReferenceMode(false);
-        PART_Size.SelectionChanged += OnSizeChanged;
+        PART_Stop.Click += (_, _) => _cts?.Cancel();
+        PART_SingleMode.Click += (_, _) => SetMode(WorkbenchMode.Single);
+        PART_ConversationMode.Click += (_, _) => SetMode(WorkbenchMode.Conversation);
+        PART_UploadSource.Click += OnUploadSourceClick;
+        PART_ReplaceSource.Click += OnUploadSourceClick;
+        PART_ClearSource.Click += (_, _) => ClearBaseImage();
         PART_Style.TextChanged += OnStyleChanged;
         PART_Prompt.TextChanged += (_, _) => UpdateGenerateButton();
-        PART_Prompt.KeyDown += OnPromptKeyDown;
-        _results.CollectionChanged += (_, _) => UpdateEmptyState();
+
+        // Tunnel: TextBox marks Enter handled in a class handler when
+        // AcceptsReturn is on, so a plain `KeyDown +=` never sees it — the same
+        // trap ComposerView documents.
+        PART_Prompt.AddHandler(KeyDownEvent, OnPromptKeyDown, RoutingStrategies.Tunnel);
+
+        // Dropping onto the padding around the box is the same gesture to a user,
+        // so the whole composer card accepts it.
+        PART_ComposerShell.AddHandler(DragDrop.DragOverEvent, OnSourceDragOver);
+        PART_ComposerShell.AddHandler(DragDrop.DropEvent, OnSourceDrop);
+
+        _results.CollectionChanged += (_, _) =>
+        {
+            UpdateEmptyState();
+            UpdateSourceUi();
+        };
         _gallery.CollectionChanged += (_, _) => UpdateEmptyState();
         _settings.PropertyChanged += OnSettingsChanged;
-        DetachedFromVisualTree += (_, _) => _settings.PropertyChanged -= OnSettingsChanged;
+        DetachedFromVisualTree += (_, _) =>
+        {
+            _settings.PropertyChanged -= OnSettingsChanged;
+            DisposeBaseThumbnail();
+        };
 
         InitializeUi();
     }
@@ -92,12 +147,10 @@ public partial class ImageGenerationWorkbenchView : UserControl
         _loading = true;
         try
         {
-            var configuredSize = string.IsNullOrWhiteSpace(_settings.WorkbenchImageGenerationSize)
+            _size = string.IsNullOrWhiteSpace(_settings.WorkbenchImageGenerationSize)
                 ? "1024x1024"
-                : _settings.WorkbenchImageGenerationSize;
+                : _settings.WorkbenchImageGenerationSize.Trim();
             PART_Style.Text = _settings.WorkbenchImageGenerationStyle ?? string.Empty;
-            SelectSize(configuredSize);
-            PART_Size.SelectedItem ??= PART_Size.Items.OfType<ComboBoxItem>().FirstOrDefault();
         }
         finally
         {
@@ -106,19 +159,17 @@ public partial class ImageGenerationWorkbenchView : UserControl
 
         LoadStoredImages();
         ShowCurrent();
-        UpdateStatus();
         UpdateOptionChips();
+        UpdateStatus();
         UpdateGenerateButton();
         UpdateEmptyState();
     }
 
     private async void OnGenerate(object? sender, RoutedEventArgs e)
     {
-        if (_cts is not null)
-        {
-            _cts.Cancel();
-            return;
-        }
+        // Cancelling lives on PART_Stop now. This used to double as the cancel
+        // path, which meant Enter mid-run aborted the image it had just started.
+        if (_cts is not null) return;
 
         var prompt = PART_Prompt.Text?.Trim() ?? string.Empty;
         if (prompt.Length == 0)
@@ -133,15 +184,12 @@ public partial class ImageGenerationWorkbenchView : UserControl
         var providerId = selected?.ProviderId ?? _settings.WorkbenchImageGenerationProviderId;
         var modelId = selected?.ModelId ?? _settings.WorkbenchImageGenerationModelId;
         var modelLabel = selected?.Label ?? modelId;
-        var editSource = SupportsEdit && _referenceLatest
-            ? _results.LastOrDefault(result => result.HasImage)
-            : null;
+        var editSource = ResolveEditSource();
         var isEdit = editSource is not null;
         var taskTitle = CurrentTaskTitle();
         if (IsDefaultTaskTitle(taskTitle)) taskTitle = BuildTaskTitle(prompt);
 
         var pending = ImageWorkbenchResult.Pending(prompt, taskTitle, isEdit, modelLabel);
-        _hiddenWhileGenerating = false;
         _hiddenNotificationShown = false;
         _results.Add(pending);
         ShowCurrent();
@@ -152,7 +200,13 @@ public partial class ImageGenerationWorkbenchView : UserControl
         SetGenerating(true);
         try
         {
-            PART_Status.Text = isEdit ? "正在编辑图片。" : "正在生成图片。";
+            // HasEditSource can be true while the resolve came up empty — the
+            // stored original was deleted between the last refresh and now.
+            PART_Status.Text = isEdit
+                ? "正在编辑图片。"
+                : HasEditSource
+                    ? "底图已不可用，本次改为直接生成。"
+                    : "正在生成图片。";
             var options = _settings.BuildWorkbenchImageGenerationOptions() with
             {
                 Size = SelectedSize(),
@@ -160,7 +214,8 @@ public partial class ImageGenerationWorkbenchView : UserControl
                 AsTool = false
             };
             var images = isEdit
-                ? await _imageGeneration.EditAsync(options, prompt, editSource!.Bytes, editSource.MimeType, cts.Token)
+                ? await _imageGeneration.EditAsync(
+                    options, prompt, editSource!.Value.Bytes, editSource.Value.MimeType, cts.Token)
                 : await _imageGeneration.GenerateAsync(options, prompt, cts.Token);
 
             if (images.Count == 0)
@@ -196,11 +251,16 @@ public partial class ImageGenerationWorkbenchView : UserControl
                 var fileName = $"generated-{DateTime.Now:yyyyMMdd-HHmmss}-{added + 1}{ExtensionForMime(image.MimeType)}";
                 var localName = _attachmentStore.Save(image.Bytes, image.MimeType, fileName);
                 var result = ImageWorkbenchResult.Completed(
-                    fileName, image.MimeType, image.Bytes, localName, image.RevisedPrompt,
+                    fileName, image.MimeType, DecodeThumbnail(image.Bytes),
+                    ByteSourceFor(localName, image.Bytes), localName, image.RevisedPrompt,
                     prompt, taskTitle, isEdit, modelLabel, modelId, providerId);
                 _results.Insert(Math.Min(insertIndex + added, _results.Count), result);
                 _gallery.Insert(0, result);
                 Persist(prompt, result);
+
+                // The chain head moves to what was just produced; the base image
+                // stays loaded for 生成模式, which always goes back to it.
+                _baseIsChainHead = false;
                 added++;
             }
 
@@ -281,21 +341,32 @@ public partial class ImageGenerationWorkbenchView : UserControl
     {
         if (!string.IsNullOrWhiteSpace(_conversationId))
             _onGeneratingChanged(_conversationId, generating);
-        PART_GenerateIcon.Text = generating ? "" : "";
-        ToolTip.SetTip(PART_Generate, generating ? "停止" : "生成");
-        PART_Generate.Classes.Set("stop", generating);
+        PART_Generate.IsVisible = !generating;
+        PART_Stop.IsVisible = generating;
         UpdateGenerateButton();
         UpdateEmptyState();
     }
 
     private void UpdateGenerateButton() =>
-        PART_Generate.IsEnabled = _cts is not null
-            || (_settings.IsWorkbenchImageGenerationConfigured
-                && !string.IsNullOrWhiteSpace(PART_Prompt.Text));
+        PART_Generate.IsEnabled = _settings.IsWorkbenchImageGenerationConfigured
+            && !string.IsNullOrWhiteSpace(PART_Prompt.Text);
 
-    private void OnPromptKeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+    private void OnPromptKeyDown(object? sender, KeyEventArgs e)
     {
-        if (e.Key != Avalonia.Input.Key.Enter || e.KeyModifiers.HasFlag(Avalonia.Input.KeyModifiers.Shift)) return;
+        if (e.Key == Key.V && e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            _ = TryPasteSourceAsync();
+            return;
+        }
+
+        if (e.Key != Key.Enter) return;
+
+        // Same contract as the chat composer, read from the same preference:
+        // Ctrl+Enter always sends, and 「Enter 发送」 decides what a bare Enter does.
+        var wantsSend = e.KeyModifiers.HasFlag(KeyModifiers.Control)
+            || (_settings.EnterToSend && !e.KeyModifiers.HasFlag(KeyModifiers.Shift));
+        if (!wantsSend) return;
+
         e.Handled = true;
         if (PART_Generate.IsEnabled) OnGenerate(PART_Generate, new RoutedEventArgs());
     }
@@ -303,7 +374,8 @@ public partial class ImageGenerationWorkbenchView : UserControl
     private void OnSettingsChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName is nameof(SettingsViewModel.WorkbenchImageGenerationProviderId)
-            or nameof(SettingsViewModel.WorkbenchImageGenerationModelId))
+            or nameof(SettingsViewModel.WorkbenchImageGenerationModelId)
+            or nameof(SettingsViewModel.EnterToSend))
         {
             Dispatcher.UIThread.Post(() =>
             {
@@ -315,41 +387,338 @@ public partial class ImageGenerationWorkbenchView : UserControl
 
     private void UpdateStatus()
     {
-        PART_EditModes.IsVisible = SupportsEdit;
-        PART_ModeLabel.Text = SupportsEdit && _referenceLatest ? "图像编辑" : "图像生成";
-        PART_ReferenceLatest.Classes.Set("active", SupportsEdit && _referenceLatest);
-        PART_FreshGenerate.Classes.Set("active", SupportsEdit && !_referenceLatest);
+        UpdateSourceUi();
+
+        if (_settings.GetWorkbenchImageGenerationProvider() is null)
+        {
+            PART_Status.Text = "请在设置的模型服务中添加图像服务。";
+            return;
+        }
+
+        PART_Status.Text = _settings.IsWorkbenchImageGenerationConfigured
+            ? SupportsEdit
+                ? "已就绪。当前模型支持在已有图片的基础上继续编辑。"
+                : "已就绪。当前模型仅支持生成新图。"
+            : "请补全图像服务的地址、密钥和模型。";
+    }
+
+    /// <summary>
+    /// Says where each knob actually goes. The panel used to print
+    /// 「尺寸：1024×1024」 for models whose endpoint has no size field at all —
+    /// the value was dropped and the summary claimed otherwise.
+    /// </summary>
+    private void UpdateConfigSummary()
+    {
+        PART_SizeCaption.Text = string.Equals(SelectedSize(), "auto", StringComparison.OrdinalIgnoreCase)
+            ? "由模型决定"
+            : ReadableSize(SelectedSize());
 
         var provider = _settings.GetWorkbenchImageGenerationProvider();
         if (provider is null)
         {
             PART_ConfigSummary.Text = "暂无可用的图像服务";
-            PART_Status.Text = "请在设置的模型服务中添加图像服务。";
             return;
         }
 
-        PART_ConfigSummary.Text =
-            $"服务：{provider.Name}\n模型：{_settings.WorkbenchImageGenerationModelId}\n尺寸：{ReadableSize(SelectedSize())}";
-        PART_Status.Text = _settings.IsWorkbenchImageGenerationConfigured
-            ? SupportsEdit
-                ? "已就绪。当前模型支持在上一张图的基础上继续编辑。"
-                : "已就绪。当前模型仅支持生成新图。"
-            : "请补全图像服务的地址、密钥和模型。";
+        var options = _settings.BuildWorkbenchImageGenerationOptions() with
+        {
+            Size = SelectedSize(),
+            Style = string.IsNullOrWhiteSpace(PART_Style.Text) ? null : PART_Style.Text.Trim()
+        };
+        var delivery = ImagePromptComposer.Describe(options, isEdit: HasEditSource);
+
+        var lines = new List<string>
+        {
+            $"服务：{provider.Name}",
+            $"模型：{_settings.WorkbenchImageGenerationModelId}",
+            $"画幅：{PART_SizeCaption.Text}{ChannelSuffix(delivery.Size)}"
+        };
+        if (options.Style is { Length: > 0 } style)
+            lines.Add($"风格：{style}{ChannelSuffix(delivery.Style)}");
+
+        PART_ConfigSummary.Text = string.Join("\n", lines);
     }
 
-    private void SetReferenceMode(bool reference)
+    private static string ChannelSuffix(ImageParameterChannel channel) => channel switch
     {
-        _referenceLatest = reference;
-        UpdateStatus();
+        ImageParameterChannel.Parameter => "（接口参数）",
+        ImageParameterChannel.Prompt => "（写入提示词）",
+        _ => "（本次不生效）"
+    };
+
+    /// <summary>
+    /// The mode strip, the base-image chip and the 「本次：…」 label all read the
+    /// same resolved state, so the label can never promise an edit the run would
+    /// silently downgrade to a fresh generation.
+    /// </summary>
+    private void UpdateSourceUi()
+    {
+        // Without edit support there is exactly one possible behaviour and no
+        // base image can be sent, so the whole strip is noise.
+        PART_EditModes.IsVisible = SupportsEdit;
+        PART_SingleMode.Classes.Set("active", SupportsEdit && _mode == WorkbenchMode.Single);
+        PART_ConversationMode.Classes.Set("active", SupportsEdit && _mode == WorkbenchMode.Conversation);
+
+        var hasBase = _baseBytes is { Length: > 0 };
+        var chained = _mode == WorkbenchMode.Conversation && !_baseIsChainHead
+                      && _results.Any(result => result.HasImage);
+
+        PART_SourceChip.IsVisible = SupportsEdit && hasBase;
+        PART_SourceThumb.Source = _baseThumbnail;
+        PART_SourceName.Text = _baseName ?? string.Empty;
+        PART_SourceHint.Text = !hasBase
+            ? string.Empty
+            : chained
+                // Honest about being superseded rather than implying the base is
+                // still what gets edited.
+                ? $"已由最新结果接手 · {FormatSize(_baseBytes!.Length)}"
+                : _mode == WorkbenchMode.Single
+                    ? $"每次都从这张图出发 · {FormatSize(_baseBytes!.Length)}"
+                    : $"下一张从这里开始 · {FormatSize(_baseBytes!.Length)}";
+
+        // Drag-and-drop and paste have no button of their own; the placeholder
+        // is the only place they are discoverable.
+        PART_Prompt.PlaceholderText = SupportsEdit
+            ? "描述你想要的画面，或拖入 / 粘贴一张图片作为底图…"
+            : "描述你想要的画面…";
+
+        // Reads the same preference OnPromptKeyDown does, so the hint cannot
+        // describe a key that no longer sends.
+        PART_Hint.Text = _settings.EnterToSend
+            ? "Enter 发送 · Shift+Enter 换行"
+            : "Enter 换行 · Ctrl+Enter 发送";
+
+        PART_ModeLabel.Text = chained
+            ? "本次：在上一张上继续修改"
+            : SupportsEdit && hasBase
+                ? "本次：编辑底图"
+                : "本次：生成新图";
+
+        // 画幅 delivery depends on whether this run is an edit, so the summary
+        // has to follow the mode strip.
+        UpdateConfigSummary();
     }
 
-    private void OnSizeChanged(object? sender, SelectionChangedEventArgs e)
+    /// <summary>
+    /// Whether this run would be an edit — without touching the bytes. The UI
+    /// asks this on every refresh, and <see cref="ResolveEditSource"/> reads the
+    /// image back off disk.
+    /// </summary>
+    private bool HasEditSource => SupportsEdit
+        && ((_mode == WorkbenchMode.Conversation && !_baseIsChainHead && _results.Any(result => result.HasImage))
+            || _baseBytes is { Length: > 0 });
+
+    /// <summary>
+    /// The bytes this run will edit, or null for a plain generation.
+    ///
+    /// 对话模式 chains on the newest result and falls back to the base image
+    /// before anything has been generated; 生成模式 always goes back to the base
+    /// image, so five runs give five variants of the same source rather than a
+    /// chain. Either can come up empty and then simply generates.
+    /// </summary>
+    private (byte[] Bytes, string MimeType)? ResolveEditSource()
     {
-        if (_loading || PART_Size.SelectedItem is not ComboBoxItem item) return;
-        if (item.Tag?.ToString() is { Length: > 0 } size)
-            _settings.WorkbenchImageGenerationSize = size;
-        UpdateOptionChips();
-        UpdateStatus();
+        if (!SupportsEdit) return null;
+
+        if (_mode == WorkbenchMode.Conversation && !_baseIsChainHead
+            && _results.LastOrDefault(result => result.HasImage) is { } latest
+            && latest.LoadBytes() is { Length: > 0 } previous)
+        {
+            return (previous, latest.MimeType);
+        }
+
+        return _baseBytes is { Length: > 0 } bytes ? (bytes, _baseMime ?? "image/png") : null;
+    }
+
+    private void SetMode(WorkbenchMode mode)
+    {
+        if (_mode == mode) return;
+        _mode = mode;
+        UpdateSourceUi();
+
+        PART_Status.Text = mode == WorkbenchMode.Conversation
+            ? _baseBytes is { Length: > 0 } && _baseIsChainHead
+                ? "对话模式：先编辑底图，之后每次都接着上一张改。"
+                : _results.Any(result => result.HasImage)
+                    ? "对话模式：接下来会在最新一张的基础上继续修改。"
+                    : "对话模式：第一张从头生成，之后每次都接着上一张改。"
+            : _baseBytes is { Length: > 0 }
+                ? "生成模式：每次都从这张底图重新出发，结果互不影响。"
+                : "生成模式：每次都从头生成一张，互不影响。";
+    }
+
+    // ---- edit source: upload / drop / paste / reuse a result ---------------
+
+    // The base image is an input, not a mode: picking one never changes 生成 /
+    // 对话, and both modes make use of it.
+    private async void OnUploadSourceClick(object? sender, RoutedEventArgs e) =>
+        await PickBaseImageAsync();
+
+    private async Task<bool> PickBaseImageAsync()
+    {
+        if (TopLevel.GetTopLevel(this)?.StorageProvider is not { } storage) return false;
+
+        var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "选择要编辑的图片",
+            AllowMultiple = false,
+            FileTypeFilter = [FilePickerFileTypes.ImageAll]
+        });
+        if (files.Count == 0) return false;
+
+        try
+        {
+            await using var stream = await files[0].OpenReadAsync();
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer);
+            return ApplyBaseImage(buffer.ToArray(), files[0].Name);
+        }
+        catch (Exception ex)
+        {
+            PART_Status.Text = "无法读取图片：" + ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Every entry point (picker, drop, paste, "以这张图为底图") lands here, so the
+    /// size ceiling, EXIF fix-up and 2000px cap of the chat attachment pipeline
+    /// apply to the workbench too.
+    /// </summary>
+    private bool ApplyBaseImage(byte[] bytes, string fileName)
+    {
+        if (!SupportsEdit)
+        {
+            PART_Status.Text = "当前模型不支持图像编辑，无法使用底图。";
+            return false;
+        }
+
+        var intake = AttachmentIntake.FromBytes(bytes, fileName, new AttachmentIntakeCapabilities(true, false));
+        if (intake.Attachment is not { Kind: AttachmentKind.Image } image)
+        {
+            PART_Status.Text = intake.Error ?? "请选择图片文件（PNG / JPEG / WebP）。";
+            return false;
+        }
+
+        DisposeBaseThumbnail();
+        _baseBytes = image.Bytes;
+        _baseMime = image.MimeType;
+        _baseName = fileName;
+        _baseThumbnail = DecodeThumbnail(image.Bytes);
+
+        // Newer than anything already in the task, so 对话模式 continues from it
+        // rather than from a result the user has just moved past.
+        _baseIsChainHead = true;
+        UpdateSourceUi();
+        PART_Status.Text = $"已载入底图 {fileName}，描述你想要的修改。";
+        return true;
+    }
+
+    /// <summary>Unbinds before disposing: an Image still pointing at a disposed
+    /// bitmap is a crash waiting for the next render pass.</summary>
+    private void DisposeBaseThumbnail()
+    {
+        PART_SourceThumb.Source = null;
+        _baseThumbnail?.Dispose();
+        _baseThumbnail = null;
+    }
+
+    private void ClearBaseImage()
+    {
+        DisposeBaseThumbnail();
+        _baseBytes = null;
+        _baseMime = null;
+        _baseName = null;
+        _baseIsChainHead = false;
+        UpdateSourceUi();
+        PART_Status.Text = "已移除底图。";
+    }
+
+    private void OnUseAsSource(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Control { DataContext: ImageWorkbenchResult { HasImage: true } result }) return;
+        if (result.LoadBytes() is not { Length: > 0 } bytes)
+        {
+            PART_Status.Text = "原图已不在本地存储中，无法用作底图。";
+            return;
+        }
+
+        if (ApplyBaseImage(bytes, result.FileName)) ShowCurrent();
+    }
+
+    private void OnSourceDragOver(object? sender, DragEventArgs e)
+    {
+        var accepted = SupportsEdit && e.DataTransfer.Contains(DataFormat.File);
+        e.DragEffects = accepted ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Handled = accepted;
+    }
+
+    private void OnSourceDrop(object? sender, DragEventArgs e)
+    {
+        if (!SupportsEdit) return;
+        if (e.DataTransfer.TryGetFiles() is not { Length: > 0 } files) return;
+
+        e.Handled = true;
+
+        // Only the first image: the workbench edits one base image at a time,
+        // and silently keeping the last of five dropped files is worse than
+        // saying which one was taken.
+        var path = files[0].TryGetLocalPath();
+        if (string.IsNullOrWhiteSpace(path) || Directory.Exists(path))
+        {
+            PART_Status.Text = "请拖入单张图片文件。";
+            return;
+        }
+
+        try
+        {
+            ApplyBaseImage(File.ReadAllBytes(path), Path.GetFileName(path));
+        }
+        catch (Exception ex)
+        {
+            PART_Status.Text = "无法读取图片：" + ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// Ctrl+V with a screenshot on the clipboard loads it as the base image.
+    /// Text keeps the TextBox's own paste — the handler stays unhandled because
+    /// telling the two apart needs an await, by which time the key is delivered.
+    /// </summary>
+    private async Task TryPasteSourceAsync()
+    {
+        if (!SupportsEdit) return;
+        if (TopLevel.GetTopLevel(this)?.Clipboard is not { } clipboard) return;
+
+        try
+        {
+            using var data = await clipboard.TryGetDataAsync();
+            if (data is null) return;
+
+            if (data.Contains(DataFormat.File)
+                && await data.TryGetFilesAsync() is { Length: > 0 } files
+                && files[0].TryGetLocalPath() is { Length: > 0 } path)
+            {
+                ApplyBaseImage(File.ReadAllBytes(path), Path.GetFileName(path));
+                return;
+            }
+
+            if (data.Contains(DataFormat.Bitmap)
+                && await data.TryGetBitmapAsync() is { } bitmap)
+            {
+                using (bitmap)
+                {
+                    using var buffer = new MemoryStream();
+                    bitmap.Save(buffer, PngBitmapEncoderOptions.Default);
+                    ApplyBaseImage(buffer.ToArray(), $"粘贴图片_{DateTime.Now:HHmmss}.png");
+                }
+            }
+        }
+        catch
+        {
+            // The clipboard is shared state and can be locked mid-read by
+            // another process; a failed paste is not worth surfacing.
+        }
     }
 
     private void OnStyleChanged(object? sender, TextChangedEventArgs e)
@@ -359,11 +728,16 @@ public partial class ImageGenerationWorkbenchView : UserControl
             ? null
             : PART_Style.Text.Trim();
         UpdateOptionChips();
+        UpdateConfigSummary();
     }
 
     private void OnRatio(object? sender, RoutedEventArgs e)
     {
-        if (sender is Button { Tag: string size }) SelectSize(size);
+        if (sender is not Button { Tag: string size }) return;
+        _size = size;
+        _settings.WorkbenchImageGenerationSize = size;
+        UpdateOptionChips();
+        UpdateConfigSummary();
     }
 
     private void OnStyle(object? sender, RoutedEventArgs e)
@@ -371,31 +745,32 @@ public partial class ImageGenerationWorkbenchView : UserControl
         PART_Style.Text = sender is Button { Tag: string style } ? style : string.Empty;
     }
 
-    private void SelectSize(string size)
+    /// <summary>
+    /// Fills the prompt box from an empty-state starter and puts the caret at
+    /// the end. Deliberately does not generate: the starter is a draft to edit,
+    /// and a chip that spends money on one click is a chip nobody dares press.
+    /// </summary>
+    private void OnPromptStarter(object? sender, RoutedEventArgs e)
     {
-        foreach (var item in PART_Size.Items.OfType<ComboBoxItem>())
-        {
-            if (!string.Equals(item.Tag?.ToString(), size, StringComparison.OrdinalIgnoreCase)) continue;
-            PART_Size.SelectedItem = item;
-            break;
-        }
-        UpdateOptionChips();
+        if (sender is not Button { Tag: string prompt } || prompt.Length == 0) return;
+        PART_Prompt.Text = prompt;
+        PART_Prompt.CaretIndex = prompt.Length;
+        PART_Prompt.Focus();
     }
 
     private void UpdateOptionChips()
     {
-        var size = SelectedSize();
+        // A size stored before the chip set changed may match nothing; leaving
+        // every chip dark is honest, and the caption still shows the value.
         foreach (var button in PART_RatioChips.Children.OfType<Button>())
-            button.Classes.Set("active", string.Equals(button.Tag?.ToString(), size, StringComparison.OrdinalIgnoreCase));
+            button.Classes.Set("active", string.Equals(button.Tag?.ToString(), _size, StringComparison.OrdinalIgnoreCase));
+
         var style = PART_Style.Text?.Trim() ?? string.Empty;
         foreach (var button in PART_StyleChips.Children.OfType<Button>())
             button.Classes.Set("active", string.Equals(button.Tag?.ToString() ?? string.Empty, style, StringComparison.OrdinalIgnoreCase));
     }
 
-    private string SelectedSize() =>
-        (PART_Size.SelectedItem as ComboBoxItem)?.Tag?.ToString() is { Length: > 0 } size
-            ? size
-            : "1024x1024";
+    private string SelectedSize() => string.IsNullOrWhiteSpace(_size) ? "1024x1024" : _size;
 
     private void NewTask()
     {
@@ -403,6 +778,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         _conversationId = null;
         _results.Clear();
         PART_Prompt.Clear();
+        ClearBaseImage();
         ShowCurrent();
         PART_Status.Text = "已新建图像任务。";
     }
@@ -411,7 +787,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
     {
         if (_cts is not null) return;
         _results.Clear();
-        PART_Status.Text = "已清空当前结果，作品仍保留在画廊中。";
+        PART_Status.Text = "已收起当前视图。作品仍在画廊中，重新打开这个任务会再次显示。";
     }
 
     private void ShowCurrent()
@@ -433,6 +809,9 @@ public partial class ImageGenerationWorkbenchView : UserControl
     private void UpdateEmptyState()
     {
         PART_EmptyResults.IsVisible = _results.Count == 0;
+        // The scroller and the starters share a cell; an empty scroller left
+        // visible would sit on top of the chips and swallow their clicks.
+        PART_ResultsScroll.IsVisible = _results.Count > 0;
         PART_EmptyGallery.IsVisible = _gallery.Count == 0;
         PART_CurrentCount.Text = _results.Count.ToString();
         PART_GalleryCount.Text = _gallery.Count.ToString();
@@ -458,13 +837,19 @@ public partial class ImageGenerationWorkbenchView : UserControl
             }
         }
 
-        foreach (var result in _messageRepo
-                     .ListImageWorkbenchMessages(ConversationListViewModel.ImageWorkbenchProviderId)
-                     .SelectMany(row => ParseStored(row.Meta, row.Content, row.CreatedAt, row.ConversationTitle, false))
-                     .OrderByDescending(result => result.CreatedAt))
-        {
+        // The query is already newest-first, so taking the head keeps the cap on
+        // the *recent* end — and stops before decoding a thumbnail for entry 201.
+        var stored = _messageRepo
+            .ListImageWorkbenchMessages(ConversationListViewModel.ImageWorkbenchProviderId)
+            .SelectMany(row => ParseStored(row.Meta, row.Content, row.CreatedAt, row.ConversationTitle, false))
+            .Take(GalleryLimit + 1)
+            .ToList();
+
+        foreach (var result in stored.Take(GalleryLimit).OrderByDescending(result => result.CreatedAt))
             _gallery.Add(result);
-        }
+
+        PART_GalleryLimitNote.IsVisible = stored.Count > GalleryLimit;
+        PART_GalleryLimitNote.Text = $"只显示最近 {GalleryLimit} 张";
 
         if (_results.LastOrDefault() is { Prompt.Length: > 0 } latest)
             PART_Prompt.Text = latest.Prompt;
@@ -510,15 +895,17 @@ public partial class ImageGenerationWorkbenchView : UserControl
             {
                 if (attachment.ValueKind != JsonValueKind.Object) continue;
                 var localName = ReadString(attachment, "localName");
-                var bytes = _attachmentStore.Load(localName);
-                if (bytes is not { Length: > 0 }) continue;
+
+                // Decoding from the file also doubles as the existence check the
+                // eager Load() used to perform.
+                if (DecodeStoredThumbnail(localName) is not { } thumbnail) continue;
                 var mime = ReadString(attachment, "mime") ?? "image/png";
                 var fileName = ReadString(attachment, "filename")
                     ?? localName
                     ?? $"generated-{createdAt}{ExtensionForMime(mime)}";
                 yield return ImageWorkbenchResult.Completed(
-                    fileName, mime, bytes, localName, revised, prompt, taskTitle, isEdit,
-                    modelLabel, modelId, providerId, created);
+                    fileName, mime, thumbnail, ByteSourceFor(localName, null), localName,
+                    revised, prompt, taskTitle, isEdit, modelLabel, modelId, providerId, created);
             }
         }
     }
@@ -576,6 +963,14 @@ public partial class ImageGenerationWorkbenchView : UserControl
         if (sender is not Control { DataContext: ImageWorkbenchResult { HasImage: true } result }) return;
         if (TopLevel.GetTopLevel(this)?.StorageProvider is not { } storage) return;
 
+        // The card is drawn from a thumbnail, so a card on screen is no longer
+        // proof the original is still on disk.
+        if (result.LoadBytes() is not { Length: > 0 } bytes)
+        {
+            PART_Status.Text = "原图已不在本地存储中，无法保存。";
+            return;
+        }
+
         var file = await storage.SaveFilePickerAsync(new FilePickerSaveOptions
         {
             Title = "保存图片",
@@ -587,7 +982,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         try
         {
             await using var stream = await file.OpenWriteAsync();
-            await stream.WriteAsync(result.Bytes);
+            await stream.WriteAsync(bytes);
             PART_Status.Text = "已保存到 " + (file.TryGetLocalPath() ?? file.Name);
         }
         catch (Exception ex)
@@ -603,7 +998,13 @@ public partial class ImageGenerationWorkbenchView : UserControl
 
         // The full bytes, not the list's thumbnail: this is the only place the
         // generated image is shown at the size it was actually produced at.
-        _ = ImagePreviewWindow.ShowAsync(owner, result.Bytes, result.FileName);
+        if (result.LoadBytes() is not { Length: > 0 } bytes)
+        {
+            PART_Status.Text = "原图已不在本地存储中，无法预览。";
+            return;
+        }
+
+        _ = ImagePreviewWindow.ShowAsync(owner, bytes, result.FileName);
     }
 
     private string CurrentTaskTitle() => string.IsNullOrWhiteSpace(_conversationId)
@@ -614,7 +1015,6 @@ public partial class ImageGenerationWorkbenchView : UserControl
     {
         if (_cts is null || _hiddenNotificationShown) return;
 
-        _hiddenWhileGenerating = true;
         var pendingTitle = CurrentTaskTitle();
         _notifications?.Notify(new AppNotification
         {
@@ -653,15 +1053,76 @@ public partial class ImageGenerationWorkbenchView : UserControl
         _ => ".png"
     };
 
+    // ---- thumbnails and byte sources ---------------------------------------
+
+    /// <summary>
+    /// Cards render at most ~600×460, so a full 1024²-or-larger decode is pure
+    /// waste: 4 MB of surface per image against roughly 1.6 MB at this width.
+    /// </summary>
+    private const int ThumbnailWidth = 640;
+
+    /// <summary>Decodes straight off disk, so the full-size bytes never have to
+    /// exist in memory just to draw a preview.</summary>
+    private Bitmap? DecodeStoredThumbnail(string? localName)
+    {
+        if (!_attachmentStore.TryGetPath(localName, out var path)) return null;
+        try
+        {
+            using var stream = File.OpenRead(path);
+            return Bitmap.DecodeToWidth(stream, ThumbnailWidth);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static Bitmap? DecodeThumbnail(byte[] bytes)
+    {
+        try
+        {
+            using var stream = new MemoryStream(bytes);
+            return Bitmap.DecodeToWidth(stream, ThumbnailWidth);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Prefers the store, so nothing is retained but the file name. Only when a
+    /// save failed does the closure keep the bytes alive.
+    /// </summary>
+    private Func<byte[]> ByteSourceFor(string? localName, byte[]? retainedFallback)
+    {
+        if (localName is { Length: > 0 } name)
+            return () => _attachmentStore.Load(name) ?? [];
+
+        var retained = retainedFallback ?? [];
+        return () => retained;
+    }
+
+    private static string FormatSize(long bytes) => bytes >= 1024 * 1024
+        ? $"{bytes / 1024d / 1024d:0.#} MB"
+        : $"{bytes / 1024d:0.#} KB";
+
     private static string ReadableSize(string? size) => string.IsNullOrWhiteSpace(size)
         ? "1024×1024"
         : size.Trim().Replace("x", "×", StringComparison.OrdinalIgnoreCase);
 }
 
+/// <summary>
+/// One card in the workbench. The full-resolution bytes are deliberately *not*
+/// a field: the gallery holds every image ever generated, and keeping a 1–3 MB
+/// PNG plus a full-size decoded surface per entry made a few hundred pictures
+/// cost hundreds of megabytes. The bytes live on disk in the attachment store
+/// and are read back only when something actually needs them.
+/// </summary>
 public sealed record ImageWorkbenchResult(
     string FileName,
     string MimeType,
-    byte[] Bytes,
+    Func<byte[]>? BytesSource,
     string? LocalName,
     string? RevisedPrompt,
     Bitmap? Thumbnail,
@@ -676,7 +1137,14 @@ public sealed record ImageWorkbenchResult(
     string? ModelId = null,
     string? ProviderId = null)
 {
-    public bool HasImage => !IsPending && !IsError && Bytes.Length > 0 && Thumbnail is not null;
+    /// <summary>Full-resolution bytes, read on demand. Only click handlers may
+    /// call this — never a binding, or scrolling the gallery would page every
+    /// image back into memory.</summary>
+    public byte[] LoadBytes() => BytesSource?.Invoke() ?? [];
+
+    // A decoded thumbnail is proof the bytes were readable; asking LoadBytes()
+    // here would put a disk read behind a property the templates bind to.
+    public bool HasImage => !IsPending && !IsError && Thumbnail is not null;
     public bool HasModelLabel => !string.IsNullOrWhiteSpace(ModelLabel);
     public string PromptHeader => IsEditMode ? "修改指令" : "生成提示词";
     public string ModeLabel => IsPending
@@ -690,33 +1158,20 @@ public sealed record ImageWorkbenchResult(
         : (IsEditMode ? "编辑提示词：" : "修订提示词：") + RevisedPrompt;
 
     public static ImageWorkbenchResult Pending(string prompt, string title, bool edit, string? modelLabel) =>
-        new(string.Empty, "image/png", [], null, null, null, prompt, title, DateTimeOffset.Now,
+        new(string.Empty, "image/png", null, null, null, null, prompt, title, DateTimeOffset.Now,
             edit, IsPending: true, ModelLabel: modelLabel);
 
     public static ImageWorkbenchResult Error(
         string prompt, string title, bool edit, string message, string? modelLabel,
         string? modelId, string? providerId, DateTimeOffset? createdAt = null) =>
-        new(string.Empty, "image/png", [], null, null, null, prompt, title, createdAt ?? DateTimeOffset.Now,
+        new(string.Empty, "image/png", null, null, null, null, prompt, title, createdAt ?? DateTimeOffset.Now,
             edit, IsError: true, ErrorMessage: message, ModelLabel: modelLabel,
             ModelId: modelId, ProviderId: providerId);
 
     public static ImageWorkbenchResult Completed(
-        string fileName, string mimeType, byte[] bytes, string? localName, string? revisedPrompt,
-        string prompt, string title, bool edit, string? modelLabel, string? modelId, string? providerId,
-        DateTimeOffset? createdAt = null) =>
-        new(fileName, mimeType, bytes, localName, revisedPrompt, CreateBitmap(bytes), prompt, title,
+        string fileName, string mimeType, Bitmap? thumbnail, Func<byte[]> bytesSource,
+        string? localName, string? revisedPrompt, string prompt, string title, bool edit,
+        string? modelLabel, string? modelId, string? providerId, DateTimeOffset? createdAt = null) =>
+        new(fileName, mimeType, bytesSource, localName, revisedPrompt, thumbnail, prompt, title,
             createdAt ?? DateTimeOffset.Now, edit, ModelLabel: modelLabel, ModelId: modelId, ProviderId: providerId);
-
-    private static Bitmap? CreateBitmap(byte[] bytes)
-    {
-        try
-        {
-            using var stream = new MemoryStream(bytes);
-            return new Bitmap(stream);
-        }
-        catch
-        {
-            return null;
-        }
-    }
 }
