@@ -158,7 +158,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         bool supportsThinking,
         bool supportsReasoningEffort)
     {
-        if (!supportsThinking) return null;
+        if (!supportsThinking && !supportsReasoningEffort) return null;
 
         var inferred = ThinkingParamKindInference.InferFromModelId(modelName);
         if (inferred == ThinkingParamKind.None && supportsReasoningEffort)

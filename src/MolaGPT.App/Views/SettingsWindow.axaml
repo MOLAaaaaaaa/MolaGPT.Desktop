@@ -72,7 +72,7 @@
                 <ListBoxItem Content="账号与同步" />
                 <ListBoxItem Content="界面与偏好" />
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="模型" />
-                <ListBoxItem Content="模型服务" />
+                <ListBoxItem Name="PART_ProvidersNav" Content="模型服务" />
                 <ListBoxItem Name="PART_PersonasNav" Content="角色" />
                 <ListBoxItem Content="联网搜索" />
                 <ListBoxItem Content="会话标题" />
@@ -1582,6 +1582,9 @@
     <Style Selector="TextBlock.label">
       <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
       <Setter Property="FontWeight" Value="SemiBold" />
+      <!-- Stated rather than inherited: the theme's TextBlock.label is
+           Text.Secondary, and settings captions have always been primary. -->
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
       <Setter Property="Margin" Value="0,0,0,6" />
     </Style>
     <Style Selector="TextBlock.hint">

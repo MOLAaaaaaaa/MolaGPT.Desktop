@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.LocalTools;
@@ -10,6 +11,10 @@ namespace MolaGPT.Core.Chat.Tools.ImageGeneration;
 public sealed class ImageGenerationTool
 {
     public const string ToolName = "generate_image";
+
+    /// <summary>Ceiling on one batch. Every extra picture is a paid request and
+    /// a parallel connection, so this is a spend limit as much as a UI one.</summary>
+    public const int MaxBatchSize = 4;
 
     private readonly Func<HttpClient> _httpFactory;
     private readonly Func<byte[], string?, string?, string?>? _saveAttachment;
@@ -44,6 +49,25 @@ public sealed class ImageGenerationTool
             }
         }
     };
+
+    /// <summary>Generation, <paramref name="count"/> pictures at a time. See
+    /// <see cref="FanOutAsync"/> for why that is not one request.</summary>
+    public Task<IReadOnlyList<GeneratedImage>> GenerateAsync(
+        ImageGenerationOptions options,
+        string prompt,
+        int count,
+        CancellationToken ct) =>
+        FanOutAsync(token => GenerateAsync(options, prompt, token), count, ct);
+
+    /// <summary>Editing, <paramref name="count"/> variants of the same source.</summary>
+    public Task<IReadOnlyList<GeneratedImage>> EditAsync(
+        ImageGenerationOptions options,
+        string prompt,
+        byte[] imageBytes,
+        string? imageMime,
+        int count,
+        CancellationToken ct) =>
+        FanOutAsync(token => EditAsync(options, prompt, imageBytes, imageMime, token), count, ct);
 
     public async Task<IReadOnlyList<GeneratedImage>> GenerateAsync(
         ImageGenerationOptions options,
@@ -179,6 +203,47 @@ public sealed class ImageGenerationTool
         {
             return Error(ex.Message);
         }
+    }
+
+    /// <summary>
+    /// N pictures from N requests, in parallel.
+    ///
+    /// Neither dialect has a batch field worth using: <c>images/generations</c>
+    /// takes <c>n</c>, but DALL·E 3 rejects anything above 1 and the value is
+    /// per-model rather than per-endpoint; the chat-image dialect has no such
+    /// field at all. Asking four times is the one way that works everywhere, and
+    /// it costs the same — these APIs bill per picture, not per request.
+    ///
+    /// Partial failure keeps what came back: three pictures and one timeout is a
+    /// better answer than nothing. The failure is only rethrown when every
+    /// request failed, so a wrong key or an unsupported model still surfaces.
+    /// </summary>
+    private static async Task<IReadOnlyList<GeneratedImage>> FanOutAsync(
+        Func<CancellationToken, Task<IReadOnlyList<GeneratedImage>>> run,
+        int count,
+        CancellationToken ct)
+    {
+        var requests = Math.Clamp(count, 1, MaxBatchSize);
+        if (requests == 1) return await run(ct).ConfigureAwait(false);
+
+        var tasks = new Task<IReadOnlyList<GeneratedImage>>[requests];
+        for (var i = 0; i < requests; i++) tasks[i] = run(ct);
+
+        // WhenAll surfaces only the first failure; every task is inspected below.
+        try { await Task.WhenAll(tasks).ConfigureAwait(false); }
+        catch { /* handled per task */ }
+
+        var images = new List<GeneratedImage>();
+        Exception? failure = null;
+        foreach (var task in tasks)
+        {
+            if (task.IsCompletedSuccessfully) images.AddRange(task.Result);
+            else failure ??= task.Exception?.InnerException ?? task.Exception;
+        }
+
+        if (images.Count == 0 && failure is not null)
+            ExceptionDispatchInfo.Capture(failure).Throw();
+        return images;
     }
 
     private static Dictionary<string, object> BuildRequestBody(ImageGenerationOptions options, string prompt)

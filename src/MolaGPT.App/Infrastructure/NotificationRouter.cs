@@ -47,6 +47,7 @@ internal sealed class NotificationRouter : IDisposable
         _center.Published += OnPublished;
         _center.Dismissed += OnDismissed;
         _backgroundStreams.TaskCompleted += OnStreamCompleted;
+        _backgroundStreams.TaskFailed += OnStreamFailed;
         MolaWindow.AnyWindowActivated += OnWindowActivated;
     }
 
@@ -152,6 +153,31 @@ internal sealed class NotificationRouter : IDisposable
         });
     }
 
+    /// <summary>
+    /// Same key as the completion above, so a turn reports one outcome: a retry
+    /// that succeeds replaces this banner instead of leaving a stale failure
+    /// standing next to a finished answer.
+    ///
+    /// Deliberately <em>not</em> <see cref="AppNotification.IsAnswerCompleted"/>.
+    /// That flag is the one road to a Windows toast, and a failure does not get to
+    /// open a second one — an Error banner already stays put until it is replaced,
+    /// and a failure that lands while the app is away waits in the queue and is
+    /// shown on return.
+    /// </summary>
+    private void OnStreamFailed(object? sender, BackgroundStreamFailedEventArgs e)
+    {
+        _center.Notify(new AppNotification
+        {
+            Key = "answer-" + e.ConversationId,
+            Kind = NotifyKind.Error,
+            Title = string.IsNullOrWhiteSpace(e.ConversationTitle)
+                ? "回复失败"
+                : $"「{e.ConversationTitle}」回复失败",
+            Body = string.IsNullOrWhiteSpace(e.ErrorMessage) ? e.ModelLabel : e.ErrorMessage,
+            ConversationId = e.ConversationId
+        });
+    }
+
     private void OnWindowActivated(object? sender, EventArgs e) => FlushQueue();
 
     /// <summary>
@@ -202,6 +228,7 @@ internal sealed class NotificationRouter : IDisposable
         _center.Published -= OnPublished;
         _center.Dismissed -= OnDismissed;
         _backgroundStreams.TaskCompleted -= OnStreamCompleted;
+        _backgroundStreams.TaskFailed -= OnStreamFailed;
         MolaWindow.AnyWindowActivated -= OnWindowActivated;
     }
 }

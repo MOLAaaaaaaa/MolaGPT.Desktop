@@ -12,6 +12,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- So a decision buried behind a repository — which stored reading a reopened
+         conversation may restore — can be tested without one. -->
+    <InternalsVisibleTo Include="MolaGPT.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\MolaGPT.Core\MolaGPT.Core.csproj" />
     <ProjectReference Include="..\MolaGPT.Presentation\MolaGPT.Presentation.csproj" />
     <ProjectReference Include="..\MolaGPT.Storage\MolaGPT.Storage.csproj" />

@@ -187,6 +187,93 @@ public sealed class PiSidecarSession : IAsyncDisposable
     }
 
     /// <summary>
+    /// Summarize the transcript now rather than waiting for the threshold.
+    ///
+    /// Takes the turn gate because it is a turn in all but name: it calls the model,
+    /// it rewrites the history, and it shares the one stdout reader. Slow by nature —
+    /// the summary is a model call — so the caller has to show it as work in
+    /// progress, not as a click that appeared to do nothing.
+    ///
+    /// <paramref name="modelId"/> is selected first for the same reason a turn does
+    /// it: a compaction that ran on whichever model the process happened to boot
+    /// with would summarize the conversation using a model the user did not choose.
+    /// </summary>
+    public async Task<PiCompactionResult?> CompactAsync(
+        string modelId,
+        string? customInstructions,
+        CancellationToken ct)
+    {
+        await _turnGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await Task.Run(EnsureStarted, ct).ConfigureAwait(false);
+
+            if (!string.Equals(_activeModel, modelId, StringComparison.Ordinal))
+            {
+                using (await RequestAsync(
+                           "set_model",
+                           new { provider = PiWorkProvider.SidecarProviderId, modelId },
+                           ct).ConfigureAwait(false))
+                {
+                }
+                _activeModel = modelId;
+            }
+
+            using var response = await RequestAsync(
+                "compact",
+                new { customInstructions },
+                ct).ConfigureAwait(false);
+
+            if (!response.RootElement.TryGetProperty("data", out var data)
+                || data.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var tokensBefore = data.TryGetProperty("tokensBefore", out var tb) && tb.TryGetInt32(out var before)
+                ? before
+                : 0;
+            var summary = data.TryGetProperty("summary", out var s) && s.ValueKind == JsonValueKind.String
+                ? s.GetString()
+                : null;
+            var tokensAfter =
+                data.TryGetProperty("estimatedTokensAfter", out var ta) && ta.TryGetInt32(out var after)
+                    ? after
+                    : 0;
+            return new PiCompactionResult(tokensBefore, summary, tokensAfter);
+        }
+        finally
+        {
+            _turnGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Turn Pi's automatic compaction on or off for this sidecar.
+    ///
+    /// Deliberately not cached on the session: a <c>switch_session</c> resets the
+    /// sidecar to Pi's default (on), and a remembered "off" here would go stale
+    /// without anything noticing. The preference belongs to the caller, which
+    /// re-applies it — one owner, no half-truth. That owner is
+    /// <see cref="PiRuntime.AutoCompactionEnabled"/>, re-sent on every lease.
+    /// </summary>
+    public async Task SetAutoCompactionAsync(bool enabled, CancellationToken ct)
+    {
+        await _turnGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (!IsAlive) return;
+            using (await RequestAsync("set_auto_compaction", new { enabled }, ct).ConfigureAwait(false))
+            {
+            }
+        }
+        finally
+        {
+            _turnGate.Release();
+        }
+    }
+
+    /// <summary>
     /// Older MolaGPT builds launched Pi from the downloaded runtime directory, so
     /// Pi persisted that versioned directory in every session header. Replacing a
     /// runtime removes the old directory and Pi then refuses to open the transcript.
@@ -476,6 +563,18 @@ public sealed class PiSidecarSession : IAsyncDisposable
         await Task.CompletedTask.ConfigureAwait(false);
     }
 }
+
+/// <summary>What a compaction actually did.</summary>
+/// <param name="TokensBefore">Context size at the moment of the cut. There is no
+/// "after" to pair it with: the next honest measurement only exists once the model
+/// has replied again, which is why the gauge goes unknown rather than to zero.</param>
+/// <param name="EstimatedTokensAfter">Pi's own estimate of the compacted history's
+/// size, from a character heuristic rather than the model — 0 on runtimes that do
+/// not report it.</param>
+public sealed record PiCompactionResult(
+    int TokensBefore,
+    string? Summary,
+    int EstimatedTokensAfter = 0);
 
 /// <summary>One image on a prompt, in Pi's <c>ImageContent</c> shape. Property
 /// names are lower-case because they go on the wire as-is.</summary>

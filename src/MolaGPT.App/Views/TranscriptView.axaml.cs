@@ -268,6 +268,21 @@ public partial class TranscriptView : UserControl
     {
         if (_scroll is null) return;
 
+        // Content growing below the fold is the one thing the branch above would
+        // have caught, and it is unreachable for as long as an animation owns the
+        // viewport. A tool card that fills in its arguments grows *inside* a row,
+        // so no row is inserted and nothing else will replay it: the growth is
+        // simply lost, and a wheel aimed at the bottom settles on the bottom as it
+        // was when the wheel turned — short by exactly what the card gained, with
+        // no "回到最新" offered because the gap stays inside BottomStickTolerance.
+        //
+        // So carry the growth into the destination, the same way the offset
+        // corrections below are carried. Only while following: a reader who
+        // wheeled upwards must not be dragged after the new content. The jump
+        // animation needs nothing here — it re-reads the bottom every frame.
+        if (_followBottom && _wheelAnimating && e.ExtentDelta.Y > ScrollCorrectionEpsilon)
+            _wheelTarget += e.ExtentDelta.Y;
+
         double correction;
         if (_expectedOffset is { } expected)
         {

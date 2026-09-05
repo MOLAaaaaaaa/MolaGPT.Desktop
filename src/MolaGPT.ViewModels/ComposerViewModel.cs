@@ -8,6 +8,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
@@ -147,12 +148,17 @@ public sealed partial class ComposerViewModel : ObservableObject
         _personas = personas;
         _attachmentStore = attachmentStore;
         _skills = skills;
+        WireContextGauge();
         _chat.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(ChatViewModel.ConversationId))
                 PruneOrphanedArtifactContexts();
             if (e.PropertyName is nameof(ChatViewModel.ActiveProvider) or nameof(ChatViewModel.ActiveModel))
             {
+                // The gauge is only actionable on providers that own an agent loop,
+                // so the popup's controls appear and disappear with the provider
+                // rather than sitting there dead.
+                WireContextGauge();
                 SendCommand.NotifyCanExecuteChanged();
                 RetryCommand.NotifyCanExecuteChanged();
                 OnPropertyChanged(nameof(IsThinkingVisible));
@@ -248,11 +254,73 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// <summary>Show "推理" toggle iff the active model explicitly reports
     /// SupportsThinking. MolaGPT account models get this from
     /// model_config_public.php; BYOK models get it from user settings.</summary>
+    /// <summary>The conversation's context gauge, surfaced here because the ring is
+    /// drawn in the composer footer — beside the send button, where the decision it
+    /// informs ("send another turn or compact first") is actually taken.</summary>
+    public ContextGaugeViewModel ContextGauge => _chat.ContextGauge;
+
+    /// <summary>
+    /// Point the gauge's controls at whichever provider is active, or unhook them
+    /// when that provider has no history of its own to summarize.
+    ///
+    /// The conversation id is read at call time rather than captured, so switching
+    /// conversations cannot leave a button that compacts the previous one.
+    /// </summary>
+    private void WireContextGauge()
+    {
+        // Unhooked first, because the switch below is restored from settings rather
+        // than pressed by the user: a live callback would read that restore as a
+        // click and push it back down to the agent on every provider change.
+        _chat.ContextGauge.AutoCompactionChangeRequested = null;
+
+        if (_chat.ActiveProvider is not PiWorkProvider agent)
+        {
+            _chat.ContextGauge.CompactRequested = null;
+            _chat.ContextGauge.CompactionRecorded = null;
+            return;
+        }
+
+        // The preference is application-wide and lives in settings; the agent gets
+        // told once here and re-applies it to every sidecar it leases from now on.
+        var autoCompaction = _settings?.AutoCompactionEnabled ?? true;
+        agent.AutoCompactionEnabled = autoCompaction;
+        _chat.ContextGauge.IsAutoCompactionEnabled = autoCompaction;
+
+        _chat.ContextGauge.CompactRequested = async ct =>
+        {
+            var model = _chat.ActiveModel?.Id
+                        ?? throw new InvalidOperationException("尚未选择模型。");
+            var result = await agent.CompactAsync(_chat.ConversationId, model, null, ct);
+            return new ContextGaugeViewModel.CompactionSizes(
+                result?.TokensBefore ?? 0,
+                result?.EstimatedTokensAfter ?? 0);
+        };
+
+        _chat.ContextGauge.AutoCompactionChangeRequested = async (enabled, ct) =>
+        {
+            // Written down before the round-trip on purpose: if the sidecar call
+            // fails, the preference is still the user's answer and the next lease
+            // applies it. The other order loses the choice to a transient error.
+            if (_settings is not null) _settings.AutoCompactionEnabled = enabled;
+
+            var model = _chat.ActiveModel?.Id
+                        ?? throw new InvalidOperationException("尚未选择模型。");
+            await agent.SetAutoCompactionAsync(_chat.ConversationId, model, enabled, ct);
+        };
+
+        // The manual button's only trace was the gauge, which does not survive a
+        // reload. Same destination as the automatic path below: the transcript.
+        _chat.ContextGauge.CompactionRecorded = _chat.NoteManualCompaction;
+    }
+
     public bool IsThinkingVisible => _chat.ActiveModel?.SupportsThinking == true;
 
-    /// <summary>Show the thinking control when the user has enabled thinking and
-    /// the model exposes either effort or budget controls.</summary>
-    public bool IsReasoningEffortVisible => EnableThinking
+    private bool IsThinkingEnabled => IsThinkingVisible
+        ? EnableThinking
+        : _chat.ActiveModel?.SupportsReasoningEffort == true;
+
+    /// <summary>Effort-only models expose controls without a thinking toggle.</summary>
+    public bool IsReasoningEffortVisible => IsThinkingEnabled
         && (_chat.ActiveModel?.SupportsReasoningEffort == true || IsBudgetSliderVisible);
 
     /// <summary>Attach button is always shown; text/document attachments are
@@ -363,7 +431,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             var kind = EffectiveThinkingKind;
             var resolved = MolaGPT.Core.Models.ThinkingEffortLevels.Resolve(model?.ThinkingConfig, kind);
             // OpenAI 模板历史上带 none（关）；若模型未自定义档位，保留兼容。
-            if (kind == MolaGPT.Core.Models.ThinkingParamKind.OpenAiReasoningEffort
+            if (IsThinkingVisible && kind == MolaGPT.Core.Models.ThinkingParamKind.OpenAiReasoningEffort
                 && (model?.ThinkingConfig?.EffortLevels is null or { Length: 0 }))
             {
                 return new[] { "none" }.Concat(resolved).ToArray();
@@ -640,10 +708,10 @@ public sealed partial class ComposerViewModel : ObservableObject
             Messages: msgs,
             ConversationId: conversationId,
             SessionId: Guid.NewGuid().ToString("N"),
-            UseThinking: EnableThinking,
+            UseThinking: IsThinkingEnabled,
             ReasoningEffort: IsReasoningEffortVisible ? ReasoningEffort : null,
             ExtraBody: extras,
-            ThinkingBudgetTokens: EnableThinking ? ThinkingBudgetTokens : null,
+            ThinkingBudgetTokens: IsThinkingEnabled ? ThinkingBudgetTokens : null,
             ThinkingParamKind: thinkingKind);
 
         var streamContext = new BackgroundStreamTask
@@ -666,6 +734,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         streamContext.StreamTask = streamTask;
         _activeStreamTask = streamTask;
         var wasCancelled = false;
+        string? failureMessage = null;
 
         try
         {
@@ -680,6 +749,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         catch (MolaGptAuthExpiredException ex)
         {
+            failureMessage = ex.Message;
             assistantMsg.AppendDelta($"\n\n> {ex.Message}");
             try
             {
@@ -694,12 +764,13 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            failureMessage = ex.Message;
             assistantMsg.AppendDelta($"\n\n> **错误**：{ex.Message}");
             ClassifyActionableError(assistantMsg, ex);
         }
         finally
         {
-            CompleteStreamContext(streamContext, publishNotification: !wasCancelled);
+            CompleteStreamContext(streamContext, publishNotification: !wasCancelled, failureMessage);
             if (ReferenceEquals(_activeTask, streamContext))
             {
                 IsSending = false;
@@ -1430,6 +1501,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         };
         _activeTask = streamContext;
         var wasCancelled = false;
+        string? failureMessage = null;
 
         try
         {
@@ -1469,10 +1541,10 @@ public sealed partial class ComposerViewModel : ObservableObject
                 Messages: msgs,
                 ConversationId: _chat.ConversationId,
                 SessionId: sessionId,
-                UseThinking: EnableThinking,
+                UseThinking: IsThinkingEnabled,
                 ReasoningEffort: IsReasoningEffortVisible ? ReasoningEffort : null,
                 ExtraBody: extras,
-                ThinkingBudgetTokens: EnableThinking ? ThinkingBudgetTokens : null,
+                ThinkingBudgetTokens: IsThinkingEnabled ? ThinkingBudgetTokens : null,
                 ThinkingParamKind: thinkingKind);
 
             var streamTask = RunStreamLoopAsync(activeProvider, req, assistantMsg, cts, streamContext);
@@ -1489,6 +1561,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            failureMessage = ex.Message;
             assistantMsg.AppendDelta($"\n\n> **错误**：{ex.Message}");
             ClassifyActionableError(assistantMsg, ex);
         }
@@ -1508,7 +1581,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             RewritePythonArtifactMarkdownLinks(assistantMsg);
             assistantMsg.CommitRetryAttempt();
 
-            CompleteStreamContext(streamContext, publishNotification: !wasCancelled);
+            CompleteStreamContext(streamContext, publishNotification: !wasCancelled, failureMessage);
             if (ReferenceEquals(_activeTask, streamContext))
             {
                 IsSending = false;
@@ -1605,6 +1678,28 @@ public sealed partial class ComposerViewModel : ObservableObject
             assistantMsg.Sources = chunk.Sources;
         if (chunk.Usage is not null)
             assistantMsg.Usage = chunk.Usage;
+        if (chunk.ContextUsage is { } contextUsage)
+        {
+            _chat.ContextGauge.Apply(contextUsage);
+            // Also on the message, so the reading survives a reload — the gauge
+            // itself is rebuilt empty on every conversation load.
+            if (contextUsage.Tokens is > 0) assistantMsg.ContextTokens = contextUsage.Tokens.Value;
+            if (contextUsage.ContextWindow > 0) assistantMsg.ContextWindow = contextUsage.ContextWindow;
+        }
+        if (chunk.Compaction is { } compaction)
+        {
+            _chat.ContextGauge.ApplyCompaction(compaction);
+            // Recorded on the message rather than announced as a banner: this is
+            // where in the conversation the history was cut, and a notification that
+            // scrolls away cannot say "here".
+            if (compaction is { Completed: true, Aborted: false })
+            {
+                assistantMsg.NoteCompaction(
+                    compaction.TokensBefore,
+                    compaction.TokensAfter,
+                    compaction.Reason);
+            }
+        }
         if (chunk.DeltaText is { Length: > 0 } t)
         {
             t = RewritePythonArtifactMarkdownLinks(t, assistantMsg);
@@ -1788,7 +1883,16 @@ public sealed partial class ComposerViewModel : ObservableObject
             ? value.GetString()
             : null;
 
-    private void CompleteStreamContext(BackgroundStreamTask streamContext, bool publishNotification)
+    /// <summary>
+    /// <paramref name="failureMessage"/> non-null means the turn ended on an error.
+    /// It has to travel this far because the exit is decided here: announcing
+    /// 「回复已完成」 over a bubble that failed is how a rate-limited research turn
+    /// came out looking merely truncated.
+    /// </summary>
+    private void CompleteStreamContext(
+        BackgroundStreamTask streamContext,
+        bool publishNotification,
+        string? failureMessage = null)
     {
         RewritePythonArtifactMarkdownLinks(streamContext.AssistantMessage);
         _pythonArtifactContexts.Remove(streamContext.AssistantMessage);
@@ -1800,7 +1904,18 @@ public sealed partial class ComposerViewModel : ObservableObject
         else
             _chat.FinalizeAssistantMessage(streamContext.ConversationId, streamContext.AssistantMessage);
 
-        if (publishNotification)
+        if (publishNotification && failureMessage is not null)
+        {
+            if (streamContext.IsDetached)
+                _backgroundStreams?.Fail(streamContext, failureMessage);
+            else
+                _backgroundStreams?.PublishFailure(
+                    streamContext.ConversationId,
+                    streamContext.ConversationTitle,
+                    streamContext.ModelLabel,
+                    failureMessage);
+        }
+        else if (publishNotification)
         {
             if (streamContext.IsDetached)
                 _backgroundStreams?.Complete(streamContext);
@@ -1902,7 +2017,7 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     private MolaGPT.Core.Models.ThinkingParamKind? ResolveActiveThinkingParamKind()
     {
-        if (!IsThinkingVisible) return null;
+        if (!IsThinkingVisible && !IsReasoningEffortVisible) return null;
 
         var kind = EffectiveThinkingKind;
 

@@ -101,7 +101,7 @@ public sealed class AgentSessionManager : IAsyncDisposable
             Model: model,
             ReasoningEffort: reasoningEffort,
             ResumeSessionId: resumeSessionId,
-            ApprovalPolicy: approvalPolicy,
+            ApprovalPolicy: CodexBackend.NormalizeApprovalPolicy(approvalPolicy),
             // Bind a fresh CLI session to our stable conversation id so the on-disk
             // session matches what the bridge/phone track. Ignored when resuming.
             SessionId: conversationId);

@@ -298,8 +298,8 @@
                ScrollViewer.VerticalScrollBarVisibility="Auto"
                ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
 
-      <!-- Row 4: hint on the left, send/stop on the right -->
-      <Grid Grid.Row="4" ColumnDefinitions="*,Auto" Margin="0,6,0,0">
+      <!-- Row 4: hint on the left, context gauge and send/stop on the right -->
+      <Grid Grid.Row="4" ColumnDefinitions="*,Auto,Auto" Margin="0,6,0,0">
         <Panel Grid.Column="0" VerticalAlignment="Center">
           <TextBlock Name="PART_Hint" Classes="muted"
                      FontSize="{DynamicResource Font.Size.XSmall}"
@@ -310,10 +310,92 @@
                      IsVisible="{Binding !EnterToSend}" />
         </Panel>
 
+        <!-- Context gauge. Sits beside 发送 because that is where the decision it
+             informs gets made: send another turn, or compact first. Absent rather
+             than empty until there is a real reading — see ContextGaugeViewModel. -->
+        <Button Grid.Column="1"
+                Name="PART_ContextGauge"
+                Classes="contextgauge"
+                IsVisible="{Binding ContextGauge.IsVisible}"
+                ToolTip.Tip="{Binding ContextGauge.Tooltip}"
+                VerticalAlignment="Center"
+                Margin="0,0,8,0">
+          <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <Panel Width="16" Height="16" VerticalAlignment="Center">
+              <r:ContextRing Percent="{Binding ContextGauge.Percent}"
+                             IsIndeterminate="{Binding !ContextGauge.IsKnown}"
+                             Classes.warning="{Binding ContextGauge.IsWarning}"
+                             Classes.critical="{Binding ContextGauge.IsCritical}"
+                             TrackBrush="{DynamicResource Brush.Border}"
+                             Thickness="2.5" />
+            </Panel>
+            <TextBlock Text="{Binding ContextGauge.PercentText}"
+                       Classes="muted"
+                       FontSize="{DynamicResource Font.Size.XSmall}"
+                       VerticalAlignment="Center"
+                       Margin="5,0,0,0" />
+          </StackPanel>
+
+          <Button.Flyout>
+            <Flyout Placement="TopEdgeAlignedRight" FlyoutPresenterClasses="molaflyout">
+              <Border Classes="flyoutsurface contextpanel" Width="228">
+                <StackPanel Spacing="9">
+                  <!-- State first, controls second. The popup reports; it does not
+                       explain how compaction works — that belongs in docs, not in a
+                       panel the user opens to make one decision. -->
+                  <StackPanel Spacing="2">
+                    <TextBlock Text="上下文" Classes="muted"
+                               FontSize="{DynamicResource Font.Size.XSmall}" />
+                    <TextBlock Text="{Binding ContextGauge.SummaryText}"
+                               FontWeight="SemiBold" FontSize="15" />
+                    <TextBlock Text="{Binding ContextGauge.HeadroomText}"
+                               Classes="muted"
+                               FontSize="{DynamicResource Font.Size.XSmall}"
+                               IsVisible="{Binding ContextGauge.IsKnown}" />
+                  </StackPanel>
+
+                  <TextBlock Text="{Binding ContextGauge.CompactedText}"
+                             FontSize="{DynamicResource Font.Size.XSmall}"
+                             Foreground="{DynamicResource Brush.Warning.Foreground}"
+                             IsVisible="{Binding ContextGauge.HasCompacted}" />
+
+                  <!-- Controls only for providers that own an agent loop; for the
+                       rest there is no history of ours to summarize, and a dead
+                       button would be worse than none. -->
+                  <StackPanel Spacing="9" IsVisible="{Binding ContextGauge.IsControllable}">
+                    <Border Height="1" Background="{DynamicResource Brush.Border.Subtle}" />
+
+                    <CheckBox Content="自动压缩"
+                              IsChecked="{Binding ContextGauge.IsAutoCompactionEnabled, Mode=TwoWay}"
+                              FontSize="{DynamicResource Font.Size.Small}" />
+
+                    <Button Classes="toolchip"
+                            HorizontalAlignment="Left"
+                            Command="{Binding ContextGauge.CompactCommand}"
+                            IsVisible="{Binding !ContextGauge.IsCompacting}"
+                            Content="立即压缩"
+                            ToolTip.Tip="在此刻生成摘要，而非等待阈值触发" />
+
+                    <TextBlock Text="正在压缩" Classes="muted"
+                               FontSize="{DynamicResource Font.Size.Small}"
+                               IsVisible="{Binding ContextGauge.IsCompacting}" />
+
+                    <TextBlock Text="{Binding ContextGauge.CompactionError}"
+                               TextWrapping="Wrap"
+                               FontSize="{DynamicResource Font.Size.XSmall}"
+                               Foreground="{DynamicResource Brush.Error}"
+                               IsVisible="{Binding ContextGauge.HasCompactionError}" />
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+            </Flyout>
+          </Button.Flyout>
+        </Button>
+
         <!-- Send and stop swap places rather than one button changing meaning:
              a button whose action changes under the cursor mid-stream is how
              people cancel answers they wanted to keep. -->
-        <Panel Grid.Column="1">
+        <Panel Grid.Column="2">
           <Button Name="PART_Send"
                   Classes="send"
                   Command="{Binding SendCommand}"
@@ -411,7 +493,7 @@
       </Style.Animations>
     </Style>
 
-    <Style Selector="Border.personapanel, Border.effortpanel">
+    <Style Selector="Border.personapanel, Border.effortpanel, Border.contextpanel">
       <Setter Property="Padding" Value="12,10" />
     </Style>
     <Style Selector="Button.personarow">
@@ -459,38 +541,9 @@
       <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
 
-    <!-- ToolToggleButton / ToolPlainButton: 30 high, radius 10, Font.Cjk 12
-         Medium, brand tint when checked. -->
-    <Style Selector=":is(Button).toolchip">
-      <Setter Property="Height" Value="30" />
-      <Setter Property="MinHeight" Value="30" />
-      <Setter Property="Padding" Value="10,0" />
-      <Setter Property="Margin" Value="0,0,4,0" />
-      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
-      <Setter Property="FontFamily" Value="{DynamicResource Font.Cjk}" />
-      <Setter Property="FontSize" Value="12" />
-      <Setter Property="FontWeight" Value="Medium" />
-    </Style>
-    <Style Selector=":is(Button).toolchip:pointerover /template/ Border#PART_Root">
-      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
-    </Style>
-    <Style Selector=":is(Button).toolchip:pointerover">
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
-    </Style>
-    <Style Selector="ToggleButton.toolchip:checked /template/ Border#PART_Root">
-      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
-      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
-    </Style>
-    <Style Selector="ToggleButton.toolchip:checked">
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
-    </Style>
-
-    <!-- Button.send / .stop, the swap animation and the disabled state moved to
-         Theme/Controls.axaml: the image workbench's composer runs the same
-         send↔stop hand-off and was drifting from this one. -->
+    <!-- Button.toolchip, Button.send / .stop, the send↔stop swap animation and
+         the disabled state all moved to Theme/Controls.axaml: the image
+         workbench's composer runs the same chip strip and the same hand-off,
+         and the private copies had started to drift from these. -->
   </UserControl.Styles>
 </UserControl>

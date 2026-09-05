@@ -47,11 +47,27 @@ public sealed class BackgroundStreamCompletedEventArgs : EventArgs
     public string? ModelLabel { get; init; }
 }
 
+/// <summary>
+/// A turn that ended on an error rather than an answer. Separate from
+/// <see cref="BackgroundStreamCompletedEventArgs"/> because the two must not
+/// share an exit: a failed turn was announcing itself as 「回复已完成」 while the
+/// bubble sat empty, which is precisely the case where the user needs to be told
+/// what went wrong.
+/// </summary>
+public sealed class BackgroundStreamFailedEventArgs : EventArgs
+{
+    public string ConversationId { get; init; } = default!;
+    public string ConversationTitle { get; init; } = "新对话";
+    public string? ModelLabel { get; init; }
+    public string ErrorMessage { get; init; } = string.Empty;
+}
+
 public sealed class BackgroundStreamService
 {
     private readonly ConcurrentDictionary<string, BackgroundStreamTask> _tasks = new();
 
     public event EventHandler<BackgroundStreamCompletedEventArgs>? TaskCompleted;
+    public event EventHandler<BackgroundStreamFailedEventArgs>? TaskFailed;
     public event EventHandler<string>? TaskRegistered;
 
     public bool HasTask(string conversationId) => _tasks.ContainsKey(conversationId);
@@ -148,6 +164,13 @@ public sealed class BackgroundStreamService
         PublishCompletion(task.ConversationId, task.ConversationTitle, task.ModelLabel);
     }
 
+    public void Fail(BackgroundStreamTask task, string errorMessage)
+    {
+        task.IsCompleted = true;
+        _tasks.TryRemove(task.ConversationId, out _);
+        PublishFailure(task.ConversationId, task.ConversationTitle, task.ModelLabel, errorMessage);
+    }
+
     public void PublishCompletion(string conversationId, string conversationTitle, string? modelLabel)
     {
         if (string.IsNullOrWhiteSpace(conversationId)) return;
@@ -156,6 +179,22 @@ public sealed class BackgroundStreamService
             ConversationId = conversationId,
             ConversationTitle = conversationTitle,
             ModelLabel = modelLabel
+        });
+    }
+
+    public void PublishFailure(
+        string conversationId,
+        string conversationTitle,
+        string? modelLabel,
+        string errorMessage)
+    {
+        if (string.IsNullOrWhiteSpace(conversationId)) return;
+        TaskFailed?.Invoke(this, new BackgroundStreamFailedEventArgs
+        {
+            ConversationId = conversationId,
+            ConversationTitle = conversationTitle,
+            ModelLabel = modelLabel,
+            ErrorMessage = errorMessage
         });
     }
 }

@@ -12,6 +12,10 @@ public sealed record LocalToolOptions(
     string? SearchBaseUrl = null,
     int SearchMaxResults = 6,
     int WebPageMaxCharacters = 12000,
+    // Per search hit, not per call. A hit is a lead the model may then web_fetch;
+    // letting providers hand back whole page bodies here is what blew one turn's
+    // context past 390K tokens.
+    int SearchSnippetMaxCharacters = 1500,
     IReadOnlyList<McpServerOptions>? McpServers = null,
     VisionProxyOptions? Vision = null,
     ImageGenerationOptions? ImageGeneration = null,
@@ -77,6 +81,7 @@ public sealed record LocalToolOptions(
             ReadString(raw, "searchBaseUrl"),
             ReadInt(raw, "searchMaxResults") is { } maxResults ? Math.Clamp(maxResults, 1, 10) : 6,
             ReadInt(raw, "webPageMaxCharacters") is { } maxChars ? Math.Clamp(maxChars, 1000, 30000) : 12000,
+            ReadInt(raw, "searchSnippetMaxCharacters") is { } maxSnippet ? Math.Clamp(maxSnippet, 200, 10000) : 1500,
             ReadMcpServers(raw),
             ReadVision(raw),
             ReadImageGeneration(raw),

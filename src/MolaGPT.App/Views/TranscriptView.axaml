@@ -360,22 +360,66 @@
       </Border>
     </DataTemplate>
 
+    <!-- A run of consecutive same-kind tools (file reads / searches / fetches),
+         merged into one card. Header reads as a single step ("联网搜索 · 2 次");
+         the fold reveals one row per call with its query/path/URL and status. -->
     <DataTemplate DataType="r:ToolGroupRow">
-      <Border Classes="assistantcol toolcard compact">
-        <Grid ColumnDefinitions="Auto,*,Auto">
-          <Border Grid.Column="0" Width="24" Height="24"
-                  CornerRadius="{DynamicResource Radius.Sm}"
-                  Background="{DynamicResource Brush.Bg.Tertiary}">
-            <TextBlock Classes="icon" Text="&#xE90F;" FontSize="12"
-                       HorizontalAlignment="Center" VerticalAlignment="Center"
-                       Foreground="{DynamicResource Brush.Text.Secondary}" />
-          </Border>
-          <TextBlock Grid.Column="1" Text="{Binding Group.Name}" Margin="10,0,12,0"
-                     FontSize="13" FontWeight="Medium" VerticalAlignment="Center"
-                     TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-          <TextBlock Grid.Column="2" Text="{Binding Group.CountText}" Classes="muted"
-                     FontSize="{DynamicResource Font.Size.XSmall}" VerticalAlignment="Center" />
-        </Grid>
+      <Border Classes="assistantcol toolcard">
+        <Expander Classes="toolbody" IsExpanded="{Binding IsExpanded, Mode=TwoWay}">
+          <Expander.Header>
+            <Grid ColumnDefinitions="Auto,10,*,Auto">
+              <Border Grid.Column="0" Classes="toolicon"
+                      CornerRadius="{DynamicResource Radius.Sm}"
+                      Background="{DynamicResource Brush.Primary.Tint}"
+                      Classes.errored="{Binding Group.IsError}">
+                <TextBlock Classes="icon" Text="{Binding Group.IconGlyph}"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Brush.Primary}" />
+              </Border>
+
+              <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="2">
+                <TextBlock Text="{Binding Group.Label}" FontSize="13" FontWeight="Medium"
+                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                <TextBlock Text="{Binding Group.CountText}" Classes="muted"
+                           FontSize="{DynamicResource Font.Size.XSmall}"
+                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+              </StackPanel>
+
+              <Border Grid.Column="3" Classes="statuschip"
+                      Classes.errored="{Binding Group.IsError}"
+                      Classes.done="{Binding Group.IsCompleted}">
+                <TextBlock Text="{Binding Group.StatusText}" FontSize="11" FontWeight="SemiBold" />
+              </Border>
+            </Grid>
+          </Expander.Header>
+
+          <ItemsControl ItemsSource="{Binding Group.Items}" Margin="0,10,0,0">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:ToolCallViewModel">
+                <Grid ColumnDefinitions="*,Auto" Margin="0,3">
+                  <Panel Grid.Column="0" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding HeaderArgPreview}"
+                               IsVisible="{Binding HasHeaderArgPreview}"
+                               FontFamily="{DynamicResource Font.Mono}"
+                               FontSize="{DynamicResource Font.Size.XSmall}"
+                               Foreground="{DynamicResource Brush.Text.Secondary}"
+                               TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                    <TextBlock Text="{Binding Label}"
+                               IsVisible="{Binding !HasHeaderArgPreview}"
+                               FontSize="{DynamicResource Font.Size.XSmall}"
+                               Foreground="{DynamicResource Brush.Text.Secondary}"
+                               TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                  </Panel>
+                  <Border Grid.Column="1" Classes="statuschip"
+                          Classes.errored="{Binding IsError}"
+                          Classes.done="{Binding IsCompleted}">
+                    <TextBlock Text="{Binding StatusText}" FontSize="11" FontWeight="SemiBold" />
+                  </Border>
+                </Grid>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </Expander>
       </Border>
     </DataTemplate>
 
@@ -454,6 +498,28 @@
           <TextBlock Classes="icon" Text="&#xE9D2;" FontSize="14" />
         </Button>
         </StackPanel>
+
+        <!-- Compaction marker. Belongs in the transcript rather than in a banner
+             because the fact is positional: it says which point the model can no
+             longer see past. A notification would scroll away and could never
+             answer "where".
+
+             Last in the turn, below the action bar, because that is the boundary it
+             marks — everything above was summarized away, everything below was
+             written with only the summary in view. A manual compaction has no turn
+             of its own and lands here on the newest answer; putting it any higher
+             would read as part of that answer instead of as what came after it. -->
+        <Grid ColumnDefinitions="*,Auto,*" Margin="0,8,0,0"
+              IsVisible="{Binding Message.HasCompaction}">
+          <Border Grid.Column="0" Height="1" VerticalAlignment="Center"
+                  Background="{DynamicResource Brush.Border.Subtle}" />
+          <TextBlock Grid.Column="1" Text="{Binding Message.CompactionText}"
+                     Margin="10,0" VerticalAlignment="Center"
+                     FontSize="{DynamicResource Font.Size.XSmall}"
+                     Foreground="{DynamicResource Brush.Text.Muted}" />
+          <Border Grid.Column="2" Height="1" VerticalAlignment="Center"
+                  Background="{DynamicResource Brush.Border.Subtle}" />
+        </Grid>
       </StackPanel>
     </DataTemplate>
   </UserControl.DataTemplates>
@@ -627,16 +693,9 @@
       <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
       <Setter Property="AccentBrush" Value="{DynamicResource Brush.Primary}" />
     </Style>
-    <!-- user bubble: Brush.Primary.Tint / Radius.UserBubble / Padding 14,10 -->
-    <Style Selector="Border.userbubble">
-      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
-      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="{DynamicResource Radius.UserBubble}" />
-      <Setter Property="Padding" Value="14,10" />
-      <Setter Property="MaxWidth" Value="{DynamicResource Size.UserBubble.MaxWidth}" />
-      <Setter Property="VerticalAlignment" Value="Top" />
-    </Style>
+    <!-- user bubble: Brush.Primary.Tint / Radius.UserBubble / Padding 14,10.
+         The box itself now lives in Theme/Controls.axaml — the image workbench
+         shows a prompt in the same shape. This is the markdown fit-up. -->
     <Style Selector="Border.userbubble r|MarkdownTextBlock.prose">
       <Setter Property="Margin" Value="0" />
     </Style>

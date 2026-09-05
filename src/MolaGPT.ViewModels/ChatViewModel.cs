@@ -182,6 +182,14 @@ public sealed partial class ChatViewModel : ObservableObject
     public string ActiveModelLabel => ActiveModel?.DisplayName ?? "未选择";
     public string ActiveProviderLabel => ActiveProvider?.DisplayName ?? "未选择";
 
+    /// <summary>
+    /// Context pressure for the open conversation. Lives here rather than on the
+    /// composer because it belongs to the transcript: switching conversations has to
+    /// switch the reading with it, or the gauge shows one conversation's fullness
+    /// over another's messages.
+    /// </summary>
+    public ContextGaugeViewModel ContextGauge { get; } = new();
+
     private readonly ProviderRegistry _providers;
     private readonly MessageRepository? _messageRepo;
     private readonly ConversationRepository? _conversationRepo;
@@ -457,6 +465,7 @@ public sealed partial class ChatViewModel : ObservableObject
         ConversationSystemPrompt = null;
         ActivePersonaId = ResolveDefaultPersonaId();
         SystemPromptMode = "override";
+        ContextGauge.Reset();
         // New conversation has no working directory yet — clear artifacts
         // and dismiss the panel so the previous conversation's files don't stick.
         RefreshArtifacts();
@@ -470,6 +479,11 @@ public sealed partial class ChatViewModel : ObservableObject
     public async Task LoadConversationAsync(string conversationId, bool loadAllMessagesImmediately = false)
     {
         ConversationId = conversationId;
+        // Cleared here and restored from the loaded messages below. Leaving it
+        // cleared was the first attempt and it was wrong: reopening a conversation
+        // made the gauge vanish until the user sent another turn, which reads as the
+        // feature being broken rather than as "not measured yet".
+        ContextGauge.Reset();
         var loadVersion = ++_messageLoadVersion;
         var loadUiContext = SynchronizationContext.Current;
 
@@ -518,6 +532,11 @@ public sealed partial class ChatViewModel : ObservableObject
 
                 conversationRow = snapshot.conversation;
                 var prepared = snapshot.messages;
+
+                // From the whole snapshot, not just the materialized tail: the
+                // reading belongs to the conversation, and only the newest turns are
+                // built up front.
+                RestoreContextGauge(prepared);
 
                 // Open at the END of the conversation. The newest messages are
                 // what the user clicked to see, and materializing only those
@@ -620,6 +639,11 @@ public sealed partial class ChatViewModel : ObservableObject
             IReadOnlyList<ThinkingSegmentDelta>? thinkingSegments = null;
             var retryCurrent = 0;
             var wasStopped = false;
+            var contextTokens = 0;
+            var contextWindow = 0;
+            var compactionTokensBefore = 0;
+            var compactionTokensAfter = 0;
+            string? compactionReason = null;
             if (!string.IsNullOrEmpty(row.Meta))
             {
                 try
@@ -652,6 +676,11 @@ public sealed partial class ChatViewModel : ObservableObject
                         toolCalls);
                     wasStopped = doc.RootElement.TryGetProperty("stopped", out var st)
                                  && st.ValueKind == JsonValueKind.True;
+                    contextTokens = ReadMetaInt(doc.RootElement, "context_tokens");
+                    contextWindow = ReadMetaInt(doc.RootElement, "context_window");
+                    compactionTokensBefore = ReadMetaInt(doc.RootElement, "compaction_tokens_before");
+                    compactionTokensAfter = ReadMetaInt(doc.RootElement, "compaction_tokens_after");
+                    compactionReason = ReadString(doc.RootElement, "compaction_reason");
                 }
                 catch (JsonException) { }
             }
@@ -693,7 +722,12 @@ public sealed partial class ChatViewModel : ObservableObject
                 retryCurrent,
                 toolCalls,
                 thinkingSegments,
-                wasStopped));
+                wasStopped,
+                contextTokens,
+                contextWindow,
+                compactionTokensBefore,
+                compactionReason,
+                compactionTokensAfter));
         }
 
         return prepared;
@@ -713,6 +747,11 @@ public sealed partial class ChatViewModel : ObservableObject
             RetryAttempts = prepared.RetryAttempts,
             RetryCurrentIndex = prepared.RetryCurrentIndex,
             WasStopped = prepared.WasStopped,
+            ContextTokens = prepared.ContextTokens,
+            ContextWindow = prepared.ContextWindow,
+            CompactionTokensBefore = prepared.CompactionTokensBefore,
+            CompactionReason = prepared.CompactionReason,
+            CompactionTokensAfter = prepared.CompactionTokensAfter,
             AutoCollapseThinkingOnComplete = AutoCollapseThinking
         };
         if (prepared.ToolCalls is { Count: > 0 })
@@ -748,7 +787,12 @@ public sealed partial class ChatViewModel : ObservableObject
         int RetryCurrentIndex,
         IReadOnlyList<ToolCallDelta>? ToolCalls,
         IReadOnlyList<ThinkingSegmentDelta>? ThinkingSegments,
-        bool WasStopped);
+        bool WasStopped,
+        int ContextTokens = 0,
+        int ContextWindow = 0,
+        int CompactionTokensBefore = 0,
+        string? CompactionReason = null,
+        int CompactionTokensAfter = 0);
 
     /// <summary>
     /// Materialize up to <paramref name="count"/> more of the history parked by
@@ -941,6 +985,40 @@ public sealed partial class ChatViewModel : ObservableObject
         _messageRepo.Update(vm.MessageId, vm.Content, BuildMessageMeta(vm));
     }
 
+    /// <summary>
+    /// Mark a user-requested compaction where it actually happened.
+    ///
+    /// An automatic compaction arrives mid-turn and is recorded on the message being
+    /// streamed. A manual one has no turn to ride on, so nothing was writing it down
+    /// at all: the gauge held it, and the gauge is rebuilt empty on every load — which
+    /// is why reopening the conversation restored the pre-compaction reading from the
+    /// last turn as if nothing had been cut.
+    ///
+    /// It lands on the newest assistant message, the last thing the model wrote before
+    /// its history was summarized. A turn still streaming has no row yet; leaving the
+    /// property set is enough, because <see cref="FinalizeAssistantMessage(MessageViewModel)"/>
+    /// writes the marker along with everything else.
+    /// </summary>
+    public void NoteManualCompaction(ContextGaugeViewModel.CompactionSizes sizes)
+    {
+        if (sizes.TokensBefore <= 0) return;
+
+        var target = Messages.LastOrDefault(m =>
+            string.Equals(m.Role, ChatMessage.RoleAssistant, StringComparison.OrdinalIgnoreCase));
+        if (target is null) return;
+
+        target.NoteCompaction(
+            sizes.TokensBefore,
+            sizes.TokensAfter,
+            MessageViewModel.ManualCompactionReason);
+        if (string.IsNullOrWhiteSpace(target.MessageId)) return;
+
+        UpdatePersistedMessage(target);
+        // Cloud sync picks work up by updated_at, and updating a message row alone
+        // does not move it.
+        TouchConversation();
+    }
+
     private static string BuildMessageMeta(MessageViewModel vm)
     {
         var meta = new JsonObject();
@@ -952,6 +1030,14 @@ public sealed partial class ChatViewModel : ObservableObject
         {
             meta["response_stats"] = BuildUsageJson(vm.Usage);
         }
+        // Separate from response_stats: that is the turn's cost, this is how full
+        // the context was left. Persisted so reopening a conversation restores the
+        // gauge instead of blanking it until the next turn.
+        if (vm.ContextTokens > 0) meta["context_tokens"] = vm.ContextTokens;
+        if (vm.ContextWindow > 0) meta["context_window"] = vm.ContextWindow;
+        if (vm.CompactionTokensBefore > 0) meta["compaction_tokens_before"] = vm.CompactionTokensBefore;
+        if (vm.CompactionTokensAfter > 0) meta["compaction_tokens_after"] = vm.CompactionTokensAfter;
+        if (!string.IsNullOrWhiteSpace(vm.CompactionReason)) meta["compaction_reason"] = vm.CompactionReason;
         if (vm.Sources is { Count: > 0 })
         {
             meta["sources"] = new JsonArray(vm.Sources
@@ -1390,6 +1476,68 @@ public sealed partial class ChatViewModel : ObservableObject
         {
             return null;
         }
+    }
+
+    private static int ReadMetaInt(JsonElement root, string propertyName) =>
+        root.TryGetProperty(propertyName, out var node)
+        && node.ValueKind == JsonValueKind.Number
+        && node.TryGetInt32(out var value)
+            ? value
+            : 0;
+
+    /// <summary>
+    /// Put the gauge back to where the last turn left it.
+    ///
+    /// Walks backwards to the newest turn that recorded a reading. A turn that also
+    /// compacted is deliberately skipped rather than used: its reading describes the
+    /// context <em>before</em> the cut, and restoring that would show a nearly full
+    /// ring over a history that was just summarized down. The agent applies the same
+    /// rule to its own reporting — there is no honest number again until the model
+    /// replies once more.
+    /// </summary>
+    private void RestoreContextGauge(IReadOnlyList<PreparedMessage> messages)
+    {
+        var restore = SelectContextRestore(messages
+            .Select(m => new ContextRestoreCandidate(
+                m.Role == ChatMessage.RoleAssistant,
+                m.ContextTokens,
+                m.ContextWindow,
+                m.CompactionTokensBefore))
+            .ToList());
+
+        if (restore.CompactedBefore > 0)
+        {
+            // Known to have compacted, size unknown. Surfacing that is the point:
+            // it is why the ring is blank.
+            ContextGauge.ContextWindow = restore.Window;
+            ContextGauge.LastCompactionTokensBefore = restore.CompactedBefore;
+        }
+        else if (restore.Tokens > 0)
+        {
+            ContextGauge.Apply(new ContextUsageDelta(restore.Tokens, restore.Window));
+        }
+    }
+
+    internal readonly record struct ContextRestoreCandidate(
+        bool IsAssistant,
+        int Tokens,
+        int Window,
+        int CompactedBefore);
+
+    internal readonly record struct ContextRestore(int Tokens, int Window, int CompactedBefore);
+
+    /// <summary>The decision half of <see cref="RestoreContextGauge"/>, separated so
+    /// the compaction rule can be pinned without standing up a repository.</summary>
+    internal static ContextRestore SelectContextRestore(IReadOnlyList<ContextRestoreCandidate> turns)
+    {
+        for (var i = turns.Count - 1; i >= 0; i--)
+        {
+            var turn = turns[i];
+            if (!turn.IsAssistant) continue;
+            if (turn.CompactedBefore > 0) return new ContextRestore(0, turn.Window, turn.CompactedBefore);
+            if (turn.Tokens > 0 && turn.Window > 0) return new ContextRestore(turn.Tokens, turn.Window, 0);
+        }
+        return default;
     }
 
     private static Usage? ParseUsage(JsonElement root, string propertyName)

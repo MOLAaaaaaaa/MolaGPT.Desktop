@@ -109,13 +109,31 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 }
 
-public sealed class ToolGroupRow : TranscriptRow
+public sealed class ToolGroupRow : TranscriptRow, INotifyPropertyChanged
 {
+    private bool _isExpanded;
+
     public ToolGroupRow(MessageViewModel message, ToolGroupViewModel group, int segment)
         : base(message, $"{message.RowKey()}:{segment}:toolgroup")
         => Group = group;
 
     public ToolGroupViewModel Group { get; }
+
+    /// <summary>Fold state, kept on the row (not the control) so scrolling the
+    /// card out of view and back preserves the choice. Starts collapsed — a run
+    /// of calls reads as one line; the per-call detail is behind the fold.</summary>
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set
+        {
+            if (_isExpanded == value) return;
+            _isExpanded = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsExpanded)));
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
 
 public sealed class ThinkingRow : TranscriptRow

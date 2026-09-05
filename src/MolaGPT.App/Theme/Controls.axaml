@@ -510,6 +510,82 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
   </Style>
 
+  <!-- ============================== ToolChip ============================ -->
+  <!-- ToolToggleButton / ToolPlainButton: 30 high, radius 10, Font.Cjk 12
+       Medium, brand tint when checked.
+
+       Lives here rather than in ComposerView for the same reason Button.send
+       does: the image workbench's composer carries the same strip of chips and
+       had grown a near-identical private copy of this style. -->
+  <Style Selector=":is(Button).toolchip">
+    <Setter Property="Height" Value="30" />
+    <Setter Property="MinHeight" Value="30" />
+    <Setter Property="Padding" Value="10,0" />
+    <Setter Property="Margin" Value="0,0,4,0" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    <Setter Property="FontFamily" Value="{DynamicResource Font.Cjk}" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontWeight" Value="Medium" />
+  </Style>
+  <Style Selector=":is(Button).toolchip:pointerover /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+  </Style>
+  <Style Selector=":is(Button).toolchip:pointerover">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+  </Style>
+  <Style Selector="ToggleButton.toolchip:checked /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+  </Style>
+  <Style Selector="ToggleButton.toolchip:checked">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+  </Style>
+
+  <!-- ============================ ContextGauge =========================== -->
+  <!-- The composer's context ring. Quieter than a toolchip on purpose: it is an
+       indicator that happens to be clickable, not an action, and at 正常 pressure
+       it has nothing to say. Hover changes the background only — see the house
+       rule about hover states earning their motion. -->
+  <Style Selector="Button.contextgauge">
+    <Setter Property="Height" Value="28" />
+    <Setter Property="MinHeight" Value="28" />
+    <Setter Property="Padding" Value="7,0" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="FontFamily" Value="{DynamicResource Font.Cjk}" />
+  </Style>
+  <Style Selector="Button.contextgauge:pointerover /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+  </Style>
+
+  <!-- Three states, and only two of them are colours the eye should catch.
+       Warning means "a good moment to compact deliberately"; critical means the
+       agent is about to do it for you. -->
+  <Style Selector="r|ContextRing">
+    <Setter Property="ArcBrush" Value="{DynamicResource Brush.Text.Secondary}" />
+  </Style>
+  <Style Selector="r|ContextRing.warning">
+    <Setter Property="ArcBrush" Value="{DynamicResource Brush.Warning}" />
+  </Style>
+  <Style Selector="r|ContextRing.critical">
+    <Setter Property="ArcBrush" Value="{DynamicResource Brush.Error}" />
+  </Style>
+
+  <!-- ============================== TextLink ============================ -->
+  <!-- The other class three windows each defined privately and the image
+       workbench used without any rule in scope, so its 「收起结果」 came out as
+       Secondary body text. AboutWindow keeps its Primary.Hover; the padding
+       stays with the callers, who disagree about it. -->
+  <Style Selector="Button.textlink">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+    <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+  </Style>
+
   <!-- ============================ OutlineButton ========================= -->
   <Style Selector="Button.outline">
     <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
@@ -601,8 +677,33 @@
   <Style Selector="TextBlock.muted">
     <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
   </Style>
+  <!-- Field caption. SettingsWindow and ProviderDialog each carried a private
+       copy of this and everyone else who wrote Classes="label" — the image
+       workbench, SystemPromptWindow — got nothing at all, because a class with
+       no rule in scope is silently ignored. Margins stay with the callers:
+       theirs already differ. -->
+  <Style Selector="TextBlock.label">
+    <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+  </Style>
   <Style Selector="TextBlock.secondary">
     <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+  </Style>
+
+  <!-- What the user said, wherever they said it. Lived in TranscriptView until
+       the image workbench needed the same shape for a prompt: the two are the
+       same thing — your words, on the right, in a tinted box — and a second copy
+       would have drifted the moment either was touched. TranscriptView keeps its
+       markdown-margin override; this is only the box. -->
+  <Style Selector="Border.userbubble">
+    <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.UserBubble}" />
+    <Setter Property="Padding" Value="14,10" />
+    <Setter Property="MaxWidth" Value="{DynamicResource Size.UserBubble.MaxWidth}" />
+    <Setter Property="VerticalAlignment" Value="Top" />
   </Style>
   <Style Selector="SelectableTextBlock">
     <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
@@ -634,12 +735,26 @@
     </Style.Animations>
   </Style>
 
+  <!--
+    This padding is the flyout's shadow budget, not just its gap from the anchor.
+
+    A BoxShadow does not participate in measure, so it never enlarges the popup:
+    on Windows a flyout is its own PopupRoot window sized to this presenter, and
+    whatever the shadow paints beyond that edge is simply not in the window. The
+    padding is therefore the only room the shadow has, on every side.
+
+    It ran at 12 against a `0 10 30` shadow — which reaches roughly offsetY+blur
+    ≈ 40px below the card — so the softest, widest part was cut off flat, worst
+    along the bottom edge where the offset pushes it. Enlarging the padding alone
+    would only have pushed the card away from its anchor, so the shadow was
+    brought back within budget at the same time.
+  -->
   <Style Selector="FlyoutPresenter.molaflyout">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="CornerRadius" Value="0" />
-    <Setter Property="Padding" Value="12" />
+    <Setter Property="Padding" Value="20" />
     <Setter Property="MinWidth" Value="0" />
     <Setter Property="MinHeight" Value="0" />
   </Style>
@@ -648,7 +763,10 @@
     <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Strong}" />
     <Setter Property="BorderThickness" Value="1" />
     <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
-    <Setter Property="BoxShadow" Value="0 10 30 0 #3D16202A" />
+    <!-- Reaches 18px down, 14 sideways, 10 up — inside the 20px budget above.
+         A shorter shadow that renders whole reads as more elevation than a tall
+         one with its falloff sliced off. -->
+    <Setter Property="BoxShadow" Value="0 4 14 0 #3D16202A" />
   </Style>
 
   <!-- The Windows tray menu is a separate transparent window. The low-latency
@@ -705,6 +823,13 @@
     <Setter Property="Padding" Value="9,5" />
     <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
     <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+    <!-- Every tooltip in the app was a short label until the gallery started
+         putting whole prompts in one. Unbounded, a 200-character prompt lays
+         itself out as a single line wider than the screen. -->
+    <Setter Property="MaxWidth" Value="420" />
+  </Style>
+  <Style Selector="ToolTip TextBlock">
+    <Setter Property="TextWrapping" Value="Wrap" />
   </Style>
 
   <!-- ============================= ScrollBar ============================ -->

@@ -196,7 +196,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
             e.ReasoningEffort = string.IsNullOrWhiteSpace(reasoningEffort) ? null : reasoningEffort;
             e.PermissionMode = permissionMode ?? _config.PermissionMode;
             e.ApprovalPolicy = backendId == CodexBackend.BackendId
-                ? approvalPolicy ?? CodexApprovalPolicy.OnRequest
+                ? CodexBackend.NormalizeApprovalPolicy(approvalPolicy)
                 : null;
         });
 
@@ -510,7 +510,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
             if (reasoningEffort is not null) { e.ReasoningEffort = reasoningEffort; changed = true; needsRespawn = true; }
             if (permissionMode is not null) { e.PermissionMode = permissionMode.Value; changed = true; needsRespawn = true; }
             if (approvalPolicy is not null && e.BackendId == CodexBackend.BackendId)
-            { e.ApprovalPolicy = approvalPolicy; changed = true; needsRespawn = true; }
+            { e.ApprovalPolicy = CodexBackend.NormalizeApprovalPolicy(approvalPolicy); changed = true; needsRespawn = true; }
         });
         if (!changed) return;
 
@@ -782,10 +782,9 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
             _ => isCodex ? "可写" : "逐项询问"
         };
         if (!isCodex) return $"{model} · {posture}";
-        var approval = e.ApprovalPolicy ?? CodexApprovalPolicy.OnRequest;
+        var approval = CodexBackend.NormalizeApprovalPolicy(e.ApprovalPolicy);
         var approvalLabel = approval switch
         {
-            CodexApprovalPolicy.Untrusted => "严格审批",
             CodexApprovalPolicy.Never => "免审批",
             _ => "按需审批"
         };

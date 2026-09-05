@@ -155,16 +155,158 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         string? errorMessage = null;
         var pendingArgs = new Dictionary<string, string>(StringComparer.Ordinal);
         var preview = new ToolPreviewTracker();
+
+        // The same window Pi was catalogued with, so the gauge is measured against
+        // the very number its auto-compaction is thresholded on.
+        var contextWindow = ModelContextWindows.ResolveOrDefault(
+            creds.Model,
+            Models.FirstOrDefault(m => m.Id.Equals(creds.Model, StringComparison.OrdinalIgnoreCase))?.ContextWindow);
+
         await foreach (var line in lease.Session
                            .SendTurnAsync(creds.Model, thinkingLevel, userText, images, ct)
                            .ConfigureAwait(false))
         {
-            var chunk = MapLine(line, options, pendingArgs, preview, ref errorMessage);
+            var chunk = MapLine(line, options, pendingArgs, preview, contextWindow, ref errorMessage);
             if (chunk is not null) yield return chunk;
         }
 
         if (errorMessage is not null)
-            throw new InvalidOperationException(errorMessage);
+            throw new InvalidOperationException(HumanizeAgentError(errorMessage));
+    }
+
+    /// <summary>
+    /// Summarize a conversation's history on demand, ahead of the threshold.
+    ///
+    /// Worth doing early: a summary made at 60% is written from a complete view of
+    /// the conversation, while one forced at the limit is written from a view that
+    /// is already crowded — the agent compacts either way, this only decides whether
+    /// the user picks the moment.
+    ///
+    /// Runs through a full lease because the summary is a real model call and has to
+    /// bill to the same endpoint the conversation does. It is the only work in the
+    /// slot while it holds it, which is correct: compacting beside a live answer
+    /// would have two writers rewriting one transcript.
+    /// </summary>
+    public async Task<PiCompactionResult?> CompactAsync(
+        string? conversationId,
+        string modelId,
+        string? customInstructions,
+        CancellationToken ct)
+    {
+        await using var lease = await AcquireOperationLeaseAsync(conversationId, modelId, ct)
+            .ConfigureAwait(false);
+        return await lease.Session.CompactAsync(modelId, customInstructions, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The user's standing answer to "may the agent summarize my history on its
+    /// own?". Application-wide and owned by <see cref="PiRuntime"/>, which re-applies
+    /// it to every sidecar it hands out — see the property there for why it cannot
+    /// live any closer to the session.
+    /// </summary>
+    public bool AutoCompactionEnabled
+    {
+        get => _runtime.AutoCompactionEnabled;
+        set => _runtime.AutoCompactionEnabled = value;
+    }
+
+    /// <summary>
+    /// Switch Pi's automatic compaction, now and for every sidecar afterwards.
+    ///
+    /// Turning it off means the transcript is never summarized behind the user's
+    /// back, and equally that a long enough conversation will eventually be refused
+    /// upstream. That trade is the user's to make, which is the whole reason this is
+    /// reachable.
+    ///
+    /// Sent explicitly even though the lease already re-applied it, because that
+    /// re-apply is deliberately best-effort — it must never fail a turn. A click is
+    /// the one moment where a sidecar that refuses the command has to be reported
+    /// rather than swallowed, so this path keeps its own throwing round-trip.
+    /// </summary>
+    public async Task SetAutoCompactionAsync(
+        string? conversationId,
+        string modelId,
+        bool enabled,
+        CancellationToken ct)
+    {
+        AutoCompactionEnabled = enabled;
+        await using var lease = await AcquireOperationLeaseAsync(conversationId, modelId, ct)
+            .ConfigureAwait(false);
+        await lease.Session.SetAutoCompactionAsync(enabled, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A lease for work that is not a turn: same endpoint and same transcript, but
+    /// no tools and no system prompt.
+    ///
+    /// The empty tool catalogue is safe because the bridge binding is per-lease —
+    /// the next real turn installs the full set again — and compaction never calls a
+    /// tool anyway. The executor throws rather than returning something bland, so a
+    /// future caller that does need tools finds out immediately instead of getting
+    /// silently toolless behaviour.
+    /// </summary>
+    private async Task<PiTurnLease> AcquireOperationLeaseAsync(
+        string? conversationId,
+        string modelId,
+        CancellationToken ct)
+    {
+        var creds = _config.ResolveCreds(new ChatRequest(modelId, Array.Empty<ChatMessage>()));
+
+        var binding = new PiWorkToolBridge.TurnBinding(
+            (name, _, _) => throw new InvalidOperationException(
+                $"Pi 在非对话操作中请求了工具 {name}，该通道不提供工具。"),
+            () => "[]",
+            () => null);
+
+        var target = new PiWorkLlmShim.ForwardTarget(
+            creds.Endpoint,
+            creds.TokenProvider,
+            creds.OnUnauthorized,
+            creds.Headers,
+            creds.ExtraBody,
+            creds.Auth,
+            creds.DropBodyKeys ?? PiEndpointQuirks.DropBodyKeysFor(creds.Endpoint),
+            creds.PathMode);
+
+        return await _runtime.AcquireAsync(
+            _config.Spec,
+            conversationId ?? PiRuntime.DraftKey,
+            target,
+            binding,
+            ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Pi reports an upstream failure as <c>"&lt;status&gt;: &lt;raw body&gt;"</c>,
+    /// which puts a wall of JSON in front of the one sentence that says what to do
+    /// about it. This peels it back to the human message and names the rate limit
+    /// explicitly — 429 is what a long research turn actually dies of, and the bare
+    /// status code reads like a crash instead of "you went too fast".
+    /// </summary>
+    internal static string HumanizeAgentError(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "Agent 运行失败。";
+
+        var text = raw.Trim();
+        var status = 0;
+        var separator = text.IndexOf(':');
+        if (separator > 0
+            && int.TryParse(text[..separator], out var parsed)
+            && parsed is >= 100 and <= 599)
+        {
+            status = parsed;
+            text = text[(separator + 1)..].Trim();
+        }
+
+        var detail = ChatApiErrorHelper.ExtractErrorMessage(text);
+        if (string.IsNullOrWhiteSpace(detail)) detail = text;
+
+        return status switch
+        {
+            0 => detail,
+            429 => $"请求过于频繁，请稍后重试（429）。{detail}",
+            _ => $"HTTP {status}：{detail}"
+        };
     }
 
     /// <summary>
@@ -252,6 +394,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         LocalToolOptions options,
         IDictionary<string, string> pendingArgs,
         ToolPreviewTracker preview,
+        int contextWindow,
         ref string? errorMessage)
     {
         JsonDocument doc;
@@ -334,11 +477,21 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                     var output = 0;
                     var total = 0;
                     var counted = false;
+
+                    // The turn's cost is a sum; how full the context is, is not.
+                    // Pi sizes the context from the newest assistant message alone
+                    // (its token total already includes everything replayed to the
+                    // model), and its compaction threshold reads that same number —
+                    // so summing here would put the gauge and the trigger on
+                    // different scales.
+                    int? contextTokens = null;
+
                     if (root.TryGetProperty("messages", out var msgs) && msgs.ValueKind == JsonValueKind.Array)
                     {
                         foreach (var mm in msgs.EnumerateArray())
                         {
-                            if (mm.TryGetProperty("stopReason", out var sr) && sr.GetString() == "error")
+                            var stopReason = mm.TryGetProperty("stopReason", out var sr) ? sr.GetString() : null;
+                            if (stopReason == "error")
                                 errorMessage = mm.TryGetProperty("errorMessage", out var em) ? em.GetString() : "Pi agent error";
 
                             if (!mm.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
@@ -347,9 +500,58 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                             input += Int(usage, "input") + Int(usage, "cacheRead") + Int(usage, "cacheWrite");
                             output += Int(usage, "output") + Int(usage, "reasoning");
                             total += Int(usage, "totalTokens");
+
+                            // A failed or cancelled call reports zeroes; taking those
+                            // as the context size would empty the gauge exactly when
+                            // the context is at its fullest, which is the reading a
+                            // user is most likely to act on.
+                            if (stopReason is "error" or "aborted") continue;
+                            var messageTokens = Int(usage, "totalTokens");
+                            if (messageTokens <= 0)
+                            {
+                                messageTokens = Int(usage, "input") + Int(usage, "output")
+                                    + Int(usage, "cacheRead") + Int(usage, "cacheWrite");
+                            }
+                            if (messageTokens > 0) contextTokens = messageTokens;
                         }
                     }
-                    return counted ? new ChatChunk(Usage: new Usage(input, output, total)) : null;
+
+                    if (!counted) return null;
+                    return new ChatChunk(
+                        Usage: new Usage(input, output, total),
+                        ContextUsage: new ContextUsageDelta(contextTokens, contextWindow));
+                }
+
+                // Pi compacts on its own once the context nears the window. It has
+                // always emitted these on the same channel as the tool events; they
+                // were simply dropped here, which is why a conversation could lose
+                // its own history with nothing on screen to say so.
+                case "compaction_start":
+                    return new ChatChunk(Compaction: new CompactionDelta(
+                        Completed: false,
+                        Reason: Str(root, "reason")));
+
+                case "compaction_end":
+                {
+                    var aborted = root.TryGetProperty("aborted", out var ab)
+                                  && ab.ValueKind == JsonValueKind.True;
+                    var tokensBefore = 0;
+                    var tokensAfter = 0;
+                    if (root.TryGetProperty("result", out var result)
+                        && result.ValueKind == JsonValueKind.Object)
+                    {
+                        tokensBefore = Int(result, "tokensBefore");
+                        tokensAfter = Int(result, "estimatedTokensAfter");
+                    }
+                    return new ChatChunk(Compaction: new CompactionDelta(
+                        Completed: true,
+                        Reason: Str(root, "reason"),
+                        TokensBefore: tokensBefore,
+                        Aborted: aborted,
+                        ErrorMessage: root.TryGetProperty("errorMessage", out var em)
+                            ? em.GetString()
+                            : null,
+                        TokensAfter: tokensAfter));
                 }
 
                 case "agent_settled":

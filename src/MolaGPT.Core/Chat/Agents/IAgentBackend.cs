@@ -29,7 +29,11 @@ public enum AgentPermissionMode
 /// </summary>
 public enum CodexApprovalPolicy
 {
-    /// <summary>Ask before anything outside the trusted set (most cautious).</summary>
+    /// <summary>
+    /// Retired Codex wire value (<c>untrusted</c>). Kept so older phones and
+    /// persisted sessions still deserialize; mapped to <see cref="OnRequest"/>
+    /// before talking to the CLI (Codex 0.149+ rejects the old setting).
+    /// </summary>
     Untrusted,
 
     /// <summary>Ask only when the model itself requests escalation (the Codex default).</summary>

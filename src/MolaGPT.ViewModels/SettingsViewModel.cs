@@ -6,6 +6,7 @@ using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Models;
 using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels.Services;
@@ -22,6 +23,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string SyncConversationsKey = "sync_conversations";
     private const string EnterToSendKey = "enter_to_send";
     public const string AutoCollapseThinkingKey = "auto_collapse_thinking";
+    private const string AutoCompactionKey = "auto_compaction";
     private const string TracksEnabledKey = "molagpt_tracks_enabled";
     private const string CompletionNotificationKey = "completion_notification";
     private const string ThemeModeKey = "theme_mode";
@@ -47,6 +49,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string WorkbenchImageGenerationModelIdKey = "image_workbench_model_id";
     private const string WorkbenchImageGenerationSizeKey = "image_workbench_size";
     private const string WorkbenchImageGenerationStyleKey = "image_workbench_style";
+    private const string WorkbenchImageGenerationCountKey = "image_workbench_count";
     private const string PythonToolEnabledKey = "python_tool_enabled";
     private const string FileToolsEnabledKey = "file_tools_enabled";
     private const string PythonToolExecutablePathKey = "python_tool_executable_path";
@@ -81,6 +84,19 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private ThemeMode _themeMode = ThemeMode.System;
     [ObservableProperty] private bool _enterToSend = true;
     [ObservableProperty] private bool _autoCollapseThinking = true;
+
+    /// <summary>
+    /// Whether the agent may summarize a conversation's history on its own once the
+    /// context fills up. Mirrors Pi's default.
+    ///
+    /// Application-wide rather than per-conversation: it is a stance on whether the
+    /// agent is allowed to rewrite your history at all, and it only ever comes into
+    /// play near the context limit — so a per-conversation copy would be a setting
+    /// you had to re-make in every long chat and that meant nothing in short ones.
+    /// The control stays in the composer's context popup, where the decision is
+    /// actually taken; this is only where the answer is kept.
+    /// </summary>
+    [ObservableProperty] private bool _autoCompactionEnabled = true;
     public const double MinFontScale = 0.8;
     public const double MaxFontScale = 1.4;
     [ObservableProperty] private double _fontScale = 1.0;
@@ -108,6 +124,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string? _workbenchImageGenerationModelId;
     [ObservableProperty] private string _workbenchImageGenerationSize = "1024x1024";
     [ObservableProperty] private string? _workbenchImageGenerationStyle;
+
+    /// <summary>How many pictures one 生成模式 run produces. Clamped on write, so
+    /// a hand-edited settings row cannot make the workbench fire ten requests.</summary>
+    [ObservableProperty] private int _workbenchImageGenerationCount = 1;
     [ObservableProperty] private bool _pythonToolEnabled;
     [ObservableProperty] private bool _fileToolsEnabled;
     [ObservableProperty] private string? _pythonToolExecutablePath;
@@ -196,6 +216,8 @@ public sealed partial class SettingsViewModel : ObservableObject
                 EnterToSend = enterToSend;
             if (bool.TryParse(_settingsRepo.Get(AutoCollapseThinkingKey), out var autoCollapseThinking))
                 AutoCollapseThinking = autoCollapseThinking;
+            if (bool.TryParse(_settingsRepo.Get(AutoCompactionKey), out var autoCompaction))
+                AutoCompactionEnabled = autoCompaction;
             if (bool.TryParse(_settingsRepo.Get(TracksEnabledKey), out var tracksEnabled))
                 TracksEnabled = tracksEnabled;
             if (bool.TryParse(_settingsRepo.Get(CompletionNotificationKey), out var completionNotification))
@@ -241,6 +263,9 @@ public sealed partial class SettingsViewModel : ObservableObject
             WorkbenchImageGenerationModelId = _settingsRepo.Get(WorkbenchImageGenerationModelIdKey) ?? ImageGenerationModelId;
             WorkbenchImageGenerationSize = _settingsRepo.Get(WorkbenchImageGenerationSizeKey) ?? ImageGenerationSize;
             WorkbenchImageGenerationStyle = _settingsRepo.Get(WorkbenchImageGenerationStyleKey) ?? ImageGenerationStyle;
+            WorkbenchImageGenerationCount = int.TryParse(_settingsRepo.Get(WorkbenchImageGenerationCountKey), out var batch)
+                ? Math.Clamp(batch, 1, ImageGenerationTool.MaxBatchSize)
+                : 1;
             PythonToolEnabled = bool.TryParse(_settingsRepo.Get(PythonToolEnabledKey), out var pythonEnabled) && pythonEnabled;
             FileToolsEnabled = bool.TryParse(_settingsRepo.Get(FileToolsEnabledKey), out var fileToolsEnabled) && fileToolsEnabled;
             PythonToolExecutablePath = _settingsRepo.Get(PythonToolExecutablePathKey);
@@ -316,6 +341,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(AutoCollapseThinkingKey, value.ToString());
+    }
+
+    partial void OnAutoCompactionEnabledChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(AutoCompactionKey, value.ToString());
     }
 
     partial void OnFontScaleChanged(double value)
@@ -506,6 +537,19 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings) return;
         SetOrRemove(WorkbenchImageGenerationStyleKey, value);
+    }
+
+    partial void OnWorkbenchImageGenerationCountChanged(int value)
+    {
+        if (_loadingSettings) return;
+        var clamped = Math.Clamp(value, 1, ImageGenerationTool.MaxBatchSize);
+        if (clamped != value)
+        {
+            WorkbenchImageGenerationCount = clamped;
+            return;
+        }
+
+        SetOrRemove(WorkbenchImageGenerationCountKey, clamped.ToString());
     }
 
     partial void OnPythonToolEnabledChanged(bool value)

@@ -151,6 +151,10 @@ public sealed partial class MainViewModel : ObservableObject
                 _conversationList.SetGenerating(conversationId, true);
             _backgroundStreams.TaskCompleted += (_, e) =>
                 _conversationList.SetGenerating(e.ConversationId, false);
+            // A turn that died is just as over as one that answered. Without this
+            // the row keeps spinning forever on the failure path.
+            _backgroundStreams.TaskFailed += (_, e) =>
+                _conversationList.SetGenerating(e.ConversationId, false);
         }
 
         _chat.PropertyChanged += (_, e) =>

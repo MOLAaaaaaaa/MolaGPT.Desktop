@@ -6,6 +6,7 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using System.Text.RegularExpressions;
+using Markdig;
 using Markdig.Syntax;
 using Markdig.Syntax.Inlines;
 
@@ -27,6 +28,10 @@ namespace MolaGPT.App.Rendering;
 /// </summary>
 public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
 {
+    private static readonly MarkdownPipeline s_pipeline = new MarkdownPipelineBuilder()
+        .DisableHtml()
+        .Build();
+
     public static readonly StyledProperty<string?> MarkdownProperty =
         AvaloniaProperty.Register<MarkdownTextBlock, string?>(nameof(Markdown));
 
@@ -134,7 +139,7 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
         try
         {
             var protectedSource = InlineMath.Protect(source, out _protectedMath);
-            var document = Markdig.Markdown.Parse(protectedSource);
+            var document = Markdig.Markdown.Parse(protectedSource, s_pipeline);
             var wrote = AppendBlocks(target, document, first: true);
 
             // A block Markdig folds away entirely (a lone reference definition,
@@ -256,8 +261,8 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
                         AccentBrush, Avalonia.Media.TextDecorations.Underline);
                     break;
 
-                case LineBreakInline lineBreak:
-                    target.Add(lineBreak.IsHard ? new LineBreak() : new Run(" "));
+                case LineBreakInline:
+                    target.Add(new LineBreak());
                     break;
 
                 case AutolinkInline autolink:
@@ -270,12 +275,6 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
                     AppendText(
                         target, entity.Transcoded.ToString(), style, weight, strike,
                         null, null);
-                    break;
-
-                // Citation tags are normalized before block parsing. Other
-                // inline HTML is not visible content; calling ToString() here
-                // exposes Markdig's internal syntax-node name in the transcript.
-                case HtmlInline:
                     break;
 
                 case ContainerInline nested:

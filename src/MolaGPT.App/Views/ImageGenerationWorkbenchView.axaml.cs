@@ -32,7 +32,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
     private readonly Func<string, string?, string> _createConversation;
     private readonly Action<string, bool> _onGeneratingChanged;
     private readonly NotificationCenter? _notifications;
-    private readonly ObservableCollection<ImageWorkbenchResult> _results = new();
+    private readonly ObservableCollection<ImageWorkbenchRun> _runs = new();
     private readonly ObservableCollection<ImageWorkbenchResult> _gallery = new();
     private CancellationTokenSource? _cts;
     private string? _conversationId;
@@ -60,12 +60,15 @@ public partial class ImageGenerationWorkbenchView : UserControl
     /// </summary>
     private enum WorkbenchMode
     {
-        /// <summary>One shot. Each run starts from the same place: the base
-        /// image if there is one, otherwise nothing. Output never feeds back.</summary>
+        /// <summary>Spread. One prompt, up to four pictures side by side, and
+        /// each run starts from the same place: the base image if there is one,
+        /// otherwise nothing. Output never feeds back.</summary>
         Single,
 
-        /// <summary>Iterative. Each run edits the newest image in the task —
-        /// the last result, or the base image before anything is generated.</summary>
+        /// <summary>Chain. One picture at a time, each editing the newest image
+        /// in the task — the last result, or the base image before anything has
+        /// been generated. A batch has no single newest picture to continue
+        /// from, which is why the count is pinned to one here.</summary>
         Conversation
     }
 
@@ -91,7 +94,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         _notifications = notifications;
 
         InitializeComponent();
-        PART_Results.ItemsSource = _results;
+        PART_Results.ItemsSource = _runs;
         PART_Gallery.ItemsSource = _gallery;
         PART_CurrentTab.Click += (_, _) => ShowCurrent();
         PART_GalleryTab.Click += (_, _) => ShowGallery();
@@ -119,7 +122,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         PART_ComposerShell.AddHandler(DragDrop.DragOverEvent, OnSourceDragOver);
         PART_ComposerShell.AddHandler(DragDrop.DropEvent, OnSourceDrop);
 
-        _results.CollectionChanged += (_, _) =>
+        _runs.CollectionChanged += (_, _) =>
         {
             UpdateEmptyState();
             UpdateSourceUi();
@@ -137,10 +140,30 @@ public partial class ImageGenerationWorkbenchView : UserControl
 
     public event EventHandler? CloseRequested;
     public event EventHandler? OpenSettingsRequested;
+
+    /// <summary>A gallery cell asking to open the task it came from. Carries the
+    /// conversation id, not the result: the host routes it through the sidebar
+    /// so the list highlights the same task the workbench switches to.</summary>
+    public event EventHandler<string>? OpenTaskRequested;
     public bool IsGenerating => _cts is not null;
     public string? ConversationId => _conversationId;
 
     private bool SupportsEdit => _settings.SelectedWorkbenchImageGenerationModel?.SupportsEdit == true;
+
+    /// <summary>
+    /// The line above the prompt box. It collapses when empty, which is the
+    /// normal case: this used to be a permanent paragraph in the 生成参数 rail
+    /// that spent most of its height restating what the header's model chip
+    /// already says.
+    /// </summary>
+    private string StatusText
+    {
+        set
+        {
+            PART_Status.Text = value;
+            PART_Status.IsVisible = !string.IsNullOrWhiteSpace(value);
+        }
+    }
 
     private void InitializeUi()
     {
@@ -174,7 +197,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         var prompt = PART_Prompt.Text?.Trim() ?? string.Empty;
         if (prompt.Length == 0)
         {
-            PART_Status.Text = "请先输入图像描述。";
+            StatusText = "请先输入描述";
             PART_Prompt.Focus();
             return;
         }
@@ -186,12 +209,19 @@ public partial class ImageGenerationWorkbenchView : UserControl
         var modelLabel = selected?.Label ?? modelId;
         var editSource = ResolveEditSource();
         var isEdit = editSource is not null;
+        var count = EffectiveCount;
         var taskTitle = CurrentTaskTitle();
         if (IsDefaultTaskTitle(taskTitle)) taskTitle = BuildTaskTitle(prompt);
 
-        var pending = ImageWorkbenchResult.Pending(prompt, taskTitle, isEdit, modelLabel);
+        var pending = ImageWorkbenchRun.Pending(prompt, taskTitle, isEdit, modelLabel, modelId, providerId);
         _hiddenNotificationShown = false;
-        _results.Add(pending);
+        _runs.Add(pending);
+
+        // Emptied the moment the run is queued, exactly like the chat composer:
+        // the prompt is on screen in its own bubble now, so leaving a copy in
+        // the box only means typing over it. Put back if the run failed and
+        // nothing new has been typed since — the words are not worth losing.
+        PART_Prompt.Clear();
         ShowCurrent();
         ScrollResultsToEnd();
 
@@ -202,11 +232,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         {
             // HasEditSource can be true while the resolve came up empty — the
             // stored original was deleted between the last refresh and now.
-            PART_Status.Text = isEdit
-                ? "正在编辑图片。"
-                : HasEditSource
-                    ? "底图已不可用，本次改为直接生成。"
-                    : "正在生成图片。";
+            StatusText = !isEdit && HasEditSource ? "底图已失效，本次直接生成" : string.Empty;
             var options = _settings.BuildWorkbenchImageGenerationOptions() with
             {
                 Size = SelectedSize(),
@@ -215,106 +241,60 @@ public partial class ImageGenerationWorkbenchView : UserControl
             };
             var images = isEdit
                 ? await _imageGeneration.EditAsync(
-                    options, prompt, editSource!.Value.Bytes, editSource.Value.MimeType, cts.Token)
-                : await _imageGeneration.GenerateAsync(options, prompt, cts.Token);
+                    options, prompt, editSource!.Value.Bytes, editSource.Value.MimeType, count, cts.Token)
+                : await _imageGeneration.GenerateAsync(options, prompt, count, cts.Token);
 
             if (images.Count == 0)
             {
-                ReplacePending(pending, ImageWorkbenchResult.Error(
-                    prompt, taskTitle, isEdit, "未返回图片，请调整描述后重试。", modelLabel, modelId, providerId));
-                PART_Status.Text = "未返回图片，请调整描述后重试。";
+                Complete(pending, pending with { IsPending = false, ErrorMessage = "未返回图片，换个描述再试" });
+                RestorePrompt(prompt);
 
                 // Still a terminal state: without it the 「正在后台生成」 banner
                 // for this key would stay up for good.
-                if (!string.IsNullOrWhiteSpace(_conversationId))
-                {
-                    _notifications?.Notify(new AppNotification
-                    {
-                        Key = "image-" + _conversationId,
-                        Kind = NotifyKind.Warning,
-                        Title = string.IsNullOrWhiteSpace(taskTitle) ? "未返回图片" : $"「{taskTitle}」未返回图片",
-                        Body = "请调整描述后重试。",
-                        ConversationId = _conversationId,
-                        IsAnswerCompleted = true
-                    });
-                }
+                Announce(NotifyKind.Warning, taskTitle, "未返回图片", "换个描述再试", completed: true);
                 return;
             }
 
-            var insertIndex = _results.IndexOf(pending);
-            if (insertIndex >= 0) _results.RemoveAt(insertIndex);
-            else insertIndex = _results.Count;
-
-            var added = 0;
+            var results = new List<ImageWorkbenchResult>(images.Count);
+            var index = 0;
             foreach (var image in images)
             {
-                var fileName = $"generated-{DateTime.Now:yyyyMMdd-HHmmss}-{added + 1}{ExtensionForMime(image.MimeType)}";
+                var fileName = $"generated-{DateTime.Now:yyyyMMdd-HHmmss}-{++index}{ExtensionForMime(image.MimeType)}";
                 var localName = _attachmentStore.Save(image.Bytes, image.MimeType, fileName);
-                var result = ImageWorkbenchResult.Completed(
-                    fileName, image.MimeType, DecodeThumbnail(image.Bytes),
-                    ByteSourceFor(localName, image.Bytes), localName, image.RevisedPrompt,
-                    prompt, taskTitle, isEdit, modelLabel, modelId, providerId);
-                _results.Insert(Math.Min(insertIndex + added, _results.Count), result);
+                var result = new ImageWorkbenchResult(
+                    fileName, image.MimeType, ByteSourceFor(localName, image.Bytes), localName,
+                    image.RevisedPrompt, DecodeThumbnail(image.Bytes), prompt, DateTimeOffset.Now,
+                    modelLabel, _conversationId);
+                results.Add(result);
                 _gallery.Insert(0, result);
-                Persist(prompt, result);
-
-                // The chain head moves to what was just produced; the base image
-                // stays loaded for 生成模式, which always goes back to it.
-                _baseIsChainHead = false;
-                added++;
             }
 
-            PART_Status.Text = isEdit
-                ? $"编辑完成，共 {added} 张图片。"
-                : $"生成完成，共 {added} 张图片。";
-            _notifications?.Notify(new AppNotification
-            {
-                Key = "image-" + _conversationId,
-                Kind = NotifyKind.Success,
-                Title = string.IsNullOrWhiteSpace(taskTitle) ? "图像生成完成" : $"「{taskTitle}」生成完成",
-                Body = added > 0 ? $"已生成 {added} 张图片" : null,
-                ConversationId = _conversationId,
-                IsAnswerCompleted = true
-            });
+            // The chain head moves to what was just produced; the base image
+            // stays loaded for 生成模式, which always goes back to it.
+            _baseIsChainHead = false;
+            var done = pending with { IsPending = false, Images = results };
+            Complete(pending, done);
+            Persist(done);
+
+            Announce(NotifyKind.Success, taskTitle, "生成完成",
+                results.Count > 1 ? $"共 {results.Count} 张" : null, completed: true);
             ScrollResultsToEnd();
         }
         catch (OperationCanceledException)
         {
-            var error = ImageWorkbenchResult.Error(
-                prompt, taskTitle, isEdit, "已取消本次生成。", modelLabel, modelId, providerId);
-            ReplacePending(pending, error);
-            Persist(prompt, error);
-            PART_Status.Text = "已取消本次生成。";
-            if (!string.IsNullOrWhiteSpace(_conversationId))
-            {
-                _notifications?.Notify(new AppNotification
-                {
-                    Key = "image-" + _conversationId,
-                    Kind = NotifyKind.Warning,
-                    Title = string.IsNullOrWhiteSpace(taskTitle) ? "图像生成已取消" : $"「{taskTitle}」已取消",
-                    ConversationId = _conversationId,
-                    IsAnswerCompleted = true
-                });
-            }
+            var cancelled = pending with { IsPending = false, ErrorMessage = "已取消" };
+            Complete(pending, cancelled);
+            Persist(cancelled);
+            RestorePrompt(prompt);
+            Announce(NotifyKind.Warning, taskTitle, "已取消", null, completed: true);
         }
         catch (Exception ex)
         {
-            var error = ImageWorkbenchResult.Error(
-                prompt, taskTitle, isEdit, ex.Message, modelLabel, modelId, providerId);
-            ReplacePending(pending, error);
-            Persist(prompt, error);
-            PART_Status.Text = "生成失败：" + ex.Message;
-            if (!string.IsNullOrWhiteSpace(_conversationId))
-            {
-                _notifications?.Notify(new AppNotification
-                {
-                    Key = "image-" + _conversationId,
-                    Kind = NotifyKind.Error,
-                    Title = string.IsNullOrWhiteSpace(taskTitle) ? "图像生成失败" : $"「{taskTitle}」生成失败",
-                    Body = ex.Message,
-                    ConversationId = _conversationId
-                });
-            }
+            var failed = pending with { IsPending = false, ErrorMessage = ex.Message };
+            Complete(pending, failed);
+            Persist(failed);
+            RestorePrompt(prompt);
+            Announce(NotifyKind.Error, taskTitle, "生成失败", ex.Message, completed: false);
         }
         finally
         {
@@ -324,17 +304,49 @@ public partial class ImageGenerationWorkbenchView : UserControl
         }
     }
 
+    /// <summary>
+    /// Swaps the pending run for its outcome in place, so the row keeps its
+    /// position even if the user opened another task and came back.
+    /// </summary>
+    private void Complete(ImageWorkbenchRun pending, ImageWorkbenchRun outcome)
+    {
+        var index = _runs.IndexOf(pending);
+        if (index >= 0) _runs[index] = outcome;
+        else _runs.Add(outcome);
+    }
+
+    /// <summary>Only when the box is still empty: a prompt typed while the run
+    /// was in flight outranks the one that failed.</summary>
+    private void RestorePrompt(string prompt)
+    {
+        if (!string.IsNullOrWhiteSpace(PART_Prompt.Text)) return;
+        PART_Prompt.Text = prompt;
+        PART_Prompt.CaretIndex = prompt.Length;
+    }
+
+    /// <summary>
+    /// One key per task, so a run's progress banner is replaced by its outcome
+    /// rather than stacked under it. <paramref name="completed"/> is what lets
+    /// the router raise a system toast while the app is in the background.
+    /// </summary>
+    private void Announce(NotifyKind kind, string taskTitle, string headline, string? body, bool completed)
+    {
+        if (string.IsNullOrWhiteSpace(_conversationId)) return;
+        _notifications?.Notify(new AppNotification
+        {
+            Key = "image-" + _conversationId,
+            Kind = kind,
+            Title = string.IsNullOrWhiteSpace(taskTitle) ? headline : $"「{taskTitle}」{headline}",
+            Body = body,
+            ConversationId = _conversationId,
+            IsAnswerCompleted = completed
+        });
+    }
+
     private void EnsureConversation(string prompt)
     {
         if (!string.IsNullOrWhiteSpace(_conversationId)) return;
         _conversationId = _createConversation(BuildTaskTitle(prompt), _settings.WorkbenchImageGenerationModelId);
-    }
-
-    private void ReplacePending(ImageWorkbenchResult pending, ImageWorkbenchResult replacement)
-    {
-        var index = _results.IndexOf(pending);
-        if (index >= 0) _results[index] = replacement;
-        else _results.Add(replacement);
     }
 
     private void SetGenerating(bool generating)
@@ -389,62 +401,15 @@ public partial class ImageGenerationWorkbenchView : UserControl
     {
         UpdateSourceUi();
 
-        if (_settings.GetWorkbenchImageGenerationProvider() is null)
-        {
-            PART_Status.Text = "请在设置的模型服务中添加图像服务。";
-            return;
-        }
-
-        PART_Status.Text = _settings.IsWorkbenchImageGenerationConfigured
-            ? SupportsEdit
-                ? "已就绪。当前模型支持在已有图片的基础上继续编辑。"
-                : "已就绪。当前模型仅支持生成新图。"
-            : "请补全图像服务的地址、密钥和模型。";
+        // Only problems get a line. 「已就绪」 is a state, not an event: the
+        // header's model chip carries it, and whether the mode strip is there
+        // at all says whether the model can edit.
+        StatusText = _settings.GetWorkbenchImageGenerationProvider() is null
+            ? "尚未配置图像服务"
+            : _settings.IsWorkbenchImageGenerationConfigured
+                ? string.Empty
+                : "图像服务配置不完整";
     }
-
-    /// <summary>
-    /// Says where each knob actually goes. The panel used to print
-    /// 「尺寸：1024×1024」 for models whose endpoint has no size field at all —
-    /// the value was dropped and the summary claimed otherwise.
-    /// </summary>
-    private void UpdateConfigSummary()
-    {
-        PART_SizeCaption.Text = string.Equals(SelectedSize(), "auto", StringComparison.OrdinalIgnoreCase)
-            ? "由模型决定"
-            : ReadableSize(SelectedSize());
-
-        var provider = _settings.GetWorkbenchImageGenerationProvider();
-        if (provider is null)
-        {
-            PART_ConfigSummary.Text = "暂无可用的图像服务";
-            return;
-        }
-
-        var options = _settings.BuildWorkbenchImageGenerationOptions() with
-        {
-            Size = SelectedSize(),
-            Style = string.IsNullOrWhiteSpace(PART_Style.Text) ? null : PART_Style.Text.Trim()
-        };
-        var delivery = ImagePromptComposer.Describe(options, isEdit: HasEditSource);
-
-        var lines = new List<string>
-        {
-            $"服务：{provider.Name}",
-            $"模型：{_settings.WorkbenchImageGenerationModelId}",
-            $"画幅：{PART_SizeCaption.Text}{ChannelSuffix(delivery.Size)}"
-        };
-        if (options.Style is { Length: > 0 } style)
-            lines.Add($"风格：{style}{ChannelSuffix(delivery.Style)}");
-
-        PART_ConfigSummary.Text = string.Join("\n", lines);
-    }
-
-    private static string ChannelSuffix(ImageParameterChannel channel) => channel switch
-    {
-        ImageParameterChannel.Parameter => "（接口参数）",
-        ImageParameterChannel.Prompt => "（写入提示词）",
-        _ => "（本次不生效）"
-    };
 
     /// <summary>
     /// The mode strip, the base-image chip and the 「本次：…」 label all read the
@@ -459,27 +424,27 @@ public partial class ImageGenerationWorkbenchView : UserControl
         PART_SingleMode.Classes.Set("active", SupportsEdit && _mode == WorkbenchMode.Single);
         PART_ConversationMode.Classes.Set("active", SupportsEdit && _mode == WorkbenchMode.Conversation);
 
+        // Hidden rather than pinned to 1 and greyed out: a chain has nowhere to
+        // put a second picture, and the chip's label carries its own value, so
+        // folding it away in 对话模式 hides no state.
+        PART_CountChip.IsVisible = BatchAvailable;
+
         var hasBase = _baseBytes is { Length: > 0 };
-        var chained = _mode == WorkbenchMode.Conversation && !_baseIsChainHead
-                      && _results.Any(result => result.HasImage);
+        var chained = _mode == WorkbenchMode.Conversation && !_baseIsChainHead && HasResultImage;
 
         PART_SourceChip.IsVisible = SupportsEdit && hasBase;
         PART_SourceThumb.Source = _baseThumbnail;
         PART_SourceName.Text = _baseName ?? string.Empty;
         PART_SourceHint.Text = !hasBase
             ? string.Empty
-            : chained
-                // Honest about being superseded rather than implying the base is
-                // still what gets edited.
-                ? $"已由最新结果接手 · {FormatSize(_baseBytes!.Length)}"
-                : _mode == WorkbenchMode.Single
-                    ? $"每次都从这张图出发 · {FormatSize(_baseBytes!.Length)}"
-                    : $"下一张从这里开始 · {FormatSize(_baseBytes!.Length)}";
+            // Says what the next run starts from, which is the only question the
+            // chip answers — and in the chained case that is honestly not this.
+            : $"起点：{(chained ? "最新结果" : "这张")} · {FormatSize(_baseBytes!.Length)}";
 
         // Drag-and-drop and paste have no button of their own; the placeholder
         // is the only place they are discoverable.
         PART_Prompt.PlaceholderText = SupportsEdit
-            ? "描述你想要的画面，或拖入 / 粘贴一张图片作为底图…"
+            ? "描述你想要的画面，或拖入图片作为底图…"
             : "描述你想要的画面…";
 
         // Reads the same preference OnPromptKeyDown does, so the hint cannot
@@ -488,16 +453,36 @@ public partial class ImageGenerationWorkbenchView : UserControl
             ? "Enter 发送 · Shift+Enter 换行"
             : "Enter 换行 · Ctrl+Enter 发送";
 
-        PART_ModeLabel.Text = chained
-            ? "本次：在上一张上继续修改"
+        // What one press of 生成 will actually do, in the same words the mode and
+        // the source chip use. The count is appended rather than replacing the
+        // verb: 「编辑底图」 and 「4 张」 are both true of the same run.
+        var action = chained
+            ? "续改上一张"
             : SupportsEdit && hasBase
-                ? "本次：编辑底图"
-                : "本次：生成新图";
-
-        // 画幅 delivery depends on whether this run is an edit, so the summary
-        // has to follow the mode strip.
-        UpdateConfigSummary();
+                ? "编辑底图"
+                : "生成新图";
+        PART_ModeLabel.Text = EffectiveCount > 1
+            ? $"本次：{action} · {EffectiveCount} 张"
+            : $"本次：{action}";
     }
+
+    /// <summary>Whether the task holds anything a chain could continue from.</summary>
+    private bool HasResultImage => _runs.Any(run => run.HasImages);
+
+    /// <summary>
+    /// Whether a batch means anything right now. 对话模式 is always one picture:
+    /// a chain has no single newest one to continue from otherwise, and picking
+    /// one out of a batch is what the 底图 button on each picture is for.
+    ///
+    /// The chip's visibility and the count read this same property on purpose —
+    /// two copies of the condition would eventually disagree, and the way they
+    /// would disagree is a hidden chip that still bills for four pictures.
+    /// </summary>
+    private bool BatchAvailable => !SupportsEdit || _mode == WorkbenchMode.Single;
+
+    private int EffectiveCount => BatchAvailable
+        ? Math.Clamp(_settings.WorkbenchImageGenerationCount, 1, ImageGenerationTool.MaxBatchSize)
+        : 1;
 
     /// <summary>
     /// Whether this run would be an edit — without touching the bytes. The UI
@@ -505,7 +490,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
     /// image back off disk.
     /// </summary>
     private bool HasEditSource => SupportsEdit
-        && ((_mode == WorkbenchMode.Conversation && !_baseIsChainHead && _results.Any(result => result.HasImage))
+        && ((_mode == WorkbenchMode.Conversation && !_baseIsChainHead && HasResultImage)
             || _baseBytes is { Length: > 0 });
 
     /// <summary>
@@ -520,8 +505,11 @@ public partial class ImageGenerationWorkbenchView : UserControl
     {
         if (!SupportsEdit) return null;
 
+        // The newest picture in the task, which for a batch means the last of
+        // it. Continuing from a different one of the four is what the 底图
+        // button on each picture is for.
         if (_mode == WorkbenchMode.Conversation && !_baseIsChainHead
-            && _results.LastOrDefault(result => result.HasImage) is { } latest
+            && _runs.LastOrDefault(run => run.HasImages)?.Images[^1] is { } latest
             && latest.LoadBytes() is { Length: > 0 } previous)
         {
             return (previous, latest.MimeType);
@@ -530,21 +518,14 @@ public partial class ImageGenerationWorkbenchView : UserControl
         return _baseBytes is { Length: > 0 } bytes ? (bytes, _baseMime ?? "image/png") : null;
     }
 
+    // No status line: the mode chip lights up, the 本次 label rewrites itself and
+    // the 张数 chip appears or leaves. Three places already say it, and a banner
+    // for a state the user just set is a banner nobody reads.
     private void SetMode(WorkbenchMode mode)
     {
         if (_mode == mode) return;
         _mode = mode;
         UpdateSourceUi();
-
-        PART_Status.Text = mode == WorkbenchMode.Conversation
-            ? _baseBytes is { Length: > 0 } && _baseIsChainHead
-                ? "对话模式：先编辑底图，之后每次都接着上一张改。"
-                : _results.Any(result => result.HasImage)
-                    ? "对话模式：接下来会在最新一张的基础上继续修改。"
-                    : "对话模式：第一张从头生成，之后每次都接着上一张改。"
-            : _baseBytes is { Length: > 0 }
-                ? "生成模式：每次都从这张底图重新出发，结果互不影响。"
-                : "生成模式：每次都从头生成一张，互不影响。";
     }
 
     // ---- edit source: upload / drop / paste / reuse a result ---------------
@@ -575,7 +556,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         }
         catch (Exception ex)
         {
-            PART_Status.Text = "无法读取图片：" + ex.Message;
+            StatusText = "无法读取图片 · " + ex.Message;
             return false;
         }
     }
@@ -589,14 +570,14 @@ public partial class ImageGenerationWorkbenchView : UserControl
     {
         if (!SupportsEdit)
         {
-            PART_Status.Text = "当前模型不支持图像编辑，无法使用底图。";
+            StatusText = "当前模型不支持图像编辑";
             return false;
         }
 
         var intake = AttachmentIntake.FromBytes(bytes, fileName, new AttachmentIntakeCapabilities(true, false));
         if (intake.Attachment is not { Kind: AttachmentKind.Image } image)
         {
-            PART_Status.Text = intake.Error ?? "请选择图片文件（PNG / JPEG / WebP）。";
+            StatusText = intake.Error ?? "请选择图片文件（PNG / JPEG / WebP）";
             return false;
         }
 
@@ -610,7 +591,10 @@ public partial class ImageGenerationWorkbenchView : UserControl
         // rather than from a result the user has just moved past.
         _baseIsChainHead = true;
         UpdateSourceUi();
-        PART_Status.Text = $"已载入底图 {fileName}，描述你想要的修改。";
+
+        // The chip that just appeared shows the thumbnail, the name and what the
+        // next run starts from. A line repeating it would be the fourth.
+        StatusText = string.Empty;
         return true;
     }
 
@@ -631,7 +615,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         _baseName = null;
         _baseIsChainHead = false;
         UpdateSourceUi();
-        PART_Status.Text = "已移除底图。";
+        StatusText = string.Empty;
     }
 
     private void OnUseAsSource(object? sender, RoutedEventArgs e)
@@ -639,7 +623,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         if (sender is not Control { DataContext: ImageWorkbenchResult { HasImage: true } result }) return;
         if (result.LoadBytes() is not { Length: > 0 } bytes)
         {
-            PART_Status.Text = "原图已不在本地存储中，无法用作底图。";
+            StatusText = "原图已丢失";
             return;
         }
 
@@ -666,7 +650,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         var path = files[0].TryGetLocalPath();
         if (string.IsNullOrWhiteSpace(path) || Directory.Exists(path))
         {
-            PART_Status.Text = "请拖入单张图片文件。";
+            StatusText = "请拖入单张图片文件";
             return;
         }
 
@@ -676,7 +660,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         }
         catch (Exception ex)
         {
-            PART_Status.Text = "无法读取图片：" + ex.Message;
+            StatusText = "无法读取图片 · " + ex.Message;
         }
     }
 
@@ -728,7 +712,6 @@ public partial class ImageGenerationWorkbenchView : UserControl
             ? null
             : PART_Style.Text.Trim();
         UpdateOptionChips();
-        UpdateConfigSummary();
     }
 
     private void OnRatio(object? sender, RoutedEventArgs e)
@@ -737,7 +720,16 @@ public partial class ImageGenerationWorkbenchView : UserControl
         _size = size;
         _settings.WorkbenchImageGenerationSize = size;
         UpdateOptionChips();
-        UpdateConfigSummary();
+    }
+
+    private void OnCount(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: string tag } || !int.TryParse(tag, out var count)) return;
+        _settings.WorkbenchImageGenerationCount = count;
+        UpdateOptionChips();
+
+        // 本次 label lives with the source UI and reads EffectiveCount.
+        UpdateSourceUi();
     }
 
     private void OnStyle(object? sender, RoutedEventArgs e)
@@ -758,16 +750,47 @@ public partial class ImageGenerationWorkbenchView : UserControl
         PART_Prompt.Focus();
     }
 
+    /// <summary>
+    /// Keeps the two flyouts and the chips that open them in step. The chip
+    /// labels are what makes folding these settings away free: the current
+    /// value stays on the composer, so nothing is hidden behind a click.
+    /// </summary>
     private void UpdateOptionChips()
     {
         // A size stored before the chip set changed may match nothing; leaving
         // every chip dark is honest, and the caption still shows the value.
+        Button? activeRatio = null;
         foreach (var button in PART_RatioChips.Children.OfType<Button>())
-            button.Classes.Set("active", string.Equals(button.Tag?.ToString(), _size, StringComparison.OrdinalIgnoreCase));
+        {
+            var active = string.Equals(button.Tag?.ToString(), _size, StringComparison.OrdinalIgnoreCase);
+            button.Classes.Set("active", active);
+            if (active) activeRatio = button;
+        }
 
         var style = PART_Style.Text?.Trim() ?? string.Empty;
+        Button? activeStyle = null;
         foreach (var button in PART_StyleChips.Children.OfType<Button>())
-            button.Classes.Set("active", string.Equals(button.Tag?.ToString() ?? string.Empty, style, StringComparison.OrdinalIgnoreCase));
+        {
+            var active = string.Equals(button.Tag?.ToString() ?? string.Empty, style, StringComparison.OrdinalIgnoreCase);
+            button.Classes.Set("active", active);
+            if (active) activeStyle = button;
+        }
+
+        var count = Math.Clamp(_settings.WorkbenchImageGenerationCount, 1, ImageGenerationTool.MaxBatchSize);
+        foreach (var button in PART_CountChips.Children.OfType<Button>())
+            button.Classes.Set("active", string.Equals(button.Tag?.ToString(), count.ToString(), StringComparison.Ordinal));
+
+        PART_SizeCaption.Text = string.Equals(SelectedSize(), "auto", StringComparison.OrdinalIgnoreCase)
+            ? "由模型决定"
+            : ReadableSize(SelectedSize());
+
+        // Falls back to the raw value so a size or style that matches no chip
+        // still shows on the composer rather than reading as unset.
+        PART_SizeChipLabel.Text = activeRatio?.Content?.ToString() ?? ReadableSize(SelectedSize());
+        PART_StyleChipLabel.Text = style.Length == 0
+            ? "风格"
+            : activeStyle?.Content?.ToString() ?? style;
+        PART_CountChipLabel.Text = $"{count} 张";
     }
 
     private string SelectedSize() => string.IsNullOrWhiteSpace(_size) ? "1024x1024" : _size;
@@ -776,18 +799,21 @@ public partial class ImageGenerationWorkbenchView : UserControl
     {
         if (_cts is not null) return;
         _conversationId = null;
-        _results.Clear();
+        _runs.Clear();
         PART_Prompt.Clear();
         ClearBaseImage();
         ShowCurrent();
-        PART_Status.Text = "已新建图像任务。";
+
+        // The empty state is now the whole pane. Announcing it too would be a
+        // banner describing the screen behind it.
+        StatusText = string.Empty;
     }
 
     private void ClearResults()
     {
         if (_cts is not null) return;
-        _results.Clear();
-        PART_Status.Text = "已收起当前视图。作品仍在画廊中，重新打开这个任务会再次显示。";
+        _runs.Clear();
+        StatusText = "已收起，作品仍在画廊";
     }
 
     private void ShowCurrent()
@@ -808,14 +834,16 @@ public partial class ImageGenerationWorkbenchView : UserControl
 
     private void UpdateEmptyState()
     {
-        PART_EmptyResults.IsVisible = _results.Count == 0;
+        PART_EmptyResults.IsVisible = _runs.Count == 0;
         // The scroller and the starters share a cell; an empty scroller left
         // visible would sit on top of the chips and swallow their clicks.
-        PART_ResultsScroll.IsVisible = _results.Count > 0;
+        PART_ResultsScroll.IsVisible = _runs.Count > 0;
         PART_EmptyGallery.IsVisible = _gallery.Count == 0;
-        PART_CurrentCount.Text = _results.Count.ToString();
+        // Pictures, not runs: 「当前任务 4」 next to 「画廊 16」 has to count the
+        // same thing in both places.
+        PART_CurrentCount.Text = _runs.Sum(run => run.Images.Count).ToString();
         PART_GalleryCount.Text = _gallery.Count.ToString();
-        PART_ClearResults.IsVisible = _results.Count > 0 && _cts is null;
+        PART_ClearResults.IsVisible = _runs.Count > 0 && _cts is null;
     }
 
     private void ScrollResultsToEnd() =>
@@ -823,17 +851,18 @@ public partial class ImageGenerationWorkbenchView : UserControl
 
     private void LoadStoredImages()
     {
-        _results.Clear();
+        _runs.Clear();
         _gallery.Clear();
 
         if (!string.IsNullOrWhiteSpace(_conversationId))
         {
             var title = CurrentTaskTitle();
-            foreach (var result in _messageRepo.List(_conversationId)
-                         .SelectMany(row => ParseStored(row.Meta, row.Content, row.CreatedAt, title, true))
-                         .OrderBy(result => result.CreatedAt))
+            foreach (var run in _messageRepo.List(_conversationId)
+                         .Select(row => ParseStored(row.Meta, row.Content, row.CreatedAt, title, _conversationId, true))
+                         .OfType<ImageWorkbenchRun>()
+                         .OrderBy(run => run.CreatedAt))
             {
-                _results.Add(result);
+                _runs.Add(run);
             }
         }
 
@@ -841,7 +870,10 @@ public partial class ImageGenerationWorkbenchView : UserControl
         // the *recent* end — and stops before decoding a thumbnail for entry 201.
         var stored = _messageRepo
             .ListImageWorkbenchMessages(ConversationListViewModel.ImageWorkbenchProviderId)
-            .SelectMany(row => ParseStored(row.Meta, row.Content, row.CreatedAt, row.ConversationTitle, false))
+            .Select(row => ParseStored(
+                row.Meta, row.Content, row.CreatedAt, row.ConversationTitle, row.ConversationId, false))
+            .OfType<ImageWorkbenchRun>()
+            .SelectMany(run => run.Images)
             .Take(GalleryLimit + 1)
             .ToList();
 
@@ -850,28 +882,31 @@ public partial class ImageGenerationWorkbenchView : UserControl
 
         PART_GalleryLimitNote.IsVisible = stored.Count > GalleryLimit;
         PART_GalleryLimitNote.Text = $"只显示最近 {GalleryLimit} 张";
-
-        if (_results.LastOrDefault() is { Prompt.Length: > 0 } latest)
-            PART_Prompt.Text = latest.Prompt;
     }
 
-    private IEnumerable<ImageWorkbenchResult> ParseStored(
-        string? meta, string content, long createdAt, string taskTitle, bool includeErrors)
+    /// <summary>
+    /// One stored row back into one run. The attachments were always an array,
+    /// so a batch round-trips through the same shape a single picture does —
+    /// what changed is that <see cref="Persist"/> now writes one row per run
+    /// instead of one per picture, and four pictures come back as one prompt.
+    /// </summary>
+    private ImageWorkbenchRun? ParseStored(
+        string? meta, string content, long createdAt, string taskTitle,
+        string? conversationId, bool includeErrors)
     {
-        if (string.IsNullOrWhiteSpace(meta)) yield break;
+        if (string.IsNullOrWhiteSpace(meta)) return null;
 
         JsonDocument document;
         try { document = JsonDocument.Parse(meta); }
-        catch (JsonException) { yield break; }
+        catch (JsonException) { return null; }
 
         using (document)
         {
             var root = document.RootElement;
             if (!root.TryGetProperty("image_workbench", out var marker) || marker.ValueKind != JsonValueKind.True)
-                yield break;
+                return null;
 
             var prompt = ReadString(root, "prompt") ?? content;
-            var revised = ReadString(root, "revised_prompt") ?? content;
             var modelLabel = ReadString(root, "model_label") ?? ReadString(root, "model") ?? ReadString(root, "model_id");
             var modelId = ReadString(root, "model_id");
             var providerId = ReadString(root, "provider_id");
@@ -881,16 +916,19 @@ public partial class ImageGenerationWorkbenchView : UserControl
 
             if (isError)
             {
-                if (includeErrors)
-                    yield return ImageWorkbenchResult.Error(
-                        prompt, taskTitle, isEdit, ReadString(root, "error_message") ?? content,
-                        modelLabel, modelId, providerId, created);
-                yield break;
+                return includeErrors
+                    ? new ImageWorkbenchRun(prompt, taskTitle, created, isEdit, modelLabel, modelId, providerId,
+                        [], ErrorMessage: ReadString(root, "error_message") ?? content)
+                    : null;
             }
 
             if (!root.TryGetProperty("attachments", out var attachments)
-                || attachments.ValueKind != JsonValueKind.Array) yield break;
+                || attachments.ValueKind != JsonValueKind.Array) return null;
 
+            // Rows written before the batch existed carry one revised prompt for
+            // the whole run; newer ones carry one per picture.
+            var sharedRevised = ReadString(root, "revised_prompt");
+            var images = new List<ImageWorkbenchResult>();
             foreach (var attachment in attachments.EnumerateArray())
             {
                 if (attachment.ValueKind != JsonValueKind.Object) continue;
@@ -903,48 +941,56 @@ public partial class ImageGenerationWorkbenchView : UserControl
                 var fileName = ReadString(attachment, "filename")
                     ?? localName
                     ?? $"generated-{createdAt}{ExtensionForMime(mime)}";
-                yield return ImageWorkbenchResult.Completed(
-                    fileName, mime, thumbnail, ByteSourceFor(localName, null), localName,
-                    revised, prompt, taskTitle, isEdit, modelLabel, modelId, providerId, created);
+                images.Add(new ImageWorkbenchResult(
+                    fileName, mime, ByteSourceFor(localName, null), localName,
+                    ReadString(attachment, "revised_prompt") ?? sharedRevised,
+                    thumbnail, prompt, created, modelLabel, conversationId));
             }
+
+            return images.Count == 0
+                ? null
+                : new ImageWorkbenchRun(prompt, taskTitle, created, isEdit, modelLabel, modelId, providerId, images);
         }
     }
 
-    private void Persist(string prompt, ImageWorkbenchResult result)
+    private void Persist(ImageWorkbenchRun run)
     {
         if (string.IsNullOrWhiteSpace(_conversationId)) return;
-        if (!result.IsError && string.IsNullOrWhiteSpace(result.LocalName)) return;
+        if (!run.IsError && run.Images.Count == 0) return;
 
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var meta = new JsonObject
         {
             ["image_workbench"] = true,
-            ["prompt"] = prompt,
-            ["image_edit"] = result.IsEditMode,
-            ["model_label"] = result.ModelLabel,
-            ["model"] = result.ModelLabel,
-            ["model_id"] = result.ModelId,
-            ["provider_id"] = result.ProviderId,
-            ["status"] = result.IsError ? "error" : "completed"
+            ["prompt"] = run.Prompt,
+            ["image_edit"] = run.IsEditMode,
+            ["model_label"] = run.ModelLabel,
+            ["model"] = run.ModelLabel,
+            ["model_id"] = run.ModelId,
+            ["provider_id"] = run.ProviderId,
+            ["status"] = run.IsError ? "error" : "completed"
         };
 
         string content;
-        if (result.IsError)
+        if (run.IsError)
         {
-            meta["error_message"] = result.ErrorDisplay;
-            content = (result.IsEditMode ? "图像编辑失败：" : "图像生成失败：") + result.ErrorDisplay;
+            meta["error_message"] = run.ErrorDisplay;
+            content = (run.IsEditMode ? "图像编辑失败：" : "图像生成失败：") + run.ErrorDisplay;
         }
         else
         {
-            meta["revised_prompt"] = result.RevisedPrompt;
-            meta["attachments"] = new JsonArray(new JsonObject
+            // One row for the whole run. Four rows would reload as four runs and
+            // print the prompt four times.
+            meta["revised_prompt"] = run.Images[0].RevisedPrompt;
+            meta["attachments"] = new JsonArray(run.Images.Select(image => (JsonNode?)new JsonObject
             {
-                ["filename"] = result.FileName,
+                ["filename"] = image.FileName,
                 ["label"] = "图片",
-                ["localName"] = result.LocalName,
-                ["mime"] = result.MimeType
-            });
-            content = string.IsNullOrWhiteSpace(result.RevisedPrompt) ? "图像生成完成" : result.RevisedPrompt;
+                ["localName"] = image.LocalName,
+                ["mime"] = image.MimeType,
+                ["revised_prompt"] = image.RevisedPrompt
+            }).ToArray());
+            content = run.Images[0].RevisedPrompt is { Length: > 0 } revised ? revised : "图像生成完成";
         }
 
         _messageRepo.Insert(new MessageRow(
@@ -952,8 +998,8 @@ public partial class ImageGenerationWorkbenchView : UserControl
         if (_conversationRepo.Get(_conversationId) is not { } row) return;
         _conversationRepo.Upsert(row with
         {
-            Title = IsDefaultTaskTitle(row.Title) ? BuildTaskTitle(prompt) : row.Title,
-            ModelId = result.ModelId ?? _settings.WorkbenchImageGenerationModelId,
+            Title = IsDefaultTaskTitle(row.Title) ? BuildTaskTitle(run.Prompt) : row.Title,
+            ModelId = run.ModelId ?? _settings.WorkbenchImageGenerationModelId,
             UpdatedAt = now
         });
     }
@@ -967,7 +1013,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         // proof the original is still on disk.
         if (result.LoadBytes() is not { Length: > 0 } bytes)
         {
-            PART_Status.Text = "原图已不在本地存储中，无法保存。";
+            StatusText = "原图已丢失";
             return;
         }
 
@@ -983,12 +1029,36 @@ public partial class ImageGenerationWorkbenchView : UserControl
         {
             await using var stream = await file.OpenWriteAsync();
             await stream.WriteAsync(bytes);
-            PART_Status.Text = "已保存到 " + (file.TryGetLocalPath() ?? file.Name);
+            StatusText = "已保存到 " + (file.TryGetLocalPath() ?? file.Name);
         }
         catch (Exception ex)
         {
-            PART_Status.Text = "保存失败：" + ex.Message;
+            StatusText = "保存失败 · " + ex.Message;
         }
+    }
+
+    /// <summary>
+    /// Opens the task a gallery picture came from, which is where the untrimmed
+    /// prompt, the revised prompt and the rest of that task's runs already live.
+    /// Already looking at it? Then just switch panes — re-opening would rebuild
+    /// the view and lose the scroll position for no gain.
+    /// </summary>
+    private void OnOpenTask(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Control { DataContext: ImageWorkbenchResult result }) return;
+        if (result.ConversationId is not { Length: > 0 } id)
+        {
+            StatusText = "这张图没有关联的任务";
+            return;
+        }
+
+        if (string.Equals(id, _conversationId, StringComparison.Ordinal))
+        {
+            ShowCurrent();
+            return;
+        }
+
+        OpenTaskRequested?.Invoke(this, id);
     }
 
     private void OnPreviewResult(object? sender, RoutedEventArgs e)
@@ -1000,7 +1070,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         // generated image is shown at the size it was actually produced at.
         if (result.LoadBytes() is not { Length: > 0 } bytes)
         {
-            PART_Status.Text = "原图已不在本地存储中，无法预览。";
+            StatusText = "原图已丢失";
             return;
         }
 
@@ -1021,7 +1091,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
             Key = "image-" + _conversationId,
             Kind = NotifyKind.Progress,
             Title = "图像正在后台生成",
-            Body = string.IsNullOrWhiteSpace(pendingTitle) ? "完成后会通知你" : $"「{pendingTitle}」完成后会通知你",
+            Body = string.IsNullOrWhiteSpace(pendingTitle) ? "完成后提醒" : $"「{pendingTitle}」· 完成后提醒",
             ConversationId = _conversationId
         });
         _hiddenNotificationShown = true;
@@ -1113,11 +1183,62 @@ public partial class ImageGenerationWorkbenchView : UserControl
 }
 
 /// <summary>
-/// One card in the workbench. The full-resolution bytes are deliberately *not*
-/// a field: the gallery holds every image ever generated, and keeping a 1–3 MB
-/// PNG plus a full-size decoded surface per entry made a few hundred pictures
-/// cost hundreds of megabytes. The bytes live on disk in the attachment store
-/// and are read back only when something actually needs them.
+/// One run: what was asked for, and whatever came back. The unit used to be the
+/// picture, which was fine while a run produced exactly one — 生成模式 now asks
+/// for up to four at a time, and four pictures under four copies of the same
+/// prompt is not a batch, it is four runs that happen to rhyme.
+///
+/// Pending and failed states live here rather than on the picture, because they
+/// are properties of the request. A run can also be partly both: three pictures
+/// and one timeout keeps the three and still says what went wrong.
+/// </summary>
+public sealed record ImageWorkbenchRun(
+    string Prompt,
+    string TaskTitle,
+    DateTimeOffset CreatedAt,
+    bool IsEditMode,
+    string? ModelLabel,
+    string? ModelId,
+    string? ProviderId,
+    IReadOnlyList<ImageWorkbenchResult> Images,
+    bool IsPending = false,
+    string? ErrorMessage = null)
+{
+    public bool IsError => !string.IsNullOrWhiteSpace(ErrorMessage);
+    public bool HasImages => Images.Count > 0;
+
+    /// <summary>Whether the pictures need a grid. One picture is left at its own
+    /// size; more than one shares the reading column.</summary>
+    public bool IsGrid => Images.Count > 1;
+    public ImageWorkbenchResult? SingleImage => Images.Count == 1 ? Images[0] : null;
+    public bool HasSingleImage => Images.Count == 1;
+
+    /// <summary>Replaces the card's row of badges: one muted line, the shape the
+    /// transcript uses for everything that is about a message rather than in it.</summary>
+    public string MetaLine
+    {
+        get
+        {
+            var kind = IsEditMode ? "编辑" : "生成";
+            var time = CreatedAt.ToString("MM-dd HH:mm");
+            return string.IsNullOrWhiteSpace(ModelLabel) ? $"{kind} · {time}" : $"{kind} · {ModelLabel} · {time}";
+        }
+    }
+
+    public string PendingText => IsEditMode ? "编辑中" : "生成中";
+    public string ErrorDisplay => string.IsNullOrWhiteSpace(ErrorMessage) ? "本次未完成" : ErrorMessage!;
+
+    public static ImageWorkbenchRun Pending(
+        string prompt, string title, bool edit, string? modelLabel, string? modelId, string? providerId) =>
+        new(prompt, title, DateTimeOffset.Now, edit, modelLabel, modelId, providerId, [], IsPending: true);
+}
+
+/// <summary>
+/// One picture. The full-resolution bytes are deliberately *not* a field: the
+/// gallery holds every image ever generated, and keeping a 1–3 MB PNG plus a
+/// full-size decoded surface per entry made a few hundred pictures cost hundreds
+/// of megabytes. The bytes live on disk in the attachment store and are read
+/// back only when something actually needs them.
 /// </summary>
 public sealed record ImageWorkbenchResult(
     string FileName,
@@ -1127,15 +1248,12 @@ public sealed record ImageWorkbenchResult(
     string? RevisedPrompt,
     Bitmap? Thumbnail,
     string Prompt,
-    string TaskTitle,
     DateTimeOffset CreatedAt,
-    bool IsEditMode = false,
-    bool IsPending = false,
-    bool IsError = false,
-    string? ErrorMessage = null,
     string? ModelLabel = null,
-    string? ModelId = null,
-    string? ProviderId = null)
+    /// <summary>Which task produced this. Only the gallery needs it — it is the
+    /// one view that spans tasks, so it is the only one that can be asked to
+    /// jump to the run a picture came from.</summary>
+    string? ConversationId = null)
 {
     /// <summary>Full-resolution bytes, read on demand. Only click handlers may
     /// call this — never a binding, or scrolling the gallery would page every
@@ -1144,34 +1262,15 @@ public sealed record ImageWorkbenchResult(
 
     // A decoded thumbnail is proof the bytes were readable; asking LoadBytes()
     // here would put a disk read behind a property the templates bind to.
-    public bool HasImage => !IsPending && !IsError && Thumbnail is not null;
-    public bool HasModelLabel => !string.IsNullOrWhiteSpace(ModelLabel);
-    public string PromptHeader => IsEditMode ? "修改指令" : "生成提示词";
-    public string ModeLabel => IsPending
-        ? IsEditMode ? "编辑中" : "生成中"
-        : IsError ? "生成失败" : IsEditMode ? "图像编辑" : "图像生成";
+    public bool HasImage => Thumbnail is not null;
+    public bool HasRevisedPrompt => !string.IsNullOrWhiteSpace(RevisedPrompt);
     public string CreatedAtText => CreatedAt.ToString("MM-dd HH:mm");
-    public string PendingStatusText => IsEditMode ? "正在编辑图片" : "正在生成图片";
-    public string ErrorDisplay => string.IsNullOrWhiteSpace(ErrorMessage) ? "本次任务未完成。" : ErrorMessage;
-    public string RevisedPromptDisplay => string.IsNullOrWhiteSpace(RevisedPrompt)
-        ? IsEditMode ? "图像编辑完成" : "图像生成完成"
-        : (IsEditMode ? "编辑提示词：" : "修订提示词：") + RevisedPrompt;
 
-    public static ImageWorkbenchResult Pending(string prompt, string title, bool edit, string? modelLabel) =>
-        new(string.Empty, "image/png", null, null, null, null, prompt, title, DateTimeOffset.Now,
-            edit, IsPending: true, ModelLabel: modelLabel);
+    /// <summary>One caption line for a gallery cell, where the run's meta line
+    /// would cost more height than the picture under it.</summary>
+    public string GalleryMeta => string.IsNullOrWhiteSpace(ModelLabel)
+        ? CreatedAtText
+        : $"{CreatedAtText} · {ModelLabel}";
 
-    public static ImageWorkbenchResult Error(
-        string prompt, string title, bool edit, string message, string? modelLabel,
-        string? modelId, string? providerId, DateTimeOffset? createdAt = null) =>
-        new(string.Empty, "image/png", null, null, null, null, prompt, title, createdAt ?? DateTimeOffset.Now,
-            edit, IsError: true, ErrorMessage: message, ModelLabel: modelLabel,
-            ModelId: modelId, ProviderId: providerId);
-
-    public static ImageWorkbenchResult Completed(
-        string fileName, string mimeType, Bitmap? thumbnail, Func<byte[]> bytesSource,
-        string? localName, string? revisedPrompt, string prompt, string title, bool edit,
-        string? modelLabel, string? modelId, string? providerId, DateTimeOffset? createdAt = null) =>
-        new(fileName, mimeType, bytesSource, localName, revisedPrompt, thumbnail, prompt, title,
-            createdAt ?? DateTimeOffset.Now, edit, ModelLabel: modelLabel, ModelId: modelId, ProviderId: providerId);
+    public string RevisedPromptDisplay => "改写：" + RevisedPrompt;
 }

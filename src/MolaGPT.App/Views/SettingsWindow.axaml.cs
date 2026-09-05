@@ -291,6 +291,14 @@ public partial class SettingsWindow : MolaContentWindow
         PART_Nav.SelectedItem = PART_SandboxNav;
     }
 
+    /// <summary>Where image services are added, which is what every 「去设置」
+    /// in the app is actually asking for.</summary>
+    internal void OpenProvidersPage()
+    {
+        PART_Nav.SelectedItem = PART_ProvidersNav;
+        ShowSelectedPage();
+    }
+
     internal void OpenPersonaPage(bool startNew)
     {
         PART_Nav.SelectedItem = PART_PersonasNav;
@@ -511,7 +519,7 @@ public partial class SettingsWindow : MolaContentWindow
         _settings.VisionProxyModelId = option.ModelId;
     }
 
-    private void OnManageProviders(object? sender, RoutedEventArgs e) => PART_Nav.SelectedIndex = 4;
+    private void OnManageProviders(object? sender, RoutedEventArgs e) => OpenProvidersPage();
 
     private void RefreshImageGenerationStatus()
     {

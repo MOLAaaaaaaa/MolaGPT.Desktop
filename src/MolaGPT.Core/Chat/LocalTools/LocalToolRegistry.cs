@@ -11,6 +11,19 @@ public static partial class LocalToolRegistry
 {
     private const int MaxSearchQueries = 5;
     private const int MaxPageCharacters = 12000;
+
+    /// <summary>
+    /// Per-result ceiling for the text a search hit carries back.
+    ///
+    /// Exa and Tavily can return the whole page body next to each hit, and one
+    /// <c>search_web</c> call is up to <see cref="MaxSearchQueries"/> queries by
+    /// <see cref="LocalToolOptions.SearchMaxResults"/> hits — so uncapped bodies
+    /// turned a single call into ~500KB of tool result. Four of those in one turn
+    /// pushed the context past 390K tokens and the turn died without an answer.
+    /// A search hit is a lead, not a source: the model has <c>web_fetch</c> for
+    /// when it actually wants to read one.
+    /// </summary>
+    private const int MaxSearchSnippetCharacters = 1500;
     private static readonly JsonSerializerOptions ToolResultJsonOptions = new()
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
@@ -496,7 +509,7 @@ public static partial class LocalToolRegistry
             {
                 title = ReadString(result, "title") ?? ReadString(result, "url") ?? "Untitled",
                 url = ReadString(result, "url") ?? string.Empty,
-                snippet = ReadString(result, "content") ?? string.Empty
+                snippet = TrimSnippet(ReadString(result, "content"), options)
             })
             .Where(item => !string.IsNullOrWhiteSpace(item.url))
             .Cast<object>()
@@ -533,11 +546,29 @@ public static partial class LocalToolRegistry
             {
                 title = ReadString(result, "title") ?? ReadString(result, "url") ?? "Untitled",
                 url = ReadString(result, "url") ?? string.Empty,
-                snippet = ReadString(result, "text") ?? string.Empty
+                snippet = TrimSnippet(ReadString(result, "text"), options)
             })
             .Where(item => !string.IsNullOrWhiteSpace(item.url))
             .Cast<object>()
             .ToArray();
+    }
+
+    /// <summary>
+    /// Cuts a search hit's text down to <see cref="MaxSearchSnippetCharacters"/>
+    /// (or whatever the turn configured). The marker is left in on purpose: the
+    /// model needs to see that there is more behind the URL, or it will treat a
+    /// clipped page as the whole story.
+    /// </summary>
+    private static string TrimSnippet(string? text, LocalToolOptions options)
+    {
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+
+        var max = options.SearchSnippetMaxCharacters > 0
+            ? options.SearchSnippetMaxCharacters
+            : MaxSearchSnippetCharacters;
+        return text.Length <= max
+            ? text
+            : text[..max] + "\n[snippet truncated — use web_fetch on this url to read the full page]";
     }
 
     private static string RequireApiKey(LocalToolOptions options, string providerName)

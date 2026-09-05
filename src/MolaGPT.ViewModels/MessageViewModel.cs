@@ -130,6 +130,111 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         ErrorAction = action;
     }
 
+    /// <summary>Context size when the agent summarized its own history during this
+    /// turn; 0 when it did not.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasCompaction))]
+    [NotifyPropertyChangedFor(nameof(CompactionText))]
+    private int _compactionTokensBefore;
+
+    /// <summary>
+    /// Why the cut happened — <c>manual</c> when the user pressed the button in the
+    /// gauge, otherwise whatever the agent called its own trigger.
+    ///
+    /// Persisted beside the size because it cannot be re-derived afterwards, and
+    /// "did I do this or did it happen to me" is the first question the marker has
+    /// to answer. Null on rows written before this was recorded, which is why the
+    /// text below still has an unqualified form.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CompactionText))]
+    private string? _compactionReason;
+
+    /// <summary>
+    /// What the history weighs now that it is a summary — the agent's own estimate,
+    /// from counting characters rather than asking the model. 0 when unreported.
+    ///
+    /// Rendered with a 约 for exactly that reason: the next turn's real reading will
+    /// not match it, and a number presented as measured would make that difference
+    /// look like something going wrong.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CompactionText))]
+    private int _compactionTokensAfter;
+
+    /// <summary>
+    /// How full the context was when this turn ended, and against which window.
+    ///
+    /// Stored per message rather than only on the gauge because the gauge is
+    /// rebuilt from scratch on every conversation load — without this, reopening a
+    /// conversation showed no reading at all until the user sent another turn.
+    /// Deliberately not derived from <see cref="Usage"/>: that is the turn's total
+    /// across every model call in the agent loop, which for a multi-call turn is
+    /// several times the context size.
+    /// </summary>
+    [ObservableProperty] private int _contextTokens;
+
+    [ObservableProperty] private int _contextWindow;
+
+    public bool HasCompaction => CompactionTokensBefore > 0;
+
+    /// <summary>The agent's own word for a user-requested compaction.</summary>
+    public const string ManualCompactionReason = "manual";
+
+    public string CompactionText => HasCompaction
+        ? $"{CompactionKindText} · {CompactionSizeText}"
+        : string.Empty;
+
+    private string CompactionKindText => CompactionReason switch
+    {
+        null or "" => "上下文已压缩",
+        ManualCompactionReason => "上下文已手动压缩",
+        _ => "上下文已自动压缩"
+    };
+
+    /// <summary>
+    /// The before, the after and the difference — "how much did that actually buy
+    /// me" is the only question this marker gets asked twice.
+    ///
+    /// Falls back to the before-size alone when the agent reported no estimate,
+    /// rather than filling the gap with a computed one. A savings figure derived
+    /// from a number nobody gave us would be the least trustworthy thing on screen.
+    /// </summary>
+    private string CompactionSizeText
+    {
+        get
+        {
+            if (CompactionTokensAfter <= 0 || CompactionTokensAfter >= CompactionTokensBefore)
+                return $"压缩前 {FormatTokens(CompactionTokensBefore)}";
+
+            var saved = CompactionTokensBefore - CompactionTokensAfter;
+            return $"{FormatTokens(CompactionTokensBefore)} → 约 {FormatTokens(CompactionTokensAfter)}"
+                   + $"，省下 {FormatTokens(saved)}";
+        }
+    }
+
+    /// <summary>
+    /// Record that history was summarized away at this point in the conversation.
+    ///
+    /// Kept on the message on purpose: the fact is <em>positional</em> — it marks
+    /// which point in the conversation the model can no longer see past — and a
+    /// banner, which is by definition transient and placeless, cannot carry that.
+    /// </summary>
+    public void NoteCompaction(int tokensBefore, int tokensAfter = 0, string? reason = null)
+    {
+        if (tokensBefore <= 0) return;
+        CompactionTokensBefore = tokensBefore;
+        if (tokensAfter > 0) CompactionTokensAfter = tokensAfter;
+        if (!string.IsNullOrWhiteSpace(reason)) CompactionReason = reason;
+    }
+
+    private static string FormatTokens(int tokens) => tokens switch
+    {
+        >= 1_000_000 => $"{tokens / 1_000_000d:0.#}M",
+        >= 1_000 => $"{tokens / 1_000d:0}K",
+        _ => tokens.ToString()
+    };
+
     public bool HasThinking => !string.IsNullOrEmpty(Thinking);
 
     /// <summary>
@@ -790,13 +895,14 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         var content = Content ?? string.Empty;
         var cursor = 0;
 
-        // Accumulator for a run of consecutive same-type file-operation tools.
+        // Accumulator for a run of consecutive same-kind groupable tools. runName
+        // holds the canonical group key (aliases collapsed), not the raw tool name.
         var run = new List<ToolCallViewModel>();
         string? runName = null;
         void FlushRun()
         {
             if (run.Count == 0) return;
-            // A lone file-op renders as a normal single card; ≥2 merge into a group.
+            // A lone groupable tool renders as a normal single card; ≥2 merge.
             next.Add(run.Count == 1
                 ? MessageDisplayBlockViewModel.ForTool(run[0])
                 : MessageDisplayBlockViewModel.ForToolGroup(new ToolGroupViewModel(runName!, run.ToList())));
@@ -818,11 +924,11 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             }
             if (tool is ToolCallViewModel toolCall)
             {
-                if (toolCall.IsFileOperation)
+                if (toolCall.GroupKey is { } groupKey)
                 {
-                    if (runName is not null && !string.Equals(runName, toolCall.Name, StringComparison.Ordinal))
-                        FlushRun(); // different file-op type breaks the run
-                    runName = toolCall.Name;
+                    if (runName is not null && !string.Equals(runName, groupKey, StringComparison.Ordinal))
+                        FlushRun(); // a different groupable kind breaks the run
+                    runName = groupKey;
                     run.Add(toolCall);
                 }
                 else
@@ -1183,6 +1289,8 @@ public sealed partial class ToolGroupViewModel : ObservableObject
         "read_file" => $"{Count} 个文件",
         "glob_files" => $"{Count} 次查找",
         "grep_files" => $"{Count} 次搜索",
+        "web_search" => $"{Count} 次搜索",
+        "web_fetch" => $"{Count} 个网页",
         _ => $"{Count} 次"
     };
 
@@ -1322,6 +1430,28 @@ public sealed partial class ToolCallViewModel : ObservableObject
         name is "read_file" or "glob_files" or "grep_files";
 
     public bool IsFileOperation => IsFileOperationTool(Name);
+
+    /// <summary>
+    /// Canonical grouping key for tools we merge into one card when called back to
+    /// back, or null for tools that always stand alone. Aliases collapse to a
+    /// single key so a run holds together even if the backend alternates names
+    /// within a turn (search_web/web_search → "web_search",
+    /// web_fetch/steel_browser → "web_fetch"). The read-only file tools group
+    /// under their own names. Only same-key tools merge, so a search run and a
+    /// fetch run stay two separate cards.
+    /// </summary>
+    public static string? GroupKeyFor(string name) => name switch
+    {
+        "read_file" => "read_file",
+        "glob_files" => "glob_files",
+        "grep_files" => "grep_files",
+        "search_web" or "web_search" => "web_search",
+        "web_fetch" or "steel_browser" => "web_fetch",
+        _ => null
+    };
+
+    public string? GroupKey => GroupKeyFor(Name);
+    public bool IsGroupable => GroupKey is not null;
 
     /// <summary>
     /// One-line argument preview shown in the collapsed header, right after the

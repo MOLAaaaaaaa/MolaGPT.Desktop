@@ -56,12 +56,17 @@ public partial class MainWindow : MolaWindow
     private ImageGenerationWorkbenchView? _imageWorkbench;
     private Task<bool>? _agentRuntimeSetupTask;
     private bool _agentRuntimeActivated;
+    private int _compactionTokensBeforeAtStart;
 
     private const string AgentRuntimeNotificationKey = "pi-sidecar";
 
     /// <summary>Shared so that flipping sides twice in a row replaces the banner
     /// instead of stacking two.</summary>
     private const string ModeSwitchNotificationKey = "mode-switch";
+
+    /// <summary>Progress on the way in, outcome on the way out, one key so the
+    /// second replaces the first.</summary>
+    private const string CompactionNotificationKey = "context-compaction";
 
     /// <summary>The in-app banner stack. <see cref="NotificationRouter"/> drives it.</summary>
     public NotificationHost Notifications => PART_Notifications;
@@ -212,6 +217,11 @@ public partial class MainWindow : MolaWindow
         PART_Transcript.ErrorActionRequested += (_, _) => PART_Header.OpenModelSelector();
 
         _chat.PropertyChanged += OnChatPropertyChanged;
+        // The gauge instance outlives every conversation, so one subscription covers
+        // all of them. Compaction is the one thing this app does that takes seconds,
+        // rewrites the conversation, and — until now — happened entirely inside a
+        // popup nobody has open at the time.
+        _chat.ContextGauge.PropertyChanged += OnContextGaugePropertyChanged;
         _auth.LoggedOut += OnLoggedOut;
         SyncChrome();
         RefreshAccountState();
@@ -223,7 +233,54 @@ public partial class MainWindow : MolaWindow
         {
             _auth.LoggedOut -= OnLoggedOut;
             _settings.PropertyChanged -= OnSettingsPropertyChanged;
+            _chat.ContextGauge.PropertyChanged -= OnContextGaugePropertyChanged;
         };
+    }
+
+    /// <summary>
+    /// Say out loud that the conversation is being summarized.
+    ///
+    /// Both kinds land here: the manual button and the automatic cut mid-answer. The
+    /// automatic one is the reason this exists at all — it happens without anyone
+    /// asking, takes a model call to finish, and until now the only sign of it was
+    /// the answer appearing to stall.
+    ///
+    /// <see cref="ContextGaugeViewModel.ApplyCompaction"/> sets the outcome before it
+    /// lowers the flag, so the finished branch below reads the result rather than the
+    /// state the run started in.
+    /// </summary>
+    private void OnContextGaugePropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(ContextGaugeViewModel.IsCompacting)) return;
+
+        var gauge = _chat.ContextGauge;
+        if (gauge.IsCompacting)
+        {
+            // Remembered so the end can tell "this run cut something" from "this
+            // conversation compacted at some point earlier": an aborted run leaves
+            // the previous run's numbers standing, and reporting those as fresh
+            // would announce a compaction that did not happen.
+            _compactionTokensBeforeAtStart = gauge.LastCompactionTokensBefore;
+            _notifications.Progress(CompactionNotificationKey, "正在压缩上下文");
+            return;
+        }
+
+        if (gauge.HasCompactionError)
+        {
+            _notifications.Error("上下文压缩失败", gauge.CompactionError, CompactionNotificationKey);
+            return;
+        }
+
+        if (gauge.HasCompacted && gauge.LastCompactionTokensBefore != _compactionTokensBeforeAtStart)
+        {
+            _notifications.Success("上下文已压缩", gauge.CompactedText, CompactionNotificationKey);
+            return;
+        }
+
+        // Aborted, or the agent found nothing worth summarizing. A progress banner is
+        // showing and nothing is going to replace it, so retract it rather than
+        // leaving "正在压缩上下文" pinned to a run that already ended.
+        _notifications.Dismiss(CompactionNotificationKey);
     }
 
     private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -553,6 +610,12 @@ public partial class MainWindow : MolaWindow
         _settingsWindow?.OpenSandboxPage();
     }
 
+    private void OpenProviderSettings()
+    {
+        OpenSettings();
+        _settingsWindow?.OpenProvidersPage();
+    }
+
     private async Task OpenSystemPromptAsync()
     {
         var window = new SystemPromptWindow();
@@ -594,7 +657,14 @@ public partial class MainWindow : MolaWindow
             PART_Header.RefreshSecondaryUi();
             _ = _conversations.ReloadAsync();
         };
-        workbench.OpenSettingsRequested += (_, _) => OpenSettings();
+        // Straight to 模型服务: the gear is pressed because the workbench has no
+        // image service, and dropping the user on whichever page settings was
+        // last left open leaves them to find it themselves.
+        // Through the sidebar rather than straight to OpenImageWorkbench: the
+        // list has to end up highlighting the task the workbench switched to,
+        // and SelectById is the one path that does both.
+        workbench.OpenTaskRequested += (_, id) => _conversations.SelectById(id);
+        workbench.OpenSettingsRequested += (_, _) => OpenProviderSettings();
         _imageWorkbench = workbench;
         PART_ImageWorkbenchHost.Content = workbench;
         _main.IsImageWorkbenchVisible = true;

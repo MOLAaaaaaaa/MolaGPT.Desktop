@@ -72,12 +72,23 @@ public sealed class CodexBackend : IAgentBackend
         _ => "workspace-write"
     };
 
+    /// <summary>
+    /// Collapse retired / omitted policies onto values Codex 0.149+ still
+    /// accepts. <see cref="CodexApprovalPolicy.Untrusted"/> used to mean "ask
+    /// before running anything outside the known-safe set"; that wire value now
+    /// hard-fails with <c>approval_policy = "untrusted" is no longer supported</c>.
+    /// </summary>
+    internal static CodexApprovalPolicy NormalizeApprovalPolicy(CodexApprovalPolicy? policy)
+        => policy is CodexApprovalPolicy.Never
+            ? CodexApprovalPolicy.Never
+            : CodexApprovalPolicy.OnRequest;
+
     /// <summary>Map the Codex approval axis onto the app-server <c>approvalPolicy</c>
     /// wire value (the JSON-RPC equivalent of <c>--ask-for-approval</c>).</summary>
-    internal static string MapApprovalPolicy(CodexApprovalPolicy policy) => policy switch
-    {
-        CodexApprovalPolicy.Untrusted => "untrusted",
-        CodexApprovalPolicy.Never => "never",
-        _ => "on-request"
-    };
+    internal static string MapApprovalPolicy(CodexApprovalPolicy policy) =>
+        NormalizeApprovalPolicy(policy) switch
+        {
+            CodexApprovalPolicy.Never => "never",
+            _ => "on-request"
+        };
 }

@@ -13,10 +13,10 @@ namespace MolaGPT.Core.Chat.Agents.Pi;
 /// </summary>
 public static class PiModelCatalog
 {
-    /// <summary>Pi requires a context window and an output cap; MolaGPT's model rows
-    /// carry neither, and the real limits are enforced upstream anyway. These are
-    /// deliberately generous placeholders rather than guesses at the truth.</summary>
-    private const int DefaultContextWindow = 128000;
+    /// <summary>
+    /// Pi requires an output cap and MolaGPT's model rows usually lack one; the real
+    /// limit is enforced upstream anyway, so this is a floor rather than a claim.
+    /// </summary>
     private const int DefaultMaxTokens = 8192;
 
     public static string BuildJson(
@@ -34,7 +34,7 @@ public static class PiModelCatalog
                 ["id"] = model.Id,
                 ["name"] = $"{displayName} · {model.DisplayName}",
                 ["api"] = api,
-                ["reasoning"] = model.SupportsThinking,
+                ["reasoning"] = model.SupportsThinking || model.SupportsReasoningEffort,
                 // Claimed for every model: Pi refuses to send an image to a model
                 // that does not declare it, and MolaGPT has already decided whether
                 // to send one by the time the turn reaches the sidecar.
@@ -42,8 +42,12 @@ public static class PiModelCatalog
                 // Billing is MolaGPT's, upstream of Pi. Zeroes keep Pi's own cost
                 // display from inventing numbers we would then have to explain.
                 ["cost"] = new { input = 0, output = 0, cacheRead = 0, cacheWrite = 0 },
-                ["contextWindow"] = DefaultContextWindow,
-                ["maxTokens"] = DefaultMaxTokens,
+                // Pi budgets auto-compaction off this number (it compacts once the
+                // context passes contextWindow − 16,384), so a flat placeholder here
+                // was compacting 1M-token models at about an eighth of their window.
+                // The user's own setting wins; the table only covers the silence.
+                ["contextWindow"] = ModelContextWindows.ResolveOrDefault(model.Id, model.ContextWindow),
+                ["maxTokens"] = model.MaxOutputTokens is > 0 ? model.MaxOutputTokens.Value : DefaultMaxTokens,
             };
             if (compat is not null) entry["compat"] = compat;
             return entry;

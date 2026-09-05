@@ -77,6 +77,17 @@ public sealed class PiRuntime : IAsyncDisposable
     public string BridgeUrl => _bridge.Url;
 
     /// <summary>
+    /// Whether sidecars may summarize their own history once the context fills up.
+    ///
+    /// Application-wide, and kept here rather than on a provider for two reasons:
+    /// this is the object that survives a provider being re-registered, and this is
+    /// where the setting gets wiped — every <see cref="AcquireAsync"/> switches the
+    /// session, which resets the sidecar to Pi's default. Re-applying anywhere else
+    /// means some future caller forgets and the preference lasts one turn.
+    /// </summary>
+    public bool AutoCompactionEnabled { get; set; } = true;
+
+    /// <summary>
     /// Take a sidecar for one turn on <paramref name="conversationKey"/>.
     ///
     /// Blocks while every slot is busy, which is the intended back-pressure: three
@@ -114,6 +125,28 @@ public sealed class PiRuntime : IAsyncDisposable
             // the file disagreeing. 60ms is not worth the class of bug that
             // "optimising" it away would open.
             var wasWarm = await entry.Session.SwitchSessionAsync(sessionPath, ct).ConfigureAwait(false);
+
+            // The switch just reset the sidecar's auto-compaction to Pi's default,
+            // so the preference is re-sent here rather than anywhere the caller has
+            // to remember. Sent every time and in both directions on purpose: it
+            // costs one line on a live process, and skipping the "on" case would
+            // make this silently wrong the day Pi's default changes.
+            //
+            // Best-effort: a runtime too old to know the command must not take the
+            // turn down with it. Losing the preference means summarizing stays on,
+            // which is the default and costs the user nothing they did not already
+            // have; failing the lease would cost them the answer.
+            try
+            {
+                await entry.Session
+                    .SetAutoCompactionAsync(AutoCompactionEnabled, ct)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _log?.Invoke("[pi-runtime] 自动压缩偏好未生效：" + ex.Message);
+            }
+
             entry.ConversationKey = conversationKey;
             return new PiTurnLease(this, entry, wasWarm);
         }
