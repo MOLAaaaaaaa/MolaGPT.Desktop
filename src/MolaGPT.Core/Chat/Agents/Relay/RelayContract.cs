@@ -29,7 +29,11 @@ namespace MolaGPT.Core.Chat.Agents.Relay;
 [JsonDerivedType(typeof(ThinkingSnapshotEvent), "thinkingSnapshot")]
 [JsonDerivedType(typeof(TurnDoneEvent), "turnDone")]
 [JsonDerivedType(typeof(TurnFailedEvent), "turnFailed")]
+[JsonDerivedType(typeof(HistoryResetEvent), "historyReset")]
 public abstract record RelayTranscriptEvent;
+
+/// <summary>The following events replace the previously displayed history.</summary>
+public sealed record HistoryResetEvent : RelayTranscriptEvent;
 
 /// <summary>The user's prompt for this turn (optimistic local echo).</summary>
 public sealed record UserPromptEvent(string Text) : RelayTranscriptEvent;
@@ -58,7 +62,7 @@ public sealed record AnswerSnapshotEvent(string Text, string? SegmentId = null) 
 public sealed record ThinkingSnapshotEvent(string Text, string? SegmentId = null) : RelayTranscriptEvent;
 
 /// <summary>The turn completed. Carries final usage when known.</summary>
-public sealed record TurnDoneEvent(AgentUsage? Usage) : RelayTranscriptEvent;
+public sealed record TurnDoneEvent(AgentUsage? Usage, string? Reason = null) : RelayTranscriptEvent;
 
 /// <summary>The turn failed.</summary>
 public sealed record TurnFailedEvent(string Message) : RelayTranscriptEvent;

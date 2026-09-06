@@ -107,6 +107,11 @@ public sealed class MarkdownListView : TemplatedControl
             _host.Children.Add(BuildRow(items[i]));
 
         _rows = items;
+
+        // Re-applied on every rebuild, not once: which item is last changes as
+        // the list grows, and the entry that has just stopped being last has to
+        // give the trailing fade back.
+        StreamTailFade.KeepTailOnLast(_host);
     }
 
     /// <summary>

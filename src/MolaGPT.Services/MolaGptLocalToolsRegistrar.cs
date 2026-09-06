@@ -115,7 +115,15 @@ public sealed class MolaGptLocalToolsRegistrar
                 // Pi's own session files live beside MolaGPT's other state, one per
                 // conversation, so a sidecar can be pointed at any of them.
                 PiWorkSidecarLocator.SessionRoot,
-                PiModelCatalog.BuildJson(models, api, MolaGptProxyProvider.LocalToolsDisplayName, endpoint),
+                // multiplexedRelay: one URL, many vendors behind it. Pi has to be
+                // told the dialect explicitly here — it cannot read it off a host
+                // that is ours.
+                PiModelCatalog.BuildJson(
+                    models,
+                    api,
+                    MolaGptProxyProvider.LocalToolsDisplayName,
+                    endpoint,
+                    multiplexedRelay: true),
                 models[0].Id,
                 api,
                 AuthHeader: true,

@@ -269,6 +269,11 @@ public sealed partial class AgentHistoryReader
                 events.Add(new TurnDoneEvent(null));
                 Commit(alreadyTerminated: true);
             }
+            else if (payloadType is "turn_aborted" or "task_aborted" && inTurn)
+            {
+                events.Add(new TurnDoneEvent(null, "interrupted"));
+                Commit(alreadyTerminated: true);
+            }
         }
 
         void AppendCodexResponseItem(JsonElement payload)

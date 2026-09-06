@@ -157,7 +157,10 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         var recent = await _history
             .ListRecentAsync(max: 120, ct: ct, maxStaleness: maxStaleness)
             .ConfigureAwait(false);
-        var entry = recent.FirstOrDefault(e => string.Equals(e.SessionId, conversationId, StringComparison.Ordinal));
+        var session = GetSession(conversationId);
+        var historyId = session?.ResumeSessionId ?? conversationId;
+        var entry = recent.FirstOrDefault(e => string.Equals(e.SessionId, historyId, StringComparison.Ordinal)
+            && (session is null || e.BackendId == session.BackendId));
         if (entry is null)
             throw new FileNotFoundException($"History transcript for session '{conversationId}' was not found.");
 
@@ -680,10 +683,11 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         bool titleChanged;
         lock (entry.StateLock)
         {
-            if (!entry.IsBridgeManaged)
+            if (!entry.IsBridgeManaged || (entry.EventLog.Seq == 0 && entry.Phase == AgentSessionPhase.Idle))
             {
                 if (fileMs > entry.UpdatedAtMs) entry.UpdatedAtMs = fileMs;
-                titleChanged = !string.IsNullOrWhiteSpace(title) && title != entry.Title;
+                titleChanged = !string.IsNullOrWhiteSpace(title) && title != entry.Title
+                    && (!entry.IsBridgeManaged || IsDefaultTitle(entry.Title, entry.BackendId));
             }
             else
             {

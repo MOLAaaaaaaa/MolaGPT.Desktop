@@ -168,6 +168,10 @@ public sealed class MarkdownTableView : TemplatedControl
                 _host.Children.Add(cell);
             }
         }
+
+        // One text control per cell, so without this every cell in the table
+        // dims its own last words while the answer is still being written.
+        StreamTailFade.KeepTailOnLast(_host);
     }
 
     private static TextAlignment Align(TableBlock block, int column) =>

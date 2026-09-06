@@ -70,6 +70,13 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
         CodeBackgroundProperty.Changed.AddClassHandler<MarkdownTextBlock>((x, _) => x.Rebuild());
         FontSizeProperty.Changed.AddClassHandler<MarkdownTextBlock>((x, _) => x.Rebuild());
         FontWeightProperty.Changed.AddClassHandler<MarkdownTextBlock>((x, _) => x.Rebuild());
+
+        // The rebuild when the flag goes *false* is the one that matters. A
+        // trailing fade that is never taken off leaves the last words of a
+        // finished answer permanently dimmed, and nothing else would ever
+        // rebuild a row that has stopped changing.
+        StreamTailFade.IsTailProperty.Changed.AddClassHandler<MarkdownTextBlock>(
+            (x, _) => x.Rebuild());
     }
 
     private bool _attached;
@@ -81,6 +88,9 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
     private bool _usingAdaptiveLineHeight;
     private double _configuredLineHeight;
     private double _configuredLineSpacing;
+
+    private IBrush? _dimBrush;
+    private Color _dimSource;
 
     /// <summary>
     /// Building is deferred until the control is in the tree, because the Latin
@@ -101,6 +111,63 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
     {
         base.OnDetachedFromVisualTree(e);
         _attached = false;
+    }
+
+    /// <summary>
+    /// Splits the newest words off the trailing run and draws them dimmed.
+    ///
+    /// Deliberately a function of the text rather than an animation. This app
+    /// draws through a low-latency swap chain that stops producing frames when
+    /// nothing changes, so an animated value can come to rest short of its final
+    /// keyframe and stay there; opacity baked into a run has no in-between state
+    /// to be stranded in. It is also why the flag turning off rebuilds the
+    /// inlines rather than fading them back up: the effect is removed, not
+    /// animated away, so there is no frame it can stop on.
+    ///
+    /// Only the final run is split, and only once — see
+    /// <see cref="StreamTailFade"/> for why a second boundary is not affordable.
+    /// When something else ends the paragraph, a closing bold marker or an
+    /// inline image, the tail is shorter for the frame or two until plain text
+    /// follows it, which is not worth walking the inline list backwards to
+    /// avoid.
+    /// </summary>
+    private void ApplyTailFade(InlineCollection target)
+    {
+        if (!StreamTailFade.IsEnabled || !GetValue(StreamTailFade.IsTailProperty)) return;
+        if (target.Count == 0 || target[^1] is not Run tail) return;
+        if (tail.Text is not { Length: > 0 } text) return;
+        if ((tail.Foreground ?? Foreground) is not ISolidColorBrush solid) return;
+
+        var start = StreamTailFade.TailStart(text);
+        if (start >= text.Length) return;
+
+        target.RemoveAt(target.Count - 1);
+        if (start > 0) target.Add(CopyRun(tail, text[..start], tail.Foreground));
+        target.Add(CopyRun(tail, text[start..], Dim(solid.Color)));
+    }
+
+    /// <summary>Same run, different text and colour. Everything the inline
+    /// builders set has to come across, or the tail of a bold sentence loses its
+    /// weight and a code span loses its tint.</summary>
+    private static Run CopyRun(Run source, string text, IBrush? foreground) => new(text)
+    {
+        FontFamily = source.FontFamily,
+        FontStyle = source.FontStyle,
+        FontWeight = source.FontWeight,
+        Background = source.Background,
+        TextDecorations = source.TextDecorations,
+        Foreground = foreground
+    };
+
+    /// <summary>Cached against the colour it came from: the same brush is wanted
+    /// again on every delta of every streaming row.</summary>
+    private IBrush Dim(Color color)
+    {
+        if (_dimBrush is not null && _dimSource == color) return _dimBrush;
+
+        _dimSource = color;
+        return _dimBrush = new SolidColorBrush(Color.FromArgb(
+            (byte)Math.Round(color.A * StreamTailFade.TailOpacity), color.R, color.G, color.B));
     }
 
     private void Rebuild()
@@ -156,6 +223,7 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
         finally
         {
             _protectedMath = null;
+            ApplyTailFade(target);
             UpdateLineMetrics();
         }
     }

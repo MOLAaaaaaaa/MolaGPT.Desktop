@@ -15,7 +15,8 @@ public sealed record AgentEvent(
     AgentPermissionRequest? Permission = null,
     AgentUsage? Usage = null,
     string? ErrorMessage = null,
-    string? RawJson = null)
+    string? RawJson = null,
+    string? EndReason = null)
 {
     public static AgentEvent TextDelta(string text, string? raw = null) =>
         new(AgentEventKind.TextDelta, Text: text, RawJson: raw);

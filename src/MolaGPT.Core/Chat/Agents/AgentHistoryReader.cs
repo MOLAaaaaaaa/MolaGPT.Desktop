@@ -32,6 +32,18 @@ public sealed partial class AgentHistoryReader
     private readonly ConcurrentDictionary<string, CachedFile<ClaudeFacts>> _claudeCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, CachedFile<CodexFacts>> _codexCache = new(StringComparer.OrdinalIgnoreCase);
     private CachedFile<Dictionary<string, string>>? _codexTitleIndex;
+    private readonly ConcurrentDictionary<string, (long Length, long WriteTicks, DateTimeOffset Activity)> _activity = new(StringComparer.OrdinalIgnoreCase);
+
+    private DateTimeOffset ObserveActivity(FileInfo file)
+    {
+        // Windows can defer LastWriteTime while the CLI keeps its writer open.
+        var stamp = _activity.AddOrUpdate(file.FullName,
+            _ => (file.Length, file.LastWriteTimeUtc.Ticks, new DateTimeOffset(file.LastWriteTimeUtc)),
+            (_, previous) => previous.Length == file.Length && previous.WriteTicks == file.LastWriteTimeUtc.Ticks
+                ? previous
+                : (file.Length, file.LastWriteTimeUtc.Ticks, DateTimeOffset.UtcNow));
+        return stamp.Activity;
+    }
 
     /// <summary>Bound on cache growth. Each scan looks at 120 files per backend,
     /// so this only trips after a lot of session churn in one process lifetime.</summary>
@@ -257,7 +269,7 @@ public sealed partial class AgentHistoryReader
                 facts.SessionId,
                 facts.Cwd ?? "",
                 CleanTitle(facts.Title) ?? "(无标题)",
-                new DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero),
+                ObserveActivity(fi),
                 fi.FullName);
         }
     }
@@ -365,7 +377,7 @@ public sealed partial class AgentHistoryReader
                 sessionId,
                 facts.Cwd ?? "",
                 CleanTitle(displayTitle) ?? "(无标题)",
-                new DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero),
+                ObserveActivity(fi),
                 fi.FullName);
         }
     }

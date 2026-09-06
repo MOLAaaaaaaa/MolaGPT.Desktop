@@ -186,7 +186,9 @@
     </DataTemplate>
 
     <DataTemplate DataType="r:ProseRow">
-      <Border Classes="assistantcol">
+      <!-- IsTail inherits, so whichever control the block template picks can
+           read it without the row having to know which one that is. -->
+      <Border Classes="assistantcol" r:StreamTailFade.IsTail="{Binding IsFadingTail}">
         <ContentControl Content="{Binding Block}" />
       </Border>
     </DataTemplate>

@@ -52,22 +52,74 @@ public sealed class UserMessageRow : TranscriptRow
 }
 
 /// <summary>Assistant avatar plus model name — row 0 of the AssistantGrid.</summary>
-public sealed class HeaderRow : TranscriptRow
+public sealed class HeaderRow : TranscriptRow, INotifyPropertyChanged
 {
-    public HeaderRow(MessageViewModel message) : base(message, message.RowKey() + ":head") { }
+    private string _label;
 
-    public string Label =>
-        Message.ModelLabel is { Length: > 0 } model ? model : "Assistant";
+    public HeaderRow(MessageViewModel message) : base(message, message.RowKey() + ":head")
+        => _label = LabelFor(message);
+
+    /// <summary>
+    /// Notifying rather than computed, for the same reason
+    /// <see cref="ProseRow.IsFadingTail"/> is: this row's key never changes, so
+    /// the splice always carries the existing instance — and its container —
+    /// forward. A plain getter is read once when that container is realized and
+    /// never again, which is how a retry on a different model kept showing the
+    /// name of the model that produced the attempt it had just replaced.
+    /// </summary>
+    public string Label
+    {
+        get => _label;
+        private set
+        {
+            if (string.Equals(_label, value, StringComparison.Ordinal)) return;
+            _label = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Label)));
+        }
+    }
+
+    /// <summary>Re-read the model name onto a row the splice is about to carry
+    /// forward.</summary>
+    public void Refresh() => Label = LabelFor(Message);
+
+    private static string LabelFor(MessageViewModel message) =>
+        message.ModelLabel is { Length: > 0 } model ? model : "Assistant";
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
 
 /// <summary>A parsed markdown block: paragraph, heading, code fence, table…</summary>
-public sealed class ProseRow : TranscriptRow
+public sealed class ProseRow : TranscriptRow, INotifyPropertyChanged
 {
+    private bool _isFadingTail;
+
     public ProseRow(MessageViewModel message, RenderBlock block, int segment)
         : base(message, $"{message.RowKey()}:{segment}:{block.Key}")
         => Block = block;
 
     public RenderBlock Block { get; }
+
+    /// <summary>
+    /// This is the last block of a message whose text is still being revealed,
+    /// so its final line gets the trailing fade.
+    ///
+    /// Lives on the row rather than being derived in the template because a
+    /// splice carries unchanged rows forward by reference: the row that was the
+    /// tail a moment ago is often the same object, and only an assignment with
+    /// notification can take the flag back off it.
+    /// </summary>
+    public bool IsFadingTail
+    {
+        get => _isFadingTail;
+        set
+        {
+            if (_isFadingTail == value) return;
+            _isFadingTail = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsFadingTail)));
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
 
 public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged

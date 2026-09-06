@@ -230,7 +230,7 @@ public sealed class AgentRelayClient
                 if (ConsumeAwaitingTerminal(sessionId))
                 {
                     FlushTurnBuffers(sessionId, entry.Seq);
-                    Post(Envelope(sessionId, entry.Seq, new TurnDoneEvent(null)));
+                    Post(Envelope(sessionId, entry.Seq, new TurnDoneEvent(null, "interrupted")));
                 }
                 ResetTurnBuffers(sessionId);
                 break;
@@ -262,7 +262,7 @@ public sealed class AgentRelayClient
                 SetAwaitingTerminal(sessionId, false); // terminal: a normal completion
                 FlushTurnBuffers(sessionId, seq);
                 ResetTurnBuffers(sessionId);
-                return new TurnDoneEvent(ev.Usage);
+                return new TurnDoneEvent(ev.Usage, ev.EndReason);
 
             case AgentEventKind.Error:
                 SetAwaitingTerminal(sessionId, false); // terminal: a failure
@@ -615,9 +615,9 @@ public sealed class AgentRelayClient
             var tailOpen = turns[^1].IsOpen;
             var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var fileFresh = nowMs - state.UpdatedAtMs <= (long)ExternalTurnActiveWindow.TotalMilliseconds;
-            var liveTail = tailOpen && fileFresh;
+            var liveTail = tailOpen && (state.BackendId == CodexBackend.BackendId || fileFresh);
             // A stale open tail = the writer stopped without a terminal; close it.
-            var closeStaleTail = tailOpen && !fileFresh;
+            var closeStaleTail = tailOpen && !fileFresh && state.BackendId != CodexBackend.BackendId;
 
             // Record BEFORE the meta post below so the phone sees Running while the
             // external turn's tail is still live, and flips back once it closes.
@@ -663,16 +663,13 @@ public sealed class AgentRelayClient
         if (turns.Count == 0)
             return;
 
-        // Build the full transcript with fresh seqs 1..N, then ship it as ONE atomic
-        // replace. The old approach (reset + post each event individually) exposed a
-        // half-rebuilt transcript to the phone for the entire backfill — and for a
-        // large session that backfill outran the 10s snapshot loop, which observed the
-        // reset cursor and re-triggered the projection endlessly (so every re-entry on
-        // the phone showed a different, incomplete tail).
+        // Replace atomically, with a reset marker and cursors newer than the old
+        // snapshot, including when text changes without changing the event count.
         await DrainEventPostsAsync().ConfigureAwait(false);
 
         var envelopes = new List<RelayEventEnvelope>();
-        long seq = 0;
+        long seq = LastConfirmedRelaySeq(sessionId);
+        envelopes.Add(new RelayEventEnvelope(sessionId, ++seq, new HistoryResetEvent()));
         foreach (var turn in turns)
         {
             foreach (var ev in turn.Events)
@@ -682,12 +679,10 @@ public sealed class AgentRelayClient
             }
         }
 
-        // Terminate a stale open tail so the phone's detail view doesn't derive a
-        // perpetual Running from a transcript that stopped mid-turn. The file is no
-        // longer changing, so this synthetic TurnDone lands at a stable seq on every
-        // re-projection — the phone's since-cursor sees it once and does not re-fire.
+        // Claude's interactive history may omit its terminal marker. An inactivity
+        // closure must not produce a successful-completion notification.
         if (closeStaleTail && envelopes.Count > 0 && envelopes[^1].Event is not TurnDoneEvent)
-            envelopes.Add(new RelayEventEnvelope(sessionId, ++seq, new TurnDoneEvent(null)));
+            envelopes.Add(new RelayEventEnvelope(sessionId, ++seq, new TurnDoneEvent(null, "inactive")));
 
         await _producer.ReplaceSessionEventsAsync(sessionId, envelopes, ct).ConfigureAwait(false);
 
@@ -781,6 +776,7 @@ public sealed class AgentRelayClient
     // detail view from a perpetual 运行中.
     private bool NeedsTailClose(AgentSessionStateDto s)
         => IsHistoryProjection(s)
+           && s.BackendId != CodexBackend.BackendId
            && IsProjectedTailOpen(s.ConversationId)
            && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - s.UpdatedAtMs
                > (long)ExternalTurnActiveWindow.TotalMilliseconds;
@@ -807,7 +803,8 @@ public sealed class AgentRelayClient
         if (phase == AgentSessionPhase.Idle
             && s.Seq <= 0
             && IsProjectedTailOpen(s.ConversationId)
-            && nowMs - s.UpdatedAtMs <= (long)ExternalTurnActiveWindow.TotalMilliseconds)
+            && (s.BackendId == CodexBackend.BackendId
+                || nowMs - s.UpdatedAtMs <= (long)ExternalTurnActiveWindow.TotalMilliseconds))
         {
             phase = AgentSessionPhase.Running;
         }

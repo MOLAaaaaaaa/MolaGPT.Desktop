@@ -41,6 +41,29 @@ public static class PiEndpointQuirks
     }
 
     /// <summary>
+    /// The profile for an endpoint that is not a vendor's own API but a relay in
+    /// front of many — MolaGPT's account-quota endpoint, where every model bills
+    /// to one URL and the vendor behind it changes per request.
+    ///
+    /// <see cref="CompatJsonFor"/> cannot help there: it keys on the host, and
+    /// the host is ours. So Pi saw a plain OpenAI endpoint and sent the system
+    /// prompt as <c>role: "developer"</c> — which OpenAI accepts and Zhipu and
+    /// DashScope reject with a 400, i.e. every reasoning-capable Chinese model on
+    /// the account plan failed outright.
+    ///
+    /// Only the two flags that are safe for <em>every</em> vendor behind the
+    /// relay are set. <c>system</c> is accepted by everything that accepts
+    /// <c>developer</c>, and <c>store</c> is optional everywhere, so neither
+    /// costs the endpoints that would have been fine.
+    /// <c>maxTokensField</c> is deliberately left to Pi: the same relay carries
+    /// GPT-5-family models, and those reject <c>max_tokens</c> as firmly as Zhipu
+    /// rejects <c>developer</c>. Getting that one right needs to be per model,
+    /// and nothing has been observed failing on it.
+    /// </summary>
+    public const string MultiplexedRelayCompatJson =
+        """{"supportsStore":false,"supportsDeveloperRole":false}""";
+
+    /// <summary>
     /// The compatibility profile Pi would have detected for <paramref name="endpoint"/>
     /// if it could see it, as a JSON fragment for the model's <c>compat</c> field.
     /// Null means "Pi's default profile is right", which is the common case.

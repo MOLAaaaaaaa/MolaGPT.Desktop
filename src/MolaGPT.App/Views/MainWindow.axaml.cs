@@ -8,6 +8,7 @@ using Avalonia.Media;
 using Avalonia.Styling;
 using Avalonia.Threading;
 using MolaGPT.App.Infrastructure;
+using MolaGPT.App.Rendering;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Providers;
@@ -128,6 +129,7 @@ public partial class MainWindow : MolaWindow
         InitializeComponent();
         DataContext = _main;
         ApplyFontScale(_settings.FontScale);
+        StreamTailFade.Configure(_settings.StreamFadeEnabled);
         _settings.PropertyChanged += OnSettingsPropertyChanged;
 
         PART_Header.AttachProviders(providers);
@@ -287,6 +289,8 @@ public partial class MainWindow : MolaWindow
     {
         if (e.PropertyName == nameof(SettingsViewModel.FontScale))
             ApplyFontScale(_settings.FontScale);
+        if (e.PropertyName == nameof(SettingsViewModel.StreamFadeEnabled))
+            StreamTailFade.Configure(_settings.StreamFadeEnabled);
     }
 
     internal void ApplyFontScale(double value)

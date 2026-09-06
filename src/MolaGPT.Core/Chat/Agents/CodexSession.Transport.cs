@@ -269,7 +269,14 @@ internal sealed partial class CodexSession
                 return MapItemLifecycle(prms, raw, AgentToolStatus.Completed);
 
             case "turn/completed":
-                return AgentEvent.Complete(ExtractUsage(prms), raw);
+                var turn = prms.TryGetProperty("turn", out var completedTurn) ? completedTurn : prms;
+                var status = turn.TryGetProperty("status", out var turnStatus) ? turnStatus.GetString() : null;
+                if (status == "failed")
+                    return AgentEvent.Failure(ExtractError(turn) ?? "Codex turn failed.", raw);
+                return AgentEvent.Complete(ExtractUsage(prms), raw) with
+                {
+                    EndReason = status == "interrupted" ? "interrupted" : null
+                };
 
             case "turn/failed":
                 return AgentEvent.Failure(ExtractError(prms) ?? "Codex turn failed.", raw);

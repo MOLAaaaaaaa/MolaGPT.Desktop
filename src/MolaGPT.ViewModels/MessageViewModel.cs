@@ -36,12 +36,11 @@ public enum MessageErrorAction
 ///
 /// We use <see cref="System.Threading.Timer"/> + a captured
 /// <see cref="SynchronizationContext"/> to keep this VM platform-agnostic
-/// (the ViewModels project deliberately stays net8.0, not net8.0-windows,
-/// so it doesn't depend on WPF's DispatcherTimer).
+/// (the ViewModels project deliberately carries no UI framework reference, so
+/// it cannot reach for a dispatcher timer).
 /// </summary>
 public sealed partial class MessageViewModel : ObservableObject, IDisposable
 {
-    private static readonly TimeSpan StreamFlushInterval = TimeSpan.FromMilliseconds(16);
 
     [GeneratedRegex("<DSanalysis\\b(?=[^>]*\\bdata-tool-type\\s*=\\s*['\"]image-gen['\"])[^>]*>[\\s\\S]*?</DSanalysis>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ImageGenDsAnalysisRegex();
@@ -274,13 +273,17 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     private DateTimeOffset? _pendingStartedAt;
     private System.Threading.Timer? _elapsedTimer;
     private System.Threading.Timer? _pendingTimer;
-    private System.Threading.Timer? _streamFlushTimer;
-    private readonly System.Threading.Lock _streamLock = new();
-    private readonly System.Text.StringBuilder _pendingDelta = new();
-    private System.Threading.Timer? _thinkingFlushTimer;
-    private readonly System.Threading.Lock _thinkingLock = new();
-    private readonly System.Text.StringBuilder _pendingThinking = new();
-    private bool _thinkingFlushScheduled;
+
+    /// <summary>Holds streamed text back and releases it at a readable rate.
+    /// Both the answer and the reasoning go through this one instance, so they
+    /// share a single rate budget: two independent throttles would have let a
+    /// turn that reasons and answers at once emit at twice the intended
+    /// speed.</summary>
+    private readonly StreamPacer _pacer = new();
+    private System.Threading.Timer? _paceTimer;
+    private readonly System.Threading.Lock _paceLock = new();
+    private readonly System.Diagnostics.Stopwatch _paceClock = new();
+    private bool _paceScheduled;
 
     /// <summary>Whether the active segment currently shows anything. Tracked so a
     /// delta only rebuilds the display blocks when that answer changes.</summary>
@@ -289,7 +292,6 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     private ThinkingSegmentViewModel? _activeThinkingSegment;
     private int _nextDisplaySequence;
     private bool _disposed;
-    private bool _streamFlushScheduled;
 
     public MessageViewModel(string role, string content, DateTimeOffset timestamp)
     {
@@ -314,20 +316,11 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public void AppendDelta(string delta)
     {
         if (_disposed || string.IsNullOrEmpty(delta)) return;
-        StopPending();
 
         if (IsStreaming)
         {
-            lock (_streamLock)
-            {
-                _pendingDelta.Append(delta);
-                if (!_streamFlushScheduled)
-                {
-                    _streamFlushScheduled = true;
-                    _streamFlushTimer ??= new System.Threading.Timer(_ => PostFlushPendingDeltaFrame(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-                    _streamFlushTimer.Change(StreamFlushInterval, Timeout.InfiniteTimeSpan);
-                }
-            }
+            _pacer.Enqueue(PacedStream.Answer, delta);
+            SchedulePaceFrame();
         }
         else
         {
@@ -343,96 +336,151 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
-    /// Commit any queued streaming text immediately. Called before final
-    /// markdown render and before persistence so the database never misses
-    /// the tail that was waiting for the next UI frame.
+    /// The whole answer, including any tail the pacer is still revealing.
     ///
-    /// Reasoning is queued the same way the answer is, so it is flushed here
-    /// too rather than at each of this method's call sites — a caller that
-    /// remembered one and forgot the other would silently persist a truncated
-    /// chain of thought.
+    /// <see cref="Content"/> is what the transcript shows, and after the stream
+    /// ends it deliberately lags for up to a couple of seconds while the last
+    /// words play out. Everything that captures the finished text — persistence,
+    /// the history sent with the next request, title generation — has to read
+    /// this instead, or it saves a truncated answer that nothing would report.
+    /// </summary>
+    public string FullContent
+    {
+        get
+        {
+            var pending = _pacer.PendingAnswer;
+            return pending.Length == 0 ? Content : Content + pending;
+        }
+    }
+
+    /// <summary>Whether text is still being revealed. Stays true through the
+    /// post-stream drain, after <see cref="IsStreaming"/> has gone false, and is
+    /// what the trailing fade keys off.</summary>
+    [ObservableProperty] private bool _isRevealing;
+
+    /// <summary>
+    /// Reveal every queued character immediately.
+    ///
+    /// This is the escape hatch for the places where the display has to be in
+    /// step with the model right now rather than a fraction of a second behind:
+    /// a tool card about to record its offset in the text, a cancelled turn, a
+    /// wholesale content replacement. Ordinary completion does not go through
+    /// here — see <see cref="CompleteStreaming"/>.
     /// </summary>
     public void FlushPendingDelta()
     {
         if (_disposed) return;
-        FlushPendingThinking();
-        var pending = TakeAllPendingDelta();
-        if (pending.Length > 0) Content += pending;
+        _pacer.DumpAll(EmitPaced);
+        StopPaceFrames();
     }
 
+    /// <summary>
+    /// Upstream has finished producing text.
+    ///
+    /// Reasoning is released whole, and the answer switches to a bounded drain
+    /// so the last words are not slammed onto the screen in one frame — which is
+    /// exactly what a dump-on-finish does, and what the tapering batch size
+    /// during streaming exists to avoid in the first place.
+    /// </summary>
+    public void CompleteStreaming()
+    {
+        if (_disposed) return;
+        _pacer.Complete(EmitPaced);
+        if (_pacer.HasPending) SchedulePaceFrame();
+        else StopPaceFrames();
+    }
+
+    /// <summary>Swaps the whole answer for a new one. The queue is discarded
+    /// rather than drained: the caller is supplying the complete text, so
+    /// anything still in flight is already part of it.</summary>
     public void ReplaceContent(string text)
     {
         if (_disposed) return;
-        FlushPendingDelta();
+        _pacer.Reset();
+        StopPaceFrames();
         Content = text;
     }
 
     public void FinishStreaming()
     {
         if (_disposed) return;
-        FlushPendingDelta();
+        CompleteStreaming();
         IsStreaming = false;
     }
 
-    private void PostFlushPendingDeltaFrame()
+    // ---- pacing frame loop -------------------------------------------------
+
+    private void SchedulePaceFrame()
+    {
+        lock (_paceLock)
+        {
+            if (_disposed || _paceScheduled) return;
+            _paceScheduled = true;
+            _paceTimer ??= new System.Threading.Timer(
+                _ => PostPaceFrame(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            _paceTimer.Change(StreamPacer.FrameInterval, Timeout.InfiniteTimeSpan);
+        }
+
+        if (!IsRevealing) IsRevealing = true;
+    }
+
+    private void StopPaceFrames()
+    {
+        lock (_paceLock)
+        {
+            _paceScheduled = false;
+            _paceTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            _paceClock.Reset();
+        }
+
+        if (IsRevealing) IsRevealing = false;
+    }
+
+    private void PostPaceFrame()
     {
         if (_disposed) return;
-        if (_syncContext is not null) _syncContext.Post(_ => FlushPendingDeltaFrame(), null);
-        else FlushPendingDeltaFrame();
+        if (_syncContext is not null) _syncContext.Post(_ => PaceFrame(), null);
+        else PaceFrame();
     }
 
-    private void FlushPendingDeltaFrame()
+    /// <summary>
+    /// One frame of playout.
+    ///
+    /// The elapsed time is measured rather than assumed to be the timer period.
+    /// A <see cref="System.Threading.Timer"/> on Windows resolves to about
+    /// 15.6ms and coalesces under load, so a fixed batch per tick makes output
+    /// <em>slower</em> exactly when the UI thread is already struggling —
+    /// punishing the user twice. Feeding the real delta to the pacer keeps the
+    /// perceived rate flat across a stutter instead.
+    /// </summary>
+    private void PaceFrame()
     {
         if (_disposed) return;
-        var pending = TakeFramePendingDelta();
-        if (pending.Length > 0) Content += pending;
-    }
 
-    private string TakeFramePendingDelta()
-    {
-        lock (_streamLock)
+        double elapsedMs;
+        lock (_paceLock)
         {
-            _streamFlushScheduled = false;
-            if (_pendingDelta.Length == 0) return string.Empty;
-            var take = Math.Min(GetAdaptiveStreamBatchSize(_pendingDelta.Length), _pendingDelta.Length);
-            var pending = _pendingDelta.ToString(0, take);
-            _pendingDelta.Remove(0, take);
-            if (_pendingDelta.Length > 0 && !_disposed)
-            {
-                _streamFlushScheduled = true;
-                _streamFlushTimer?.Change(StreamFlushInterval, Timeout.InfiniteTimeSpan);
-            }
-            return pending;
+            _paceScheduled = false;
+            elapsedMs = _paceClock.IsRunning ? _paceClock.Elapsed.TotalMilliseconds : 0;
+            _paceClock.Restart();
         }
+
+        _pacer.Drain(elapsedMs, EmitPaced);
+
+        if (_pacer.HasPending) SchedulePaceFrame();
+        else StopPaceFrames();
     }
 
-    private string TakeAllPendingDelta()
+    private void EmitPaced(PacedStream kind, string text)
     {
-        lock (_streamLock)
-        {
-            _streamFlushScheduled = false;
-            _streamFlushTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-            if (_pendingDelta.Length == 0) return string.Empty;
-            var pending = _pendingDelta.ToString();
-            _pendingDelta.Clear();
-            return pending;
-        }
-    }
-
-    private static int GetAdaptiveStreamBatchSize(int queuedChars)
-    {
-        if (queuedChars >= 4000) return 512;
-        if (queuedChars >= 1600) return 256;
-        if (queuedChars >= 700) return 160;
-        if (queuedChars >= 240) return 96;
-        if (queuedChars >= 80) return 48;
-        return Math.Min(queuedChars, 24);
+        if (_disposed || text.Length == 0) return;
+        if (kind == PacedStream.Answer) Content += text;
+        else CommitThinking(text);
     }
 
     public void AppendThinking(string delta)
     {
         if (_disposed || string.IsNullOrEmpty(delta)) return;
-        StopPending();
 
         // Opening a segment is structural — the card has to appear on the first
         // delta — so it is never deferred. Only the text is.
@@ -464,57 +512,8 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             return;
         }
 
-        lock (_thinkingLock)
-        {
-            _pendingThinking.Append(delta);
-            if (_thinkingFlushScheduled) return;
-
-            _thinkingFlushScheduled = true;
-            _thinkingFlushTimer ??= new System.Threading.Timer(
-                _ => PostFlushPendingThinkingFrame(), null,
-                Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-            _thinkingFlushTimer.Change(StreamFlushInterval, Timeout.InfiniteTimeSpan);
-        }
-    }
-
-    private void PostFlushPendingThinkingFrame()
-    {
-        if (_disposed) return;
-        if (_syncContext is not null) _syncContext.Post(_ => FlushPendingThinkingFrame(), null);
-        else FlushPendingThinkingFrame();
-    }
-
-    private void FlushPendingThinkingFrame() => CommitThinking(TakeFramePendingThinking());
-
-    private string TakeFramePendingThinking()
-    {
-        lock (_thinkingLock)
-        {
-            _thinkingFlushScheduled = false;
-            if (_pendingThinking.Length == 0) return string.Empty;
-
-            var take = Math.Min(GetAdaptiveStreamBatchSize(_pendingThinking.Length), _pendingThinking.Length);
-            var pending = _pendingThinking.ToString(0, take);
-            _pendingThinking.Remove(0, take);
-            if (_pendingThinking.Length > 0 && !_disposed)
-            {
-                _thinkingFlushScheduled = true;
-                _thinkingFlushTimer?.Change(StreamFlushInterval, Timeout.InfiniteTimeSpan);
-            }
-            return pending;
-        }
-    }
-
-    private string TakeAllPendingThinking()
-    {
-        lock (_thinkingLock)
-        {
-            _thinkingFlushScheduled = false;
-            if (_pendingThinking.Length == 0) return string.Empty;
-            var pending = _pendingThinking.ToString();
-            _pendingThinking.Clear();
-            return pending;
-        }
+        _pacer.Enqueue(PacedStream.Thinking, delta);
+        SchedulePaceFrame();
     }
 
     /// <summary>
@@ -560,14 +559,19 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public void FlushPendingThinking()
     {
         if (_disposed) return;
-        CommitThinking(TakeAllPendingThinking());
+        _pacer.DumpThinking(EmitPaced);
     }
 
     /// <summary>Freeze the elapsed counter and clear active state. Called
-    /// when normal content starts arriving or when streaming finalizes.</summary>
+    /// when normal content starts arriving or when streaming finalizes.
+    ///
+    /// Only the reasoning queue is drained here. Draining the answer too — as
+    /// this used to — would dump the answer's backlog at the exact moment the
+    /// first answer token arrives, which is the one transition the pacing is
+    /// most visible on.</summary>
     public void StopThinking()
     {
-        FlushPendingDelta();
+        FlushPendingThinking();
         if (_thinkingStartedAt is { } start)
             ThinkingElapsedSeconds = (DateTimeOffset.UtcNow - start).TotalSeconds;
         if (_activeThinkingSegment is { } segment)
@@ -596,7 +600,11 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         ThinkingSegments.Clear();
         ToolCalls.Clear();
         DisplayBlocks.Clear();
-        TakeAllPendingThinking();
+        // The attempt above already captured everything the pacer was still
+        // holding, so the queue is discarded rather than drained into the empty
+        // content the retry starts from.
+        _pacer.Reset();
+        StopPaceFrames();
         _activeThinkingSegment = null;
         _activeThinkingVisible = false;
         _thinkingStartedAt = null;
@@ -646,7 +654,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
                 .ToArray();
 
         return new MessageAttempt(
-            Content,
+            FullContent,
             ModelLabel,
             Usage,
             Sources,
@@ -950,6 +958,36 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             next.Add(MessageDisplayBlockViewModel.ForText(ProcessCitationRefs(content[cursor..])));
 
         SyncDisplayBlocks(next);
+
+        // The placeholder goes when there is something to replace it with, not
+        // when the first byte lands. Those are not the same moment: a turn whose
+        // first delta is a newline (common) or a not-yet-closed hidden marker
+        // draws nothing, and tearing the pill down on arrival left the answer a
+        // blank gap under the model name until real text showed up — which for a
+        // reasoning model is the whole thinking phase.
+        if (IsPending && HasVisibleOutput) StopPending();
+    }
+
+    /// <summary>
+    /// Whether the transcript would draw anything for this message yet.
+    ///
+    /// Deliberately conservative about text: whitespace produces a display block
+    /// but no markdown block, so counting blocks alone would call an empty
+    /// message visible. Tool cards and reasoning cards are structural — they are
+    /// on screen the moment they exist.
+    /// </summary>
+    private bool HasVisibleOutput
+    {
+        get
+        {
+            foreach (var block in DisplayBlocks)
+            {
+                if (block.Tool is not null || block.ToolGroup is not null || block.Thinking is not null)
+                    return true;
+                if (block.IsText && !string.IsNullOrWhiteSpace(block.Text)) return true;
+            }
+            return false;
+        }
     }
 
     private void SyncDisplayBlocks(IReadOnlyList<MessageDisplayBlockViewModel> next)
@@ -1116,10 +1154,9 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         _elapsedTimer = null;
         _pendingTimer?.Dispose();
         _pendingTimer = null;
-        _streamFlushTimer?.Dispose();
-        _streamFlushTimer = null;
-        _thinkingFlushTimer?.Dispose();
-        _thinkingFlushTimer = null;
+        _paceTimer?.Dispose();
+        _paceTimer = null;
+        _paceClock.Reset();
     }
 }
 

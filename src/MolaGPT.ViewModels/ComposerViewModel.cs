@@ -1046,7 +1046,9 @@ public sealed partial class ComposerViewModel : ObservableObject
             catch (JsonException) { }
         }
 
-        return message.Content;
+        // FullContent: a follow-up sent while the previous answer is still being
+        // revealed must carry the whole answer, not the part already on screen.
+        return message.FullContent;
     }
 
     /// <summary>
@@ -1569,13 +1571,16 @@ public sealed partial class ComposerViewModel : ObservableObject
         {
             // Ahead of CompleteStreamContext, which persists: the stored meta and
             // the version switcher both read RetryAttempts, and capturing an
-            // attempt means capturing the text — so the deltas have to be flushed
-            // and the artifact links resolved before the snapshot is taken, or the
-            // saved version keeps the links this attempt showed on screen only
-            // until it finished. (CompleteStreamContext rewrites again; the second
-            // pass sees absolute URLs and leaves them alone.)
+            // attempt means capturing the text — so the artifact links have to be
+            // resolved before the snapshot is taken, or the saved version keeps
+            // the links this attempt showed on screen only until it finished.
+            // (CompleteStreamContext rewrites again; the second pass sees
+            // absolute URLs and leaves them alone.)
+            //
+            // Everything downstream of here reads FullContent, so the pacer is
+            // allowed to keep revealing the tail while this runs.
             assistantMsg.StopPending();
-            assistantMsg.FlushPendingDelta();
+            assistantMsg.CompleteStreaming();
             assistantMsg.IsStreaming = false;
             assistantMsg.StopThinking();
             RewritePythonArtifactMarkdownLinks(assistantMsg);
@@ -1873,8 +1878,12 @@ public sealed partial class ComposerViewModel : ObservableObject
         if (!_pythonArtifactContexts.TryGetValue(assistantMsg, out var contexts))
             return;
 
-        var rewritten = PythonArtifactMarkdownRewriter.Rewrite(assistantMsg.Content, contexts);
-        if (!string.Equals(rewritten, assistantMsg.Content, StringComparison.Ordinal))
+        // Rewrite the whole answer, not the revealed prefix: ReplaceContent
+        // discards what the pacer still holds, so feeding it a prefix would drop
+        // the tail outright rather than merely delay it.
+        var full = assistantMsg.FullContent;
+        var rewritten = PythonArtifactMarkdownRewriter.Rewrite(full, contexts);
+        if (!string.Equals(rewritten, full, StringComparison.Ordinal))
             assistantMsg.ReplaceContent(rewritten);
     }
 

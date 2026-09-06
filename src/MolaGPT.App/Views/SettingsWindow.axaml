@@ -212,6 +212,17 @@
                                     IsChecked="{Binding AutoCollapseThinking, Mode=TwoWay}"
                                     VerticalAlignment="Center" />
                     </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="淡显最新文字" />
+                        <TextBlock Classes="hint" Text="生成过程中把刚写出的几个字画得淡一些。系统关闭「显示动画」时自动停用。" />
+                      </StackPanel>
+                      <ToggleButton Grid.Column="1" Name="PART_StreamFade"
+                                    Classes="settingtoggle"
+                                    IsChecked="{Binding StreamFadeEnabled, Mode=TwoWay}"
+                                    VerticalAlignment="Center" />
+                    </Grid>
                   </StackPanel>
                 </Border>
 

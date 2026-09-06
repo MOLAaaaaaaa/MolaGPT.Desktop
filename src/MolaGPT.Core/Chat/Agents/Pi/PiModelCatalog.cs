@@ -19,13 +19,19 @@ public static class PiModelCatalog
     /// </summary>
     private const int DefaultMaxTokens = 8192;
 
+    /// <param name="multiplexedRelay">The endpoint is a relay standing in front of
+    /// several vendors rather than one vendor's API, so the host says nothing
+    /// about the dialect. See <see cref="PiEndpointQuirks.MultiplexedRelayCompatJson"/>.</param>
     public static string BuildJson(
         IReadOnlyList<ProviderModel> models,
         string api,
         string displayName,
-        string? endpoint)
+        string? endpoint,
+        bool multiplexedRelay = false)
     {
-        var compat = ParseCompat(PiEndpointQuirks.CompatJsonFor(endpoint));
+        var compat = ParseCompat(multiplexedRelay
+            ? PiEndpointQuirks.MultiplexedRelayCompatJson
+            : PiEndpointQuirks.CompatJsonFor(endpoint));
 
         var entries = models.Select(model =>
         {

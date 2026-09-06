@@ -23,6 +23,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string SyncConversationsKey = "sync_conversations";
     private const string EnterToSendKey = "enter_to_send";
     public const string AutoCollapseThinkingKey = "auto_collapse_thinking";
+    private const string StreamFadeKey = "stream_tail_fade";
     private const string AutoCompactionKey = "auto_compaction";
     private const string TracksEnabledKey = "molagpt_tracks_enabled";
     private const string CompletionNotificationKey = "completion_notification";
@@ -84,6 +85,16 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private ThemeMode _themeMode = ThemeMode.System;
     [ObservableProperty] private bool _enterToSend = true;
     [ObservableProperty] private bool _autoCollapseThinking = true;
+
+    /// <summary>
+    /// Whether the newest words of an answer being written are drawn dimmed.
+    ///
+    /// Only the dimming is optional. The pacing that decides how fast text
+    /// appears is not a setting: it is how the transcript reads, not decoration,
+    /// and a switch that turned it off would only ever be found by someone
+    /// looking for a way to make the app feel worse.
+    /// </summary>
+    [ObservableProperty] private bool _streamFadeEnabled = true;
 
     /// <summary>
     /// Whether the agent may summarize a conversation's history on its own once the
@@ -216,6 +227,8 @@ public sealed partial class SettingsViewModel : ObservableObject
                 EnterToSend = enterToSend;
             if (bool.TryParse(_settingsRepo.Get(AutoCollapseThinkingKey), out var autoCollapseThinking))
                 AutoCollapseThinking = autoCollapseThinking;
+            if (bool.TryParse(_settingsRepo.Get(StreamFadeKey), out var streamFade))
+                StreamFadeEnabled = streamFade;
             if (bool.TryParse(_settingsRepo.Get(AutoCompactionKey), out var autoCompaction))
                 AutoCompactionEnabled = autoCompaction;
             if (bool.TryParse(_settingsRepo.Get(TracksEnabledKey), out var tracksEnabled))
@@ -341,6 +354,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(AutoCollapseThinkingKey, value.ToString());
+    }
+
+    partial void OnStreamFadeEnabledChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(StreamFadeKey, value.ToString());
     }
 
     partial void OnAutoCompactionEnabledChanged(bool value)

@@ -554,8 +554,15 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                         TokensAfter: tokensAfter));
                 }
 
+                // A settled run is not necessarily a successful one. Reporting
+                // "stop" for a failed turn is how the failure became invisible:
+                // consumers break out of the stream on the first finish reason,
+                // so the throw at the end of StreamChatAsync never ran and every
+                // upstream error rendered as a blank but perfectly normal-looking
+                // answer. agent_end has already recorded the message by now, so
+                // this can tell the two apart.
                 case "agent_settled":
-                    return new ChatChunk(FinishReason: "stop");
+                    return errorMessage is null ? new ChatChunk(FinishReason: "stop") : null;
 
                 default:
                     return null;

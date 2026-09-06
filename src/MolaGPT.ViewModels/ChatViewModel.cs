@@ -856,7 +856,7 @@ public sealed partial class ChatViewModel : ObservableObject
     public void FinalizeAssistantMessage(MessageViewModel vm)
     {
         vm.StopPending();
-        vm.FlushPendingDelta();
+        vm.CompleteStreaming();
         vm.IsStreaming = false;
         vm.StopThinking();
         PersistMessage(vm);
@@ -872,7 +872,7 @@ public sealed partial class ChatViewModel : ObservableObject
         }
 
         vm.StopPending();
-        vm.FlushPendingDelta();
+        vm.CompleteStreaming();
         vm.IsStreaming = false;
         vm.StopThinking();
         PersistMessage(vm, conversationId);
@@ -930,7 +930,7 @@ public sealed partial class ChatViewModel : ObservableObject
     public void CompleteRetriedAssistantMessage(string conversationId, MessageViewModel vm)
     {
         vm.StopPending();
-        vm.FlushPendingDelta();
+        vm.CompleteStreaming();
         vm.IsStreaming = false;
         vm.StopThinking();
         UpdatePersistedMessage(vm);
@@ -973,7 +973,9 @@ public sealed partial class ChatViewModel : ObservableObject
             Id: id,
             ConversationId: conversationId,
             Role: vm.Role,
-            Content: vm.Content,
+            // FullContent, not Content: after a turn ends the pacer keeps
+            // revealing the tail for a moment, and Content is behind it.
+            Content: vm.FullContent,
             Meta: meta,
             CreatedAt: vm.Timestamp.ToUnixTimeMilliseconds()));
         vm.MessageId = id;
@@ -982,7 +984,7 @@ public sealed partial class ChatViewModel : ObservableObject
     public void UpdatePersistedMessage(MessageViewModel vm)
     {
         if (_messageRepo is null || string.IsNullOrWhiteSpace(vm.MessageId)) return;
-        _messageRepo.Update(vm.MessageId, vm.Content, BuildMessageMeta(vm));
+        _messageRepo.Update(vm.MessageId, vm.FullContent, BuildMessageMeta(vm));
     }
 
     /// <summary>

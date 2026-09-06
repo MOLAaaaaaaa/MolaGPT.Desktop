@@ -187,6 +187,10 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
     {
         nameof(MessageViewModel.Content),
         nameof(MessageViewModel.IsStreaming),
+        // Not for the rows it produces — it produces none — but because the
+        // trailing fade is decided during the splice, and it has to be taken
+        // off again when the last of the text has been revealed.
+        nameof(MessageViewModel.IsRevealing),
         nameof(MessageViewModel.IsPending),
         nameof(MessageViewModel.IsLatestAssistant),
         nameof(MessageViewModel.ModelLabel),
@@ -306,7 +310,42 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         if (message.HasActions)
             rows.Add(new ActionRow(message));
 
+        MarkFadingTail(message, rows);
         return rows;
+    }
+
+    /// <summary>
+    /// Points the trailing fade at the block still being written, and takes it
+    /// off everything else.
+    ///
+    /// Only the last block qualifies, and only when nothing but the action strip
+    /// follows it: text that already has a tool card under it is finished text,
+    /// and fading its end would suggest otherwise. The strip itself is skipped
+    /// because it appears as soon as the wire closes, while the last words of
+    /// the answer are still arriving.
+    /// </summary>
+    private static void MarkFadingTail(MessageViewModel message, List<TranscriptRow> rows)
+    {
+        var tail = message.IsRevealing ? TailProseIndex(rows) : -1;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            if (rows[i] is ProseRow prose) prose.IsFadingTail = i == tail;
+        }
+    }
+
+    private static int TailProseIndex(List<TranscriptRow> rows)
+    {
+        for (var i = rows.Count - 1; i >= 0; i--)
+        {
+            switch (rows[i])
+            {
+                case ActionRow or StoppedRow: continue;
+                case ProseRow: return i;
+                default: return -1;
+            }
+        }
+
+        return -1;
     }
 
     /// <summary>
@@ -330,8 +369,19 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         }
 
         // Carry the already-realized rows forward so their containers survive.
+        // A carried row is the one still on screen, so anything it read off the
+        // message when it was built has to be read again here — the freshly
+        // built replacement is about to be thrown away.
         for (var i = 0; i < shared; i++)
-            next[i] = previous[i];
+        {
+            var carried = previous[i];
+            if (carried is HeaderRow header) header.Refresh();
+            next[i] = carried;
+        }
+
+        // After the carry, so a row that has just stopped being the tail has the
+        // flag cleared on the instance that is actually still on screen.
+        MarkFadingTail(message, next);
 
         for (var i = previous.Count - 1; i >= shared; i--)
             RemoveAt(segment.Start + i);
