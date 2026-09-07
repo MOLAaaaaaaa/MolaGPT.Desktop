@@ -215,8 +215,8 @@
                     <Border Classes="divider" />
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                        <TextBlock Classes="rowtitle" Text="淡显最新文字" />
-                        <TextBlock Classes="hint" Text="生成过程中把刚写出的几个字画得淡一些。系统关闭「显示动画」时自动停用。" />
+                        <TextBlock Classes="rowtitle" Text="流式输出动画" />
+                        <TextBlock Classes="hint" Text="流式输出过程中启用打字机中的动画效果。" />
                       </StackPanel>
                       <ToggleButton Grid.Column="1" Name="PART_StreamFade"
                                     Classes="settingtoggle"

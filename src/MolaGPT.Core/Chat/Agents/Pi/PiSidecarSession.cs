@@ -41,6 +41,24 @@ public sealed class PiSidecarSession : IAsyncDisposable
 
     public bool IsAlive => _process is { HasExited: false };
 
+    /// <summary>Start the RPC process and wait until it can answer a command,
+    /// without opening a conversation or sending anything to a model.</summary>
+    public async Task WarmAsync(CancellationToken ct)
+    {
+        await _turnGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await Task.Run(EnsureStarted, ct).ConfigureAwait(false);
+            using (await RequestAsync("get_state", new { }, ct).ConfigureAwait(false))
+            {
+            }
+        }
+        finally
+        {
+            _turnGate.Release();
+        }
+    }
+
     private void EnsureStarted()
     {
         if (IsAlive) return;

@@ -47,6 +47,8 @@ public sealed class PiRuntime : IAsyncDisposable
 
     private readonly object _gate = new();
     private readonly List<Entry> _entries = [];
+    private readonly Dictionary<string, PrewarmOperation> _prewarms = new(StringComparer.Ordinal);
+    private readonly CancellationTokenSource _lifetimeCts = new();
     private readonly Timer _idleSweep;
     private int _sidecarsCreated;
 
@@ -87,6 +89,32 @@ public sealed class PiRuntime : IAsyncDisposable
     /// </summary>
     public bool AutoCompactionEnabled { get; set; } = true;
 
+    /// <summary>Prepare one sidecar for <paramref name="spec"/> without opening a
+    /// conversation or sending a model request. Concurrent callers share the same
+    /// startup, and <see cref="AcquireAsync"/> waits for it instead of spawning a
+    /// second process.</summary>
+    public Task PrewarmAsync(PiSidecarSpec spec, CancellationToken ct = default)
+    {
+        PrewarmOperation operation;
+        var start = false;
+        lock (_gate)
+        {
+            if (_entries.Any(e => e.SpecKey == spec.Key && (e.InUse || e.Session.IsAlive)))
+                return Task.CompletedTask;
+
+            if (!_prewarms.TryGetValue(spec.Key, out operation!))
+            {
+                operation = new PrewarmOperation(
+                    CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token));
+                _prewarms.Add(spec.Key, operation);
+                start = true;
+            }
+        }
+
+        if (start) _ = RunPrewarmAsync(spec, operation);
+        return operation.Completion.Task.WaitAsync(ct);
+    }
+
     /// <summary>
     /// Take a sidecar for one turn on <paramref name="conversationKey"/>.
     ///
@@ -101,6 +129,25 @@ public sealed class PiRuntime : IAsyncDisposable
         PiWorkToolBridge.TurnBinding binding,
         CancellationToken ct)
     {
+        Task? prewarm = null;
+        lock (_gate)
+        {
+            if (_prewarms.TryGetValue(spec.Key, out var operation))
+                prewarm = operation.Completion.Task;
+        }
+
+        if (prewarm is not null)
+        {
+            try
+            {
+                await prewarm.WaitAsync(ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _log?.Invoke("[pi-runtime] 预热失败，改由当前请求启动 sidecar：" + ex.Message);
+            }
+        }
+
         await _slots.WaitAsync(ct).ConfigureAwait(false);
         Entry entry;
         try
@@ -190,10 +237,15 @@ public sealed class PiRuntime : IAsyncDisposable
     public async Task RetireSpecAsync(PiSidecarSpec spec)
     {
         List<Entry> victims;
+        PrewarmOperation? prewarm = null;
         lock (_gate)
         {
+            if (_prewarms.Remove(spec.Key, out prewarm)) prewarm.Cancellation.Cancel();
+
             victims = _entries.Where(e => !e.InUse && e.SpecKey == spec.Key).ToList();
             foreach (var victim in victims) _entries.Remove(victim);
+            foreach (var active in _entries.Where(e => e.InUse && e.SpecKey == spec.Key))
+                active.RetireOnRelease = true;
         }
 
         foreach (var victim in victims)
@@ -202,6 +254,55 @@ public sealed class PiRuntime : IAsyncDisposable
             _bridge.SetBinding(victim.Token, null);
             try { await victim.Session.DisposeAsync().ConfigureAwait(false); }
             catch (Exception ex) { _log?.Invoke("[pi-runtime] 释放 sidecar 失败：" + ex.Message); }
+        }
+    }
+
+    private async Task RunPrewarmAsync(PiSidecarSpec spec, PrewarmOperation operation)
+    {
+        try
+        {
+            await _slots.WaitAsync(operation.Cancellation.Token).ConfigureAwait(false);
+            Entry entry;
+            try
+            {
+                entry = Claim(spec);
+            }
+            catch
+            {
+                _slots.Release();
+                throw;
+            }
+
+            try
+            {
+                await entry.Session.WarmAsync(operation.Cancellation.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                Release(entry);
+            }
+
+            operation.Completion.TrySetResult();
+        }
+        catch (OperationCanceledException) when (operation.Cancellation.IsCancellationRequested)
+        {
+            operation.Completion.TrySetCanceled(operation.Cancellation.Token);
+        }
+        catch (Exception ex)
+        {
+            operation.Completion.TrySetException(ex);
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                if (_prewarms.TryGetValue(spec.Key, out var current)
+                    && ReferenceEquals(current, operation))
+                {
+                    _prewarms.Remove(spec.Key);
+                }
+            }
+            operation.Cancellation.Dispose();
         }
     }
 
@@ -295,12 +396,19 @@ public sealed class PiRuntime : IAsyncDisposable
     {
         _shim.SetTarget(entry.Token, null);
         _bridge.SetBinding(entry.Token, null);
+        var retire = false;
         lock (_gate)
         {
             entry.InUse = false;
             entry.LastUsedUtc = DateTime.UtcNow;
+            if (entry.RetireOnRelease)
+            {
+                _entries.Remove(entry);
+                retire = true;
+            }
         }
         _slots.Release();
+        if (retire) RetireDetached(entry);
     }
 
     internal void ReleaseLease(Entry entry) => Release(entry);
@@ -337,6 +445,16 @@ public sealed class PiRuntime : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _lifetimeCts.Cancel();
+        Task[] prewarms;
+        lock (_gate)
+        {
+            foreach (var operation in _prewarms.Values) operation.Cancellation.Cancel();
+            prewarms = _prewarms.Values.Select(operation => operation.Completion.Task).ToArray();
+        }
+        try { await Task.WhenAll(prewarms).ConfigureAwait(false); }
+        catch { /* shutdown */ }
+
         await _idleSweep.DisposeAsync().ConfigureAwait(false);
 
         List<Entry> all;
@@ -354,6 +472,7 @@ public sealed class PiRuntime : IAsyncDisposable
         _bridge.Dispose();
         _shim.Dispose();
         _slots.Dispose();
+        _lifetimeCts.Dispose();
     }
 
     internal sealed class Entry
@@ -362,8 +481,16 @@ public sealed class PiRuntime : IAsyncDisposable
         public required string SpecKey { get; init; }
         public required PiSidecarSession Session { get; init; }
         public bool InUse { get; set; }
+        public bool RetireOnRelease { get; set; }
         public string? ConversationKey { get; set; }
         public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
+    }
+
+    private sealed class PrewarmOperation(CancellationTokenSource cancellation)
+    {
+        public CancellationTokenSource Cancellation { get; } = cancellation;
+        public TaskCompletionSource Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }
 
@@ -422,7 +549,9 @@ public sealed record PiSidecarSpec(
     /// <summary>Pool partition. The endpoint and the credential are deliberately
     /// absent: the shim supplies both per turn, so a rotating account token or a
     /// re-keyed provider never costs a respawn.</summary>
-    public string Key => $"{ProviderId}|{AuthHeader}|{Reasoning}|{ModelsJson.Length}";
+    public string Key =>
+        $"{ProviderId}|{NodePath}|{CliJsPath}|{ExtensionPath}|{WorkingDirectory}|{SessionRoot}|" +
+        $"{DefaultModelId}|{DefaultApi}|{AuthHeader}|{Reasoning}|{ModelsJson}";
 
     internal PiSidecarLaunchOptions ToLaunchOptions(string shimBaseUrl, string token, string bridgeUrl) =>
         new(NodePath,

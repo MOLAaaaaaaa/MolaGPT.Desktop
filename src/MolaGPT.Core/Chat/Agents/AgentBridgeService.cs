@@ -154,13 +154,11 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         CancellationToken ct = default,
         TimeSpan maxStaleness = default)
     {
-        var recent = await _history
-            .ListRecentAsync(max: 120, ct: ct, maxStaleness: maxStaleness)
-            .ConfigureAwait(false);
         var session = GetSession(conversationId);
         var historyId = session?.ResumeSessionId ?? conversationId;
-        var entry = recent.FirstOrDefault(e => string.Equals(e.SessionId, historyId, StringComparison.Ordinal)
-            && (session is null || e.BackendId == session.BackendId));
+        var entry = await _history
+            .FindAsync(session?.BackendId, historyId, ct, maxStaleness)
+            .ConfigureAwait(false);
         if (entry is null)
             throw new FileNotFoundException($"History transcript for session '{conversationId}' was not found.");
 

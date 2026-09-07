@@ -134,6 +134,12 @@ public sealed class MolaGptLocalToolsRegistrar
                 request.ModelId,
                 OnUnauthorized: () => _auth.Logout()));
 
+        if (_activePi is { } current && current.TryUpdateConfig(config))
+        {
+            _registry.Register(current);
+            return true;
+        }
+
         var pi = new PiWorkProvider(
             config,
             _toolHost,

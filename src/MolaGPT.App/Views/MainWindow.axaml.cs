@@ -11,6 +11,7 @@ using MolaGPT.App.Infrastructure;
 using MolaGPT.App.Rendering;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
@@ -57,6 +58,7 @@ public partial class MainWindow : MolaWindow
     private ImageGenerationWorkbenchView? _imageWorkbench;
     private Task<bool>? _agentRuntimeSetupTask;
     private bool _agentRuntimeActivated;
+    private bool _hasOpened;
     private int _compactionTokensBeforeAtStart;
 
     private const string AgentRuntimeNotificationKey = "pi-sidecar";
@@ -230,9 +232,15 @@ public partial class MainWindow : MolaWindow
 
         PART_TitleBar.CloseRequested += (_, _) => Close();
 
-        Opened += (_, _) => PART_Composer.FocusInput();
+        Opened += (_, _) =>
+        {
+            _hasOpened = true;
+            PART_Composer.FocusInput();
+            StartActiveProviderPrewarm();
+        };
         Closed += (_, _) =>
         {
+            _hasOpened = false;
             _auth.LoggedOut -= OnLoggedOut;
             _settings.PropertyChanged -= OnSettingsPropertyChanged;
             _chat.ContextGauge.PropertyChanged -= OnContextGaugePropertyChanged;
@@ -304,6 +312,9 @@ public partial class MainWindow : MolaWindow
 
     private void OnChatPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(ChatViewModel.ActiveProvider))
+            StartActiveProviderPrewarm();
+
         if (e.PropertyName is nameof(ChatViewModel.CurrentMode)
             or nameof(ChatViewModel.ActiveModel)
             or nameof(ChatViewModel.ActiveModelLabel)
@@ -311,6 +322,20 @@ public partial class MainWindow : MolaWindow
         {
             SyncChrome();
         }
+    }
+
+    private void StartActiveProviderPrewarm()
+    {
+        if (!_hasOpened) return;
+        if (_chat.ActiveProvider is not PiWorkProvider provider) return;
+        _ = PrewarmAsync(provider);
+    }
+
+    private static async Task PrewarmAsync(PiWorkProvider provider)
+    {
+        try { await provider.PrewarmAsync().ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { DiagnosticLog.Write("pi-work", "预热 Agent 运行时失败：" + ex.Message); }
     }
 
     private void SyncChrome()
@@ -387,7 +412,13 @@ public partial class MainWindow : MolaWindow
             : AppMode.Work;
         var fromMode = _chat.CurrentMode;
 
-        if (target == AppMode.Work && !await EnsureAgentRuntimeAsync()) return;
+        // The runtime gate never blocks navigation with a modal: without a
+        // compatible runtime we announce the update banner (same key the
+        // download progress later reuses) and carry on — either into Work when
+        // the providers are already registered (the send gate still guards),
+        // or staying put with the banner explaining the gap.
+        if (target == AppMode.Work && !await EnsureAgentRuntimeUsableAsync())
+            AnnounceAgentRuntimeUpdate();
 
         // Clicking "Work" while already in an agent mode is a no-op, matching
         // MainViewModel.SwitchMode.
@@ -400,6 +431,11 @@ public partial class MainWindow : MolaWindow
                 OpenSettings();
                 return;
             }
+
+            // No agent providers and no compatible runtime: the gap is the
+            // runtime (banner already announced above), not the login.
+            if (target == AppMode.Work && !HasCompatibleAgentRuntime())
+                return;
 
             if (!await OpenLoginAsync(this)) return;
             if (!_chat.SwitchToMode(target, out _)) return;
@@ -416,7 +452,14 @@ public partial class MainWindow : MolaWindow
         if (target == AppMode.Work) _main.WorkSetupRequested?.Invoke();
     }
 
-    private async Task<bool> EnsureAgentRuntimeAsync()
+    private bool HasCompatibleAgentRuntime() => _piSidecarLocator.TryResolve() is not null;
+
+    /// <summary>Resolve a compatible sidecar and register the agent providers.
+    /// Never downloads and never prompts: a missing/expired runtime just
+    /// reports false, and the caller announces the update banner. An
+    /// in-flight download is joined so send waits for it instead of
+    /// starting a second one.</summary>
+    private async Task<bool> EnsureAgentRuntimeUsableAsync()
     {
         if (_piSidecarLocator.TryResolve() is not null)
         {
@@ -434,13 +477,59 @@ public partial class MainWindow : MolaWindow
             }
             return true;
         }
-        if (_agentRuntimeSetupTask is { } running) return await running;
+        if (_agentRuntimeSetupTask is { } running)
+        {
+            try
+            {
+                return await running;
+            }
+            catch
+            {
+                // Narrated inside the download itself; the caller re-announces.
+                return false;
+            }
+        }
+        return false;
+    }
 
+    /// <summary>Same deal as the app update: no modal, keep using everything
+    /// else, one sticky banner on the shared key with the download behind its
+    /// action button. Re-posting replaces in place, so tab-hopping never
+    /// stacks banners; a dismissed banner comes back on the next entry.</summary>
+    private void AnnounceAgentRuntimeUpdate()
+    {
+        if (_agentRuntimeSetupTask is not null) return; // progress banner owns the key
+        var updating = _piSidecar.GetInstalled() is not null;
+        _notifications.Notify(new AppNotification
+        {
+            Key = AgentRuntimeNotificationKey,
+            Kind = NotifyKind.Info,
+            Title = updating ? "Agent 运行环境有更新" : "需要 Agent 运行环境",
+            Body = "使用 Work 与 BYOK 前需要此环境。",
+            ActionText = updating ? "更新" : "下载",
+            Action = StartAgentRuntimeDownload,
+            Sticky = true
+        });
+    }
+
+    private void StartAgentRuntimeDownload()
+    {
+        if (_agentRuntimeSetupTask is not null) return;
+        _ = RunAgentRuntimeDownloadAsync();
+    }
+
+    private async Task RunAgentRuntimeDownloadAsync()
+    {
         var setup = DownloadAgentRuntimeAsync();
         _agentRuntimeSetupTask = setup;
         try
         {
-            return await setup;
+            await setup.ConfigureAwait(false);
+        }
+        catch
+        {
+            // DownloadAgentRuntimeAsync narrates its own failures; reaching here
+            // only means TryResolve threw after a reported success.
         }
         finally
         {
@@ -451,7 +540,11 @@ public partial class MainWindow : MolaWindow
 
     private async Task<bool> EnsureAgentRuntimeForSendAsync()
     {
-        if (!await EnsureAgentRuntimeAsync()) return false;
+        if (!await EnsureAgentRuntimeUsableAsync())
+        {
+            AnnounceAgentRuntimeUpdate();
+            return false;
+        }
         if (_chat.ActiveProvider is not null && _chat.ActiveModel is not null) return true;
 
         OpenSettings();
@@ -460,16 +553,6 @@ public partial class MainWindow : MolaWindow
 
     private async Task<bool> DownloadAgentRuntimeAsync()
     {
-        var updating = _piSidecar.GetInstalled() is not null;
-        if (!await Confirm.AskAsync(
-                this,
-                updating ? "更新 Agent 运行环境？" : "下载 Agent 运行环境？",
-                "使用 Work 与 BYOK 前需要此环境。",
-                updating ? "更新" : "下载"))
-        {
-            return false;
-        }
-
         _notifications.Progress(AgentRuntimeNotificationKey, "正在准备 Agent 运行环境");
         try
         {

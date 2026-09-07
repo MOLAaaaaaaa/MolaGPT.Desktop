@@ -29,7 +29,13 @@
                 BorderBrush="{DynamicResource Brush.Border.Subtle}" BorderThickness="1"
                 CornerRadius="{DynamicResource Radius.Md}" Padding="14,12">
           <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-            <r:MarkdownTextBlock Name="PART_Notes" Classes="prose" />
+            <!-- The .prose styles live in TranscriptView.axaml and don't reach
+                 this window, so wrap/brushes have to be set here or long
+                 release-note lines clip instead of wrapping. -->
+            <r:MarkdownTextBlock Name="PART_Notes" Classes="prose"
+                                 TextWrapping="Wrap"
+                                 AccentBrush="{DynamicResource Brush.Primary}"
+                                 CodeBackground="{DynamicResource Brush.Bg.Tertiary}" />
           </ScrollViewer>
         </Border>
 

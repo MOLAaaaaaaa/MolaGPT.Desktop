@@ -95,6 +95,77 @@ public sealed partial class AgentHistoryReader
             .ToList();
     }
 
+    /// <summary>
+    /// Resolve one session's transcript by id, whatever its age.
+    ///
+    /// <see cref="ListRecentAsync"/> is fed by a scan that only opens the newest
+    /// 120 files per backend, so a session that has aged past that point reads as
+    /// missing while its transcript is still sitting on disk. Resolving the relay's
+    /// history backfill through that list therefore stopped working for every
+    /// bridge session the moment it aged out — permanently, since transcripts only
+    /// get older. Both backends put the session id in the file name, so the
+    /// fallback is a targeted match rather than a second full scan; the id parsed
+    /// out of the file itself is still what decides the answer.
+    /// </summary>
+    /// <param name="backendId">Restricts the search when known. Null searches both.</param>
+    public async Task<AgentHistoryEntry?> FindAsync(
+        string? backendId, string sessionId, CancellationToken ct = default,
+        TimeSpan maxStaleness = default)
+    {
+        if (string.IsNullOrEmpty(sessionId)) return null;
+
+        var recent = await ListRecentAsync(120, null, ct, maxStaleness).ConfigureAwait(false);
+        var hit = recent.FirstOrDefault(e =>
+            string.Equals(e.SessionId, sessionId, StringComparison.Ordinal)
+            && (backendId is null || e.BackendId == backendId));
+        if (hit is not null) return hit;
+
+        return await Task.Run(() => FindOnDisk(backendId, sessionId, ct), ct).ConfigureAwait(false);
+    }
+
+    private AgentHistoryEntry? FindOnDisk(string? backendId, string sessionId, CancellationToken ct)
+    {
+        // The id is interpolated into a search pattern below, so it has to be a
+        // plain file-name component. On Windows this also rules out the wildcards.
+        if (sessionId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return null;
+
+        if (backendId is null or CodexBackend.BackendId)
+        {
+            var codexHome = Path.Combine(_home, ".codex");
+            var root = Path.Combine(codexHome, "sessions");
+            if (Directory.Exists(root))
+            {
+                var titles = ReadCodexTitleIndex(Path.Combine(codexHome, "session_index.jsonl"));
+                foreach (var fi in new DirectoryInfo(root)
+                             .EnumerateFiles($"rollout-*{sessionId}.jsonl", SearchOption.AllDirectories))
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (ReadCodexFile(fi, titles) is { } entry
+                        && string.Equals(entry.SessionId, sessionId, StringComparison.Ordinal))
+                        return entry;
+                }
+            }
+        }
+
+        if (backendId is null or ClaudeCodeBackend.BackendId)
+        {
+            var root = Path.Combine(_home, ".claude", "projects");
+            if (Directory.Exists(root))
+            {
+                foreach (var fi in new DirectoryInfo(root)
+                             .EnumerateFiles($"{sessionId}.jsonl", SearchOption.AllDirectories))
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (ReadClaudeFile(fi) is { } entry
+                        && string.Equals(entry.SessionId, sessionId, StringComparison.Ordinal))
+                        return entry;
+                }
+            }
+        }
+
+        return null;
+    }
+
     private static bool PathEquals(string a, string b)
         => string.Equals(a.TrimEnd('\\', '/'), b.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
 
@@ -226,52 +297,56 @@ public sealed partial class AgentHistoryReader
         foreach (var fi in files)
         {
             ct.ThrowIfCancellationRequested();
-
-            if (!TryGetCached(_claudeCache, fi, out var facts))
-            {
-                string? cwd = null, sessionId = null, title = null, aiTitle = null;
-                try
-                {
-                    foreach (var line in ReadFirstLines(fi.FullName, 80))
-                    {
-                        JsonElement root2;
-                        try { using var doc = JsonDocument.Parse(line); root2 = doc.RootElement.Clone(); }
-                        catch { continue; }
-                        if (root2.ValueKind != JsonValueKind.Object) continue;
-
-                        if (sessionId is null && root2.TryGetProperty("sessionId", out var sid))
-                            sessionId = sid.GetString();
-                        if (cwd is null && root2.TryGetProperty("cwd", out var c))
-                            cwd = c.GetString();
-                        if (root2.TryGetProperty("type", out var t))
-                        {
-                            var tt = t.GetString();
-                            if (aiTitle is null && tt == "ai-title" && root2.TryGetProperty("aiTitle", out var at))
-                                aiTitle = at.GetString();
-                            if (title is null && tt == "user")
-                                title = ExtractClaudeUserText(root2);
-                        }
-
-                        if (sessionId is not null && cwd is not null && aiTitle is not null) break;
-                    }
-                }
-                catch { continue; }
-
-                facts = new ClaudeFacts(
-                    sessionId ?? Path.GetFileNameWithoutExtension(fi.Name),
-                    cwd,
-                    aiTitle ?? title);
-                Store(_claudeCache, fi, facts);
-            }
-
-            yield return new AgentHistoryEntry(
-                ClaudeCodeBackend.BackendId,
-                facts.SessionId,
-                facts.Cwd ?? "",
-                CleanTitle(facts.Title) ?? "(无标题)",
-                ObserveActivity(fi),
-                fi.FullName);
+            if (ReadClaudeFile(fi) is { } entry) yield return entry;
         }
+    }
+
+    private AgentHistoryEntry? ReadClaudeFile(FileInfo fi)
+    {
+        if (!TryGetCached(_claudeCache, fi, out var facts))
+        {
+            string? cwd = null, sessionId = null, title = null, aiTitle = null;
+            try
+            {
+                foreach (var line in ReadFirstLines(fi.FullName, 80))
+                {
+                    JsonElement root2;
+                    try { using var doc = JsonDocument.Parse(line); root2 = doc.RootElement.Clone(); }
+                    catch { continue; }
+                    if (root2.ValueKind != JsonValueKind.Object) continue;
+
+                    if (sessionId is null && root2.TryGetProperty("sessionId", out var sid))
+                        sessionId = sid.GetString();
+                    if (cwd is null && root2.TryGetProperty("cwd", out var c))
+                        cwd = c.GetString();
+                    if (root2.TryGetProperty("type", out var t))
+                    {
+                        var tt = t.GetString();
+                        if (aiTitle is null && tt == "ai-title" && root2.TryGetProperty("aiTitle", out var at))
+                            aiTitle = at.GetString();
+                        if (title is null && tt == "user")
+                            title = ExtractClaudeUserText(root2);
+                    }
+
+                    if (sessionId is not null && cwd is not null && aiTitle is not null) break;
+                }
+            }
+            catch { return null; }
+
+            facts = new ClaudeFacts(
+                sessionId ?? Path.GetFileNameWithoutExtension(fi.Name),
+                cwd,
+                aiTitle ?? title);
+            Store(_claudeCache, fi, facts);
+        }
+
+        return new AgentHistoryEntry(
+            ClaudeCodeBackend.BackendId,
+            facts.SessionId,
+            facts.Cwd ?? "",
+            CleanTitle(facts.Title) ?? "(无标题)",
+            ObserveActivity(fi),
+            fi.FullName);
     }
 
     private static bool TryGetCached<T>(
@@ -328,58 +403,62 @@ public sealed partial class AgentHistoryReader
         foreach (var fi in files)
         {
             ct.ThrowIfCancellationRequested();
-
-            if (!TryGetCached(_codexCache, fi, out var facts))
-            {
-                string? id = null, cwd = null, title = null;
-                try
-                {
-                    foreach (var line in ReadFirstLines(fi.FullName, 40))
-                    {
-                        JsonElement r;
-                        try { using var doc = JsonDocument.Parse(line); r = doc.RootElement.Clone(); }
-                        catch { continue; }
-                        if (r.ValueKind != JsonValueKind.Object) continue;
-
-                        if (r.TryGetProperty("payload", out var pl) && pl.ValueKind == JsonValueKind.Object)
-                        {
-                            if (id is null && pl.TryGetProperty("id", out var pid)) id = pid.GetString();
-                            if (cwd is null && pl.TryGetProperty("cwd", out var pc)) cwd = pc.GetString();
-                            // first user_message event → title
-                            if (title is null && pl.TryGetProperty("type", out var pt) && pt.GetString() == "user_message"
-                                && pl.TryGetProperty("message", out var pm))
-                            {
-                                var msg = pm.GetString();
-                                if (!string.IsNullOrWhiteSpace(msg) && !msg.StartsWith('[') && !msg.StartsWith('<'))
-                                    title = msg;
-                            }
-                        }
-                        if (id is not null && cwd is not null && title is not null) break;
-                    }
-                }
-                catch { continue; }
-
-                facts = new CodexFacts(id, cwd, title);
-                Store(_codexCache, fi, facts);
-            }
-
-            if (facts.Id is not { } sessionId) continue;
-
-            // Codex owns the semantic thread title.  The first user message is
-            // only a fallback for old/missing index entries; preferring it here
-            // made every bridge session ignore Codex's generated thread_name.
-            var displayTitle = titles.TryGetValue(sessionId, out var indexTitle)
-                ? indexTitle
-                : facts.FallbackTitle;
-
-            yield return new AgentHistoryEntry(
-                CodexBackend.BackendId,
-                sessionId,
-                facts.Cwd ?? "",
-                CleanTitle(displayTitle) ?? "(无标题)",
-                ObserveActivity(fi),
-                fi.FullName);
+            if (ReadCodexFile(fi, titles) is { } entry) yield return entry;
         }
+    }
+
+    private AgentHistoryEntry? ReadCodexFile(FileInfo fi, Dictionary<string, string> titles)
+    {
+        if (!TryGetCached(_codexCache, fi, out var facts))
+        {
+            string? id = null, cwd = null, title = null;
+            try
+            {
+                foreach (var line in ReadFirstLines(fi.FullName, 40))
+                {
+                    JsonElement r;
+                    try { using var doc = JsonDocument.Parse(line); r = doc.RootElement.Clone(); }
+                    catch { continue; }
+                    if (r.ValueKind != JsonValueKind.Object) continue;
+
+                    if (r.TryGetProperty("payload", out var pl) && pl.ValueKind == JsonValueKind.Object)
+                    {
+                        if (id is null && pl.TryGetProperty("id", out var pid)) id = pid.GetString();
+                        if (cwd is null && pl.TryGetProperty("cwd", out var pc)) cwd = pc.GetString();
+                        // first user_message event → title
+                        if (title is null && pl.TryGetProperty("type", out var pt) && pt.GetString() == "user_message"
+                            && pl.TryGetProperty("message", out var pm))
+                        {
+                            var msg = pm.GetString();
+                            if (!string.IsNullOrWhiteSpace(msg) && !msg.StartsWith('[') && !msg.StartsWith('<'))
+                                title = msg;
+                        }
+                    }
+                    if (id is not null && cwd is not null && title is not null) break;
+                }
+            }
+            catch { return null; }
+
+            facts = new CodexFacts(id, cwd, title);
+            Store(_codexCache, fi, facts);
+        }
+
+        if (facts.Id is not { } sessionId) return null;
+
+        // Codex owns the semantic thread title.  The first user message is
+        // only a fallback for old/missing index entries; preferring it here
+        // made every bridge session ignore Codex's generated thread_name.
+        var displayTitle = titles.TryGetValue(sessionId, out var indexTitle)
+            ? indexTitle
+            : facts.FallbackTitle;
+
+        return new AgentHistoryEntry(
+            CodexBackend.BackendId,
+            sessionId,
+            facts.Cwd ?? "",
+            CleanTitle(displayTitle) ?? "(无标题)",
+            ObserveActivity(fi),
+            fi.FullName);
     }
 
     private Dictionary<string, string> ReadCodexTitleIndex(string path)

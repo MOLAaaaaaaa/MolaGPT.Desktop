@@ -91,6 +91,11 @@ public sealed class AgentRelayClient
     // conversationId -> the transcript mtime that projected to zero turns. See
     // RefreshHistoryAsync; keyed by mtime so a later write retries by itself.
     private readonly ConcurrentDictionary<string, long> _emptyHistoryProjections = new(StringComparer.Ordinal);
+    // Sessions whose transcript is not on disk at all. The lookup behind
+    // LoadHistoryTurnsAsync searches the whole history tree, so this is a real
+    // answer rather than a scan that did not reach far enough — and a session
+    // that has no file has nothing to project, now or on the next tick.
+    private readonly ConcurrentDictionary<string, byte> _missingHistoryProjections = new(StringComparer.Ordinal);
     // Exponential backoff for projections whose relay post failed, so an
     // unreachable relay cannot pin the desktop to a re-read-everything loop.
     private readonly ConcurrentDictionary<string, int> _projectionFailures = new(StringComparer.Ordinal);
@@ -597,6 +602,7 @@ public sealed class AgentRelayClient
                 HistoryBackfillMaxTurns,
                 ct,
                 PollScanStaleness).ConfigureAwait(false);
+            _missingHistoryProjections.TryRemove(sessionId, out _);
             if (turns.Count == 0)
             {
                 // Remember a successfully parsed empty transcript against its
@@ -636,6 +642,18 @@ public sealed class AgentRelayClient
             await PostMetaSafeAsync(BuildMeta(fresh), ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
+        catch (FileNotFoundException ex)
+        {
+            // No transcript means there is nothing to project, and no amount of
+            // waiting produces one. Backing this off like a transient failure is
+            // what filled the log: the ceiling is five minutes and the failure
+            // counter lives in memory, so every restart started the climb again.
+            // Park the session instead; an explicit RefreshHistory command still
+            // goes through, so a restored file is one pull-to-refresh away.
+            _missingHistoryProjections[sessionId] = 0;
+            _log?.Invoke($"history projection skipped for {sessionId}: {ex.Message}");
+            throw;
+        }
         catch (Exception ex)
         {
             // A read or relay failure must not be mistaken for an empty
@@ -744,6 +762,7 @@ public sealed class AgentRelayClient
     private bool NeedsHistoryProjection(AgentSessionStateDto s)
         => IsHistoryProjection(s)
            && !ProjectedEmptyAt(s)
+           && !_missingHistoryProjections.ContainsKey(s.ConversationId)
            && !InProjectionBackoff(s.ConversationId)
            && (LastConfirmedRelaySeq(s.ConversationId) <= 0
                || LastRelayActivity(s.ConversationId) < s.UpdatedAtMs);

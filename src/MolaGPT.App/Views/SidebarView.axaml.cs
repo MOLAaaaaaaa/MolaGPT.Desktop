@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using Avalonia.Controls;
+using Avalonia.Data.Converters;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
@@ -12,8 +14,7 @@ namespace MolaGPT.App.Views;
 
 public partial class SidebarView : UserControl
 {
-    private const double ConversationGroupDefaultByokMaxHeight = 240;
-    private static readonly TimeSpan ConversationGroupRestoreDelay = TimeSpan.FromMilliseconds(1200);
+    private const double ConversationGroupDefaultByokMaxHeight = 240;    private static readonly TimeSpan ConversationGroupRestoreDelay = TimeSpan.FromMilliseconds(1200);
 
     private ConversationListViewModel? _vm;
     private bool _syncing;
@@ -220,7 +221,8 @@ public partial class SidebarView : UserControl
     private void OnDeleteConversationFromMenu(object? sender, RoutedEventArgs e)
     {
         if (_vm is null) return;
-        if (RowOf(sender) is { } item) _vm.DeleteConversationCommand.Execute(item.Id);
+        if (sender is MenuItem { Tag: string id } && id.Length > 0)
+            _vm.DeleteConversationCommand.Execute(id);
     }
 
     /// <summary>
@@ -229,7 +231,8 @@ public partial class SidebarView : UserControl
     /// </summary>
     private void OnOpenConversationFolder(object? sender, RoutedEventArgs e)
     {
-        if (RowOf(sender) is not { } item) return;
+        if (sender is not MenuItem { Tag: string id } || id.Length == 0) return;
+        if (_vm?.FindItem(id) is not { } item) return;
         if (FolderOf(item) is not { } folder) return;
 
         try
@@ -248,20 +251,12 @@ public partial class SidebarView : UserControl
     /// chats run everything server-side — or when nothing has been written yet.
     /// The path is derivable for any id, so existence is what decides.
     /// </summary>
-    private static string? FolderOf(ConversationListItem item)
+    internal static string? FolderOf(ConversationListItem item)
     {
         if (item.Group == AppMode.Chat) return null;
         var directory = PythonExecutionTool.GetSessionDirectory(item.Id);
         return Directory.Exists(directory) ? directory : null;
     }
-
-    /// <summary>The row a context-menu click was raised for. The menu lives in
-    /// its own visual tree, so this goes through the placement target rather
-    /// than walking up from the item.</summary>
-    private static ConversationListItem? RowOf(object? sender) =>
-        sender is MenuItem { Parent: ContextMenu menu }
-            ? (menu.PlacementTarget as Control)?.DataContext as ConversationListItem
-            : null;
 
     private void OnSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
@@ -301,4 +296,22 @@ public partial class SidebarView : UserControl
         }
         finally { _syncing = false; }
     }
+}
+
+/// <summary>
+/// Enables "打开本地工作目录" only for rows that have a workspace on disk.
+/// Bound to the row itself (rather than evaluated in a menu-opening handler)
+/// because the menu's DataContext arrives when it opens: a one-shot check
+/// reads nothing on the first open and greys the item until the second.
+/// </summary>
+public sealed class HasWorkspaceConverter : IValueConverter
+{
+    public static readonly HasWorkspaceConverter Instance = new();
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+        value is ConversationListItem item
+        && SidebarView.FolderOf(item) is not null;
+
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
 }

@@ -1,6 +1,7 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
+             xmlns:views="clr-namespace:MolaGPT.App.Views"
              x:Class="MolaGPT.App.Views.SidebarView"
              x:DataType="vm:ConversationListViewModel">
 
@@ -241,16 +242,23 @@
 
         <!-- Right-click menu. The hover trash button stays as the fast path;
              this exists because actions the user cannot see do not exist, and
-             because "打开本地工作目录" has nowhere else to live. -->
+             because "打开本地工作目录" has nowhere else to live.
+             The row id travels on Tag (as with the hover button): the menu
+             lives in a popup, so PlacementTarget lookup is not reliable. -->
         <Grid.ContextMenu>
           <ContextMenu>
-            <MenuItem Header="打开本地工作目录" Tag="open-folder" Click="OnOpenConversationFolder" />
+            <MenuItem Header="打开本地工作目录" Tag="{Binding Id}"
+                      IsEnabled="{Binding Converter={x:Static views:HasWorkspaceConverter.Instance}}"
+                      Click="OnOpenConversationFolder" />
             <Separator />
-            <MenuItem Header="删除对话（可撤销）" Tag="delete" Click="OnDeleteConversationFromMenu" />
+            <MenuItem Header="删除对话" Tag="{Binding Id}" Click="OnDeleteConversationFromMenu" />
           </ContextMenu>
         </Grid.ContextMenu>
 
-        <TextBlock Grid.Column="0" Grid.RowSpan="2"
+        <!-- Icon rides the title row only. Spanning both rows pulled it down
+             half the metadata line on two-line rows, so it sat between the
+             lines instead of beside the title. -->
+        <TextBlock Grid.Column="0" Grid.Row="0"
                    Classes="icon"
                    Text="{Binding IconGlyph}"
                    FontSize="13"
@@ -292,7 +300,7 @@
                       HorizontalAlignment="Right"
                       Click="OnDeleteConversation"
                       Tag="{Binding Id}"
-                      ToolTip.Tip="删除对话（可撤销）">
+                      ToolTip.Tip="删除对话">
                 <TextBlock Classes="icon" Text="&#xE74D;" FontSize="11" />
               </Button>
             </Panel>
@@ -325,7 +333,7 @@
                        HorizontalAlignment="Right" VerticalAlignment="Center" />
             <Button Classes="rowdelete" Width="22" Height="16" Padding="0"
                     HorizontalAlignment="Right" Click="OnDeleteConversation"
-                    Tag="{Binding Id}" ToolTip.Tip="删除对话（可撤销）">
+                    Tag="{Binding Id}" ToolTip.Tip="删除对话">
               <TextBlock Classes="icon" Text="&#xE74D;" FontSize="11" />
             </Button>
           </Panel>

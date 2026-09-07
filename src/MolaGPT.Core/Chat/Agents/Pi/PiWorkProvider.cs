@@ -26,7 +26,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     /// passed on the <c>pi --provider</c> flag and to <c>set_model</c>).</summary>
     public const string SidecarProviderId = "molagpt-work";
 
-    private readonly PiWorkProviderConfig _config;
+    private PiWorkProviderConfig _config;
     private readonly IChatToolHost _toolHost;
     private readonly HttpClient _http;
     private readonly PiRuntime _runtime;
@@ -55,6 +55,18 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     public string DisplayName => _config.DisplayName;
     public ProviderKind Kind => ProviderKind.MolaGptLocalTools;
     public IReadOnlyList<ProviderModel> Models => _config.Models;
+
+    /// <summary>Start this provider's shared Pi process without sending a model
+    /// request. The first real turn reuses the same startup.</summary>
+    public Task PrewarmAsync(CancellationToken ct = default) =>
+        _runtime.PrewarmAsync(_config.Spec, ct);
+
+    public bool TryUpdateConfig(PiWorkProviderConfig config)
+    {
+        if (_config.Spec.Key != config.Spec.Key) return false;
+        _config = config;
+        return true;
+    }
 
     public async IAsyncEnumerable<ChatChunk> StreamChatAsync(
         ChatRequest request,

@@ -80,7 +80,7 @@ public partial class ChatHeader : UserControl
         PART_ExpandSidebar.IsVisible = collapsed;
 
     public void SetModeLabel(string? label) =>
-        PART_ModeLabel.Text = label ?? string.Empty;
+        PART_ModeLabel.Text = string.IsNullOrEmpty(label) ? string.Empty : "  " + label;
 
     public void RefreshSecondaryUi() => SyncSecondaryUi();
 
