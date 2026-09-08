@@ -74,6 +74,7 @@ public partial class TranscriptView : UserControl
         // has a chance to settle and re-assert the bottom.
         AddHandler(PointerWheelChangedEvent, OnWheel, RoutingStrategies.Tunnel);
         AddHandler(PointerPressedEvent, OnPointerPressed, RoutingStrategies.Tunnel);
+        AddHandler(KeyDownEvent, OnPreviewKeyDown, RoutingStrategies.Tunnel);
         HookBlockSpanningSelection();
 
         _scroll = PART_Scroll;
@@ -146,10 +147,10 @@ public partial class TranscriptView : UserControl
 
         if (empty)
         {
-            // Assigned in exactly one other place — ScrollChanged — which does
-            // not necessarily run when the rows are simply taken away. Left
-            // alone, "回到最新" stayed on screen over the welcome page, pointing
-            // at a conversation that is no longer open.
+            // Assigned in two other places — ScrollChanged and AnimateToBottom —
+            // neither of which necessarily runs when the rows are simply taken
+            // away. Left alone, "回到最新" stayed on screen over the welcome
+            // page, pointing at a conversation that is no longer open.
             PART_JumpLatest.IsVisible = false;
             CancelWheelAnimation();
             _followBottom = true;
@@ -210,12 +211,36 @@ public partial class TranscriptView : UserControl
 
     }
 
+    /// <summary>
+    /// Keyboard scrolling is the one user scroll the wheel and scrollbar
+    /// handlers cannot see. While following, <see cref="OnScrollChanged"/>
+    /// treats every extent change as the panel still measuring (see the guard
+    /// there), so an upward key must clear the flag here — otherwise a streaming
+    /// answer would drag the viewport back to the bottom mid-read.
+    /// </summary>
+    private void OnPreviewKeyDown(object? sender, KeyEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Key.Up:
+            case Key.PageUp:
+            case Key.Home:
+                CancelWheelAnimation();
+                _followBottom = false;
+                break;
+        }
+    }
+
     private void OnScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
         if (_scroll is null) return;
 
         var atBottom = IsNearBottom();
-        PART_JumpLatest.IsVisible = !atBottom && (_rows?.Count ?? 0) > 0;
+        // The affordance means "you have scrolled away from the newest message",
+        // which is intent, not geometry: while following, a gap is just the panel
+        // still measuring rows, and the button would sit on top of the message
+        // being read.
+        PART_JumpLatest.IsVisible = !_followBottom && !atBottom && (_rows?.Count ?? 0) > 0;
 
         if (_loadingOlder) return;
 
@@ -229,6 +254,28 @@ public partial class TranscriptView : UserControl
             return;
         }
 
+        // While following, an extent change is the virtualizing panel still
+        // measuring rows, never the user. ScrollViewer's anchor correction
+        // (ScrollContentPresenter.ArrangeWithAnchoring) moves the offset in the
+        // very same layout pass that grows the extent, and RaiseScrollChanged
+        // then aggregates both deltas into one event — so this has to be decided
+        // before the offset-delta branch below. Reading that correction as a
+        // user scroll is what parked a freshly opened conversation short of the
+        // bottom with the jump affordance sitting over the newest message.
+        //
+        // The growth cannot be left to OnRowsChanged either: a thinking block or
+        // a tool card grows *inside* a row whose key is position-only, so no row
+        // is inserted and no collection change is raised. Prose only followed
+        // because its rows are keyed by a hash of their own text and therefore
+        // get swapped on every delta — following a reasoning model worked or not
+        // depending on which kind of row happened to be at the bottom.
+        if (_followBottom && e.ExtentDelta.Y > ScrollCorrectionEpsilon)
+        {
+            _expectedOffset = null;
+            PinToBottom();
+            return;
+        }
+
         // Our own scroll: consume the expectation and leave the flag alone.
         if (_expectedOffset is { } expected && Math.Abs(_scroll.Offset.Y - expected) < 1.5)
         {
@@ -239,19 +286,7 @@ public partial class TranscriptView : UserControl
         _expectedOffset = null;
 
         // Extent moving under a still viewport is content growing, not the user.
-        if (Math.Abs(e.ExtentDelta.Y) > 0.5 && Math.Abs(e.OffsetDelta.Y) < 0.5)
-        {
-            // …and if we are following, that growth is below the fold, so chase
-            // it. This cannot be left to OnRowsChanged: a thinking block or a
-            // tool card grows *inside* a row whose key is position-only, so no
-            // row is inserted and no collection change is raised. Prose only
-            // followed because its rows are keyed by a hash of their own text
-            // and therefore get swapped on every delta — following a reasoning
-            // model worked or not depending on which kind of row happened to be
-            // at the bottom.
-            if (_followBottom) PinToBottom();
-            return;
-        }
+        if (Math.Abs(e.ExtentDelta.Y) > 0.5 && Math.Abs(e.OffsetDelta.Y) < 0.5) return;
 
         if (Math.Abs(e.OffsetDelta.Y) > 0.5)
         {
@@ -468,6 +503,10 @@ public partial class TranscriptView : UserControl
     {
         if (_scroll is null) return;
 
+        // Waiting for the first frame would leave the affordance over the
+        // transcript for the whole 0.42 s jump, and the early return below can
+        // finish without any ScrollChanged at all.
+        PART_JumpLatest.IsVisible = false;
         CancelWheelAnimation();
 
         var bottom = Math.Max(0, _scroll.Extent.Height - _scroll.Viewport.Height);
