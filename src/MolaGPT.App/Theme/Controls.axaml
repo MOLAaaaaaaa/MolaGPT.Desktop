@@ -614,6 +614,35 @@
     <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
   </Style>
 
+  <!-- ============================= form field =========================== -->
+  <!-- The base TextBox theme is deliberately chrome-less: the composer draws its
+       own box around a transparent editor. Anything that wants to look like a
+       form field has to say so, and windows built in code (the confirm-style
+       dialogs) cannot borrow a caller's Window.Styles — they are separate
+       windows, so a class defined there resolves to nothing and the field
+       renders as bare text on the dialog background. -->
+  <Style Selector="TextBox.field">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    <Setter Property="Padding" Value="11,8" />
+    <Setter Property="FontFamily" Value="{DynamicResource Font.Cjk}" />
+  </Style>
+  <Style Selector="TextBox.field:focus-within">
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+  </Style>
+  <Style Selector="ComboBox.field">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    <Setter Property="Height" Value="36" />
+    <Setter Property="MinHeight" Value="36" />
+    <Setter Property="Padding" Value="11,0" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+
   <!-- ======================= mode switcher segment ====================== -->
   <Style Selector="Button.modeseg">
     <Setter Property="Padding" Value="12,4" />

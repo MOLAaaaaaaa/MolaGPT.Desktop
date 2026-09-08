@@ -277,7 +277,11 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
                 segment.Documents[i] = document;
 
                 foreach (var renderBlock in document.Blocks)
-                    rows.Add(new ProseRow(message, renderBlock, i));
+                {
+                    rows.Add(renderBlock is MarkupUnitBlock markup
+                        ? new MarkupRow(message, markup, i)
+                        : new ProseRow(message, renderBlock, i));
+                }
             }
             else if (block.Tool is { } tool)
             {
@@ -376,6 +380,8 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         {
             var carried = previous[i];
             if (carried is HeaderRow header) header.Refresh();
+            if (carried is MarkupRow markup && next[i] is MarkupRow replacement)
+                markup.Refresh(replacement.Block);
             next[i] = carried;
         }
 

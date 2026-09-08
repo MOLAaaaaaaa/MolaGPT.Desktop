@@ -250,10 +250,16 @@ public sealed class ChatToolHost : IChatToolHost
         WorkspaceScope.IsInside(options.WorkspaceRoot, target)
         || options.ReadableRootList.Any(root => WorkspaceScope.Covers(root, target));
 
-    private static LocalToolOptions WithConversationWorkspace(LocalToolOptions options, ChatToolContext context) =>
-        string.IsNullOrWhiteSpace(options.WorkspaceRoot) && !string.IsNullOrWhiteSpace(context.Request.ConversationId)
-            ? options with { WorkspaceRoot = PythonExecutionTool.GetSessionDirectory(context.Request.ConversationId) }
-            : options;
+    private static LocalToolOptions WithConversationWorkspace(LocalToolOptions options, ChatToolContext context)
+    {
+        if (!string.IsNullOrWhiteSpace(options.WorkspaceRoot)
+            || string.IsNullOrWhiteSpace(context.Request.ConversationId))
+            return options;
+
+        var workspace = PythonExecutionTool.GetSessionDirectory(context.Request.ConversationId);
+        Directory.CreateDirectory(workspace);
+        return options with { WorkspaceRoot = workspace };
+    }
 
     private async Task<bool> IsApprovedAsync(
         ToolApprovalRequest request,

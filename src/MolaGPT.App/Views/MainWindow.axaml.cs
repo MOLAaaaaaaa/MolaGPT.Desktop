@@ -51,6 +51,7 @@ public partial class MainWindow : MolaWindow
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IChatToolHost _toolHost;
     private readonly PiByokProviderFactory _piByokProviderFactory;
+    private readonly PersonalizationViewModel _personalization;
 
     private bool _sidebarCollapsed;
     private SettingsWindow? _settingsWindow;
@@ -99,7 +100,8 @@ public partial class MainWindow : MolaWindow
         SkillsViewModel skills,
         IHttpClientFactory httpClientFactory,
         IChatToolHost toolHost,
-        PiByokProviderFactory piByokProviderFactory)
+        PiByokProviderFactory piByokProviderFactory,
+        PersonalizationViewModel personalization)
     {
         _main = main;
         _chat = chat;
@@ -126,6 +128,7 @@ public partial class MainWindow : MolaWindow
         _httpClientFactory = httpClientFactory;
         _toolHost = toolHost;
         _piByokProviderFactory = piByokProviderFactory;
+        _personalization = personalization;
         _composer.EnsureAgentRuntimeAsync = EnsureAgentRuntimeForSendAsync;
 
         InitializeComponent();
@@ -776,7 +779,7 @@ public partial class MainWindow : MolaWindow
             _settings, _auth, _cloudSync, _conversations, _agentStatus, _main.Personas, _mcpHttpClient,
             _imageGenerationTool, _pythonRuntime, _piSidecar, _notifications, _skills,
             () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory,
-            ActivateAgentRuntimeAsync, DeactivateAgentRuntime);
+            ActivateAgentRuntimeAsync, DeactivateAgentRuntime, _personalization);
         window.AccountRequested += async (_, _) =>
         {
             if (await OpenLoginAsync(window)) window.RefreshAccountUi();

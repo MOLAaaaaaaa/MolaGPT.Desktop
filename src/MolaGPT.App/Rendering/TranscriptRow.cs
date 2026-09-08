@@ -122,6 +122,36 @@ public sealed class ProseRow : TranscriptRow, INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 }
 
+/// <summary>
+/// A streamed MolaGPT status or analysis card. Unlike ordinary prose, its
+/// identity is its position in the answer: the source grows while a tool is
+/// running, but the card under the pointer must remain the same control.
+/// </summary>
+public sealed class MarkupRow : TranscriptRow, INotifyPropertyChanged
+{
+    private MarkupUnitBlock _block;
+
+    public MarkupRow(MessageViewModel message, MarkupUnitBlock block, int segment)
+        : base(message,
+            $"{message.RowKey()}:{segment}:markup:{block.SourceStart}:{block.UnitKind}:{block.Unit.Tag?.ToLowerInvariant()}")
+        => _block = block;
+
+    public MarkupUnitBlock Block
+    {
+        get => _block;
+        private set
+        {
+            if (ReferenceEquals(_block, value)) return;
+            _block = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Block)));
+        }
+    }
+
+    public void Refresh(MarkupUnitBlock block) => Block = block;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+}
+
 public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged
 {
     private bool _isExpanded;

@@ -13,6 +13,7 @@ using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Tools.Vision;
+using MolaGPT.Core.Personalization;
 using MolaGPT.Desktop.Services;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
@@ -97,6 +98,10 @@ internal static class AppServices
             sp.GetRequiredService<ConversationRepository>(),
             sp.GetRequiredService<MessageRepository>(),
             sp.GetRequiredService<SettingsRepository>()));
+
+        services.AddSingleton(sp => new MolaPersonalizationService(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredService<MolaGptAuthService>()));
 
         services.AddSingleton(sp => new ConversationTitleService(
             sp.GetRequiredService<ConversationRepository>(),
@@ -218,6 +223,10 @@ internal static class AppServices
             sp.GetRequiredService<ProviderRepository>(),
             sp.GetRequiredService<CredentialStore>(),
             sp.GetRequiredService<SettingsRepository>()));
+        services.AddSingleton(sp => new PersonalizationViewModel(
+            sp.GetRequiredService<MolaPersonalizationService>(),
+            sp.GetRequiredService<SettingsViewModel>(),
+            sp.GetRequiredService<MolaGptProxyProvider>()));
         services.AddSingleton<SkillManager>();
         services.AddSingleton(sp => new SkillsViewModel(
             sp.GetRequiredService<SkillManager>(),

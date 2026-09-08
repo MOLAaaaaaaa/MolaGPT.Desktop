@@ -10,6 +10,9 @@ namespace MolaGPT.App.Rendering;
 /// <summary>Native Avalonia view for the tool markup embedded in MolaGPT deltas.</summary>
 public sealed class MolaGptMarkupBlockView : ContentControl
 {
+    private const int PythonPreviewLines = 10;
+    private const double PythonPreviewHeight = 180;
+
     public static readonly StyledProperty<MarkupUnitBlock?> BlockProperty =
         AvaloniaProperty.Register<MolaGptMarkupBlockView, MarkupUnitBlock?>(nameof(Block));
 
@@ -20,6 +23,14 @@ public sealed class MolaGptMarkupBlockView : ContentControl
     }
 
     private bool _attached;
+    private Expander? _pythonExpander;
+    private SelectableTextBlock? _pythonText;
+    private Button? _pythonToggle;
+    private string? _pythonHeaderState;
+    private bool _pythonWasClosed;
+    private bool _pythonExpansionWasChosen;
+    private bool _pythonPreviewExpanded;
+    private bool _settingPythonExpansion;
 
     static MolaGptMarkupBlockView()
     {
@@ -46,12 +57,22 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         base.OnDetachedFromVisualTree(e);
     }
 
-    private void OnThemeChanged(object? sender, EventArgs e) => Rebuild();
+    private void OnThemeChanged(object? sender, EventArgs e) => Rebuild(recreate: true);
 
-    private void Rebuild()
+    private void Rebuild(bool recreate = false)
     {
         if (!_attached) return;
 
+        if (!recreate
+            && Block is { Unit: { Kind: MarkupUnitKind.DsAnalysis } unit }
+            && string.Equals(unit.Tag, "python", StringComparison.OrdinalIgnoreCase)
+            && UpdatePythonAnalysis(unit))
+        {
+            IsVisible = true;
+            return;
+        }
+
+        ClearPythonAnalysis();
         Content = Block is { } block ? Build(block) : null;
         IsVisible = Content is not null;
     }
@@ -103,6 +124,9 @@ public sealed class MolaGptMarkupBlockView : ContentControl
     /// </summary>
     private Control BuildAnalysis(MolaGptMarkupSplitter.MarkupUnit unit)
     {
+        if (string.Equals(unit.Tag, "python", StringComparison.OrdinalIgnoreCase))
+            return BuildPythonAnalysis(unit);
+
         var expander = new Expander
         {
             IsExpanded = !unit.IsClosed,
@@ -119,21 +143,156 @@ public sealed class MolaGptMarkupBlockView : ContentControl
 
         if (!string.IsNullOrWhiteSpace(unit.Inner))
         {
-            var body = new ItemsControl
+            void LoadBody()
             {
-                ItemsSource = MessageDocumentParser.Parse(unit.Inner).Blocks
-            };
-            expander.Content = new ScrollViewer
+                if (!expander.IsExpanded || expander.Content is not null) return;
+
+                var body = new ItemsControl
+                {
+                    ItemsSource = MessageDocumentParser.Parse(unit.Inner).Blocks
+                };
+                expander.Content = new ScrollViewer
+                {
+                    Content = body,
+                    MaxHeight = 620,
+                    Margin = new Thickness(0, 10, 0, 0),
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+                };
+            }
+
+            expander.PropertyChanged += (_, change) =>
             {
-                Content = body,
-                MaxHeight = 620,
-                Margin = new Thickness(0, 10, 0, 0),
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+                if (change.Property == Expander.IsExpandedProperty) LoadBody();
             };
+            LoadBody();
         }
 
         return Card(expander, maxWidth: 900);
+    }
+
+    private Control BuildPythonAnalysis(MolaGptMarkupSplitter.MarkupUnit unit)
+    {
+        var expander = new Expander
+        {
+            IsExpanded = !unit.IsClosed,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch
+        };
+        expander.Classes.Add("toolbody");
+
+        var text = new SelectableTextBlock
+        {
+            FontFamily = Font("Font.Mono"),
+            FontSize = 12,
+            TextWrapping = TextWrapping.Wrap,
+            ClipToBounds = true
+        };
+        var toggle = new Button { HorizontalAlignment = HorizontalAlignment.Left };
+        toggle.Classes.Add("rawtoggle");
+        toggle.Click += (_, _) =>
+        {
+            _pythonPreviewExpanded = !_pythonPreviewExpanded;
+            UpdatePythonPayload(text.Text);
+        };
+
+        var payload = new StackPanel { Spacing = 6 };
+        payload.Children.Add(text);
+        payload.Children.Add(toggle);
+        var fold = new Border { Child = payload, Margin = new Thickness(0, 10, 0, 0) };
+        fold.Classes.Add("rawfold");
+        expander.Content = fold;
+
+        _pythonExpander = expander;
+        _pythonText = text;
+        _pythonToggle = toggle;
+        _pythonWasClosed = unit.IsClosed;
+        UpdatePythonPayload(PythonPreview(unit.Inner));
+        UpdatePythonHeader(unit);
+
+        expander.PropertyChanged += (_, change) =>
+        {
+            if (change.Property == Expander.IsExpandedProperty && !_settingPythonExpansion)
+                _pythonExpansionWasChosen = true;
+        };
+
+        return Card(expander, maxWidth: 900);
+    }
+
+    private bool UpdatePythonAnalysis(MolaGptMarkupSplitter.MarkupUnit unit)
+    {
+        if (_pythonExpander is null || _pythonText is null || _pythonToggle is null) return false;
+
+        UpdatePythonPayload(PythonPreview(unit.Inner));
+        UpdatePythonHeader(unit);
+
+        if (!_pythonExpansionWasChosen && !_pythonWasClosed && unit.IsClosed)
+        {
+            _settingPythonExpansion = true;
+            _pythonExpander.IsExpanded = false;
+            _settingPythonExpansion = false;
+        }
+
+        _pythonWasClosed = unit.IsClosed;
+        return true;
+    }
+
+    private void UpdatePythonPayload(string? value)
+    {
+        if (_pythonText is null || _pythonToggle is null) return;
+
+        var text = value ?? string.Empty;
+        _pythonText.Text = text;
+        _pythonText.MaxHeight = _pythonPreviewExpanded ? double.PositiveInfinity : PythonPreviewHeight;
+
+        var lines = string.IsNullOrEmpty(text) ? 0 : text.Count(c => c == '\n') + 1;
+        _pythonToggle.IsVisible = lines > PythonPreviewLines;
+        _pythonToggle.Content = _pythonPreviewExpanded ? "收起" : $"显示全部 {lines} 行";
+    }
+
+    private void UpdatePythonHeader(MolaGptMarkupSplitter.MarkupUnit unit)
+    {
+        if (_pythonExpander is null) return;
+
+        var state = string.Join('\n', unit.IsClosed, unit.AnalysisPhase, unit.StatusText);
+        if (string.Equals(_pythonHeaderState, state, StringComparison.Ordinal)) return;
+
+        _pythonHeaderState = state;
+        _pythonExpander.Header = BuildHeader(
+            AnalysisTitle(unit.Tag),
+            AnalysisIcon(unit.Tag),
+            unit.IsClosed ? "已完成" : "运行中",
+            string.Equals(unit.AnalysisPhase, "error", StringComparison.OrdinalIgnoreCase),
+            unit.StatusText);
+    }
+
+    private void ClearPythonAnalysis()
+    {
+        _pythonExpander = null;
+        _pythonText = null;
+        _pythonToggle = null;
+        _pythonHeaderState = null;
+        _pythonWasClosed = false;
+        _pythonExpansionWasChosen = false;
+        _pythonPreviewExpanded = false;
+        _settingPythonExpansion = false;
+    }
+
+    private static string PythonPreview(string? inner)
+    {
+        if (string.IsNullOrWhiteSpace(inner)) return string.Empty;
+
+        var text = inner.Trim();
+        var fence = text.IndexOf("```", StringComparison.Ordinal);
+        if (fence < 0) return text;
+
+        var bodyStart = text.IndexOf('\n', fence);
+        if (bodyStart < 0) return string.Empty;
+        bodyStart++;
+
+        var bodyEnd = text.LastIndexOf("\n```", StringComparison.Ordinal);
+        if (bodyEnd < bodyStart) bodyEnd = text.Length;
+        return text[bodyStart..bodyEnd].TrimEnd('\r', '\n');
     }
 
     /// <summary>

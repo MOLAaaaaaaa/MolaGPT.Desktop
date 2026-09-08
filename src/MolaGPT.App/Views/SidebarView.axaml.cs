@@ -1,8 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Globalization;
 using Avalonia.Controls;
-using Avalonia.Data.Converters;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
@@ -225,6 +223,20 @@ public partial class SidebarView : UserControl
             _vm.DeleteConversationCommand.Execute(id);
     }
 
+    private void OnConversationMenuOpened(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not ContextMenu menu) return;
+
+        var actions = menu.Items.OfType<MenuItem>().ToArray();
+        if (actions.Length != 2) return;
+
+        var item = menu.DataContext as ConversationListItem
+                   ?? menu.PlacementTarget?.DataContext as ConversationListItem;
+        actions[0].Tag = item?.Id;
+        actions[0].IsEnabled = item is not null && FolderOf(item) is not null;
+        actions[1].Tag = item?.Id;
+    }
+
     /// <summary>
     /// Opens the conversation's Python workspace — where attachments are copied
     /// and where tool runs write their artifacts.
@@ -296,22 +308,4 @@ public partial class SidebarView : UserControl
         }
         finally { _syncing = false; }
     }
-}
-
-/// <summary>
-/// Enables "打开本地工作目录" only for rows that have a workspace on disk.
-/// Bound to the row itself (rather than evaluated in a menu-opening handler)
-/// because the menu's DataContext arrives when it opens: a one-shot check
-/// reads nothing on the first open and greys the item until the second.
-/// </summary>
-public sealed class HasWorkspaceConverter : IValueConverter
-{
-    public static readonly HasWorkspaceConverter Instance = new();
-
-    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture) =>
-        value is ConversationListItem item
-        && SidebarView.FolderOf(item) is not null;
-
-    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) =>
-        throw new NotSupportedException();
 }

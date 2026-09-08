@@ -63,6 +63,12 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [GeneratedRegex("\\bsource\\s*=\\s*(?:\"(?<value>[^\"]*)\"|'(?<value>[^']*)'|(?<value>[^\\s/>]+))", RegexOptions.IgnoreCase)]
     private static partial Regex RefSourceRegex();
 
+    [GeneratedRegex("""<blockquote\b[^>]*\bclass\s*=\s*(?:"[^"]*\btool-status\b[^"]*"|'[^']*\btool-status\b[^']*')[^>]*>|<DSanalysis\b[^>]*>|<steel-step\b[^>]*>""", RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex StreamedMarkupOpenRegex();
+
+    [GeneratedRegex("""<div\b[^>]*\bclass\s*=\s*(?:"[^"]*\bai-image-(?:pending-skeleton|error-card)\b[^"]*"|'[^']*\bai-image-(?:pending-skeleton|error-card)\b[^']*')[^>]*>""", RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex StreamedImageMarkupRegex();
+
     [ObservableProperty] private string _role;
     [ObservableProperty] private string _content;
     [ObservableProperty] private string? _messageId;
@@ -284,6 +290,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     private readonly System.Threading.Lock _paceLock = new();
     private readonly System.Diagnostics.Stopwatch _paceClock = new();
     private bool _paceScheduled;
+    private string? _streamedMarkupCloseTag;
 
     /// <summary>Whether the active segment currently shows anything. Tracked so a
     /// delta only rebuilds the display blocks when that answer changes.</summary>
@@ -319,8 +326,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
 
         if (IsStreaming)
         {
-            _pacer.Enqueue(PacedStream.Answer, delta);
-            SchedulePaceFrame();
+            AppendStreamingDelta(delta);
         }
         else
         {
@@ -332,6 +338,51 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         if (IsThinkingActive && HasThinking)
         {
             StopThinking();
+        }
+    }
+
+    private void AppendStreamingDelta(string delta)
+    {
+        if (_streamedMarkupCloseTag is null
+            && !StreamedMarkupOpenRegex().IsMatch(delta)
+            && !StreamedImageMarkupRegex().IsMatch(delta))
+        {
+            _pacer.Enqueue(PacedStream.Answer, delta);
+            SchedulePaceFrame();
+            return;
+        }
+
+        // Tool markup is structural SSE content. Revealing it one character at
+        // a time briefly turns incomplete tags into visible Markdown and makes
+        // the text inside the card inherit the answer's tail effect.
+        FlushPendingDelta();
+        Content += delta;
+        TrackStreamedMarkup(delta);
+    }
+
+    private void TrackStreamedMarkup(string text)
+    {
+        var cursor = 0;
+        while (cursor < text.Length)
+        {
+            if (_streamedMarkupCloseTag is { } closeTag)
+            {
+                var close = text.IndexOf(closeTag, cursor, StringComparison.OrdinalIgnoreCase);
+                if (close < 0) return;
+
+                cursor = close + closeTag.Length;
+                _streamedMarkupCloseTag = null;
+            }
+
+            var open = StreamedMarkupOpenRegex().Match(text, cursor);
+            if (!open.Success) return;
+
+            _streamedMarkupCloseTag = open.Value.StartsWith("<DSanalysis", StringComparison.OrdinalIgnoreCase)
+                ? "</DSanalysis>"
+                : open.Value.StartsWith("<steel-step", StringComparison.OrdinalIgnoreCase)
+                    ? "</steel-step>"
+                    : "</blockquote>";
+            cursor = open.Index + open.Length;
         }
     }
 
@@ -386,6 +437,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     {
         if (_disposed) return;
         _pacer.Complete(EmitPaced);
+        _streamedMarkupCloseTag = null;
         if (_pacer.HasPending) SchedulePaceFrame();
         else StopPaceFrames();
     }
@@ -398,6 +450,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         if (_disposed) return;
         _pacer.Reset();
         StopPaceFrames();
+        _streamedMarkupCloseTag = null;
         Content = text;
     }
 
@@ -605,6 +658,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         // content the retry starts from.
         _pacer.Reset();
         StopPaceFrames();
+        _streamedMarkupCloseTag = null;
         _activeThinkingSegment = null;
         _activeThinkingVisible = false;
         _thinkingStartedAt = null;

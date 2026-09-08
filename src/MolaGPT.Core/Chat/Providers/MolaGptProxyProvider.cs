@@ -220,6 +220,9 @@ public sealed class MolaGptProxyProvider : IChatProvider
         var username = user["username"]?.GetValue<string>() ?? "";
         var unlimited = user["unlimited"]?.GetValue<bool>() ?? false;
         var isDonor = user["is_donor"]?.GetValue<bool>() ?? false;
+        // Server-side master toggle for personalized memory. Absent on older
+        // builds of status.php (null = unknown); PDO may emit it as 0/1.
+        var personalizedMemoryEnabled = ParseOptBool(user["settings"]?["personalized_memory_enabled"]);
         var usage = ParseIntDict(user["usage"]);
         var tokensUsage = ParseIntDict(user["tokens_usage"]);
 
@@ -291,7 +294,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
             TokensUsage: tokensUsage,
             Limits: limits,
             ModelStatus: modelStatus,
-            Credits: credits);
+            Credits: credits,
+            PersonalizedMemoryEnabled: personalizedMemoryEnabled);
     }
 
     /// <summary>Reads a JSON number as a double. PHP emits credit values as
@@ -299,6 +303,24 @@ public sealed class MolaGptProxyProvider : IChatProvider
     /// neither int nor double parsing alone is enough.</summary>
     private static double? ParseDouble(JsonNode? node)
         => node is JsonValue jv && jv.TryGetValue<double>(out var d) ? d : (double?)null;
+
+    /// <summary>Reads a JSON bool that PHP may have emitted as 0/1 or
+    /// "true"/"1". Null when absent or unrecognized (older status.php builds).</summary>
+    private static bool? ParseOptBool(JsonNode? node)
+    {
+        if (node is not JsonValue jv) return null;
+        if (jv.TryGetValue<bool>(out var b)) return b;
+        if (jv.TryGetValue<int>(out var i)) return i != 0;
+        if (jv.TryGetValue<long>(out var l)) return l != 0;
+        if (jv.TryGetValue<double>(out var d)) return d != 0;
+        if (jv.TryGetValue<string>(out var s))
+        {
+            s = s.Trim();
+            if (s == "1" || s.Equals("true", StringComparison.OrdinalIgnoreCase)) return true;
+            if (s == "0" || s.Equals("false", StringComparison.OrdinalIgnoreCase)) return false;
+        }
+        return null;
+    }
 
     private static Dictionary<string, int> ParseIntDict(JsonNode? node)
     {
@@ -1382,7 +1404,8 @@ public sealed record MolaGptStatus(
     IReadOnlyDictionary<string, int> TokensUsage,
     IReadOnlyDictionary<string, MolaGptModelLimit> Limits,
     IReadOnlyDictionary<string, MolaGptModelStatus> ModelStatus,
-    MolaGptCredits? Credits = null);
+    MolaGptCredits? Credits = null,
+    bool? PersonalizedMemoryEnabled = null);
 
 public sealed record MolaGptModelLimit(
     string DisplayName,

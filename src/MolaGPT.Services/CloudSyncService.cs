@@ -303,6 +303,25 @@ public sealed class CloudSyncService
             enabled ? "云同步已开启" : "云同步已关闭");
     }
 
+    /// <summary>
+    /// Syncs the personalized-memory master toggle to the server
+    /// (<c>sync.php update_setting personalized_memory_enabled</c>). Unlike
+    /// <see cref="UpdateCloudSyncSettingAsync"/> this publishes nothing: the
+    /// caller owns the Tracks row's inline status.
+    /// </summary>
+    public async Task UpdateTracksSettingAsync(bool enabled, CancellationToken ct = default)
+    {
+        var jwt = _auth.CurrentJwt;
+        if (string.IsNullOrWhiteSpace(jwt)) return;
+
+        await PostSyncAsync(jwt, new JsonObject
+        {
+            ["action"] = "update_setting",
+            ["setting"] = "personalized_memory_enabled",
+            ["value"] = enabled
+        }, ct).ConfigureAwait(false);
+    }
+
     public async Task<bool> FetchConversationToLocalAsync(string conversationId, CancellationToken ct = default)
     {
         var jwt = _auth.CurrentJwt;

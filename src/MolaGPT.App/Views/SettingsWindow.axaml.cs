@@ -36,6 +36,7 @@ public partial class SettingsWindow : MolaContentWindow
     private readonly ConversationListViewModel? _conversations;
     private readonly AgentBridgeStatusViewModel? _agentStatus;
     private readonly PersonaListViewModel _personas;
+    private readonly PersonalizationViewModel? _personalization;
     private readonly McpHttpClient? _mcpClient;
     private readonly ImageGenerationTool? _imageGenerationTool;
     private readonly PythonRuntimeManager? _pythonRuntime;
@@ -137,7 +138,8 @@ public partial class SettingsWindow : MolaContentWindow
         IChatToolHost? toolHost = null,
         PiByokProviderFactory? piByokProviderFactory = null,
         Func<Task>? agentRuntimeInstalled = null,
-        Action? agentRuntimeRemoving = null)
+        Action? agentRuntimeRemoving = null,
+        PersonalizationViewModel? personalization = null)
     {
         _settings = settings;
         _auth = auth;
@@ -157,6 +159,7 @@ public partial class SettingsWindow : MolaContentWindow
         _piByokProviderFactory = piByokProviderFactory;
         _agentRuntimeInstalled = agentRuntimeInstalled;
         _agentRuntimeRemoving = agentRuntimeRemoving;
+        _personalization = personalization;
 
         InitializeComponent();
         DataContext = _settings;
@@ -370,6 +373,24 @@ public partial class SettingsWindow : MolaContentWindow
         {
             PART_CloudSyncStatus.Text = $"同步设置更新失败：{ex.Message}";
         }
+    }
+
+    private async void OnTracksToggleClick(object? sender, RoutedEventArgs e)
+    {
+        var error = await TracksToggleHelper.SyncAsync(
+            _settings.TracksEnabled, _settings, _auth, _cloudSync);
+        PART_TracksSummary.Text = error ?? string.Empty;
+        PART_TracksSummary.IsVisible = error is not null;
+        if (error is not null)
+            _notifications?.Error("个性化设置同步失败", error, "personalization");
+    }
+
+    private async void OnManageTracksClick(object? sender, RoutedEventArgs e)
+    {
+        if (_personalization is null || !_settings.IsLoggedIn) return;
+        var window = new PersonalizationWindow(
+            _personalization, _settings, _auth, _cloudSync, _notifications);
+        await window.ShowDialog(this);
     }
 
     private void ShowSelectedPage()

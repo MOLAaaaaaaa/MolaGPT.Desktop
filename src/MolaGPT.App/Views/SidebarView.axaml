@@ -1,7 +1,6 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
-             xmlns:views="clr-namespace:MolaGPT.App.Views"
              x:Class="MolaGPT.App.Views.SidebarView"
              x:DataType="vm:ConversationListViewModel">
 
@@ -243,15 +242,13 @@
         <!-- Right-click menu. The hover trash button stays as the fast path;
              this exists because actions the user cannot see do not exist, and
              because "打开本地工作目录" has nowhere else to live.
-             The row id travels on Tag (as with the hover button): the menu
-             lives in a popup, so PlacementTarget lookup is not reliable. -->
+             Workspace existence and the row id are refreshed when the popup
+             opens, because the directory may have appeared since its first use. -->
         <Grid.ContextMenu>
-          <ContextMenu>
-            <MenuItem Header="打开本地工作目录" Tag="{Binding Id}"
-                      IsEnabled="{Binding Converter={x:Static views:HasWorkspaceConverter.Instance}}"
-                      Click="OnOpenConversationFolder" />
+          <ContextMenu Opened="OnConversationMenuOpened">
+            <MenuItem Header="打开本地工作目录" Click="OnOpenConversationFolder" />
             <Separator />
-            <MenuItem Header="删除对话" Tag="{Binding Id}" Click="OnDeleteConversationFromMenu" />
+            <MenuItem Header="删除对话" Click="OnDeleteConversationFromMenu" />
           </ContextMenu>
         </Grid.ContextMenu>
 

@@ -161,8 +161,11 @@ public static class ImageSourceLoader
         stream.Position = 0;
         if (read == 0) return false;
 
-        return Encoding.UTF8.GetString(prefix[..read])
-            .Contains("<svg", StringComparison.OrdinalIgnoreCase);
+        var text = Encoding.UTF8.GetString(prefix[..read]);
+        var start = text.TrimStart('\uFEFF', ' ', '\t', '\r', '\n');
+        return start.Length > 0
+            && start[0] == '<'
+            && start.Contains("<svg", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

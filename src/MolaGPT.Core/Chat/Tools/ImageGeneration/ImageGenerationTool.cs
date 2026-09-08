@@ -173,16 +173,15 @@ public sealed class ImageGenerationTool
             Directory.CreateDirectory(workspaceRoot);
             var saved = images.Select((image, index) =>
             {
-                var fileName = $"generated-image-{index + 1}{ExtensionFor(image.MimeType)}";
-                var localName = _saveAttachment(image.Bytes, image.MimeType, fileName)
+                var displayName = $"generated-image-{index + 1}{ExtensionFor(image.MimeType)}";
+                var localName = _saveAttachment(image.Bytes, image.MimeType, displayName)
                     ?? throw new InvalidOperationException("Generated image could not be saved.");
-                var imagePath = Path.Combine(workspaceRoot, localName);
-                if (!File.Exists(imagePath))
-                    File.WriteAllBytes(imagePath, image.Bytes);
+                var fileName = AvailableFileName(workspaceRoot, displayName);
+                File.WriteAllBytes(Path.Combine(workspaceRoot, fileName), image.Bytes);
                 return new
                 {
                     local_name = localName,
-                    image_path = localName,
+                    image_path = fileName,
                     file_name = fileName,
                     mime_type = image.MimeType,
                     revised_prompt = image.RevisedPrompt
@@ -202,6 +201,19 @@ public sealed class ImageGenerationTool
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return Error(ex.Message);
+        }
+    }
+
+    private static string AvailableFileName(string directory, string fileName)
+    {
+        if (!File.Exists(Path.Combine(directory, fileName))) return fileName;
+
+        var stem = Path.GetFileNameWithoutExtension(fileName);
+        var extension = Path.GetExtension(fileName);
+        for (var index = 2; ; index++)
+        {
+            var candidate = $"{stem} ({index}){extension}";
+            if (!File.Exists(Path.Combine(directory, candidate))) return candidate;
         }
     }
 

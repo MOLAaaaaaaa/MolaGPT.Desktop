@@ -128,7 +128,8 @@ public partial class App : Application
                 _services.GetRequiredService<SkillsViewModel>(),
                  _services.GetRequiredService<IHttpClientFactory>(),
                  _services.GetRequiredService<IChatToolHost>(),
-                 _services.GetRequiredService<PiByokProviderFactory>());
+                 _services.GetRequiredService<PiByokProviderFactory>(),
+                 _services.GetRequiredService<PersonalizationViewModel>());
             desktop.MainWindow = window;
 
             // One router owns "banner, Windows toast, or wait" for every source.

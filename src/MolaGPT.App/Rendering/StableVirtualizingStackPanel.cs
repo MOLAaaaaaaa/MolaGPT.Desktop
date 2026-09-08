@@ -268,7 +268,7 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
         var nextAnchor = VisibleIndex(next);
         _viewport = next;
 
-        if (previousRange != nextRange)
+        if (previousRange != nextRange || !IsRangeRealized(nextRange))
             InvalidateMeasure();
         else if (previousAnchor != nextAnchor)
             InvalidateArrange();
@@ -307,6 +307,16 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
         var first = FindIndex(viewport.Top);
         var last = FindIndex(Math.Max(viewport.Top, viewport.Bottom - 0.01));
         return (Math.Clamp(first, 0, count - 1), Math.Clamp(last, 0, count - 1));
+    }
+
+    private bool IsRangeRealized((int First, int Last) range)
+    {
+        for (var index = range.First; index <= range.Last; index++)
+        {
+            if (Items[index] is { } item && !_realized.ContainsKey(item)) return false;
+        }
+
+        return true;
     }
 
     private int FindIndex(double position)

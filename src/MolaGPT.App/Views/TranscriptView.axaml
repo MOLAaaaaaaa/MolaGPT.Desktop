@@ -193,6 +193,12 @@
       </Border>
     </DataTemplate>
 
+    <DataTemplate DataType="r:MarkupRow">
+      <Border Classes="assistantcol">
+        <r:MolaGptMarkupBlockView Block="{Binding Block}" />
+      </Border>
+    </DataTemplate>
+
     <DataTemplate DataType="r:PendingRow">
       <Border Classes="pendingpill">
         <StackPanel Classes="inlinerow compact" Orientation="Horizontal" VerticalAlignment="Center">
@@ -779,6 +785,19 @@
       <Setter Property="CodeBackground" Value="{DynamicResource Brush.Bg.Tertiary}" />
       <Setter Property="LineBrush" Value="{DynamicResource Brush.Border}" />
       <Setter Property="HeaderBackground" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    </Style>
+
+    <Style Selector="r|MolaGptMarkupBlockView r|MarkdownTextBlock.prose">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+      <Setter Property="LineHeight" Value="21" />
+    </Style>
+    <Style Selector="r|MolaGptMarkupBlockView SelectableTextBlock.prose">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+      <Setter Property="LineHeight" Value="21" />
+    </Style>
+    <Style Selector="r|MolaGptMarkupBlockView r|MarkdownListView.listview">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+      <Setter Property="LineHeight" Value="21" />
     </Style>
 
     <Style Selector="r|MarkdownImageView.imagecard">

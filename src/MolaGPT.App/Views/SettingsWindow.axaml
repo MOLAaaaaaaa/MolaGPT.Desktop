@@ -152,17 +152,43 @@
 
                 <TextBlock Classes="section" Text="个性化 · MolaGPT Tracks" />
                 <Border Classes="settingscard">
-                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
-                    <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
-                      <TextBlock Classes="rowtitle" Text="启用个性化记忆" />
-                      <TextBlock Classes="hint"
-                                 Text="MolaGPT 会从对话中学习你的偏好，让后续回复更贴合你的需求。关闭后不会记录个性化数据，仅在登录 MolaGPT 账号时在 MolaGPT Chat 中生效。" />
-                    </StackPanel>
-                    <ToggleButton Grid.Column="1"
-                                  Classes="settingtoggle"
-                                  IsChecked="{Binding TracksEnabled, Mode=TwoWay}"
-                                  VerticalAlignment="Center" />
-                  </Grid>
+                  <StackPanel>
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                        <TextBlock Classes="rowtitle" Text="启用个性化记忆" />
+                        <TextBlock Classes="hint"
+                                   Text="MolaGPT 会从对话中学习你的偏好，让后续回复更贴合你的需求。关闭后不会记录个性化数据，仅在登录 MolaGPT 账号时在 MolaGPT Chat 中生效。" />
+                      </StackPanel>
+                      <ToggleButton Grid.Column="1"
+                                    Name="PART_TracksToggle"
+                                    Classes="settingtoggle"
+                                    IsChecked="{Binding TracksEnabled, Mode=TwoWay}"
+                                    Click="OnTracksToggleClick"
+                                    VerticalAlignment="Center" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                        <TextBlock Classes="rowtitle" Text="记忆与对话风格" />
+                        <TextBlock Classes="hint"
+                                   Text="查看 MolaGPT 记住了什么，为每条记忆评分、修正或删除，并设置回复的语气偏好。" />
+                        <!-- Errors stay on the row the user is looking at, not
+                             only in the corner banner. Empty until something
+                             fails, so the row does not carry a permanent slot. -->
+                        <TextBlock Name="PART_TracksSummary"
+                                   Classes="hint"
+                                   IsVisible="False"
+                                   Foreground="{DynamicResource Brush.Error}" />
+                      </StackPanel>
+                      <Button Grid.Column="1"
+                              Name="PART_ManageTracks"
+                              Classes="outline"
+                              Content="管理记忆"
+                              Padding="12,6"
+                              IsEnabled="{Binding IsLoggedIn}"
+                              Click="OnManageTracksClick" />
+                    </Grid>
+                  </StackPanel>
                 </Border>
               </StackPanel>
 
@@ -216,7 +242,7 @@
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
                         <TextBlock Classes="rowtitle" Text="流式输出动画" />
-                        <TextBlock Classes="hint" Text="流式输出过程中启用打字机中的动画效果。" />
+                        <TextBlock Classes="hint" Text="流式输出过程中启用动画效果，可能会影响可读性。" />
                       </StackPanel>
                       <ToggleButton Grid.Column="1" Name="PART_StreamFade"
                                     Classes="settingtoggle"

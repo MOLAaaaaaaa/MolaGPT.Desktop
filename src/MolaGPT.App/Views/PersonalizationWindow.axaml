@@ -1,0 +1,631 @@
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
+        x:Class="MolaGPT.App.Views.PersonalizationWindow"
+        x:DataType="vm:PersonalizationViewModel"
+        Title="个性化记忆"
+        Width="680" Height="748"
+        CanResize="False"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource Brush.Bg.Elevated}"
+        FontFamily="{DynamicResource Font.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+  <views:MolaContentWindow.Header>
+    <Border Padding="24,16,14,14"
+            Background="Transparent"
+            BorderBrush="{DynamicResource Brush.Divider}"
+            BorderThickness="0,0,0,1">
+      <Grid>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Border Width="36" Height="36"
+                  CornerRadius="{DynamicResource Radius.Md}"
+                  Background="{DynamicResource Brush.Primary.Tint}"
+                  BorderBrush="{DynamicResource Brush.Primary.Border}"
+                  BorderThickness="1">
+            <TextBlock Text="&#xE8BD;"
+                       Classes="icon"
+                       FontSize="16"
+                       Foreground="{DynamicResource Brush.Primary}"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center" />
+          </Border>
+          <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+            <TextBlock Text="个性化记忆"
+                       FontSize="{DynamicResource Font.Size.Heading}"
+                       FontWeight="Bold" />
+            <TextBlock Text="MolaGPT Tracks · 长期记忆与对话风格"
+                       Classes="muted"
+                       FontSize="{DynamicResource Font.Size.Small}"
+                       Margin="0,2,0,0" />
+          </StackPanel>
+        </StackPanel>
+        <Button Name="PART_Close"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Center"
+                Classes="headericon"
+                ToolTip.Tip="关闭">
+          <TextBlock Classes="icon" Text="&#xE711;" FontSize="13" />
+        </Button>
+      </Grid>
+    </Border>
+  </views:MolaContentWindow.Header>
+
+  <Grid RowDefinitions="Auto,*,Auto">
+    <!-- Master toggle. Same server setting as the settings account page, so it
+         is pinned above the scroll: it gates everything below it. -->
+    <Border Grid.Row="0" Classes="settingscard" Margin="24,18,24,10">
+      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+        <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+          <TextBlock Classes="rowtitle" Text="启用个性化记忆" />
+          <TextBlock Classes="hint"
+                     Text="MolaGPT 会记住关键信息，让回答更贴合你。关闭后不再学习与使用长期记忆。" />
+        </StackPanel>
+        <ToggleButton Grid.Column="1"
+                      Name="PART_TracksToggle"
+                      Classes="settingtoggle"
+                      VerticalAlignment="Center"
+                      Click="OnTracksToggleClick" />
+      </Grid>
+    </Border>
+
+    <ScrollViewer Grid.Row="1"
+                  Margin="24,0,14,0"
+                  Padding="0,0,10,0"
+                  VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled">
+      <StackPanel>
+        <!-- Writing controls sit above the list and stay there: with 38 entries
+             the old bottom placement was a long scroll away. Collapsed by
+             default, because expanded they are ~400px of a 748px window and
+             would push the list they belong to off screen. -->
+        <TextBlock Classes="section" Text="添加记忆和风格设置" Margin="2,18,2,8" />
+        <Border Classes="settingscard">
+          <StackPanel>
+            <Expander Name="PART_AddExpander" Classes="settingexpander">
+              <Expander.Header>
+                <StackPanel Margin="16,13">
+                  <TextBlock Classes="rowtitle" Text="添加记忆" />
+                  <TextBlock Classes="hint"
+                             Text="想让 MolaGPT 主动记住的事。" />
+                </StackPanel>
+              </Expander.Header>
+              <StackPanel Margin="16,2,16,16" Spacing="10">
+                <TextBox Name="PART_NewMemoryText"
+                         Classes="field"
+                         PlaceholderText="例如：我在做一个 Android 记忆管理应用。"
+                         AcceptsReturn="True" MinLines="2" MaxLines="9" MaxLength="300"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto" />
+                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10">
+                  <TextBlock Grid.Column="0" Text="归入" Classes="hint"
+                             Margin="0" VerticalAlignment="Center" />
+                  <ComboBox Grid.Column="1" Name="PART_NewMemorySection"
+                            Classes="field" MinWidth="180" MaxWidth="230"
+                            HorizontalAlignment="Left" />
+                  <Button Grid.Column="2" Name="PART_AddMemory" Content="添加"
+                          Classes="primary" Padding="18,7"
+                          Click="OnAddMemoryClick" />
+                </Grid>
+              </StackPanel>
+            </Expander>
+
+            <Border Classes="divider" />
+
+            <Expander Name="PART_StyleExpander" Classes="settingexpander">
+              <Expander.Header>
+                <StackPanel Margin="16,13">
+                  <TextBlock Classes="rowtitle" Text="对话风格" />
+                  <TextBlock Name="PART_StyleSummary" Classes="hint"
+                             Text="设置回复的语气与组织方式。" />
+                </StackPanel>
+              </Expander.Header>
+              <StackPanel Margin="16,2,16,16" Spacing="12">
+                <WrapPanel Name="PART_StyleChecks" Orientation="Horizontal" Margin="0,0,0,-8" />
+                <!-- 500 characters is roughly 17 lines here, and the section is
+                     collapsed by default, so the box may grow: it only reaches
+                     this height once there is that much to read. -->
+                <TextBox Name="PART_CustomInstruction"
+                         Classes="field"
+                         PlaceholderText="自定义指令（可选），例如：希望你回答更直接，先给结论再展开。"
+                         AcceptsReturn="True" MinLines="3" MaxLines="14" MaxLength="500"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                         TextChanged="OnCustomInstructionChanged" />
+                <Grid ColumnDefinitions="*,Auto">
+                  <TextBlock Grid.Column="0" Name="PART_CustomCount" Classes="hint"
+                             Margin="0" VerticalAlignment="Center" />
+                  <Button Grid.Column="1" Name="PART_SaveStyle" Content="保存风格"
+                          Classes="primary" Padding="18,7" IsEnabled="False"
+                          Click="OnSaveStyleClick" />
+                </Grid>
+              </StackPanel>
+            </Expander>
+          </StackPanel>
+        </Border>
+
+        <!-- Pending candidates. Brand-tinted because it is the one block that
+             asks the user for a decision rather than reporting state. -->
+        <StackPanel Name="PART_CandidatesSection" IsVisible="False">
+          <Grid Margin="2,20,2,8" ColumnDefinitions="*,Auto">
+            <TextBlock Grid.Column="0" Name="PART_CandidatesTitle"
+                       Classes="section" Margin="0" VerticalAlignment="Center"
+                       Text="待确认" />
+            <TextBlock Grid.Column="1" Classes="hint" Margin="0"
+                       VerticalAlignment="Center"
+                       Text="MolaGPT 昨夜的观察，由你决定要不要记住" />
+          </Grid>
+          <ItemsControl Name="PART_Candidates">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:MemoryCandidateRow">
+                <Border Classes="candidatecard">
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="{Binding Text}" TextWrapping="Wrap"
+                               FontWeight="SemiBold" LineHeight="21" />
+                    <Border Classes="quote" IsVisible="{Binding HasQuote}">
+                      <TextBlock Text="{Binding Quote}"
+                                 Classes="muted"
+                                 FontSize="{DynamicResource Font.Size.Small}"
+                                 FontStyle="Italic"
+                                 TextWrapping="Wrap" />
+                    </Border>
+                    <Grid ColumnDefinitions="*,Auto">
+                      <TextBlock Grid.Column="0" Text="{Binding MetaText}"
+                                 Classes="muted" VerticalAlignment="Center"
+                                 Margin="0,0,12,0"
+                                 FontSize="{DynamicResource Font.Size.XSmall}" />
+                      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                        <Button Content="忽略" Classes="outline" Padding="14,5" MinHeight="30"
+                                Tag="{Binding Id}" Click="OnDismissCandidate"
+                                ToolTip.Tip="不记住，且不再建议" />
+                        <Button Content="记住" Classes="primary" Padding="16,5" MinHeight="30"
+                                Tag="{Binding Id}" Click="OnAcceptCandidate" />
+                      </StackPanel>
+                    </Grid>
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+
+        <!-- Entries -->
+        <Grid ColumnDefinitions="Auto,*,Auto" Margin="2,20,2,8">
+          <TextBlock Grid.Column="0" Classes="section" Text="记忆条目" Margin="0"
+                     VerticalAlignment="Center" />
+          <TextBlock Grid.Column="1" Name="PART_Projection" Classes="hint"
+                     Margin="12,0,12,0" VerticalAlignment="Center"
+                     TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+          <Button Grid.Column="2" Name="PART_Refresh" Classes="ghostaction"
+                  VerticalAlignment="Center" ToolTip.Tip="重新拉取"
+                  Click="OnRefreshClick">
+            <StackPanel Classes="inlinerow" Spacing="6">
+              <TextBlock Classes="icon" Text="&#xE72C;" FontSize="12" />
+              <TextBlock Text="刷新" FontSize="{DynamicResource Font.Size.Small}" />
+            </StackPanel>
+          </Button>
+        </Grid>
+
+        <!-- Injection budget. Hidden until the server reports one, because a
+             0/0 bar reads as "nothing is being remembered". -->
+        <Border Name="PART_ProjectionTrack" Classes="metertrack"
+                Height="4" Margin="2,0,2,10"
+                HorizontalAlignment="Stretch" IsVisible="False">
+          <Border Name="PART_ProjectionFill" Classes="meterfill"
+                  HorizontalAlignment="Left" Width="0" />
+        </Border>
+
+        <Border Name="PART_Empty" Classes="emptystate" IsVisible="False">
+          <StackPanel Spacing="10" HorizontalAlignment="Center">
+            <TextBlock Classes="icon" Text="&#xE8BD;" FontSize="24"
+                       Foreground="{DynamicResource Brush.Text.Muted}"
+                       HorizontalAlignment="Center" />
+            <TextBlock Name="PART_EmptyText" Classes="muted"
+                       MaxWidth="380" TextAlignment="Center" TextWrapping="Wrap"
+                       FontSize="{DynamicResource Font.Size.Small}" />
+          </StackPanel>
+        </Border>
+
+        <ItemsControl Name="PART_Groups">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:MemorySectionGroup">
+              <StackPanel Margin="0,0,0,4">
+                <TextBlock Text="{Binding Title}" Classes="grouptitle" />
+                <ItemsControl ItemsSource="{Binding Items}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:MemoryEntryRow">
+                      <Border Classes="memorycard">
+                        <StackPanel Spacing="9">
+                          <!-- The memory itself leads. Everything under it is
+                               provenance, and used to sit above the text. -->
+                          <TextBlock Text="{Binding Text}" TextWrapping="Wrap"
+                                     LineHeight="21" />
+
+                          <StackPanel Classes="inlinerow" Spacing="8">
+                            <TextBlock Text="{Binding TierLabel}"
+                                       FontSize="{DynamicResource Font.Size.XSmall}"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource Brush.Text.Secondary}" />
+                            <Border Classes="metertrack" Width="46" Height="4">
+                              <Border Classes="meterfill"
+                                      HorizontalAlignment="Left"
+                                      Width="{Binding MeterWidth}" />
+                            </Border>
+                            <TextBlock Text="{Binding ConfidenceText}"
+                                       FontSize="{DynamicResource Font.Size.XSmall}"
+                                       Foreground="{DynamicResource Brush.Text.Muted}" />
+                            <Border Classes="dot" />
+                            <TextBlock Text="{Binding StatusLabel}"
+                                       FontSize="{DynamicResource Font.Size.XSmall}"
+                                       Foreground="{DynamicResource Brush.Text.Muted}" />
+                            <TextBlock Text="{Binding MetaText}"
+                                       IsVisible="{Binding HasMetaText}"
+                                       FontSize="{DynamicResource Font.Size.XSmall}"
+                                       Foreground="{DynamicResource Brush.Text.Muted}"
+                                       TextTrimming="CharacterEllipsis" />
+                          </StackPanel>
+
+                          <!-- Flags only when they say something. Eight identical
+                               grey pills said nothing. -->
+                          <WrapPanel Orientation="Horizontal" Margin="0,-3,0,0"
+                                     IsVisible="{Binding HasFlags}">
+                            <Border Classes="tag" IsVisible="{Binding HasCategoryLabel}">
+                              <TextBlock Text="{Binding CategoryLabel}" />
+                            </Border>
+                            <Border Classes="tag" IsVisible="{Binding IsPermanent}">
+                              <TextBlock Text="长期保留" />
+                            </Border>
+                            <Border Classes="tag" IsVisible="{Binding IsUserSet}">
+                              <TextBlock Text="手动添加" />
+                            </Border>
+                            <Border Classes="tag warn" IsVisible="{Binding IsNearExpiry}">
+                              <TextBlock Text="即将过期" />
+                            </Border>
+                            <Border Classes="tag danger" IsVisible="{Binding IsExpired}">
+                              <TextBlock Text="已过期 · 不再注入" />
+                            </Border>
+                          </WrapPanel>
+
+                          <Grid ColumnDefinitions="Auto,*,Auto">
+                            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6">
+                              <ToggleButton Classes="rate agree" Content="认可"
+                                            IsChecked="{Binding IsAgree, Mode=OneWay}"
+                                            Tag="{Binding Id}" Click="OnRateAgree"
+                                            ToolTip.Tip="记得没错 · 提高置信度" />
+                              <ToggleButton Classes="rate doubt" Content="存疑"
+                                            IsChecked="{Binding IsDoubt, Mode=OneWay}"
+                                            Tag="{Binding Id}" Click="OnRateDoubt"
+                                            ToolTip.Tip="不太准 · 降低置信度" />
+                              <ToggleButton Classes="rate reject" Content="否认"
+                                            IsChecked="{Binding IsReject, Mode=OneWay}"
+                                            Tag="{Binding Id}" Click="OnRateReject"
+                                            ToolTip.Tip="完全不对 · 大幅降低置信度" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2">
+                              <Button Classes="inlineaction" Tag="{Binding Id}"
+                                      Click="OnEditEntry" ToolTip.Tip="修正措辞">
+                                <TextBlock Classes="icon" Text="&#xE70F;" FontSize="13" />
+                              </Button>
+                              <Button Classes="inlineaction" Tag="{Binding Id}"
+                                      Click="OnDeleteEntry" ToolTip.Tip="删除这条记忆">
+                                <TextBlock Classes="icon" Text="&#xE74D;" FontSize="13" />
+                              </Button>
+                            </StackPanel>
+                          </Grid>
+                        </StackPanel>
+                      </Border>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <!-- Danger zone -->
+        <TextBlock Classes="section" Text="数据清除" />
+        <!-- Neutral card, red only on the control that does the damage: a
+             pink block in a column of grey ones reads as a rendering fault. -->
+        <Border Classes="settingscard">
+          <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+            <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+              <TextBlock Classes="rowtitle" Text="清除全部记忆" />
+              <TextBlock Classes="hint"
+                         Text="永久删除服务器上的全部长期记忆，此操作不可撤销。" />
+            </StackPanel>
+            <Button Grid.Column="1" Name="PART_ClearAll" Content="清除"
+                    Classes="outline danger" Padding="16,7"
+                    VerticalAlignment="Center" Click="OnClearAllClick" />
+          </Grid>
+        </Border>
+
+        <TextBlock Classes="hint" Margin="2,14,2,20" TextAlignment="Center"
+                   Text="记忆由 MolaGPT 在夜间自动整理生成，可能不完全准确；可随时评分、修正、删除或自行添加。" />
+      </StackPanel>
+    </ScrollViewer>
+
+    <Border Grid.Row="2"
+            Background="{DynamicResource Brush.Bg.Secondary}"
+            BorderBrush="{DynamicResource Brush.Divider}"
+            BorderThickness="0,1,0,0"
+            Padding="24,12,24,14">
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <!-- Colour comes from the classes below, not from inline values: a local
+             value outranks a style setter, so an inline Fill could never be
+             swapped for the error state. -->
+        <Ellipse Grid.Column="0" Name="PART_StatusDot" Classes="statusdot"
+                 Width="6" Height="6" Margin="0,0,8,0"
+                 VerticalAlignment="Center" />
+        <TextBlock Grid.Column="1"
+                   Name="PART_Status"
+                   Classes="statustext"
+                   VerticalAlignment="Center"
+                   Margin="0,0,16,0"
+                   FontSize="{DynamicResource Font.Size.Small}"
+                   TextWrapping="NoWrap"
+                   TextTrimming="CharacterEllipsis" />
+        <Button Grid.Column="2" Content="关闭" Classes="outline" Padding="18,7"
+                Click="OnCloseClick" />
+      </Grid>
+    </Border>
+  </Grid>
+
+  <Window.Styles>
+    <!-- Settings-page primitives. SettingsWindow keeps its own copies in its
+         Window.Styles, as AboutWindow and ProviderDialog do for theirs; a class
+         with no rule in scope is silently ignored, which is exactly what this
+         window shipped with — an unstyled toggle renders as an empty box. -->
+    <Style Selector="TextBlock.section">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+      <Setter Property="Margin" Value="2,22,2,8" />
+    </Style>
+    <Style Selector="TextBlock.grouptitle">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.XSmall}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="Margin" Value="4,6,2,7" />
+    </Style>
+    <Style Selector="TextBlock.rowtitle">
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="TextBlock.hint">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+      <Setter Property="Margin" Value="0,4,0,0" />
+    </Style>
+    <Style Selector="Border.settingscard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <Setter Property="Margin" Value="0,0,0,12" />
+    </Style>
+    <Style Selector="Grid.settingrow">
+      <Setter Property="Margin" Value="16,13" />
+    </Style>
+    <Style Selector="Border.divider">
+      <Setter Property="Height" Value="1" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Divider}" />
+      <Setter Property="Margin" Value="16,0" />
+    </Style>
+    <!-- The Expander template puts the chevron flush against the right edge;
+         a settings row needs it inside the card's own padding. -->
+    <Style Selector="Expander.settingexpander /template/ TextBlock#PART_chevron">
+      <Setter Property="Margin" Value="10,0,16,0" />
+    </Style>
+
+    <Style Selector="ToggleButton.settingtoggle">
+      <Setter Property="Width" Value="40" />
+      <Setter Property="Height" Value="22" />
+      <Setter Property="MinWidth" Value="40" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Border.Strong}" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="Padding" Value="3" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Name="PART_Track"
+                  Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}"
+                  CornerRadius="{TemplateBinding CornerRadius}"
+                  Padding="{TemplateBinding Padding}">
+            <Ellipse Name="PART_Thumb"
+                     Width="16" Height="16"
+                     Fill="{DynamicResource Brush.Bg.Elevated}"
+                     HorizontalAlignment="Left" />
+          </Border>
+        </ControlTemplate>
+      </Setter>
+    </Style>
+    <Style Selector="ToggleButton.settingtoggle:checked">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+    <Style Selector="ToggleButton.settingtoggle:checked:pointerover">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+    <Style Selector="ToggleButton.settingtoggle:checked /template/ Ellipse#PART_Thumb">
+      <Setter Property="HorizontalAlignment" Value="Right" />
+    </Style>
+
+    <!-- TextBox.field / ComboBox.field are theme-wide (Theme/Controls.axaml):
+         the memory edit dialog is its own window and could not see a copy kept
+         here. -->
+
+    <!-- Cards -->
+    <Style Selector="Border.memorycard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="14,12" />
+      <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+    <Style Selector="Border.memorycard:pointerover">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+    </Style>
+    <Style Selector="Border.candidatecard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="14,12" />
+      <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+    <Style Selector="Border.quote">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="2,0,0,0" />
+      <Setter Property="Padding" Value="10,1,0,1" />
+    </Style>
+    <Style Selector="Border.emptystate">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="24,28" />
+      <Setter Property="Margin" Value="0,4,0,8" />
+    </Style>
+
+    <!-- Confidence / budget meter -->
+    <Style Selector="Border.metertrack">
+      <Setter Property="Background" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <!-- Stated because the meter also sits in a horizontal row, where a
+           4px-high Border would otherwise hang off the top of the line. -->
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Border.meterfill">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+    </Style>
+    <Style Selector="Border.meterfill.tight">
+      <Setter Property="Background" Value="{DynamicResource Brush.Warning}" />
+    </Style>
+    <Style Selector="Border.dot">
+      <Setter Property="Width" Value="2" />
+      <Setter Property="Height" Value="2" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Text.Muted}" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Opacity" Value="0.6" />
+    </Style>
+
+    <!-- Flag tags -->
+    <Style Selector="Border.tag">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="Padding" Value="8,2" />
+      <Setter Property="Margin" Value="0,0,6,0" />
+    </Style>
+    <Style Selector="Border.tag > TextBlock">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.XSmall}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+    <Style Selector="Border.tag.warn">
+      <Setter Property="Background" Value="{DynamicResource Brush.Warning.Surface}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Warning.Border}" />
+    </Style>
+    <Style Selector="Border.tag.warn > TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Warning.Foreground}" />
+    </Style>
+    <Style Selector="Border.tag.danger">
+      <Setter Property="Background" Value="{DynamicResource Brush.Danger.Surface}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Danger.Border}" />
+    </Style>
+    <Style Selector="Border.tag.danger > TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Danger.Foreground}" />
+    </Style>
+
+    <!-- Rating pills. Three states that mean different things, so they read as
+         three colours rather than as three identical default buttons. -->
+    <Style Selector="ToggleButton.rate">
+      <Setter Property="MinHeight" Value="28" />
+      <Setter Property="Padding" Value="12,4" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+    </Style>
+    <Style Selector="ToggleButton.rate:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    </Style>
+    <Style Selector="ToggleButton.rate:checked">
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="ToggleButton.rate.agree:checked">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+    <Style Selector="ToggleButton.rate.agree:checked /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+    <Style Selector="ToggleButton.rate.doubt:checked">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Warning.Foreground}" />
+    </Style>
+    <Style Selector="ToggleButton.rate.doubt:checked /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Warning.Surface}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Warning.Border}" />
+    </Style>
+    <Style Selector="ToggleButton.rate.reject:checked">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Danger.Foreground}" />
+    </Style>
+    <Style Selector="ToggleButton.rate.reject:checked /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Danger.Surface}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Danger.Border}" />
+    </Style>
+
+    <!-- Style chips are built in code-behind; toolchip is the app-wide chip. -->
+    <Style Selector="ToggleButton.toolchip">
+      <Setter Property="Margin" Value="0,0,8,8" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="Padding" Value="14,0" />
+    </Style>
+
+    <Style Selector="Button.ghostaction">
+      <Setter Property="Padding" Value="10,4" />
+      <Setter Property="MinHeight" Value="28" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <Style Selector="Button.ghostaction:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    </Style>
+    <Style Selector="Button.ghostaction:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+
+    <Style Selector="Button.outline.danger">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Danger.Foreground}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Danger.Border}" />
+    </Style>
+    <Style Selector="Button.outline.danger:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Danger.Border}" />
+    </Style>
+
+    <Style Selector="TextBlock.statustext">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+    </Style>
+    <Style Selector="TextBlock.statustext.error">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
+    </Style>
+    <Style Selector="Ellipse.statusdot">
+      <Setter Property="Fill" Value="{DynamicResource Brush.Text.Muted}" />
+    </Style>
+    <Style Selector="Ellipse.statusdot.error">
+      <Setter Property="Fill" Value="{DynamicResource Brush.Error}" />
+    </Style>
+  </Window.Styles>
+</views:MolaContentWindow>

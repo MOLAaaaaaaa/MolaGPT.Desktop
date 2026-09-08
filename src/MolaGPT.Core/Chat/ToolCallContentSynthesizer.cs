@@ -1,7 +1,6 @@
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace MolaGPT.Core.Chat;
 
@@ -23,7 +22,6 @@ public sealed class ToolCallContentSynthesizer
         public StringBuilder Arguments { get; } = new();
         public bool UiStarted { get; set; }
         public bool UiClosed { get; set; }
-        public int EmittedCodeLength { get; set; }
     }
 
     private readonly Dictionary<int, State> _toolCalls = new();
@@ -52,7 +50,9 @@ public sealed class ToolCallContentSynthesizer
             }
 
             EnsureToolUi(state, output);
-            MaybeAppendPythonCode(state, output);
+            // Keep the live card lightweight while the model is still writing
+            // arguments. Each partial prefix would otherwise make the UI parse
+            // and syntax-highlight the whole growing script again.
         }
 
         return handled ? output.ToString() : null;
@@ -67,7 +67,7 @@ public sealed class ToolCallContentSynthesizer
 
             if (state.Name == "execute_python_code")
             {
-                MaybeAppendPythonCode(state, output);
+                AppendPythonCode(state, output);
                 output.Append("\n```\n\n</DSanalysis>\n");
             }
             else
@@ -112,15 +112,13 @@ public sealed class ToolCallContentSynthesizer
         state.UiStarted = true;
     }
 
-    private static void MaybeAppendPythonCode(State state, StringBuilder output)
+    private static void AppendPythonCode(State state, StringBuilder output)
     {
         if (!state.UiStarted || state.UiClosed || state.Name != "execute_python_code") return;
         var decodedCode = TryExtractPythonCode(state.Arguments.ToString());
         if (string.IsNullOrEmpty(decodedCode)) return;
 
-        if (decodedCode.Length <= state.EmittedCodeLength) return;
-        output.Append(decodedCode.AsSpan(state.EmittedCodeLength));
-        state.EmittedCodeLength = decodedCode.Length;
+        output.Append(decodedCode);
     }
 
     private static string GetToolStatusLabel(string toolName) => toolName switch
@@ -155,17 +153,18 @@ public sealed class ToolCallContentSynthesizer
     private static string TryExtractPythonCode(string rawArgs)
     {
         if (string.IsNullOrEmpty(rawArgs)) return string.Empty;
-        var match = Regex.Match(rawArgs, "\"code\"\\s*:\\s*\"([\\s\\S]*)");
-        if (!match.Success) return string.Empty;
-
-        var code = Regex.Replace(match.Groups[1].Value, "\"\\s*}?$", string.Empty);
-        if (code.EndsWith("\\", StringComparison.Ordinal)) code = code[..^1];
-
-        return code
-            .Replace("\\n", "\n", StringComparison.Ordinal)
-            .Replace("\\\"", "\"", StringComparison.Ordinal)
-            .Replace("\\\\", "\\", StringComparison.Ordinal)
-            .Replace("\\t", "\t", StringComparison.Ordinal);
+        try
+        {
+            using var doc = JsonDocument.Parse(rawArgs);
+            return doc.RootElement.TryGetProperty("code", out var code)
+                   && code.ValueKind == JsonValueKind.String
+                ? code.GetString() ?? string.Empty
+                : string.Empty;
+        }
+        catch (JsonException)
+        {
+            return string.Empty;
+        }
     }
 
     private static int? ReadInt(JsonElement obj, string name)
