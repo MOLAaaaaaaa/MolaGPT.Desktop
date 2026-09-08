@@ -262,21 +262,129 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public string VisibleContent => ProcessCitationRefs(StripSystemHints(Content));
     public bool HasRetryBar => IsLatestAssistant && RetryAttempts is { Count: > 1 };
     public string RetryCounter => HasRetryBar ? $"{RetryCurrentIndex + 1}/{RetryAttempts!.Count}" : string.Empty;
-    public string ResponseStatsText
+
+    /// <summary>请求发出到首个输出的秒数；未打点时为空。</summary>
+    public double? FirstTokenSeconds =>
+        _requestStartedAt is { } start && _firstOutputAt is { } first
+            ? Math.Max(0, (first - start).TotalSeconds)
+            : null;
+
+    /// <summary>首个输出到上游结束的生成秒数，平均速度的分母；未完成时为空。</summary>
+    public double? GenerationSeconds =>
+        _firstOutputAt is { } first && _streamCompletedAt is { } end
+            ? Math.Max(0, (end - first).TotalSeconds)
+            : null;
+
+    /// <summary>输出 tokens 除以生成耗时。Usage、时序或耗时任一缺失时为空。</summary>
+    public double? OutputTokensPerSecond =>
+        Usage?.CompletionTokens is { } completion && GenerationSeconds is { } seconds && seconds > 0
+            ? completion / seconds
+            : null;
+
+    /// <summary>TTFT 数值文本，如 <c>1234ms</c>。</summary>
+    public string? FirstTokenText =>
+        FirstTokenSeconds is { } seconds ? $"{(long)Math.Round(seconds * 1000)}ms" : null;
+
+    /// <summary>输入/输出 tokens 文本，如 <c>↑3710 ↓6322</c>；只有一侧时只显示那一侧。</summary>
+    public string? TokensText =>
+        (Usage?.PromptTokens, Usage?.CompletionTokens) switch
+        {
+            ({ } input, { } output) => $"↑{input} ↓{output}",
+            ({ } input, null) => $"↑{input}",
+            (null, { } output) => $"↓{output}",
+            _ => null
+        };
+
+    /// <summary>平均速度的展示文本，如 <c>188.7 tok/s</c>。</summary>
+    public string? SpeedText =>
+        OutputTokensPerSecond is { } speed ? $"{speed:0.#} tok/s" : null;
+
+    public bool HasInlineStats => InlineStatsText.Length > 0;
+
+    /// <summary>
+    /// 动作条里跟在响应统计按钮后面的一行摘要，例如
+    /// <c>TTFT: 1234ms · Tokens: ↑3710 ↓6322 · 188.7 tok/s</c>。
+    /// 没有数据的段落自动省略；全都缺失时返回空串，由
+    /// <see cref="HasInlineStats"/> 隐藏整段。
+    /// </summary>
+    public string InlineStatsText
     {
         get
         {
-            var rows = new List<string>();
-            if (!string.IsNullOrWhiteSpace(ModelLabel)) rows.Add($"使用模型：{ModelLabel}");
-            if (Usage?.PromptTokens is { } prompt) rows.Add($"输入 Tokens：{prompt:N0}");
-            if (Usage?.CompletionTokens is { } completion) rows.Add($"输出 Tokens：{completion:N0}");
-            if (Usage?.TotalTokens is { } total) rows.Add($"总 Tokens：{total:N0}");
-            return rows.Count == 0 ? "暂无响应统计" : string.Join("\n", rows);
+            var parts = new List<string>(3);
+            if (FirstTokenText is { } ttft) parts.Add($"TTFT: {ttft}");
+            if (TokensText is { } tokens) parts.Add($"Tokens: {tokens}");
+            if (SpeedText is { } speed) parts.Add(speed);
+            return string.Join(" · ", parts);
         }
+    }
+
+    /// <summary>
+    /// 从历史版本恢复时序。持久化的是秒数而不是时刻，这里以当前时刻为锚点反推，
+    /// 使 <see cref="FirstTokenSeconds"/> / <see cref="GenerationSeconds"/> 精确复现。
+    /// </summary>
+    public void RestoreTurnTiming(double? firstTokenSeconds, double? generationSeconds)
+    {
+        if (firstTokenSeconds is not { } latency)
+        {
+            _requestStartedAt = null;
+            _firstOutputAt = null;
+            _streamCompletedAt = null;
+        }
+        else
+        {
+            var start = DateTimeOffset.UtcNow;
+            _requestStartedAt = start;
+            _firstOutputAt = start + TimeSpan.FromSeconds(latency);
+            _streamCompletedAt = generationSeconds is { } generation
+                ? _firstOutputAt.Value + TimeSpan.FromSeconds(generation)
+                : null;
+        }
+        NotifyTurnStatsChanged();
+    }
+
+    /// <summary>
+    /// 标记本轮请求已真正发出（在 <c>provider.StreamChatAsync</c> 之前）。
+    /// 幂等：续流重连不覆盖最初起点；重试由 <see cref="BeginRetryAttempt"/> 先清零。
+    /// </summary>
+    public void MarkRequestStarted()
+    {
+        if (_disposed || _requestStartedAt is not null) return;
+        _requestStartedAt = DateTimeOffset.UtcNow;
+        NotifyTurnStatsChanged();
+    }
+
+    /// <summary>记录首个输出。正文、思考、工具卡任一先到都算，只在第一次生效。</summary>
+    private void MarkFirstOutput()
+    {
+        if (_disposed || _firstOutputAt is not null) return;
+        _firstOutputAt = DateTimeOffset.UtcNow;
+        NotifyTurnStatsChanged();
+    }
+
+    private void NotifyTurnStatsChanged()
+    {
+        OnPropertyChanged(nameof(FirstTokenSeconds));
+        OnPropertyChanged(nameof(GenerationSeconds));
+        OnPropertyChanged(nameof(OutputTokensPerSecond));
+        OnPropertyChanged(nameof(FirstTokenText));
+        OnPropertyChanged(nameof(TokensText));
+        OnPropertyChanged(nameof(SpeedText));
+        OnPropertyChanged(nameof(InlineStatsText));
+        OnPropertyChanged(nameof(HasInlineStats));
     }
 
     private DateTimeOffset? _thinkingStartedAt;
     private DateTimeOffset? _pendingStartedAt;
+
+    /// <summary>
+    /// 本轮的时序打点：请求真正发出、首个输出到达、上游结束。三者都是 UTC 时刻，
+    /// 只在一次回答版本内有效——切换重试版本时随版本存取，重新生成时清零。
+    /// </summary>
+    private DateTimeOffset? _requestStartedAt;
+    private DateTimeOffset? _firstOutputAt;
+    private DateTimeOffset? _streamCompletedAt;
+
     private System.Threading.Timer? _elapsedTimer;
     private System.Threading.Timer? _pendingTimer;
 
@@ -323,6 +431,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public void AppendDelta(string delta)
     {
         if (_disposed || string.IsNullOrEmpty(delta)) return;
+        MarkFirstOutput();
 
         if (IsStreaming)
         {
@@ -436,6 +545,8 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public void CompleteStreaming()
     {
         if (_disposed) return;
+        _streamCompletedAt ??= DateTimeOffset.UtcNow;
+        NotifyTurnStatsChanged();
         _pacer.Complete(EmitPaced);
         _streamedMarkupCloseTag = null;
         if (_pacer.HasPending) SchedulePaceFrame();
@@ -534,6 +645,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public void AppendThinking(string delta)
     {
         if (_disposed || string.IsNullOrEmpty(delta)) return;
+        MarkFirstOutput();
 
         // Opening a segment is structural — the card has to appear on the first
         // delta — so it is never deferred. Only the text is.
@@ -662,6 +774,10 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         _activeThinkingSegment = null;
         _activeThinkingVisible = false;
         _thinkingStartedAt = null;
+        _requestStartedAt = null;
+        _firstOutputAt = null;
+        _streamCompletedAt = null;
+        NotifyTurnStatsChanged();
         _nextDisplaySequence = 0;
         ThinkingElapsedSeconds = 0;
         Usage = null;
@@ -715,7 +831,9 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             WasStopped,
             Thinking,
             thinkingSegments,
-            toolCalls);
+            toolCalls,
+            FirstTokenSeconds,
+            GenerationSeconds);
     }
 
     [RelayCommand(CanExecute = nameof(CanPreviousAttempt))]
@@ -759,6 +877,8 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
                 ? attempt.ThinkingSegments
                 : [new ThinkingSegmentDelta(attempt.Thinking, 0)]);
         }
+        // 放在工具卡/思考段恢复之后：ApplyToolDelta 会记首个输出，这里必须覆盖它。
+        RestoreTurnTiming(attempt.FirstTokenSeconds, attempt.GenerationSeconds);
         RetryCurrentIndex = index;
     }
 
@@ -802,6 +922,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public void ApplyToolDelta(ToolCallDelta delta)
     {
         if (_disposed) return;
+        MarkFirstOutput();
         StopPending();
         var existing = ToolCalls.FirstOrDefault(t => t.Id == delta.Id);
         if (existing is null)
@@ -923,12 +1044,11 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     partial void OnUsageChanged(Usage? value)
     {
         OnPropertyChanged(nameof(HasResponseStats));
-        OnPropertyChanged(nameof(ResponseStatsText));
+        NotifyTurnStatsChanged();
     }
     partial void OnModelLabelChanged(string? value)
     {
         OnPropertyChanged(nameof(HasResponseStats));
-        OnPropertyChanged(nameof(ResponseStatsText));
     }
     partial void OnRetryAttemptsChanged(IReadOnlyList<MessageAttempt>? value)
     {
@@ -1227,7 +1347,9 @@ public sealed record MessageAttempt(
     bool WasStopped = false,
     string? Thinking = null,
     IReadOnlyList<ThinkingSegmentDelta>? ThinkingSegments = null,
-    IReadOnlyList<ToolCallDelta>? ToolCalls = null);
+    IReadOnlyList<ToolCallDelta>? ToolCalls = null,
+    double? FirstTokenSeconds = null,
+    double? GenerationSeconds = null);
 /// <summary>
 /// Lightweight representation of a sent attachment, kept on the message
 /// view-model after the original <see cref="MolaGPT.Core.Models.Attachment"/>

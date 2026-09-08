@@ -643,6 +643,8 @@ public sealed partial class ChatViewModel : ObservableObject
             var contextWindow = 0;
             var compactionTokensBefore = 0;
             var compactionTokensAfter = 0;
+            double? firstTokenSeconds = null;
+            double? generationSeconds = null;
             string? compactionReason = null;
             if (!string.IsNullOrEmpty(row.Meta))
             {
@@ -681,6 +683,7 @@ public sealed partial class ChatViewModel : ObservableObject
                     compactionTokensBefore = ReadMetaInt(doc.RootElement, "compaction_tokens_before");
                     compactionTokensAfter = ReadMetaInt(doc.RootElement, "compaction_tokens_after");
                     compactionReason = ReadString(doc.RootElement, "compaction_reason");
+                    (firstTokenSeconds, generationSeconds) = ParseTurnTiming(doc.RootElement);
                 }
                 catch (JsonException) { }
             }
@@ -727,7 +730,9 @@ public sealed partial class ChatViewModel : ObservableObject
                 contextWindow,
                 compactionTokensBefore,
                 compactionReason,
-                compactionTokensAfter));
+                compactionTokensAfter,
+                firstTokenSeconds,
+                generationSeconds));
         }
 
         return prepared;
@@ -768,6 +773,8 @@ public sealed partial class ChatViewModel : ObservableObject
                 ? prepared.ThinkingSegments
                 : [new ThinkingSegmentDelta(prepared.Thinking, 0)]);
         }
+        // 最后一步：ApplyToolDelta 会记首个输出，必须用落库的时序覆盖它。
+        vm.RestoreTurnTiming(prepared.FirstTokenSeconds, prepared.GenerationSeconds);
         return vm;
     }
 
@@ -792,7 +799,9 @@ public sealed partial class ChatViewModel : ObservableObject
         int ContextWindow = 0,
         int CompactionTokensBefore = 0,
         string? CompactionReason = null,
-        int CompactionTokensAfter = 0);
+        int CompactionTokensAfter = 0,
+        double? FirstTokenSeconds = null,
+        double? GenerationSeconds = null);
 
     /// <summary>
     /// Materialize up to <paramref name="count"/> more of the history parked by
@@ -1032,6 +1041,8 @@ public sealed partial class ChatViewModel : ObservableObject
         {
             meta["response_stats"] = BuildUsageJson(vm.Usage);
         }
+        if (BuildTurnTimingJson(vm.FirstTokenSeconds, vm.GenerationSeconds) is { } timing)
+            meta["turn_timing"] = timing;
         // Separate from response_stats: that is the turn's cost, this is how full
         // the context was left. Persisted so reopening a conversation restores the
         // gauge instead of blanking it until the next turn.
@@ -1149,6 +1160,18 @@ public sealed partial class ChatViewModel : ObservableObject
         return obj;
     }
 
+    /// <summary>把首字延迟/生成耗时写成毫秒整数；两者都缺失时返回 null，不落库空对象。</summary>
+    private static JsonObject? BuildTurnTimingJson(double? firstTokenSeconds, double? generationSeconds)
+    {
+        if (firstTokenSeconds is null && generationSeconds is null) return null;
+        var timing = new JsonObject();
+        if (firstTokenSeconds is { } firstToken)
+            timing["first_token_ms"] = (long)Math.Round(firstToken * 1000);
+        if (generationSeconds is { } generation)
+            timing["generated_ms"] = (long)Math.Round(generation * 1000);
+        return timing;
+    }
+
     private static JsonArray BuildSourcesJson(IReadOnlyList<SourceReference> sources) =>
         new(sources
             .Select(s => new JsonObject
@@ -1170,6 +1193,8 @@ public sealed partial class ChatViewModel : ObservableObject
             ["sources"] = attempt.Sources is null ? (JsonNode?)null : BuildSourcesJson(attempt.Sources),
             ["stopped"] = attempt.WasStopped ? true : (JsonNode?)null
         };
+        if (BuildTurnTimingJson(attempt.FirstTokenSeconds, attempt.GenerationSeconds) is { } timing)
+            result["turn_timing"] = timing;
         if (!string.IsNullOrWhiteSpace(attempt.Thinking))
             result["thinking"] = attempt.Thinking;
         if (attempt.ToolCalls is { Count: > 0 })
@@ -1555,6 +1580,17 @@ public sealed partial class ChatViewModel : ObservableObject
             : new Usage(prompt, completion, total);
     }
 
+    /// <summary>读取 <c>turn_timing</c> 里的毫秒打点，换算回秒；缺失时为 null。</summary>
+    private static (double? FirstTokenSeconds, double? GenerationSeconds) ParseTurnTiming(JsonElement root)
+    {
+        if (!root.TryGetProperty("turn_timing", out var timing) || timing.ValueKind != JsonValueKind.Object)
+            return (null, null);
+        var firstTokenMs = ReadInt(timing, "first_token_ms");
+        var generatedMs = ReadInt(timing, "generated_ms");
+        return (firstTokenMs is { } latency ? latency / 1000d : null,
+                generatedMs is { } generation ? generation / 1000d : null);
+    }
+
     private static (IReadOnlyList<MessageAttempt>? Attempts, int Current) ParseRetry(JsonElement root)
     {
         if (!root.TryGetProperty("retry", out var retry) || retry.ValueKind != JsonValueKind.Object)
@@ -1590,6 +1626,7 @@ public sealed partial class ChatViewModel : ObservableObject
             var toolCalls = ParseToolCalls(item);
             var thinkingSegments = ParseThinkingSegments(item);
             (toolCalls, thinkingSegments) = InferMissingTimelineIndexes(toolCalls, thinkingSegments);
+            var (firstTokenSeconds, generationSeconds) = ParseTurnTiming(item);
             attempts.Add(new MessageAttempt(
                 split.Visible,
                 modelLabel,
@@ -1598,7 +1635,9 @@ public sealed partial class ChatViewModel : ObservableObject
                 item.TryGetProperty("stopped", out var stoppedNode) && stoppedNode.ValueKind == JsonValueKind.True,
                 thinking,
                 thinkingSegments,
-                toolCalls));
+                toolCalls,
+                firstTokenSeconds,
+                generationSeconds));
         }
 
         var current = ReadInt(retry, "current") ?? Math.Max(0, attempts.Count - 1);

@@ -501,10 +501,28 @@
         <Button Classes="inlineaction" Click="OnCopyMessage" ToolTip.Tip="复制回答">
           <TextBlock Classes="icon" Text="&#xE8C8;" FontSize="14" />
         </Button>
-        <Button Classes="inlineaction" Click="OnShowStats" ToolTip.Tip="响应统计"
+        <!-- 悬浮即弹出统计浮窗，点击固定显示。tooltip 会与浮窗抢同一个位置，故不再设置。 -->
+        <Button Classes="inlineaction" Click="OnShowStats"
+                PointerEntered="OnStatsPointerEntered" PointerExited="OnStatsPointerExited"
                 IsVisible="{Binding Message.HasResponseStats}">
           <TextBlock Classes="icon" Text="&#xE9D2;" FontSize="14" />
         </Button>
+        <!-- 首字延迟 / 输入输出 tokens / 平均速度。刻意用 Muted 而不是按钮的
+             Secondary：这是比图标按钮更淡的一档。同一水平行，不改变虚拟化行高。
+             用 SelectableTextBlock 以便选中复制，右键菜单提供一键复制整行。 -->
+        <SelectableTextBlock IsVisible="{Binding Message.HasInlineStats}"
+                             Text="{Binding Message.InlineStatsText}"
+                             Margin="10,0,2,0" VerticalAlignment="Center"
+                             FontSize="{DynamicResource Font.Size.XSmall}"
+                             Foreground="{DynamicResource Brush.Text.Muted}"
+                             TextWrapping="NoWrap" TextTrimming="CharacterEllipsis">
+          <SelectableTextBlock.ContextMenu>
+            <ContextMenu>
+              <MenuItem Header="复制性能数据" Tag="{Binding Message.InlineStatsText}"
+                        Click="OnCopyInlineStats" />
+            </ContextMenu>
+          </SelectableTextBlock.ContextMenu>
+        </SelectableTextBlock>
         </StackPanel>
 
         <!-- Compaction marker. Belongs in the transcript rather than in a banner
