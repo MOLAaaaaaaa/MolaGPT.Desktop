@@ -72,7 +72,7 @@
           <TextBlock Name="PART_EditorLabel" Text="本次对话的提示词"
                      Classes="label" Margin="0,0,0,6" />
           <Border Name="PART_EditorBorder" Background="{DynamicResource Brush.Bg.Primary}"
-                  BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1"
+                  BorderThickness="1"
                   CornerRadius="{DynamicResource Radius.Sm}" Padding="12,10" Height="200">
             <TextBox Name="PART_Prompt" AcceptsReturn="True" TextWrapping="Wrap"
                      ScrollViewer.VerticalScrollBarVisibility="Auto"
@@ -92,7 +92,8 @@
 
           <Expander Name="PART_PersonaPromptExpander" Header="查看角色默认提示词"
                     Margin="0,12,0,0">
-            <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+            <Border Name="PART_PersonaBorder" Background="{DynamicResource Brush.Bg.Tertiary}"
+                    BorderThickness="1"
                     CornerRadius="{DynamicResource Radius.Sm}" Padding="12,10" Margin="0,6,0,0">
               <StackPanel>
                 <TextBox Name="PART_PersonaPrompt" IsReadOnly="True" AcceptsReturn="True"
@@ -117,6 +118,23 @@
   </Grid>
 
   <Window.Styles>
+    <!-- Both prompt editors are borderless TextBoxes inside a chrome border, so
+         the focus ring the theme drops for text fields has to be drawn by the
+         border that owns the chrome. BorderBrush lives in a style rather than on
+         the Border because a local value outranks a style setter and would make
+         the :focus-within override below a no-op. -->
+    <Style Selector="Border#PART_EditorBorder">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+    </Style>
+    <Style Selector="Border#PART_EditorBorder:focus-within">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+    <Style Selector="Border#PART_PersonaBorder">
+      <Setter Property="BorderBrush" Value="Transparent" />
+    </Style>
+    <Style Selector="Border#PART_PersonaBorder:focus-within">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
     <Style Selector="Button.hintchip">
       <Setter Property="Padding" Value="10,3" />
       <Setter Property="Margin" Value="0,0,6,4" />

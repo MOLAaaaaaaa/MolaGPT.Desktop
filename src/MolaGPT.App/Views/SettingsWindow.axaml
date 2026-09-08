@@ -1768,6 +1768,11 @@
       <Setter Property="Padding" Value="11,0" />
       <Setter Property="VerticalContentAlignment" Value="Center" />
     </Style>
+    <!-- The spin box forwards focus to its inner TextBox, which the theme no
+         longer gives a focus ring, so the field border has to show it. -->
+    <Style Selector="NumericUpDown.settingsinput:focus-within">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+    </Style>
     <Style Selector="ButtonSpinner /template/ RepeatButton">
       <Setter Property="Padding" Value="0" />
       <Setter Property="HorizontalContentAlignment" Value="Center" />
