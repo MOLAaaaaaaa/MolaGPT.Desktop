@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 
 namespace MolaGPT.Storage;
@@ -11,6 +12,10 @@ namespace MolaGPT.Storage;
 /// </summary>
 public sealed class MolaGptDatabase
 {
+    private static readonly Regex AddColumnMigration = new(
+        @"^\s*ALTER\s+TABLE\s+(?<table>[A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+COLUMN\s+(?<column>[A-Za-z_][A-Za-z0-9_]*)\s+[^;]+;",
+        RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
     public string ConnectionString { get; }
 
     public MolaGptDatabase(string filePath)
@@ -72,16 +77,36 @@ public sealed class MolaGptDatabase
             using var reader = new StreamReader(stream);
             var sql = reader.ReadToEnd();
 
-            try
+            foreach (Match addColumn in AddColumnMigration.Matches(sql))
             {
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = sql;
-                cmd.ExecuteNonQuery();
+                var table = addColumn.Groups["table"].Value;
+                var column = addColumn.Groups["column"].Value;
+                if (!ColumnExists(conn, table, column))
+                    Execute(conn, addColumn.Value);
             }
-            catch (SqliteException ex) when (ex.SqliteErrorCode == 1 && ex.Message.Contains("duplicate column"))
-            {
-                // ALTER TABLE ADD COLUMN on an already-migrated database - safe to ignore.
-            }
+
+            var remainingSql = AddColumnMigration.Replace(sql, string.Empty);
+            Execute(conn, remainingSql);
         }
+    }
+
+    private static bool ColumnExists(SqliteConnection conn, string table, string column)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"PRAGMA table_info({table});";
+        using var rows = cmd.ExecuteReader();
+        while (rows.Read())
+        {
+            if (string.Equals(rows.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    private static void Execute(SqliteConnection conn, string sql)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
     }
 }

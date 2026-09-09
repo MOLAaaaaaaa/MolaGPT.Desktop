@@ -7,6 +7,8 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
+using Avalonia.Layout;
+using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MolaGPT.App.Rendering;
@@ -72,6 +74,7 @@ public partial class TranscriptView : UserControl
         // has a chance to settle and re-assert the bottom.
         AddHandler(PointerWheelChangedEvent, OnWheel, RoutingStrategies.Tunnel);
         AddHandler(PointerPressedEvent, OnPointerPressed, RoutingStrategies.Tunnel);
+        AddHandler(KeyDownEvent, OnPreviewKeyDown, RoutingStrategies.Tunnel);
         HookBlockSpanningSelection();
 
         _scroll = PART_Scroll;
@@ -144,10 +147,10 @@ public partial class TranscriptView : UserControl
 
         if (empty)
         {
-            // Assigned in exactly one other place — ScrollChanged — which does
-            // not necessarily run when the rows are simply taken away. Left
-            // alone, "回到最新" stayed on screen over the welcome page, pointing
-            // at a conversation that is no longer open.
+            // Assigned in two other places — ScrollChanged and AnimateToBottom —
+            // neither of which necessarily runs when the rows are simply taken
+            // away. Left alone, "回到最新" stayed on screen over the welcome
+            // page, pointing at a conversation that is no longer open.
             PART_JumpLatest.IsVisible = false;
             CancelWheelAnimation();
             _followBottom = true;
@@ -208,12 +211,38 @@ public partial class TranscriptView : UserControl
 
     }
 
+    /// <summary>
+    /// Keyboard scrolling is the one user scroll the wheel and scrollbar
+    /// handlers cannot see. While following, <see cref="OnScrollChanged"/>
+    /// treats every extent change as the panel still measuring (see the guard
+    /// there), so an upward key must clear the flag here — otherwise a streaming
+    /// answer would drag the viewport back to the bottom mid-read.
+    /// </summary>
+    private void OnPreviewKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Source is Visual source && source.GetSelfAndVisualAncestors()
+            .Any(control => control is TextBox or SelectableTextBlock)) return;
+        switch (e.Key)
+        {
+            case Key.Up:
+            case Key.PageUp:
+            case Key.Home:
+                CancelWheelAnimation();
+                _followBottom = false;
+                break;
+        }
+    }
+
     private void OnScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
         if (_scroll is null) return;
 
         var atBottom = IsNearBottom();
-        PART_JumpLatest.IsVisible = !atBottom && (_rows?.Count ?? 0) > 0;
+        // The affordance means "you have scrolled away from the newest message",
+        // which is intent, not geometry: while following, a gap is just the panel
+        // still measuring rows, and the button would sit on top of the message
+        // being read.
+        PART_JumpLatest.IsVisible = !_jumping && !_followBottom && !atBottom && (_rows?.Count ?? 0) > 0;
 
         if (_loadingOlder) return;
 
@@ -227,6 +256,29 @@ public partial class TranscriptView : UserControl
             return;
         }
 
+        // While following, an extent change is the virtualizing panel still
+        // measuring rows, never the user. ScrollViewer's anchor correction
+        // (ScrollContentPresenter.ArrangeWithAnchoring) moves the offset in the
+        // very same layout pass that grows the extent, and RaiseScrollChanged
+        // then aggregates both deltas into one event — so this has to be decided
+        // before the offset-delta branch below. Reading that correction as a
+        // user scroll is what parked a freshly opened conversation short of the
+        // bottom with the jump affordance sitting over the newest message.
+        //
+        // The growth cannot be left to OnRowsChanged either: a thinking block or
+        // a tool card grows *inside* a row whose key is position-only, so no row
+        // is inserted and no collection change is raised. Prose only followed
+        // because its rows are keyed by a hash of their own text and therefore
+        // get swapped on every delta — following a reasoning model worked or not
+        // depending on which kind of row happened to be at the bottom.
+        if (_followBottom && e.ExtentDelta.Y > ScrollCorrectionEpsilon
+            && e.OffsetDelta.Y >= -ScrollCorrectionEpsilon)
+        {
+            _expectedOffset = null;
+            PinToBottom();
+            return;
+        }
+
         // Our own scroll: consume the expectation and leave the flag alone.
         if (_expectedOffset is { } expected && Math.Abs(_scroll.Offset.Y - expected) < 1.5)
         {
@@ -237,19 +289,7 @@ public partial class TranscriptView : UserControl
         _expectedOffset = null;
 
         // Extent moving under a still viewport is content growing, not the user.
-        if (Math.Abs(e.ExtentDelta.Y) > 0.5 && Math.Abs(e.OffsetDelta.Y) < 0.5)
-        {
-            // …and if we are following, that growth is below the fold, so chase
-            // it. This cannot be left to OnRowsChanged: a thinking block or a
-            // tool card grows *inside* a row whose key is position-only, so no
-            // row is inserted and no collection change is raised. Prose only
-            // followed because its rows are keyed by a hash of their own text
-            // and therefore get swapped on every delta — following a reasoning
-            // model worked or not depending on which kind of row happened to be
-            // at the bottom.
-            if (_followBottom) PinToBottom();
-            return;
-        }
+        if (Math.Abs(e.ExtentDelta.Y) > 0.5 && Math.Abs(e.OffsetDelta.Y) < 0.5) return;
 
         if (Math.Abs(e.OffsetDelta.Y) > 0.5)
         {
@@ -261,6 +301,7 @@ public partial class TranscriptView : UserControl
             _followBottom = true;
         }
 
+        PART_JumpLatest.IsVisible = !_jumping && !_followBottom && !atBottom && (_rows?.Count ?? 0) > 0;
         QueueMaybeLoadOlderMessages();
     }
 
@@ -466,6 +507,10 @@ public partial class TranscriptView : UserControl
     {
         if (_scroll is null) return;
 
+        // Waiting for the first frame would leave the affordance over the
+        // transcript for the whole 0.42 s jump, and the early return below can
+        // finish without any ScrollChanged at all.
+        PART_JumpLatest.IsVisible = false;
         CancelWheelAnimation();
 
         var bottom = Math.Max(0, _scroll.Extent.Height - _scroll.Viewport.Height);
@@ -628,48 +673,146 @@ public partial class TranscriptView : UserControl
     /// <summary>Raised for actions the composer owns rather than the row.</summary>
     public event EventHandler<MessageViewModel>? RetryRequested;
 
-    /// <summary>Raised for the response-stats popover.</summary>
-    public event EventHandler<MessageViewModel>? StatsRequested;
-
     private void OnRetry(object? sender, RoutedEventArgs e)
     {
         if (sender is Control { DataContext: TranscriptRow row })
             RetryRequested?.Invoke(this, row.Message);
     }
 
+    /// <summary>当前打开的响应统计浮窗，以及因悬浮/点击分别持有多久的那个按钮。</summary>
+    private Flyout? _statsFlyout;
+    private Button? _statsHoverButton;
+    private Button? _statsPinnedButton;
+
+    /// <summary>鼠标移入统计按钮即弹出浮窗；移开则关闭，除非已被点击固定。</summary>
+    private void OnStatsPointerEntered(object? sender, PointerEventArgs e)
+    {
+        if (sender is not Button button || button.DataContext is not TranscriptRow row) return;
+        // 已有固定显示的浮窗时以它为准，避免悬浮把固定的那个挤掉。
+        if (_statsPinnedButton is not null) return;
+        if (ReferenceEquals(_statsHoverButton, button)) return;
+        ShowStatsFlyout(button, row.Message, pinned: false);
+    }
+
+    private void OnStatsPointerExited(object? sender, PointerEventArgs e)
+    {
+        if (sender is not Button button) return;
+        if (!ReferenceEquals(_statsHoverButton, button)) return;
+        _statsHoverButton = null;
+        if (_statsPinnedButton is not null) return;
+        _statsFlyout?.Hide();
+    }
+
     /// <summary>
-    /// Response stats, shown as a flyout on the button itself. The WPF version
-    /// opened a popup with the same three numbers; there is no view model
-    /// command behind it, so the view assembles the text.
+    /// 点击按钮切换固定显示：第一次点击固定，再次点击关闭；点击别处由
+    /// flyout 的 light-dismiss 关闭，并在这里同步清掉固定状态。
     /// </summary>
     private void OnShowStats(object? sender, RoutedEventArgs e)
     {
-        if (sender is not Button button) return;
-        if (button.DataContext is not TranscriptRow row) return;
-
-        var message = row.Message;
-        var lines = new List<string>();
-        if (message.ModelLabel is { Length: > 0 } model) lines.Add(model);
-        if (message.Usage is { } usage)
+        if (sender is not Button button || button.DataContext is not TranscriptRow row) return;
+        if (ReferenceEquals(_statsPinnedButton, button))
         {
-            if (usage.PromptTokens is { } prompt) lines.Add($"输入 {prompt:N0} tokens");
-            if (usage.CompletionTokens is { } completion) lines.Add($"输出 {completion:N0} tokens");
-            if (usage.TotalTokens is { } total) lines.Add($"合计 {total:N0} tokens");
+            _statsPinnedButton = null;
+            _statsFlyout?.Hide();
+            return;
         }
-        if (lines.Count == 0) lines.Add("无统计数据");
+        // 悬浮已经打开了同一个浮窗时只加锁，避免关掉再重开闪一下。
+        if (_statsFlyout is not null && ReferenceEquals(_statsHoverButton, button))
+            _statsPinnedButton = button;
+        else
+            ShowStatsFlyout(button, row.Message, pinned: true);
+    }
 
-        FlyoutBase.SetAttachedFlyout(button, new Flyout
+    private void ShowStatsFlyout(Button button, MessageViewModel message, bool pinned)
+    {
+        var flyout = BuildStatsFlyout(message);
+        // Standard 会抢焦点，在本视图里会让浮窗开不出来；Transient 不抢焦点，
+        // 悬浮与点击固定都用它。点击别处关闭由 popup 的 light-dismiss 负责。
+        flyout.ShowMode = FlyoutShowMode.Transient;
+        // 浮窗默认走窗口 overlay 层，而 overlay 会盖住整个窗口并接管指针：按钮
+        // 在浮窗打开的瞬间就收到 PointerExited，我们一关浮窗它又 PointerEntered，
+        // 于是以每帧一次的频率来回触发（实测 entered/exited 每 ~12ms 交替）。
+        // 让指针事件穿透到按钮本身，悬浮状态就只在真正移开时才变化。
+        flyout.OverlayInputPassThroughElement = button;
+        flyout.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_statsFlyout, flyout)) _statsFlyout = null;
+            if (ReferenceEquals(_statsHoverButton, button)) _statsHoverButton = null;
+            if (ReferenceEquals(_statsPinnedButton, button)) _statsPinnedButton = null;
+        };
+        _statsFlyout?.Hide();
+        _statsFlyout = flyout;
+        _statsHoverButton = pinned ? null : button;
+        _statsPinnedButton = pinned ? button : null;
+        FlyoutBase.SetAttachedFlyout(button, flyout);
+        FlyoutBase.ShowAttachedFlyout(button);
+    }
+
+    /// <summary>
+    /// 两列网格：标签右对齐、数值左对齐且用等宽字体，所以每一行的数值都从同一条
+    /// 竖线开始。顺序为模型、TTFT、Tokens、平均速度，缺失的行自动省略。
+    /// </summary>
+    private Flyout BuildStatsFlyout(MessageViewModel message)
+    {
+        var rows = new List<(string Label, string Value)>(4);
+        if (message.ModelLabel is { Length: > 0 } model) rows.Add(("模型", model));
+        if (message.FirstTokenText is { } ttft) rows.Add(("首字延迟", ttft));
+        if (message.TokensText is { } tokens) rows.Add(("Tokens", tokens));
+        if (message.Usage?.CacheReadTokens is { } cacheRead) rows.Add(("缓存命中", $"{cacheRead:N0} tokens"));
+        if (message.Usage?.TotalTokens is { } total) rows.Add(("合计", $"{total:N0} tokens"));
+        if (message.SpeedText is { } speed) rows.Add(("生成速度", speed));
+        if (rows.Count == 0) rows.Add(("响应统计", "无数据"));
+
+        IBrush? labelBrush = null;
+        if (this.TryFindResource("Brush.Text.Muted", ActualThemeVariant, out var brush)
+            && brush is IBrush muted)
+        {
+            labelBrush = muted;
+        }
+        FontFamily? mono = null;
+        if (this.TryFindResource("Font.Mono", ActualThemeVariant, out var resource)
+            && resource is FontFamily family)
+        {
+            mono = family;
+        }
+
+        var grid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("Auto,Auto"),
+            RowDefinitions = new RowDefinitions(string.Join(',', Enumerable.Repeat("Auto", rows.Count)))
+        };
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var label = new TextBlock
+            {
+                Text = rows[i].Label,
+                FontSize = 12,
+                Foreground = labelBrush,
+                TextAlignment = TextAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 1, 14, 1)
+            };
+            var value = new SelectableTextBlock
+            {
+                Text = rows[i].Value,
+                FontSize = 12.5,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 1, 0, 1)
+            };
+            if (mono is not null) value.FontFamily = mono;
+            Grid.SetRow(label, i);
+            Grid.SetColumn(label, 0);
+            Grid.SetRow(value, i);
+            Grid.SetColumn(value, 1);
+            grid.Children.Add(label);
+            grid.Children.Add(value);
+        }
+
+        return new Flyout
         {
             Placement = PlacementMode.Top,
-            Content = new TextBlock
-            {
-                Text = string.Join('\n', lines),
-                FontSize = 12.5,
-                LineHeight = 20
-            }
-        });
-        FlyoutBase.ShowAttachedFlyout(button);
-        StatsRequested?.Invoke(this, message);
+            Content = grid
+        };
     }
 
     /// <summary>
@@ -713,6 +856,12 @@ public partial class TranscriptView : UserControl
     {
         if (sender is Control { DataContext: TranscriptRow row })
             await CopyAsync(row.Message.Content);
+    }
+
+    /// <summary>右键菜单：复制动作条后面那行性能数据。</summary>
+    private async void OnCopyInlineStats(object? sender, RoutedEventArgs e)
+    {
+        if (sender is Control { Tag: string text }) await CopyAsync(text);
     }
 
     private async Task CopyAsync(string? text)

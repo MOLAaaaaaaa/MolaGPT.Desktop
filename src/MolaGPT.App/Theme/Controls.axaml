@@ -172,6 +172,13 @@
       <Setter Property="FontFamily" Value="{DynamicResource Font.Cjk}" />
       <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
       <Setter Property="MinHeight" Value="0" />
+      <!-- Text fields do not take the layer's focus ring. Every one of them
+           already says "focused" the way the rest of this file does — a
+           :focus-within border on the box that draws the chrome, or a :focus
+           border on the field class — so the ring only ever landed as a second
+           pink rectangle floating inside the first. The ring stays for the
+           controls that have no focus treatment of their own. -->
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
       <Setter Property="Template">
         <ControlTemplate>
           <Border Background="{TemplateBinding Background}"
@@ -319,6 +326,29 @@
                               VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
           </Border>
         </ControlTemplate>
+      </Setter>
+    </ControlTheme>
+
+    <!--
+      Keyboard focus. Fluent's AdornerLayer draws a 2px black + 1px white box
+      around whatever Tab lands on. Against the brand pink every other state in
+      this file uses, that reads as a system artefact, and it lands on controls
+      this file never overrides (CheckBox, RadioButton, Slider, ScrollBar) just
+      as much as on the ones it does. Replacing the layer's default adorner
+      recolours all of them at once, instead of threading FocusAdorner="{x:Null}"
+      through a dozen ControlThemes and still missing the Fluent ones.
+
+      Same 2px weight as the Fluent default, so no layout shifts; the colour is
+      the one the selected tab, the selected chip and the selected row already
+      use, and the radius matches the row that started this.
+    -->
+    <ControlTheme x:Key="{x:Type AdornerLayer}" TargetType="AdornerLayer">
+      <Setter Property="DefaultFocusAdorner">
+        <FocusAdornerTemplate>
+          <Border BorderThickness="2"
+                  BorderBrush="{DynamicResource Brush.Primary}"
+                  CornerRadius="{DynamicResource Radius.Sm}" />
+        </FocusAdornerTemplate>
       </Setter>
     </ControlTheme>
   </Styles.Resources>

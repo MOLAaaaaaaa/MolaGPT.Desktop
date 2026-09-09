@@ -619,7 +619,10 @@ public sealed partial class AgentHistoryReader
     private static string? CleanTitle(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
-        var t = raw.Trim().ReplaceLineEndings(" ");
+        // CRLF can halve the length. 98 input characters suffice to produce
+        // 48 display characters and detect whether an ellipsis is needed.
+        var prefix = raw.AsSpan().Trim();
+        var t = prefix[..Math.Min(prefix.Length, 98)].ToString().ReplaceLineEndings(" ");
         return t.Length > 48 ? t[..48] + "…" : t;
     }
 }

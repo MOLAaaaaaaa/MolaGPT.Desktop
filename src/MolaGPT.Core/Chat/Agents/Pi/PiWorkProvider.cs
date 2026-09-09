@@ -167,6 +167,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         string? errorMessage = null;
         var pendingArgs = new Dictionary<string, string>(StringComparer.Ordinal);
         var preview = new ToolPreviewTracker();
+        var generationSpeed = new GenerationSpeedTracker();
 
         // The same window Pi was catalogued with, so the gauge is measured against
         // the very number its auto-compaction is thresholded on.
@@ -178,7 +179,14 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                            .SendTurnAsync(creds.Model, thinkingLevel, userText, images, ct)
                            .ConfigureAwait(false))
         {
-            var chunk = MapLine(line, options, pendingArgs, preview, contextWindow, ref errorMessage);
+            var chunk = MapLine(
+                line,
+                options,
+                pendingArgs,
+                preview,
+                generationSpeed,
+                contextWindow,
+                ref errorMessage);
             if (chunk is not null) yield return chunk;
         }
 
@@ -406,6 +414,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         LocalToolOptions options,
         IDictionary<string, string> pendingArgs,
         ToolPreviewTracker preview,
+        GenerationSpeedTracker generationSpeed,
         int contextWindow,
         ref string? errorMessage)
     {
@@ -424,6 +433,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                     {
                         var kind = ev.TryGetProperty("type", out var k) ? k.GetString() : null;
                         var delta = ev.TryGetProperty("delta", out var d) ? d.GetString() : null;
+                        generationSpeed.NoteDelta(kind);
                         if (kind == "text_delta" && delta is not null)
                             return new ChatChunk(DeltaText: delta);
                         if (kind == "thinking_delta" && delta is not null)
@@ -442,6 +452,10 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                         if (kind == "toolcall_end")
                             NoteFinishedToolCall(ev, preview);
                     }
+                    return null;
+
+                case "message_end":
+                    generationSpeed.CompleteMessage(root);
                     return null;
 
                 case "tool_execution_start":
@@ -488,6 +502,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                     var input = 0;
                     var output = 0;
                     var total = 0;
+                    var cacheRead = 0;
                     var counted = false;
 
                     // The turn's cost is a sum; how full the context is, is not.
@@ -510,7 +525,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                                 continue;
                             counted = true;
                             input += Int(usage, "input") + Int(usage, "cacheRead") + Int(usage, "cacheWrite");
-                            output += Int(usage, "output") + Int(usage, "reasoning");
+                            output += Int(usage, "output");
+                            cacheRead += Int(usage, "cacheRead");
                             total += Int(usage, "totalTokens");
 
                             // A failed or cancelled call reports zeroes; taking those
@@ -530,7 +546,12 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
 
                     if (!counted) return null;
                     return new ChatChunk(
-                        Usage: new Usage(input, output, total),
+                        Usage: new Usage(
+                            input,
+                            output,
+                            total,
+                            cacheRead,
+                            generationSpeed.TokensPerSecond),
                         ContextUsage: new ContextUsageDelta(contextTokens, contextWindow));
                 }
 
@@ -579,6 +600,54 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                 default:
                     return null;
             }
+        }
+    }
+
+    /// <summary>
+    /// Output throughput across the model calls in one agent turn. Tool execution
+    /// time is excluded: each call starts at its first generated delta and ends at
+    /// Pi's matching message_end event.
+    /// </summary>
+    private sealed class GenerationSpeedTracker
+    {
+        private long? _startedAt;
+        private long _elapsedTicks;
+        private int _outputTokens;
+
+        public double? TokensPerSecond
+        {
+            get
+            {
+                if (_outputTokens <= 0 || _elapsedTicks <= 0) return null;
+                var seconds = _elapsedTicks / (double)System.Diagnostics.Stopwatch.Frequency;
+                return seconds > 0 ? _outputTokens / seconds : null;
+            }
+        }
+
+        public void NoteDelta(string? kind)
+        {
+            if (_startedAt is not null) return;
+            if (kind is not ("text_delta" or "thinking_delta" or "toolcall_start" or "toolcall_delta")) return;
+            _startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+
+        public void CompleteMessage(JsonElement root)
+        {
+            if (_startedAt is not { } startedAt) return;
+
+            var endedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            _startedAt = null;
+
+            if (!root.TryGetProperty("message", out var message)
+                || !message.TryGetProperty("usage", out var usage)
+                || usage.ValueKind != JsonValueKind.Object)
+                return;
+
+            var output = Int(usage, "output");
+            if (output <= 0) return;
+
+            _elapsedTicks += Math.Max(1, endedAt - startedAt);
+            _outputTokens += output;
         }
     }
 

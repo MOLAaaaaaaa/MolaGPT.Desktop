@@ -74,6 +74,8 @@ public sealed class CloudSyncService
     private int _isSyncing;
     private volatile bool _syncIsUserInitiated;
     private CancellationTokenSource? _periodicSyncCts;
+    private volatile bool _background;
+    private long _lastSyncAttemptTicks = DateTime.UtcNow.Ticks;
 
     public event EventHandler<CloudSyncStatusChangedEventArgs>? StatusChanged;
     public event EventHandler? LocalConversationsChanged;
@@ -238,6 +240,26 @@ public sealed class CloudSyncService
         cts.Dispose();
     }
 
+    /// <summary>
+    /// 窗口最小化 / 隐藏到托盘期间不做周期同步。一次同步会在 LOH 上分配几十 MB，
+    /// 而 LOH 默认不压缩，于是每三分钟就把刚回收掉的堆重新填回去；后台又没有用户
+    /// 在产生新对话，这笔开销买不到东西。
+    ///
+    /// 回到前台时，若距上次同步已超过一个周期，立刻补一次，不等下一次 tick。
+    /// 计时器本身继续走——它一次 tick 不分配什么，停掉再重启只会多出生命周期竞争。
+    /// </summary>
+    public void SetBackgroundMode(bool background)
+    {
+        if (_background == background) return;
+        _background = background;
+        if (background) return;
+
+        var elapsed = DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastSyncAttemptTicks);
+        if (elapsed < PeriodicSyncInterval.Ticks) return;
+        var ct = _periodicSyncCts?.Token ?? CancellationToken.None;
+        _ = TryPeriodicSyncAsync(ct, publishStatus: true, userInitiated: false);
+    }
+
     /// <param name="userInitiated">
     /// False for syncs the app starts on its own (the one at launch, for
     /// example). Those still update the header chip, but they do not narrate
@@ -248,6 +270,7 @@ public sealed class CloudSyncService
         CancellationToken ct = default,
         bool userInitiated = true)
     {
+        if (IsSyncing) return null;
         return await TryPeriodicSyncAsync(ct, publishStatus: true, userInitiated).ConfigureAwait(false);
     }
 
@@ -258,6 +281,7 @@ public sealed class CloudSyncService
             using var timer = new PeriodicTimer(PeriodicSyncInterval);
             while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
             {
+                if (_background) continue;
                 await TryPeriodicSyncAsync(ct, publishStatus: true, userInitiated: false).ConfigureAwait(false);
             }
         }
@@ -269,11 +293,17 @@ public sealed class CloudSyncService
         bool publishStatus,
         bool userInitiated)
     {
+        // Recorded before the early-outs: "we last considered syncing at T" is what
+        // the foreground catch-up in SetBackgroundMode needs, and a logged-out or
+        // sync-disabled app has nothing to catch up on either.
+        Interlocked.Exchange(ref _lastSyncAttemptTicks, DateTime.UtcNow.Ticks);
+
         if (string.IsNullOrWhiteSpace(_auth.CurrentJwt)) return null;
         if (bool.TryParse(_settings.Get(SyncEnabledKey), out var enabled) && !enabled)
         {
             return null;
         }
+        if (IsSyncing) return null;
 
         try
         {

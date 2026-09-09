@@ -33,6 +33,7 @@ public sealed class PiRuntime : IAsyncDisposable
     /// cap bounds the worst case; this decides how quickly the common case falls
     /// back to zero.</summary>
     private static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan BackgroundIdleTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan IdleSweepInterval = TimeSpan.FromMinutes(1);
 
     private readonly PiWorkLlmShim _shim;
@@ -51,6 +52,7 @@ public sealed class PiRuntime : IAsyncDisposable
     private readonly CancellationTokenSource _lifetimeCts = new();
     private readonly Timer _idleSweep;
     private int _sidecarsCreated;
+    private bool _background;
 
     /// <summary>How many sidecar processes have been started. The number to watch
     /// when asking whether something is churning them.</summary>
@@ -99,6 +101,7 @@ public sealed class PiRuntime : IAsyncDisposable
         var start = false;
         lock (_gate)
         {
+            if (_background) return Task.CompletedTask;
             if (_entries.Any(e => e.SpecKey == spec.Key && (e.InUse || e.Session.IsAlive)))
                 return Task.CompletedTask;
 
@@ -265,7 +268,16 @@ public sealed class PiRuntime : IAsyncDisposable
             Entry entry;
             try
             {
-                entry = Claim(spec);
+                lock (_gate)
+                {
+                    if (_background)
+                    {
+                        _slots.Release();
+                        operation.Completion.TrySetResult();
+                        return;
+                    }
+                    entry = Claim(spec);
+                }
             }
             catch
             {
@@ -401,7 +413,7 @@ public sealed class PiRuntime : IAsyncDisposable
         {
             entry.InUse = false;
             entry.LastUsedUtc = DateTime.UtcNow;
-            if (entry.RetireOnRelease)
+            if (entry.RetireOnRelease || (_background && entry.ConversationKey is null))
             {
                 _entries.Remove(entry);
                 retire = true;
@@ -413,12 +425,31 @@ public sealed class PiRuntime : IAsyncDisposable
 
     internal void ReleaseLease(Entry entry) => Release(entry);
 
-    private void SweepIdle()
+    /// <summary>隐藏窗口时释放当前空闲 sidecar；后台任务结束后保留短暂复用时间。</summary>
+    public void SetBackgroundMode(bool background)
     {
-        var cutoff = DateTime.UtcNow - IdleTimeout;
         List<Entry> victims;
         lock (_gate)
         {
+            _background = background;
+            if (!background) return;
+            victims = _entries.Where(e => !e.InUse).ToList();
+            foreach (var victim in victims) _entries.Remove(victim);
+        }
+
+        foreach (var victim in victims)
+        {
+            _log?.Invoke($"[pi-runtime] 后台回收空闲 sidecar（{victim.ConversationKey ?? "未使用"}）");
+            RetireDetached(victim);
+        }
+    }
+
+    private void SweepIdle()
+    {
+        List<Entry> victims;
+        lock (_gate)
+        {
+            var cutoff = DateTime.UtcNow - (_background ? BackgroundIdleTimeout : IdleTimeout);
             victims = _entries.Where(e => !e.InUse && e.LastUsedUtc <= cutoff).ToList();
             foreach (var victim in victims) _entries.Remove(victim);
         }

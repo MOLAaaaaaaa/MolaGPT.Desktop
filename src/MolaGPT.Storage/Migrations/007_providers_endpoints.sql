@@ -8,8 +8,8 @@
 --   image_format    image providers: openai-images | openai-chat-image
 --
 -- All nullable: NULL falls back to the type/format default, so existing rows
--- keep their current behavior. The migration runner ignores "duplicate column"
--- errors, so re-running on an already-migrated DB is safe.
+-- keep their current behavior. The migration runner checks each column before
+-- adding it, so re-running on an already-migrated DB is safe.
 
 ALTER TABLE providers ADD COLUMN api_path TEXT;
 ALTER TABLE providers ADD COLUMN image_edit_path TEXT;

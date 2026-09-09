@@ -35,6 +35,13 @@ internal static class CodeHighlighter
     private static readonly ConcurrentDictionary<(bool Dark, string Language, string Code), IReadOnlyList<(string Text, IBrush? Brush, FontStyle Style, FontWeight Weight)>> Cache = new();
 
     /// <summary>
+    /// 退到后台时丢掉按 (语言, 代码) 记忆的高亮结果。行上的 <see cref="Run"/>
+    /// 不受影响，切回来滚动到代码块时按需重新 tokenize。
+    /// Palettes/Grammars/BrushCache 保留：重建它们要读语法文件，反而贵。
+    /// </summary>
+    internal static void TrimForBackground() => Cache.Clear();
+
+    /// <summary>
     /// A single fence's worth of tokens. Returns null when the language is
     /// unknown or tokenizing fails, which the caller renders as plain text —
     /// unhighlighted code is fine, missing code is not.

@@ -436,8 +436,12 @@
                   BorderThickness="{TemplateBinding BorderThickness}"
                   CornerRadius="{TemplateBinding CornerRadius}"
                   Padding="{TemplateBinding Padding}">
+            <!-- 同 SettingsWindow:圆点位置是 4.5 物理像素(150% 缩放),布局
+                 取整会把它不对称地推到 5,导致上间隙比下间隙大 1 物理像素。
+                 关掉圆点自身的取整,保留亚像素位置,上下各得半行抗锯齿。 -->
             <Ellipse Name="PART_Thumb"
                      Width="16" Height="16"
+                     UseLayoutRounding="False"
                      Fill="{DynamicResource Brush.Bg.Elevated}"
                      HorizontalAlignment="Left" />
           </Border>

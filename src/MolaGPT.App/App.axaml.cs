@@ -7,6 +7,7 @@ using Avalonia.Styling;
 using Avalonia.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using MolaGPT.App.Infrastructure;
+using MolaGPT.App.Rendering;
 using MolaGPT.App.Views;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
@@ -38,6 +39,14 @@ public partial class App : Application
     private string? _pendingUpdateInstallerPath;
     private NotificationRouter? _notificationRouter;
     private NotificationCenter? _notifications;
+    private long _lastBackgroundTrimTicks;
+    private bool _backgroundMode;
+    private IDisposable? _backgroundCheck;
+
+    /// <summary>How long a window state has to hold before it counts. Sized
+    /// against the ~1.5s Minimized→Normal→Minimized blip Windows emits on its
+    /// own; a real restore just waits this long for its prewarm.</summary>
+    private static readonly TimeSpan BackgroundSettleDelay = TimeSpan.FromSeconds(3);
 
     public override void Initialize() => AvaloniaXamlLoader.Load(this);
 
@@ -190,6 +199,7 @@ public partial class App : Application
             _tray = new TrayIconHost(settings);
             _tray.Attach(window);
             _tray.SettingsRequested += (_, _) => window.OpenSettings();
+            window.PropertyChanged += OnMainWindowPropertyChanged;
 
             SingleInstanceHost.Attach(deepLink => Dispatcher.UIThread.Post(() =>
             {
@@ -209,6 +219,8 @@ public partial class App : Application
 
             desktop.ShutdownRequested += (_, _) =>
             {
+                window.PropertyChanged -= OnMainWindowPropertyChanged;
+                _backgroundCheck?.Dispose();
                 cloudSync.StopPeriodicSync();
                 _notificationRouter?.Dispose();
                 StopAgentRelayAsync().GetAwaiter().GetResult();
@@ -534,6 +546,61 @@ public partial class App : Application
 
         if (!LoginWindow.NotifyExternalLoginCompleted(true))
             window.CompleteAccountLogin();
+    }
+
+    /// <summary>
+    /// 进入后台时释放空闲资源，正在运行的任务继续执行。
+    /// </summary>
+    private void OnMainWindowPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property != Window.IsVisibleProperty && e.Property != Window.WindowStateProperty) return;
+        if (sender is not Window window) return;
+
+        // Windows reports a minimized window as Normal for a moment and flips it
+        // back ~1.5s later — the change arrives from DefWindowProc, with no app
+        // code on the stack, so there is nothing to suppress at the source. Read
+        // at face value it looks like the user came back, which resumes cloud
+        // sync and re-prewarms a sidecar for a window still sitting in the
+        // taskbar. So settle first and then read the state that lasted.
+        _backgroundCheck?.Dispose();
+        _backgroundCheck = DispatcherTimer.RunOnce(() =>
+        {
+            _backgroundCheck = null;
+            var background = !window.IsVisible || window.WindowState == WindowState.Minimized;
+            if (_backgroundMode == background) return;
+            _backgroundMode = background;
+            if (background) EnterBackground();
+            else ExitBackground();
+        }, BackgroundSettleDelay);
+    }
+
+    private void EnterBackground()
+    {
+        _services?.GetRequiredService<AgentBridgeService>().SetBackgroundMode(true);
+        _services?.GetRequiredService<PiRuntime>().SetBackgroundMode(true);
+        _services?.GetRequiredService<CloudSyncService>().SetBackgroundMode(true);
+
+        var now = DateTime.UtcNow.Ticks;
+        if (now - Interlocked.Read(ref _lastBackgroundTrimTicks) < TimeSpan.FromSeconds(30).Ticks) return;
+        Interlocked.Exchange(ref _lastBackgroundTrimTicks, now);
+
+        CodeHighlighter.TrimForBackground();
+        ImageSourceLoader.TrimForBackground();
+
+        // 回收一次并归还空闲 GC 堆页；30s 内不重复请求。
+        _ = Task.Run(() => GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive,
+            blocking: true, compacting: true));
+    }
+
+    private void ExitBackground()
+    {
+        _services?.GetRequiredService<AgentBridgeService>().SetBackgroundMode(false);
+        _services?.GetRequiredService<PiRuntime>().SetBackgroundMode(false);
+        // 补同步排在预热之前：它是网络等待，不占 UI 线程。
+        _services?.GetRequiredService<CloudSyncService>().SetBackgroundMode(false);
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop
+            && desktop.MainWindow is MainWindow window)
+            window.StartActiveProviderPrewarm();
     }
 
     private static void BringToFront(Window window)

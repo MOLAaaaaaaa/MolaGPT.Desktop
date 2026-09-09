@@ -43,13 +43,14 @@ public sealed partial class AgentHistoryReader
             ct.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(line)) continue;
 
-            JsonElement root;
+            JsonDocument parsedDocument;
             try
             {
-                using var doc = JsonDocument.Parse(line);
-                root = doc.RootElement.Clone();
+                parsedDocument = JsonDocument.Parse(line);
             }
             catch { continue; }
+            using var document = parsedDocument;
+            var root = document.RootElement;
 
             var type = ReadString(root, "type");
             if (type == "user")
@@ -223,13 +224,14 @@ public sealed partial class AgentHistoryReader
             ct.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(line)) continue;
 
-            JsonElement root;
+            JsonDocument parsedDocument;
             try
             {
-                using var doc = JsonDocument.Parse(line);
-                root = doc.RootElement.Clone();
+                parsedDocument = JsonDocument.Parse(line);
             }
             catch { continue; }
+            using var document = parsedDocument;
+            var root = document.RootElement;
 
             var rootType = ReadString(root, "type");
             if (!root.TryGetProperty("payload", out var payload))

@@ -32,6 +32,23 @@ public static class ImageSourceLoader
         Timeout = TimeSpan.FromSeconds(20)
     };
 
+    internal static void TrimForBackground()
+    {
+        lock (s_cache)
+        {
+            // Keep remote images available even if their URL expires or the
+            // connection goes offline. Controls still own displayed bitmaps.
+            foreach (var key in s_order.ToArray())
+            {
+                var url = key[..key.LastIndexOf('|')].Trim().Trim('"', '\'');
+                if (!url.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
+                    && !TryResolveLocalPath(url, out _)) continue;
+                s_cache.Remove(key);
+                s_order.Remove(key);
+            }
+        }
+    }
+
     /// <summary>
     /// Loads <paramref name="url"/>, decoded to at most <paramref name="decodeWidth"/>
     /// device pixels wide. Returns null when the URL cannot be resolved — an

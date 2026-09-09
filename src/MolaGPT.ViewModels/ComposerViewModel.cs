@@ -925,6 +925,9 @@ public sealed partial class ComposerViewModel : ObservableObject
         CancellationTokenSource cts,
         BackgroundStreamTask? trackingTask = null)
     {
+        // 首字延迟的起点。放在这里而不是 SendAsync/RetryAsync 里：发送、重试、
+        // 后台续流都走这个入口，且刻意排除附件上传与模型路由的耗时。
+        assistantMsg.MarkRequestStarted();
         await foreach (var chunk in provider.StreamChatAsync(req, cts.Token).WithCancellation(cts.Token))
         {
             ApplyStreamChunk(assistantMsg, chunk);
@@ -946,6 +949,8 @@ public sealed partial class ComposerViewModel : ObservableObject
         CancellationTokenSource cts,
         BackgroundStreamTask? trackingTask = null)
     {
+        // 幂等：续流重连不会覆盖最初请求的起点。
+        assistantMsg.MarkRequestStarted();
         await foreach (var chunk in provider.ResumeStreamAsync(sessionId, offset, apiUrl, cts.Token).WithCancellation(cts.Token))
         {
             ApplyStreamChunk(assistantMsg, chunk);

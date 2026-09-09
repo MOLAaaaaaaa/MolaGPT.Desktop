@@ -214,7 +214,7 @@
                         <Button Classes="optionchip" Content="写实" Tag="photorealistic" Click="OnStyle" />
                         <Button Classes="optionchip" Content="动漫" Tag="anime" Click="OnStyle" />
                       </WrapPanel>
-                      <TextBox Name="PART_Style" PlaceholderText="自定义风格" Margin="0,4,0,0" />
+                      <TextBox Name="PART_Style" Classes="field" PlaceholderText="自定义风格" Margin="0,4,0,0" />
                     </StackPanel>
                   </Border>
                 </Flyout>

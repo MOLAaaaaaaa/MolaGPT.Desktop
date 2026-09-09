@@ -132,6 +132,10 @@ public partial class MainWindow : MolaWindow
         _composer.EnsureAgentRuntimeAsync = EnsureAgentRuntimeForSendAsync;
 
         InitializeComponent();
+        PART_Sidebar.DataContext = _conversations;
+        PART_Transcript.DataContext = _chat;
+        PART_Transcript.AttachAttachmentStore(_attachmentStore);
+        PART_Composer.DataContext = _composer;
         DataContext = _main;
         ApplyFontScale(_settings.FontScale);
         StreamTailFade.Configure(_settings.StreamFadeEnabled);
@@ -145,10 +149,6 @@ public partial class MainWindow : MolaWindow
         PART_TitleBar.LoginRequested += async (_, _) => await OpenAccountAsync();
         PART_TitleBar.AgentStatusRequested += (_, _) => OpenAgentSettings();
 
-        PART_Sidebar.DataContext = _conversations;
-        PART_Transcript.DataContext = _chat;
-        PART_Transcript.AttachAttachmentStore(_attachmentStore);
-        PART_Composer.DataContext = _composer;
         PART_Composer.PersonaSettingsRequested += (_, startNew) => OpenPersonaSettings(startNew);
         _main.SystemPromptRequested = () => _ = OpenSystemPromptAsync();
         _main.ImageWorkbenchRequested = conversationId => OpenImageWorkbench(conversationId);
@@ -327,7 +327,7 @@ public partial class MainWindow : MolaWindow
         }
     }
 
-    private void StartActiveProviderPrewarm()
+    internal void StartActiveProviderPrewarm()
     {
         if (!_hasOpened) return;
         if (_chat.ActiveProvider is not PiWorkProvider provider) return;

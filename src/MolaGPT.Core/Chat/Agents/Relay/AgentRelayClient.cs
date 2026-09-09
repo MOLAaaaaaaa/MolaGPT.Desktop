@@ -92,7 +92,7 @@ public sealed class AgentRelayClient
     // RefreshHistoryAsync; keyed by mtime so a later write retries by itself.
     private readonly ConcurrentDictionary<string, long> _emptyHistoryProjections = new(StringComparer.Ordinal);
     // Sessions whose transcript is not on disk at all. The lookup behind
-    // LoadHistoryTurnsAsync searches the whole history tree, so this is a real
+    // TryLoadHistoryTurnsAsync searches the whole history tree, so this is a real
     // answer rather than a scan that did not reach far enough — and a session
     // that has no file has nothing to project, now or on the next tick.
     private readonly ConcurrentDictionary<string, byte> _missingHistoryProjections = new(StringComparer.Ordinal);
@@ -479,7 +479,7 @@ public sealed class AgentRelayClient
     private async Task<IReadOnlyList<AgentSessionStateDto>> PublishMachineSnapshotAsync(CancellationToken ct)
     {
         IReadOnlyList<AgentSessionStateDto> sessions;
-        try { sessions = await _bridge.ListSessionsAsync(ct, PollScanStaleness).ConfigureAwait(false); }
+        try { sessions = await _bridge.ListSessionsAsync(ct, PollScanStaleness, includeTranscript: false).ConfigureAwait(false); }
         catch { return Array.Empty<AgentSessionStateDto>(); }
 
         foreach (var s in sessions)
@@ -547,7 +547,7 @@ public sealed class AgentRelayClient
     {
         try
         {
-            var sessions = await _bridge.ListSessionsAsync(ct, PollScanStaleness).ConfigureAwait(false);
+            var sessions = await _bridge.ListSessionsAsync(ct, PollScanStaleness, includeTranscript: false).ConfigureAwait(false);
             var ids = sessions
                 .Where(ShouldHeartbeat)
                 .Select(s => s.ConversationId)
@@ -588,7 +588,7 @@ public sealed class AgentRelayClient
         ct.ThrowIfCancellationRequested();
 
         IReadOnlyList<AgentSessionStateDto> sessions;
-        try { sessions = await _bridge.ListSessionsAsync(ct, PollScanStaleness).ConfigureAwait(false); }
+        try { sessions = await _bridge.ListSessionsAsync(ct, PollScanStaleness, includeTranscript: false).ConfigureAwait(false); }
         catch { return; }
 
         var state = sessions.FirstOrDefault(s => string.Equals(s.ConversationId, sessionId, StringComparison.Ordinal));
@@ -597,11 +597,17 @@ public sealed class AgentRelayClient
 
         try
         {
-            var turns = await _bridge.LoadHistoryTurnsAsync(
+            var turns = await _bridge.TryLoadHistoryTurnsAsync(
                 sessionId,
                 HistoryBackfillMaxTurns,
                 ct,
                 PollScanStaleness).ConfigureAwait(false);
+            if (turns is null)
+            {
+                _missingHistoryProjections[sessionId] = 0;
+                _log?.Invoke($"history projection skipped for {sessionId}: transcript not found");
+                return;
+            }
             _missingHistoryProjections.TryRemove(sessionId, out _);
             if (turns.Count == 0)
             {
@@ -638,22 +644,10 @@ public sealed class AgentRelayClient
             _projectionFailures.TryRemove(sessionId, out _);
             _projectionBackoffUntilMs.TryRemove(sessionId, out _);
 
-            var fresh = _bridge.GetSession(sessionId) ?? state;
+            var fresh = _bridge.GetSession(sessionId, includeTranscript: false) ?? state;
             await PostMetaSafeAsync(BuildMeta(fresh), ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (FileNotFoundException ex)
-        {
-            // No transcript means there is nothing to project, and no amount of
-            // waiting produces one. Backing this off like a transient failure is
-            // what filled the log: the ceiling is five minutes and the failure
-            // counter lives in memory, so every restart started the climb again.
-            // Park the session instead; an explicit RefreshHistory command still
-            // goes through, so a restored file is one pull-to-refresh away.
-            _missingHistoryProjections[sessionId] = 0;
-            _log?.Invoke($"history projection skipped for {sessionId}: {ex.Message}");
-            throw;
-        }
         catch (Exception ex)
         {
             // A read or relay failure must not be mistaken for an empty
@@ -880,7 +874,7 @@ public sealed class AgentRelayClient
                 // A meta snapshot may have been posted before this event completed.
                 // Refresh it after confirmed delivery so the relay never advances a
                 // list cursor beyond the transcript it actually stores.
-                if (_bridge.GetSession(envelope.SessionId) is { } session)
+                if (_bridge.GetSession(envelope.SessionId, includeTranscript: false) is { } session)
                     _ = PostMetaSafeAsync(BuildMeta(session), CancellationToken.None);
                 return;
             }

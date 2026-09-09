@@ -62,15 +62,20 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
     /// <summary>Start the state-publication timer. Idempotent.</summary>
     public void Start() => _publishTimer.Start();
 
+    /// <summary>退到后台时把 100ms 的快照发布降到 2s，切回来恢复。
+    /// 中继走 <see cref="ReplayEventAppended"/> / <see cref="SessionMetaChanged"/>
+    /// 直连事件，不经过这个 timer，所以手机端不受影响。</summary>
+    public void SetBackgroundMode(bool background) => _publishTimer.Interval = background ? 2000 : 100;
+
     /// <summary>Snapshot every live session now (bypasses the 100ms timer) — used
     /// right after a command so the caller sees the new state without waiting.</summary>
-    public IReadOnlyList<AgentSessionStateDto> Snapshot() => BuildSnapshot();
+    public IReadOnlyList<AgentSessionStateDto> Snapshot(bool includeTranscript = true) => BuildSnapshot(includeTranscript);
 
     /// <summary>Snapshot one session, or null if unknown. The relay client reads
     /// this on <c>TurnComplete</c> to ship an <c>AnswerSnapshot</c> (the answer
     /// text accumulated by the reducer), folding per-token deltas into one event.</summary>
-    public AgentSessionStateDto? GetSession(string conversationId)
-        => _sessions.TryGetValue(conversationId, out var e) ? StateOf(e) : null;
+    public AgentSessionStateDto? GetSession(string conversationId, bool includeTranscript = true)
+        => _sessions.TryGetValue(conversationId, out var e) ? StateOf(e, null, includeTranscript) : null;
 
     /// <summary>List the union of live in-memory sessions and recent on-disk
     /// history sessions, de-duplicated by conversation id, newest first. History
@@ -80,7 +85,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
     /// <see cref="AgentHistoryReader.ListRecentAsync"/>: the relay's polling
     /// loops tolerate a slightly old disk scan, on-demand callers do not.</param>
     public async Task<IReadOnlyList<AgentSessionStateDto>> ListSessionsAsync(
-        CancellationToken ct = default, TimeSpan maxStaleness = default)
+        CancellationToken ct = default, TimeSpan maxStaleness = default, bool includeTranscript = true)
     {
         // Restore durable stubs FIRST. They carry each conversation's CLI-side
         // resume id, which the history scan below needs in order to recognise a
@@ -142,7 +147,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         foreach (var backendId in _sessions.Values.Select(e => e.BackendId).Distinct(StringComparer.Ordinal))
             BeginWarmUpModelCatalog(backendId);
 
-        return BuildSnapshot();
+        return BuildSnapshot(includeTranscript);
     }
 
     /// <summary>Load coarse transcript turns for a discovered on-disk history
@@ -154,13 +159,22 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         CancellationToken ct = default,
         TimeSpan maxStaleness = default)
     {
-        var session = GetSession(conversationId);
+        return await TryLoadHistoryTurnsAsync(conversationId, maxTurns, ct, maxStaleness).ConfigureAwait(false)
+            ?? throw new FileNotFoundException($"History transcript for session '{conversationId}' was not found.");
+    }
+
+    internal async Task<IReadOnlyList<AgentHistoryTurn>?> TryLoadHistoryTurnsAsync(
+        string conversationId,
+        int maxTurns = 30,
+        CancellationToken ct = default,
+        TimeSpan maxStaleness = default)
+    {
+        var session = GetSession(conversationId, includeTranscript: false);
         var historyId = session?.ResumeSessionId ?? conversationId;
         var entry = await _history
             .FindAsync(session?.BackendId, historyId, ct, maxStaleness)
             .ConfigureAwait(false);
-        if (entry is null)
-            throw new FileNotFoundException($"History transcript for session '{conversationId}' was not found.");
+        if (entry is null) return null;
 
         return await _history.LoadTurnsAsync(entry, maxTurns, ct).ConfigureAwait(false);
     }
@@ -711,13 +725,16 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
     private static string DefaultTitle(string backendId) =>
         backendId == CodexBackend.BackendId ? "新 Codex 会话" : "新 Claude Code 会话";
 
-    private IReadOnlyList<AgentSessionStateDto> BuildSnapshot()
-        => _sessions.Values
+    private IReadOnlyList<AgentSessionStateDto> BuildSnapshot(bool includeTranscript = true)
+    {
+        var configuredModels = new Dictionary<string, string?>(StringComparer.Ordinal);
+        return _sessions.Values
             .OrderByDescending(e => e.UpdatedAtMs)
-            .Select(StateOf)
+            .Select(e => StateOf(e, configuredModels, includeTranscript))
             .ToList();
+    }
 
-    private AgentSessionStateDto StateOf(BridgeSession e)
+    private AgentSessionStateDto StateOf(BridgeSession e, Dictionary<string, string?>? configuredModels = null, bool includeTranscript = true)
     {
         // Hold the per-session lock for the whole read so a concurrent turn
         // thread cannot publish a half-mutated combination (e.g. Phase updated
@@ -726,7 +743,16 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         // reach back for StateLock.
         lock (e.StateLock)
         {
-            var model = e.Model ?? ResolveConfiguredModel(e.BackendId);
+            var model = e.Model;
+            if (model is null)
+            {
+                if (configuredModels is null) model = ResolveConfiguredModel(e.BackendId);
+                else if (!configuredModels.TryGetValue(e.BackendId, out model))
+                {
+                    model = ResolveConfiguredModel(e.BackendId);
+                    configuredModels[e.BackendId] = model;
+                }
+            }
             return new AgentSessionStateDto(
                 ConversationId: e.ConversationId,
                 BackendId: e.BackendId,
@@ -742,7 +768,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
                 Seq: e.EventLog.Seq,
                 ModeLabel: ComputeModeLabel(e, model),
                 UpdatedAtMs: e.UpdatedAtMs,
-                Transcript: e.Reducer.Blocks.ToList(),
+                Transcript: includeTranscript ? e.Reducer.Blocks.ToList() : Array.Empty<AgentBlockDto>(),
                 AvailableModels: CatalogFor(e.BackendId, e.LiveSession?.AvailableModels));
         }
     }

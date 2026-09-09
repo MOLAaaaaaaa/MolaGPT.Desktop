@@ -337,6 +337,11 @@ public partial class SettingsWindow : MolaContentWindow
     private async void OnSyncNowClick(object? sender, RoutedEventArgs e)
     {
         if (_cloudSync is null || !_settings.IsLoggedIn) return;
+        if (_cloudSync.IsSyncing)
+        {
+            PART_CloudSyncStatus.Text = "云同步正在进行中。";
+            return;
+        }
 
         PART_SyncNow.IsEnabled = false;
         PART_SyncNow.Content = "同步中...";
