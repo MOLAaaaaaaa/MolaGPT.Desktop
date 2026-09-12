@@ -16,6 +16,7 @@ using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
+using MolaGPT.Core.Models;
 using MolaGPT.Desktop.Services;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
@@ -143,6 +144,8 @@ public partial class MainWindow : MolaWindow
 
         PART_Header.AttachProviders(providers);
         PART_Header.AttachMain(_main);
+        PART_Transcript.Bind(TranscriptView.AllowMessageEditingProperty, new Avalonia.Data.Binding("CanEditHistory") { Source = _chat });
+        PART_Transcript.Bind(TranscriptView.IsRoleChatProperty, new Avalonia.Data.Binding("IsRoleChat") { Source = _chat });
         PART_TitleBar.SettingsRequested += (_, _) => OpenSettings();
         PART_TitleBar.AboutRequested += (_, _) => OpenAbout();
         PART_TitleBar.ThemeToggleRequested += (_, _) => ToggleTheme();
@@ -150,6 +153,19 @@ public partial class MainWindow : MolaWindow
         PART_TitleBar.AgentStatusRequested += (_, _) => OpenAgentSettings();
 
         PART_Composer.PersonaSettingsRequested += (_, startNew) => OpenPersonaSettings(startNew);
+        PART_Composer.PersonaSelectionFailed += (_, error) => _notifications.Error("角色切换失败", error, "persona-selection");
+        _chat.HistorySaveFailed += error => _notifications.Error("回复版本保存失败", error, "message-history");
+        _composer.AutoStorySummaryAsync = async (conversationId, providerId, modelId, ct) =>
+        {
+            try
+            {
+                if (providerId is null || modelId is null || _providers.FindModel(providerId, modelId) is not { } target) return;
+                using var http = _httpClientFactory.CreateClient(HttpClientNames.Byok);
+                await _chat.AutoSummarizeAsync(conversationId, new MolaGPT.Core.Chat.OneShotCompletionClient(http),
+                    target.Provider, target.Model, ct);
+            }
+            catch (Exception ex) { _notifications.Error("剧情整理失败", ex.Message, "story-summary-" + conversationId); }
+        };
         _main.SystemPromptRequested = () => _ = OpenSystemPromptAsync();
         _main.ImageWorkbenchRequested = conversationId => OpenImageWorkbench(conversationId);
         _main.WorkSetupRequested = () =>
@@ -216,6 +232,40 @@ public partial class MainWindow : MolaWindow
         {
             if (_composer.RetryCommand.CanExecute(message))
                 _composer.RetryCommand.Execute(message);
+        };
+        PART_Transcript.EditRequested += async (_, message) =>
+        {
+            if (!_chat.CanEditHistory) return;
+            var text = await new MessageEditorWindow().ShowForAsync(message.FullContent, this);
+            if (text is not null)
+            {
+                try
+                {
+                    var edited = await _chat.EditMessageAsync(message, text);
+                    if (edited?.Role == ChatMessage.RoleUser)
+                        await _composer.ReplyToExistingUserAsync(edited);
+                }
+                catch (Exception ex) { _notifications.Error("消息保存失败", ex.Message, "message-edit"); }
+            }
+        };
+        PART_Transcript.ContinueRequested += (_, message) =>
+        {
+            if (_composer.ContinueCommand.CanExecute(message)) _composer.ContinueCommand.Execute(message);
+        };
+        PART_Transcript.ForkRequested += async (_, message) =>
+        {
+            try
+            {
+                var branch = await _chat.CreateBranchAsync(message);
+                if (branch?.Role == ChatMessage.RoleUser)
+                    await _composer.ReplyToExistingUserAsync(branch);
+            }
+            catch (Exception ex) { _notifications.Error("无法建立分支", ex.Message, "conversation-fork"); }
+        };
+        PART_Transcript.BranchSelectionRequested += async (message, offset) =>
+        {
+            try { await _chat.SelectMessageBranchAsync(message, offset); }
+            catch (Exception ex) { _notifications.Error("无法切换时间线", ex.Message, "conversation-branch"); }
         };
 
         // The only recoverable error the view model raises is "switch model",
@@ -691,7 +741,7 @@ public partial class MainWindow : MolaWindow
     private void OpenPersonaSettings(bool startNew)
     {
         OpenSettings();
-        _settingsWindow?.OpenPersonaPage(startNew);
+        _settingsWindow?.OpenPersonaPage(startNew, _chat.ActivePersonaId);
     }
 
     private void OpenSandboxSettings()
@@ -708,8 +758,10 @@ public partial class MainWindow : MolaWindow
 
     private async Task OpenSystemPromptAsync()
     {
-        var window = new SystemPromptWindow();
-        await window.ShowForAsync(_chat, this);
+        if (!_chat.CanEditHistory) return;
+        using var http = _httpClientFactory.CreateClient(HttpClientNames.Byok);
+        var client = new MolaGPT.Core.Chat.OneShotCompletionClient(http);
+        await new ConversationRoleWindow().ShowForAsync(_chat, client, _notifications, this);
         PART_Header.RefreshSecondaryUi();
     }
 

@@ -1,0 +1,242 @@
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
+                        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                        xmlns:views="clr-namespace:MolaGPT.App.Views"
+                        xmlns:m="clr-namespace:MolaGPT.Core.Models;assembly=MolaGPT.Core"
+                        x:Class="MolaGPT.App.Views.LorebookWindow"
+                        Title="世界书" Width="920" Height="740" MinWidth="740" MinHeight="580"
+                        WindowStartupLocation="CenterOwner">
+
+  <!--
+    Two nested master-detail panes: book above, entry below. Both editors hide
+    when their side has no selection, so each empty needs a sentence of its own —
+    a blank right-hand pane reads as a failed load.
+  -->
+
+  <Grid RowDefinitions="Auto,*,Auto" Margin="24,16,24,20">
+
+    <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto" Margin="0,0,0,16">
+      <ComboBox Name="PART_Books" Classes="field" HorizontalAlignment="Stretch" Margin="0,0,12,0"
+                PlaceholderText="还没有世界书">
+        <ComboBox.ItemTemplate>
+          <DataTemplate x:DataType="m:Lorebook">
+            <TextBlock Text="{Binding Name}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+          </DataTemplate>
+        </ComboBox.ItemTemplate>
+      </ComboBox>
+      <Button Grid.Column="1" Name="PART_ImportBook" Classes="outline" Content="导入" Margin="0,0,8,0" />
+      <Button Grid.Column="2" Name="PART_ExportBook" Classes="outline" Content="导出" Margin="0,0,8,0" />
+      <Button Grid.Column="3" Name="PART_AddBook" Classes="outline" Content="新增世界书" Margin="0,0,8,0" />
+      <Button Grid.Column="4" Name="PART_DeleteBook" Classes="outline" Content="删除世界书" />
+    </Grid>
+
+    <Panel Grid.Row="1">
+      <TextBlock Name="PART_BookEmpty" Classes="emptystate"
+                 Text="添加或导入世界书" />
+
+      <Grid Name="PART_BookEditor" RowDefinitions="Auto,Auto,*">
+        <Grid ColumnDefinitions="*,16,Auto,16,Auto" Margin="0,0,0,14">
+          <StackPanel>
+            <TextBlock Classes="label" Text="名称" Margin="0,0,0,6" />
+            <TextBox Name="PART_BookName" Classes="field" />
+          </StackPanel>
+          <StackPanel Grid.Column="2">
+            <TextBlock Classes="label" Text="扫描范围" Margin="0,0,0,6" />
+            <ComboBox Name="PART_BookScanScope" Classes="field" Width="156">
+              <ComboBoxItem Content="最近消息" /><ComboBoxItem Content="全部消息" /><ComboBoxItem Content="不扫描聊天" />
+            </ComboBox>
+            <NumericUpDown Name="PART_ScanDepth" Classes="field" Width="156" Margin="0,6,0,0"
+                           Minimum="0" Maximum="2147483647" Increment="1" FormatString="0' 条消息'" AutomationProperties.Name="世界书扫描消息数" />
+          </StackPanel>
+          <StackPanel Grid.Column="4" Name="PART_BookBudgetRow">
+            <TextBlock Classes="label" Text="预算（tokens）" Margin="0,0,0,6" />
+            <NumericUpDown Name="PART_Budget" Classes="field" Width="156"
+                           Minimum="0" Maximum="1000000" Increment="256" FormatString="N0" />
+          </StackPanel>
+        </Grid>
+
+        <WrapPanel Grid.Row="1" Margin="0,0,0,14">
+          <CheckBox Name="PART_BookEnabled" Content="启用世界书" Margin="0,0,20,0" />
+          <CheckBox Name="PART_Recursive" Content="条目可连带触发" />
+        </WrapPanel>
+
+        <Grid Grid.Row="2" ColumnDefinitions="220,20,*">
+          <Grid RowDefinitions="Auto,Auto,*,Auto">
+            <TextBlock Name="PART_EntryCount" Classes="label" Margin="0,0,0,8" />
+            <Border Grid.Row="1" Classes="searchbox" Height="36" Margin="0,0,0,8" Padding="10,6">
+              <Grid ColumnDefinitions="Auto,*,Auto">
+                <TextBlock Classes="icon" Text="&#xE721;" FontSize="12" Margin="0,0,8,0"
+                           VerticalAlignment="Center" Foreground="{DynamicResource Brush.Text.Muted}" />
+                <TextBox Grid.Column="1" Name="PART_EntrySearch" PlaceholderText="搜索条目" />
+                <Button Grid.Column="2" Name="PART_ClearEntrySearch" Classes="toolchip"
+                        IsVisible="False" Width="24" Height="24" MinHeight="24" Padding="0"
+                        ToolTip.Tip="清空搜索" AutomationProperties.Name="清空搜索">
+                  <TextBlock Classes="icon" Text="&#xE711;" FontSize="10" />
+                </Button>
+              </Grid>
+            </Border>
+            <Panel Grid.Row="2">
+              <ListBox Name="PART_Entries" Classes="plainlist">
+                <ListBox.ItemTemplate>
+                  <DataTemplate x:DataType="m:LoreEntry">
+                    <StackPanel Spacing="2">
+                      <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Grid.Column="1" Text="停用" IsVisible="{Binding !Enabled}" Classes="hint" Margin="6,0,0,0" />
+                      </Grid>
+                      <TextBlock Text="{Binding Content}" FontSize="12"
+                                 Foreground="{DynamicResource Brush.Text.Secondary}"
+                                 TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+              <TextBlock Name="PART_EntriesEmpty" Classes="emptystate" Text="暂无条目" />
+            </Panel>
+            <Grid Grid.Row="3" ColumnDefinitions="*,8,*" Margin="0,12,0,0">
+              <Button Name="PART_AddEntry" Content="新增条目" Classes="outline" HorizontalAlignment="Stretch" />
+              <Button Grid.Column="2" Name="PART_DeleteEntry" Content="删除条目" Classes="outline" HorizontalAlignment="Stretch" />
+            </Grid>
+          </Grid>
+
+          <Panel Grid.Column="2">
+            <TextBlock Name="PART_EntryEmpty" Classes="emptystate" Text="选择左侧条目进行编辑" />
+
+            <ScrollViewer Name="PART_EntryScroll" HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+              <StackPanel Name="PART_EntryEditor">
+                <WrapPanel Margin="0,0,0,12">
+                  <CheckBox Name="PART_Enabled" Content="启用条目" Margin="0,0,16,0" />
+                  <CheckBox Name="PART_Constant" Content="常驻" ToolTip.Tip="无需关键词触发" />
+                </WrapPanel>
+                <TextBlock Classes="label" Text="条目名称（可选）" Margin="0,0,0,6" />
+                <TextBox Name="PART_EntryName" Classes="field" PlaceholderText="留空使用关键词显示" />
+
+                <TextBlock Classes="label" Text="关键词" Margin="0,14,0,6" />
+                <TextBox Name="PART_Keywords" Classes="field" AcceptsReturn="True" TextWrapping="Wrap"
+                         MinHeight="58" MaxHeight="120" ScrollViewer.VerticalScrollBarVisibility="Auto" />
+                <TextBlock Classes="hint" Text="逗号或换行分隔，正则每行一项" />
+
+                <TextBlock Classes="label" Text="内容" Margin="0,14,0,6" />
+                <TextBox Name="PART_Content" Classes="field" AcceptsReturn="True" TextWrapping="Wrap"
+                         MinHeight="140" MaxHeight="250" ScrollViewer.VerticalScrollBarVisibility="Auto" />
+
+                <Expander Header="匹配与位置" Classes="settingssection" Margin="0,12,0,0" HorizontalAlignment="Stretch">
+                  <StackPanel Margin="0,10,0,0" Spacing="12">
+                    <WrapPanel>
+                      <CheckBox Name="PART_UseRegex" Content="正则匹配" Margin="0,0,16,0" />
+                      <CheckBox Name="PART_WholeWords" Content="完整词匹配" Margin="0,0,16,0" />
+                      <CheckBox Name="PART_CaseSensitive" Content="区分大小写" />
+                    </WrapPanel>
+                    <Grid ColumnDefinitions="*,12,*">
+                      <StackPanel>
+                        <TextBlock Classes="label" Text="插入顺序" />
+                        <NumericUpDown Name="PART_Priority" Classes="field" Minimum="-1000000" Maximum="1000000" FormatString="0" ToolTip.Tip="数值越小，插入位置越靠前" />
+                      </StackPanel>
+                      <StackPanel Grid.Column="2">
+                        <TextBlock Classes="label" Text="扫描范围" />
+                        <ComboBox Name="PART_EntryScanScope" Classes="field" HorizontalAlignment="Stretch">
+                          <ComboBoxItem Content="沿用世界书" /><ComboBoxItem Content="最近消息" />
+                          <ComboBoxItem Content="全部消息" /><ComboBoxItem Content="不扫描聊天" />
+                        </ComboBox>
+                        <NumericUpDown Name="PART_EntryDepth" Classes="field" Minimum="0" Maximum="2147483647" FormatString="0' 条消息'" Margin="0,6,0,0" AutomationProperties.Name="条目扫描消息数" />
+                      </StackPanel>
+                    </Grid>
+                    <CheckBox Name="PART_Selective" Content="使用辅助条件" />
+                    <StackPanel Name="PART_SecondaryConditions" Spacing="8">
+                    <ComboBox Name="PART_SelectiveLogic" Classes="field" HorizontalAlignment="Stretch">
+                      <ComboBoxItem Content="任一辅助词匹配" /><ComboBoxItem Content="至少一个辅助词未匹配" />
+                      <ComboBoxItem Content="所有辅助词均未匹配" /><ComboBoxItem Content="所有辅助词匹配" />
+                    </ComboBox>
+                    <TextBlock Classes="label" Text="辅助关键词" Margin="0" />
+                    <TextBox Name="PART_SecondaryKeywords" Classes="field" AcceptsReturn="True" TextWrapping="Wrap"
+                             MinHeight="58" MaxHeight="120" ScrollViewer.VerticalScrollBarVisibility="Auto" />
+                    </StackPanel>
+                    <Grid ColumnDefinitions="*,12,*">
+                      <StackPanel>
+                        <TextBlock Classes="label" Text="插入位置" />
+                        <ComboBox Name="PART_Placement" Classes="field" HorizontalAlignment="Stretch">
+                          <ComboBoxItem Content="角色资料之前" /><ComboBoxItem Content="角色资料之后" />
+                          <ComboBoxItem Content="对话补充之前" /><ComboBoxItem Content="对话补充之后" />
+                          <ComboBoxItem Content="指定消息位置" /><ComboBoxItem Content="示例对话之前" />
+                          <ComboBoxItem Content="示例对话之后" /><ComboBoxItem Content="命名位置" />
+                        </ComboBox>
+                      </StackPanel>
+                      <StackPanel Grid.Column="2" Name="PART_EntryRoleRow">
+                        <TextBlock Classes="label" Text="消息身份" />
+                        <ComboBox Name="PART_EntryRole" Classes="field" HorizontalAlignment="Stretch">
+                          <ComboBoxItem Content="系统" /><ComboBoxItem Content="用户" /><ComboBoxItem Content="角色" />
+                        </ComboBox>
+                      </StackPanel>
+                    </Grid>
+                    <StackPanel Name="PART_InjectionDepthRow">
+                      <TextBlock Classes="label" Text="距对话末尾" />
+                      <NumericUpDown Name="PART_InjectionDepth" Classes="field" Minimum="0" Maximum="10000" FormatString="0' 条消息'" ToolTip.Tip="0 表示放在对话末尾" />
+                    </StackPanel>
+                    <StackPanel Name="PART_OutletRow" IsVisible="False">
+                      <TextBlock Classes="label" Text="位置名称" />
+                      <TextBox Name="PART_OutletName" Classes="field" />
+                    </StackPanel>
+                    <Grid Name="PART_BudgetPriorityRow" ColumnDefinitions="*,12,*">
+                      <StackPanel>
+                        <TextBlock Classes="label" Text="预算优先级" />
+                        <ComboBox Name="PART_BudgetPriorityMode" Classes="field" HorizontalAlignment="Stretch">
+                          <ComboBoxItem Content="沿用插入顺序" /><ComboBoxItem Content="单独设置" />
+                        </ComboBox>
+                      </StackPanel>
+                      <NumericUpDown Grid.Column="2" Name="PART_BudgetPriority" Classes="field" Minimum="-1000000" Maximum="1000000" FormatString="0" VerticalAlignment="Bottom" />
+                    </Grid>
+                  </StackPanel>
+                </Expander>
+                <Expander Header="触发规则" Classes="settingssection" Margin="0,12,0,0" HorizontalAlignment="Stretch">
+                  <StackPanel Margin="0,10,0,0" Spacing="12">
+                    <Grid ColumnDefinitions="*,12,*">
+                      <CheckBox Name="PART_UseProbability" Content="按概率触发" VerticalAlignment="Center" />
+                      <NumericUpDown Grid.Column="2" Name="PART_Probability" Classes="field" Minimum="0" Maximum="100" FormatString="0'%'" />
+                    </Grid>
+                    <StackPanel>
+                      <TextBlock Classes="label" Text="互斥组" />
+                      <TextBox Name="PART_Group" Classes="field" />
+                    </StackPanel>
+                    <Grid Name="PART_GroupOptions" ColumnDefinitions="*,12,*">
+                      <StackPanel>
+                        <TextBlock Classes="label" Text="同组选择" />
+                        <ComboBox Name="PART_GroupMode" Classes="field" HorizontalAlignment="Stretch">
+                          <ComboBoxItem Content="按权重选择" /><ComboBoxItem Content="按插入顺序选择" />
+                        </ComboBox>
+                      </StackPanel>
+                      <StackPanel Grid.Column="2">
+                        <TextBlock Classes="label" Text="权重" />
+                        <NumericUpDown Name="PART_GroupWeight" Classes="field" Minimum="0" Maximum="1000000" FormatString="0" />
+                      </StackPanel>
+                    </Grid>
+                    <Grid ColumnDefinitions="*,10,*,10,*">
+                      <StackPanel><TextBlock Classes="label" Text="持续消息数" /><NumericUpDown Name="PART_Sticky" Classes="field" Minimum="0" Maximum="1000000" FormatString="0" /></StackPanel>
+                      <StackPanel Grid.Column="2"><TextBlock Classes="label" Text="冷却消息数" /><NumericUpDown Name="PART_Cooldown" Classes="field" Minimum="0" Maximum="1000000" FormatString="0" /></StackPanel>
+                      <StackPanel Grid.Column="4"><TextBlock Classes="label" Text="起始消息数" /><NumericUpDown Name="PART_Delay" Classes="field" Minimum="0" Maximum="1000000" FormatString="0" ToolTip.Tip="对话达到此消息数后才可触发" /></StackPanel>
+                    </Grid>
+                    <CheckBox Name="PART_ExcludeRecursion" Content="不受其他条目触发" />
+                    <CheckBox Name="PART_PreventRecursion" Content="不触发其他条目" />
+                    <StackPanel>
+                      <TextBlock Classes="label" Text="递归起始轮次" />
+                      <NumericUpDown Name="PART_DelayRecursion" Classes="field" Minimum="0" Maximum="1000" FormatString="0" />
+                    </StackPanel>
+                    <CheckBox Name="PART_IgnoreBudget" Content="忽略预算限制" />
+                  </StackPanel>
+                </Expander>
+              </StackPanel>
+            </ScrollViewer>
+          </Panel>
+        </Grid>
+      </Grid>
+    </Panel>
+
+    <Grid Grid.Row="2" ColumnDefinitions="*,Auto" Margin="0,18,0,0">
+      <Button Name="PART_UndoDelete" Classes="textlink" Content="撤销删除" IsVisible="False"
+              HorizontalAlignment="Left" VerticalAlignment="Center" />
+      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10">
+        <Button Name="PART_Cancel" Classes="outline" Content="取消" Padding="18,7" IsCancel="True" />
+        <Button Name="PART_Save" Classes="pillprimary" Content="保存" Padding="18,7"
+                HotKey="Ctrl+Enter" ToolTip.Tip="保存 (Ctrl+Enter)" />
+      </StackPanel>
+    </Grid>
+  </Grid>
+</views:MolaContentWindow>

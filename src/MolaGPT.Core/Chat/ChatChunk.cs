@@ -18,7 +18,8 @@ public sealed record ChatChunk(
     ToolCallDelta? Tool = null,
     string? RawJson = null,
     CompactionDelta? Compaction = null,
-    ContextUsageDelta? ContextUsage = null);
+    ContextUsageDelta? ContextUsage = null,
+    RolePromptTrace? PromptTrace = null);
 
 /// <summary>
 /// How full the model's context is after this turn.

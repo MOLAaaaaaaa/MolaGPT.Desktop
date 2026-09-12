@@ -2,6 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:r="clr-namespace:MolaGPT.App.Rendering"
         xmlns:v="clr-namespace:MolaGPT.App.Views"
+        xmlns:m="clr-namespace:MolaGPT.Core.Models;assembly=MolaGPT.Core"
         xmlns:chrome="using:Avalonia.Controls.Chrome">
 
   <!--
@@ -17,6 +18,33 @@
   -->
 
   <Styles.Resources>
+
+    <DataTemplate x:Key="LorebookSummaryTemplate" x:DataType="m:Lorebook">
+      <Expander Classes="settingssection" HorizontalAlignment="Stretch" Margin="0,0,0,8">
+        <Expander.Header>
+          <Grid ColumnDefinitions="*,Auto,Auto">
+            <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1" Text="{Binding Entries.Count, StringFormat='{}{0} 条'}" Classes="hint" Margin="12,0,0,0" VerticalAlignment="Center" />
+            <TextBlock Grid.Column="2" Text="已停用" IsVisible="{Binding !Enabled}" Classes="hint" Margin="12,0,0,0" VerticalAlignment="Center" />
+          </Grid>
+        </Expander.Header>
+        <ItemsControl ItemsSource="{Binding Entries}" Margin="12,8,0,0">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="m:LoreEntry">
+              <Expander Classes="settingssection" HorizontalAlignment="Stretch" Margin="0,0,0,6">
+                <Expander.Header>
+                  <Grid ColumnDefinitions="*,Auto">
+                    <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" Text="已停用" IsVisible="{Binding !Enabled}" Classes="hint" Margin="12,0,0,0" VerticalAlignment="Center" />
+                  </Grid>
+                </Expander.Header>
+                <SelectableTextBlock Text="{Binding Content}" TextWrapping="Wrap" Margin="0,8,0,12" />
+              </Expander>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </Expander>
+    </DataTemplate>
 
     <ControlTheme x:Key="{x:Type v:MolaContentWindow}" TargetType="v:MolaContentWindow">
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
@@ -250,13 +278,11 @@
                           MinHeight="0"
                           HorizontalAlignment="Stretch"
                           HorizontalContentAlignment="Stretch">
-              <Grid ColumnDefinitions="*,Auto">
-                <ContentPresenter Grid.Column="0"
-                                  Content="{TemplateBinding Header}"
-                                  ContentTemplate="{TemplateBinding HeaderTemplate}"
-                                  HorizontalContentAlignment="Stretch"
-                                  VerticalContentAlignment="Center" />
-                <TextBlock Grid.Column="1"
+              <!-- DockPanel rather than two Grid columns so a class can move the
+                   chevron to the leading edge with one Dock setter; Expander
+                   .settingssection does exactly that. -->
+              <DockPanel>
+                <TextBlock DockPanel.Dock="Right"
                            Name="PART_chevron"
                            Classes="icon"
                            Text="&#xE70D;"
@@ -273,7 +299,11 @@
                     </Transitions>
                   </TextBlock.Transitions>
                 </TextBlock>
-              </Grid>
+                <ContentPresenter Content="{TemplateBinding Header}"
+                                  ContentTemplate="{TemplateBinding HeaderTemplate}"
+                                  HorizontalContentAlignment="Stretch"
+                                  VerticalContentAlignment="Center" />
+              </DockPanel>
             </ToggleButton>
 
             <r:RevealPresenter Name="PART_reveal"
@@ -662,6 +692,12 @@
   <Style Selector="TextBox.field:focus-within">
     <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
   </Style>
+  <!-- Every ComboBox and spinner, not just the form-field ones: scrolling the
+       page past one of these must not edit it, and opening one must not drag
+       the page to the top. Both are Avalonia defaults; see PageStabilityGuard. -->
+  <Style Selector="ComboBox, NumericUpDown">
+    <Setter Property="(r:PageStabilityGuard.IsEnabled)" Value="True" />
+  </Style>
   <Style Selector="ComboBox.field">
     <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
     <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
@@ -671,6 +707,122 @@
     <Setter Property="MinHeight" Value="36" />
     <Setter Property="Padding" Value="11,0" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="NumericUpDown.field">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    <Setter Property="MinHeight" Value="36" />
+  </Style>
+  <!-- A multi-line field is read top-down, so the caret has to start at the top.
+       The base theme centres content vertically, which is right for the one-line
+       case and wrong the moment MinHeight exceeds one line: the text floats in
+       the middle of an empty box. -->
+  <Style Selector="TextBox.field[AcceptsReturn=True]">
+    <Setter Property="VerticalContentAlignment" Value="Top" />
+  </Style>
+
+  <!-- Search affordance. Lived privately in ChatHeader; the composer's persona
+       picker needed the same shape and a class with no rule in scope renders as
+       bare text on the flyout background. -->
+  <Style Selector="Border.searchbox">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+  </Style>
+  <Style Selector="Border.searchbox:focus-within">
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+  </Style>
+
+  <!-- ======================== dialog tabs / lists ======================= -->
+  <!-- Opt-in, not a blanket TabControl rule: the settings window navigates with
+       a left rail and must not pick this up. -->
+  <Style Selector="TabControl.molatabs">
+    <Setter Property="Padding" Value="0" />
+  </Style>
+  <Style Selector="TabControl.molatabs > TabItem">
+    <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+    <Setter Property="Padding" Value="2,8" />
+    <Setter Property="Margin" Value="0,0,22,0" />
+    <Setter Property="MinHeight" Value="0" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+  </Style>
+  <Style Selector="TabControl.molatabs > TabItem:selected">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <Style Selector="TabControl.molatabs > TabItem /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Margin" Value="0,0,0,6" />
+  </Style>
+
+  <!-- A fold, not a field.
+       This header used to be a Bg.Secondary fill with a 1px Brush.Border outline,
+       a 40px row and a chevron pinned to the right edge — which is ComboBox.field
+       down to the pixel. Stacked under one, as 默认提示词 is under 提示词, the only
+       way to tell which one opened a menu and which one opened a drawer was to
+       click it.
+
+       So the box goes, and the affordance moves to the leading edge where a
+       disclosure triangle belongs: ▸ closed, ▾ open. What is left is a row of
+       text, which is what a section heading should look like — nothing in the
+       form's field vocabulary (fill, border, right-hand chevron) is reused.
+       Hover tints the row instead of the box, and bleeds 4px past the text so
+       the target does not look narrower than it is. -->
+  <Style Selector="Expander.settingssection /template/ ToggleButton#PART_toggle">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    <Setter Property="Padding" Value="4,6" />
+    <Setter Property="Margin" Value="-4,0" />
+    <Setter Property="MinHeight" Value="28" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <Style Selector="Expander.settingssection /template/ ToggleButton#PART_toggle:pointerover">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+  </Style>
+  <!-- Collapsed points at the content it would reveal; the 0.2s transition on
+       RenderTransform turns it rather than swapping glyphs. -->
+  <Style Selector="Expander.settingssection /template/ TextBlock#PART_chevron">
+    <Setter Property="DockPanel.Dock" Value="Left" />
+    <Setter Property="Margin" Value="0,0,7,0" />
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="Opacity" Value="0.75" />
+    <Setter Property="RenderTransform" Value="rotate(-90deg)" />
+  </Style>
+  <Style Selector="Expander.settingssection:expanded /template/ TextBlock#PART_chevron">
+    <Setter Property="RenderTransform" Value="rotate(0deg)" />
+  </Style>
+
+  <!-- Chrome-less list used for pick-one rails inside dialogs. -->
+  <Style Selector="ListBox.plainlist">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="0" />
+  </Style>
+  <Style Selector="ListBox.plainlist ListBoxItem">
+    <Setter Property="Padding" Value="10,7" />
+    <Setter Property="Margin" Value="0,1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+  </Style>
+  <Style Selector="ListBox.plainlist ListBoxItem:pointerover /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+  </Style>
+  <Style Selector="ListBox.plainlist ListBoxItem:selected /template/ Border#PART_Root">
+    <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+  </Style>
+
+  <!-- Empty state. Every list in this app can be empty on first run; a blank
+       panel reads as a broken page rather than as "nothing here yet". -->
+  <Style Selector="TextBlock.emptystate">
+    <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+    <Setter Property="TextAlignment" Value="Center" />
+    <Setter Property="HorizontalAlignment" Value="Center" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="MaxWidth" Value="340" />
   </Style>
 
   <!-- ======================= mode switcher segment ====================== -->
@@ -749,6 +901,15 @@
   <Style Selector="TextBlock.secondary">
     <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
   </Style>
+  <!-- Explanatory line under a control. SettingsWindow defined this privately;
+       the role dialogs need the same voice and are separate windows, so the
+       rule has to live here to reach them. -->
+  <Style Selector="TextBlock.hint">
+    <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+    <Setter Property="Margin" Value="0,4,0,0" />
+  </Style>
 
   <!-- What the user said, wherever they said it. Lived in TranscriptView until
        the image workbench needed the same shape for a prompt: the two are the
@@ -767,6 +928,18 @@
   <Style Selector="SelectableTextBlock">
     <Setter Property="FontFamily" Value="{DynamicResource Font.UI}" />
     <Setter Property="SelectionBrush" Value="{DynamicResource Brush.Selection}" />
+  </Style>
+
+  <!-- Grouping surface for a block of form controls. Named for where it started;
+       it moved here when the role dialogs needed the same block and, being their
+       own windows, could not see a rule defined in SettingsWindow. -->
+  <Style Selector="Border.settingscard">
+    <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+    <Setter Property="ClipToBounds" Value="True" />
+    <Setter Property="Margin" Value="0,0,0,12" />
   </Style>
 
   <!-- ============================ FloatingCard ========================== -->

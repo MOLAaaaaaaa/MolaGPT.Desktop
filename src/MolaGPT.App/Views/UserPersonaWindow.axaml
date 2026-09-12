@@ -1,0 +1,35 @@
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  xmlns:views="clr-namespace:MolaGPT.App.Views"
+  xmlns:m="clr-namespace:MolaGPT.Core.Models;assembly=MolaGPT.Core"
+  x:Class="MolaGPT.App.Views.UserPersonaWindow" Title="我的身份"
+  Width="600" Height="520" MinWidth="480" MinHeight="430" WindowStartupLocation="CenterOwner">
+  <Grid RowDefinitions="Auto,*,Auto" Margin="24,16,24,20">
+    <Grid ColumnDefinitions="*,Auto,Auto" Margin="0,0,0,16">
+      <ComboBox Name="PART_Identities" Classes="field" HorizontalAlignment="Stretch" Margin="0,0,10,0" PlaceholderText="选择身份">
+        <ComboBox.ItemTemplate><DataTemplate x:DataType="m:UserPersona"><TextBlock Text="{Binding Name}" /></DataTemplate></ComboBox.ItemTemplate>
+      </ComboBox>
+      <Button Grid.Column="1" Name="PART_Add" Content="新增" Classes="outline" Margin="0,0,8,0" />
+      <Button Grid.Column="2" Name="PART_Delete" Content="删除" Classes="outline" />
+    </Grid>
+    <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled" Padding="0,0,8,0">
+      <Panel>
+      <TextBlock Name="PART_Empty" Classes="emptystate" Text="添加一个身份" />
+      <StackPanel Name="PART_Editor" Spacing="12">
+        <StackPanel Orientation="Horizontal" Spacing="12">
+          <views:PersonaAvatar Name="PART_Avatar" Width="48" Height="48" />
+          <Button Name="PART_ChangeAvatar" Content="选择头像" Classes="outline" VerticalAlignment="Center" />
+          <Button Name="PART_ClearAvatar" Content="移除" Classes="textlink" VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel><TextBlock Classes="label" Text="称呼" /><TextBox Name="PART_Name" Classes="field" /></StackPanel>
+        <StackPanel><TextBlock Classes="label" Text="身份设定" /><TextBox Name="PART_Description" Classes="field" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="160" MaxHeight="250" /></StackPanel>
+        <CheckBox Name="PART_Default" Content="设为默认身份" />
+      </StackPanel>
+      </Panel>
+    </ScrollViewer>
+    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10" Margin="0,16,0,0">
+      <Button Name="PART_Cancel" Content="取消" Classes="outline" IsCancel="True" />
+      <Button Name="PART_Save" Content="保存" Classes="pillprimary" HotKey="Ctrl+Enter" />
+    </StackPanel>
+  </Grid>
+</views:MolaContentWindow>

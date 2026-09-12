@@ -159,8 +159,7 @@ public sealed class PiByokProviderFactory
                 PiModelCatalog.BuildJson(models, shape.Api, displayName, endpoint),
                 models[0].Id,
                 shape.Api,
-                shape.AuthHeader,
-                Reasoning: models.Any(m => m.SupportsThinking)),
+                shape.AuthHeader),
             request => new PiProviderCreds(
                 endpoint,
                 _ => Task.FromResult<string?>(key),

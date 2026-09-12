@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
+using MolaGPT.Core.Models;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels.Services;
@@ -40,6 +41,7 @@ public sealed partial class PersonaListViewModel : ObservableObject
         "如果问题信息不足，先提出必要的澄清问题；如果可以直接解决，就给出清晰可执行的答案。";
 
     public ObservableCollection<PersonaItemViewModel> Personas { get; } = new();
+    public RoleLibraryViewModel Library { get; } = new();
 
     private readonly PersonaRepository? _repo;
 
@@ -49,9 +51,11 @@ public sealed partial class PersonaListViewModel : ObservableObject
 
     public PersonaListViewModel() { }
 
-    public PersonaListViewModel(PersonaRepository? repo)
+    public PersonaListViewModel(PersonaRepository? repo, AttachmentStore? roleAssets = null, RoleLibraryViewModel? library = null)
     {
         _repo = repo;
+        _roleAssets = roleAssets;
+        if (library is not null) Library = library;
         Reload();
     }
 
@@ -90,6 +94,7 @@ public sealed partial class PersonaListViewModel : ObservableObject
             Name = "新角色",
             Avatar = defaultIcon,
             SystemPrompt = "",
+            Profile = new PersonaProfile { Mode = ConversationMode.Chat, Compatibility = RoleCompatibility.SillyTavern },
             CreatedAt = now,
             UpdatedAt = now,
             SortOrder = Personas.Count
@@ -105,6 +110,7 @@ public sealed partial class PersonaListViewModel : ObservableObject
             Name = source.Name + " 副本",
             Avatar = source.Avatar,
             SystemPrompt = source.SystemPrompt,
+            Profile = RoleJson.Deserialize<PersonaProfile>(RoleJson.Serialize(source.Profile)),
             DefaultEnableNetwork = source.DefaultEnableNetwork,
             DefaultEnableWebFetch = source.DefaultEnableWebFetch,
             DefaultThinking = source.DefaultThinking,
@@ -121,8 +127,13 @@ public sealed partial class PersonaListViewModel : ObservableObject
 
     public void Save(PersonaItemViewModel item)
     {
+        PersistCardAssets(item);
+        item.Profile.Mode = item.Mode;
+        item.RefreshProfile();
         item.UpdatedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         if (_repo is not null) _repo.Upsert(item.ToRow());
+        item.PendingCardSource = null;
+        item.PendingAvatarSource = null;
 
         var existing = Personas.FirstOrDefault(p => p.Id == item.Id);
         if (existing is null) Personas.Add(item);
@@ -267,6 +278,7 @@ public sealed partial class PersonaItemViewModel : ObservableObject
     [ObservableProperty] private string _name = string.Empty;
     [ObservableProperty] private string? _avatar;
     [ObservableProperty] private string _systemPrompt = string.Empty;
+    [ObservableProperty] private PersonaProfile _profile = new();
     [ObservableProperty] private bool? _defaultEnableNetwork;
     [ObservableProperty] private bool? _defaultEnableWebFetch;
     [ObservableProperty] private bool? _defaultThinking;
@@ -277,17 +289,42 @@ public sealed partial class PersonaItemViewModel : ObservableObject
     [ObservableProperty] private long _createdAt;
     [ObservableProperty] private long _updatedAt;
 
-    public string DisplayAvatar => PersonaIconCatalog.Resolve(Avatar);
+    public bool HasImageAvatar => Avatar?.StartsWith("data:image/", StringComparison.Ordinal) == true;
 
+    public string DisplayAvatar => HasImageAvatar
+        ? PersonaIconCatalog.DefaultGlyph : PersonaIconCatalog.Resolve(Avatar);
+
+    /// <summary>
+    /// Sub-label for the persona rows. Empty when the role has neither a summary
+    /// nor a prompt — callers bind <see cref="HasPreview"/> to collapse the line
+    /// rather than reserve a line box for nothing.
+    /// </summary>
     public string Preview
     {
         get
         {
-            var first = (SystemPrompt ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim();
-            if (string.IsNullOrEmpty(first)) return "自定义角色，尚未设置提示词";
+            var first = (string.IsNullOrWhiteSpace(Profile.Summary) ? SystemPrompt : Profile.Summary)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim();
+            if (string.IsNullOrEmpty(first)) return "";
             return first.Length > 60 ? first[..60] + "…" : first;
         }
     }
+
+    public bool HasPreview => Preview.Length > 0;
+
+    public ConversationMode Mode
+    {
+        get => IsBuiltin ? ConversationMode.Chat : Profile.DefaultMode;
+        set
+        {
+            if (IsBuiltin) return;
+            Profile.Mode = value;
+            RefreshProfile();
+        }
+    }
+
+    public bool IsAtmosphereMode => Mode == ConversationMode.Atmosphere;
+    public string ModeLabel => IsAtmosphereMode ? "氛围" : "对话";
 
     public PersonaRow ToRow() => new()
     {
@@ -295,6 +332,7 @@ public sealed partial class PersonaItemViewModel : ObservableObject
         Name = Name,
         Avatar = Avatar,
         SystemPrompt = SystemPrompt ?? string.Empty,
+        ProfileJson = RoleJson.Serialize(Profile),
         DefaultEnableNetwork = DefaultEnableNetwork,
         DefaultEnableWebFetch = DefaultEnableWebFetch,
         DefaultThinking = DefaultThinking,
@@ -306,23 +344,70 @@ public sealed partial class PersonaItemViewModel : ObservableObject
         UpdatedAt = UpdatedAt
     };
 
-    public static PersonaItemViewModel From(PersonaRow row) => new()
+    public static PersonaItemViewModel From(PersonaRow row)
     {
-        Id = row.Id,
-        Name = row.Name,
-        Avatar = row.Avatar,
-        SystemPrompt = row.SystemPrompt,
-        DefaultEnableNetwork = row.DefaultEnableNetwork,
-        DefaultEnableWebFetch = row.DefaultEnableWebFetch,
-        DefaultThinking = row.DefaultThinking,
-        DefaultReasoningEffort = row.DefaultReasoningEffort,
-        SortOrder = row.SortOrder,
-        Pinned = row.Pinned,
-        IsBuiltin = row.IsBuiltin,
-        CreatedAt = row.CreatedAt,
-        UpdatedAt = row.UpdatedAt
-    };
+        var profile = RoleJson.Deserialize<PersonaProfile>(row.ProfileJson);
+        if (profile.UserPersonaId is null && (profile.UserName.Length > 0 || profile.UserDescription.Length > 0))
+            profile.UserPersonaId = "";
+        foreach (var book in profile.Lorebooks)
+        {
+            book.ScanScope ??= book.ScanDepth == 0 ? LoreScanScope.All : LoreScanScope.Recent;
+            foreach (var entry in book.Entries)
+            {
+                if (entry.InsertionOrder is null)
+                {
+                    entry.InsertionOrder = -entry.Priority;
+                    entry.BudgetPriority ??= entry.Priority;
+                }
+                entry.ScanScope ??= entry.ScanDepth switch
+                {
+                    null => LoreScanScope.Inherit, 0 => LoreScanScope.All, _ => LoreScanScope.Recent
+                };
+                entry.Position ??= entry.BeforeCharacter ? LorePosition.BeforeCharacter : LorePosition.AfterCharacter;
+            }
+        }
+        profile.Mode = row.IsBuiltin ? ConversationMode.Chat : profile.DefaultMode;
+        return new()
+        {
+            Id = row.Id,
+            Name = row.Name,
+            Avatar = row.Avatar,
+            SystemPrompt = row.SystemPrompt,
+            Profile = profile,
+            DefaultEnableNetwork = row.DefaultEnableNetwork,
+            DefaultEnableWebFetch = row.DefaultEnableWebFetch,
+            DefaultThinking = row.DefaultThinking,
+            DefaultReasoningEffort = row.DefaultReasoningEffort,
+            SortOrder = row.SortOrder,
+            Pinned = row.Pinned,
+            IsBuiltin = row.IsBuiltin,
+            CreatedAt = row.CreatedAt,
+            UpdatedAt = row.UpdatedAt
+        };
+    }
 
-    partial void OnSystemPromptChanged(string value) => OnPropertyChanged(nameof(Preview));
-    partial void OnAvatarChanged(string? value) => OnPropertyChanged(nameof(DisplayAvatar));
+    partial void OnSystemPromptChanged(string value) => RefreshProfile();
+
+    partial void OnAvatarChanged(string? value)
+    {
+        OnPropertyChanged(nameof(DisplayAvatar));
+        OnPropertyChanged(nameof(HasImageAvatar));
+    }
+
+    partial void OnProfileChanged(PersonaProfile value) => RefreshProfile();
+
+    /// <summary>
+    /// <see cref="Profile"/> is a plain record with no change notification, so
+    /// edits made through <c>{Binding Profile.Summary}</c> reach the model but
+    /// never reach anything computed from it. The form calls this after writing.
+    /// </summary>
+    internal void RefreshProfile()
+    {
+        OnPropertyChanged(nameof(TagsText));
+        OnPropertyChanged(nameof(Preview));
+        OnPropertyChanged(nameof(HasPreview));
+        OnPropertyChanged(nameof(Mode));
+        OnPropertyChanged(nameof(IsAtmosphereMode));
+        OnPropertyChanged(nameof(ModeLabel));
+    }
 }

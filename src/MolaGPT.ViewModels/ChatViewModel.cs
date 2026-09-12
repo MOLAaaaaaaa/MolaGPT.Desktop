@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -273,6 +273,7 @@ public sealed partial class ChatViewModel : ObservableObject
                 OnPropertyChanged(nameof(ActivePersonaAvatar));
                 OnPropertyChanged(nameof(ActivePersonaName));
                 OnPropertyChanged(nameof(ActivePersonaSystemPrompt));
+                RefreshInteractionMode();
             };
 
         ActivePersonaId = ResolveDefaultPersonaId();
@@ -422,11 +423,28 @@ public sealed partial class ChatViewModel : ObservableObject
     /// </summary>
     public void SaveActivePersona(string? personaId)
     {
+        ValidateRoleModel(personaId);
         ActivePersonaId = string.IsNullOrEmpty(personaId) ? null : personaId;
-        if (_conversationRepo is null || string.IsNullOrEmpty(ConversationId)) return;
-        var existing = _conversationRepo.Get(ConversationId!);
-        if (existing is null) return;
-        _conversationRepo.Upsert(existing with { PersonaId = ActivePersonaId });
+        RefreshInteractionMode();
+
+        // Before the user has said anything the conversation is still the role's
+        // to configure, so the new role's defaults take over. After that the
+        // conversation owns its own switches: swapping roles mid-thread to change
+        // the voice must not also reset 联网 / 推理 or move the model.
+        var beforeFirstTurn = !Messages.Any(message => message.Role == ChatMessage.RoleUser);
+        if (beforeFirstTurn)
+        {
+            RoleContext.EnableNetwork = null;
+            RoleContext.EnableWebFetch = null;
+            RoleContext.EnableThinking = null;
+            RoleContext.ReasoningEffort = null;
+        }
+        if (_conversationRepo?.Get(ConversationId ?? "") is { } row)
+            _conversationRepo.Upsert(row with { PersonaId = ActivePersonaId });
+        RoleOptionsRequested?.Invoke(!beforeFirstTurn);
+        SaveRoleContext(RoleContext);
+        RefreshRoleGreeting();
+        if (_conversationRepo?.Get(ConversationId ?? "") is not { } existing) return;
 
         // Push the new persona label into the sidebar so the BYOK badge
         // refreshes without requiring a user message to be sent first.
@@ -463,8 +481,12 @@ public sealed partial class ChatViewModel : ObservableObject
         ConversationId = null;
         ConversationTitle = "新对话";
         ConversationSystemPrompt = null;
+        RoleContext = new();
+        SetActiveLoreEntries([]);
         ActivePersonaId = ResolveDefaultPersonaId();
         SystemPromptMode = "override";
+        RoleOptionsRequested?.Invoke(false);
+        RefreshInteractionMode();
         ContextGauge.Reset();
         // New conversation has no working directory yet — clear artifacts
         // and dismiss the panel so the previous conversation's files don't stick.
@@ -478,6 +500,8 @@ public sealed partial class ChatViewModel : ObservableObject
 
     public async Task LoadConversationAsync(string conversationId, bool loadAllMessagesImmediately = false)
     {
+        IsConversationLoading = true;
+        SetActiveLoreEntries([]);
         ConversationId = conversationId;
         // Cleared here and restored from the loaded messages below. Leaving it
         // cleared was the first attempt and it was wrong: reopening a conversation
@@ -520,7 +544,10 @@ public sealed partial class ChatViewModel : ObservableObject
                 var readSw = System.Diagnostics.Stopwatch.StartNew();
                 var snapshot = await Task.Run(() =>
                 {
-                    var messages = PrepareMessageSnapshot(_messageRepo.List(conversationId));
+                    var activeRows = _messageRepo.List(conversationId);
+                    var allRows = _messageRepo.ListAll(conversationId);
+                    var messages = PrepareMessageSnapshot(activeRows);
+                    ApplyBranchMetadata(messages, allRows);
                     var conversation = _conversationRepo?.Get(conversationId);
                     return (messages, conversation);
                 }).ConfigureAwait(true);
@@ -571,19 +598,23 @@ public sealed partial class ChatViewModel : ObservableObject
             {
                 ConversationTitle = string.IsNullOrWhiteSpace(row2.Title) ? "新对话" : row2.Title;
                 ConversationSystemPrompt = row2.SystemPrompt;
+                RoleContext = RoleJson.Deserialize<ConversationRoleContext>(row2.RoleContextJson);
                 ActivePersonaId = row2.PersonaId;
                 SystemPromptMode = string.Equals(row2.SystemPromptMode, "append", StringComparison.OrdinalIgnoreCase)
                     ? "append" : "override";
                 RestoreActiveModel(row2);
+                RoleOptionsRequested?.Invoke(true);
             }
             else
             {
                 ConversationTitle = "新对话";
                 ConversationSystemPrompt = null;
+                RoleContext = new();
                 ActivePersonaId = null;
                 SystemPromptMode = "override";
             }
 
+            RefreshInteractionMode();
             // Surface any artifacts already sitting in this conversation's
             // working directory (from earlier python runs / uploads).
             RefreshArtifacts();
@@ -629,6 +660,8 @@ public sealed partial class ChatViewModel : ObservableObject
             var split = SplitInlineThinking(row.Content);
             string? modelLabel = null;
             string? providerLabel = null;
+            string? personaId = null;
+            string? personaName = null;
             string? thinkingText = split.Thinking;
             Usage? usage = null;
             IReadOnlyList<SourceReference>? sources = null;
@@ -651,6 +684,8 @@ public sealed partial class ChatViewModel : ObservableObject
                 try
                 {
                     using var doc = JsonDocument.Parse(row.Meta);
+                    if (doc.RootElement.TryGetProperty("persona_id", out var roleId)) personaId = roleId.GetString();
+                    if (doc.RootElement.TryGetProperty("persona_name", out var roleName)) personaName = roleName.GetString();
                     if (doc.RootElement.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String)
                         modelLabel = m.GetString();
                     if (doc.RootElement.TryGetProperty("provider", out var p) && p.ValueKind == JsonValueKind.String)
@@ -732,10 +767,30 @@ public sealed partial class ChatViewModel : ObservableObject
                 compactionReason,
                 compactionTokensAfter,
                 firstTokenSeconds,
-                generationSeconds));
+                generationSeconds,
+                personaId,
+                personaName,
+                row.ParentId));
         }
 
         return prepared;
+    }
+
+    private static void ApplyBranchMetadata(List<PreparedMessage> active, IReadOnlyList<MessageRow> all)
+    {
+        var siblings = all
+            .GroupBy(row => (row.ParentId, row.Role))
+            .ToDictionary(group => group.Key, group => group.Select(row => row.Id).ToArray());
+        for (var i = 0; i < active.Count; i++)
+        {
+            var message = active[i];
+            if (!siblings.TryGetValue((message.ParentId, message.Role), out var ids) || ids.Length < 2) continue;
+            active[i] = message with
+            {
+                BranchSiblingIds = ids,
+                BranchIndex = Array.IndexOf(ids, message.Id)
+            };
+        }
     }
 
     private MessageViewModel CreateMessageViewModel(PreparedMessage prepared)
@@ -745,10 +800,14 @@ public sealed partial class ChatViewModel : ObservableObject
             MessageId = prepared.Id,
             ModelLabel = prepared.ModelLabel,
             ProviderLabel = prepared.ProviderLabel,
+            PersonaId = prepared.PersonaId,
+            PersonaName = prepared.PersonaName,
+            PersonaAvatar = _personas?.Find(prepared.PersonaId)?.Avatar,
             Usage = prepared.Usage,
             Sources = prepared.Sources,
             Attachments = prepared.Attachments,
             ContentPartsJson = prepared.ContentPartsJson,
+            ParentMessageId = prepared.ParentId,
             RetryAttempts = prepared.RetryAttempts,
             RetryCurrentIndex = prepared.RetryCurrentIndex,
             WasStopped = prepared.WasStopped,
@@ -759,6 +818,8 @@ public sealed partial class ChatViewModel : ObservableObject
             CompactionTokensAfter = prepared.CompactionTokensAfter,
             AutoCollapseThinkingOnComplete = AutoCollapseThinking
         };
+        if (prepared.BranchSiblingIds is { Count: > 1 } branchIds)
+            vm.SetBranchSiblings(branchIds, prepared.BranchIndex);
         if (prepared.ToolCalls is { Count: > 0 })
         {
             foreach (var toolCall in prepared.ToolCalls)
@@ -775,6 +836,7 @@ public sealed partial class ChatViewModel : ObservableObject
         }
         // 最后一步：ApplyToolDelta 会记首个输出，必须用落库的时序覆盖它。
         vm.RestoreTurnTiming(prepared.FirstTokenSeconds, prepared.GenerationSeconds);
+        vm.VersionSelected += OnMessageVersionSelected;
         return vm;
     }
 
@@ -801,7 +863,12 @@ public sealed partial class ChatViewModel : ObservableObject
         string? CompactionReason = null,
         int CompactionTokensAfter = 0,
         double? FirstTokenSeconds = null,
-        double? GenerationSeconds = null);
+        double? GenerationSeconds = null,
+        string? PersonaId = null,
+        string? PersonaName = null,
+        string? ParentId = null,
+        IReadOnlyList<string>? BranchSiblingIds = null,
+        int BranchIndex = 0);
 
     /// <summary>
     /// Materialize up to <paramref name="count"/> more of the history parked by
@@ -837,12 +904,20 @@ public sealed partial class ChatViewModel : ObservableObject
         string? contentPartsJson = null)
     {
         EnsureConversationExists(text);
+        if (CurrentMode.IsLocalAgent() && !Messages.Any(message => message.Role == ChatMessage.RoleUser)
+            && !string.IsNullOrWhiteSpace(text) && _conversationRepo?.Get(ConversationId ?? "") is { Title: "无标题对话" } row)
+        {
+            ConversationTitle = GenerateTitle(text);
+            _conversationRepo.Rename(row.Id, ConversationTitle, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        }
         var vm = new MessageViewModel(ChatMessage.RoleUser, text, DateTimeOffset.UtcNow)
         {
             Attachments = attachments,
-            ContentPartsJson = contentPartsJson
+            ContentPartsJson = contentPartsJson,
+            ParentMessageId = Messages.LastOrDefault()?.MessageId
         };
         Messages.Add(vm);
+        vm.VersionSelected += OnMessageVersionSelected;
         PersistMessage(vm);
         TouchConversation();
     }
@@ -852,12 +927,17 @@ public sealed partial class ChatViewModel : ObservableObject
         EnsureConversationExists();
         var vm = new MessageViewModel(ChatMessage.RoleAssistant, string.Empty, DateTimeOffset.UtcNow)
         {
+            ParentMessageId = Messages.LastOrDefault()?.MessageId,
             IsStreaming = true,
             ModelLabel = ActiveModel?.DisplayName,
             ProviderLabel = ActiveProvider?.DisplayName,
+            PersonaId = CurrentMode.IsLocalAgent() ? ActivePersonaId : null,
+            PersonaName = CurrentMode.IsLocalAgent() ? ActivePersona?.Name : null,
+            PersonaAvatar = CurrentMode.IsLocalAgent() ? ActivePersona?.Avatar : null,
             AutoCollapseThinkingOnComplete = AutoCollapseThinking
         };
         vm.StartPending(IsRoutesModel(ActiveModel));
+        vm.VersionSelected += OnMessageVersionSelected;
         Messages.Add(vm);
         return vm;
     }
@@ -978,7 +1058,7 @@ public sealed partial class ChatViewModel : ObservableObject
         if (_messageRepo is null || string.IsNullOrEmpty(conversationId)) return;
         var meta = BuildMessageMeta(vm);
         var id = Guid.NewGuid().ToString("N");
-        _messageRepo.Insert(new MessageRow(
+        vm.ParentMessageId = _messageRepo.Insert(new MessageRow(
             Id: id,
             ConversationId: conversationId,
             Role: vm.Role,
@@ -986,8 +1066,13 @@ public sealed partial class ChatViewModel : ObservableObject
             // revealing the tail for a moment, and Content is behind it.
             Content: vm.FullContent,
             Meta: meta,
-            CreatedAt: vm.Timestamp.ToUnixTimeMilliseconds()));
+            CreatedAt: vm.Timestamp.ToUnixTimeMilliseconds(),
+            ParentId: vm.ParentMessageId));
         vm.MessageId = id;
+        var siblings = _messageRepo.ListSiblings(conversationId, vm.ParentMessageId, vm.Role);
+        if (siblings.Count > 1)
+            vm.SetBranchSiblings(siblings.Select(message => message.Id).ToArray(),
+                siblings.ToList().FindIndex(message => message.Id == id));
     }
 
     public void UpdatePersistedMessage(MessageViewModel vm)
@@ -1036,6 +1121,8 @@ public sealed partial class ChatViewModel : ObservableObject
         if (!string.IsNullOrWhiteSpace(vm.ModelLabel)) meta["model"] = vm.ModelLabel;
         if (!string.IsNullOrWhiteSpace(vm.ProviderLabel)) meta["provider"] = vm.ProviderLabel;
         if (!string.IsNullOrWhiteSpace(vm.Thinking)) meta["thinking"] = vm.Thinking;
+        if (!string.IsNullOrEmpty(vm.PersonaId)) meta["persona_id"] = vm.PersonaId;
+        if (!string.IsNullOrEmpty(vm.PersonaName)) meta["persona_name"] = vm.PersonaName;
         if (vm.WasStopped) meta["stopped"] = true;
         if (vm.Usage is not null)
         {
@@ -1191,6 +1278,8 @@ public sealed partial class ChatViewModel : ObservableObject
         {
             ["content"] = attempt.Content,
             ["model_label"] = attempt.ModelLabel,
+            ["persona_id"] = attempt.PersonaId,
+            ["persona_name"] = attempt.PersonaName,
             ["response_stats"] = attempt.Usage is null ? (JsonNode?)null : BuildUsageJson(attempt.Usage),
             ["sources"] = attempt.Sources is null ? (JsonNode?)null : BuildSourcesJson(attempt.Sources),
             ["stopped"] = attempt.WasStopped ? true : (JsonNode?)null
@@ -1254,7 +1343,10 @@ public sealed partial class ChatViewModel : ObservableObject
             DeletedAt: null,
             SystemPrompt: ConversationSystemPrompt,
             PersonaId: ActivePersonaId,
-            SystemPromptMode: SystemPromptMode == "append" ? "append" : null));
+            SystemPromptMode: SystemPromptMode == "append" ? "append" : null)
+        {
+            RoleContextJson = RoleJson.Serialize(RoleContext)
+        });
         ConversationTitle = title;
         ConversationTouched?.Invoke(this, new ConversationTouchedEventArgs(
             ConversationId!, title, DateTimeOffset.FromUnixTimeMilliseconds(now), ActiveProvider?.Id, ActivePersona?.Name));
@@ -1392,8 +1484,13 @@ public sealed partial class ChatViewModel : ObservableObject
                 latest = message;
         }
 
+        var hasUser = false;
         foreach (var message in Messages)
+        {
+            message.HasPreviousUser = hasUser;
             message.IsLatestAssistant = ReferenceEquals(message, latest);
+            if (message.Role == ChatMessage.RoleUser) hasUser = true;
+        }
     }
 
     private static IReadOnlyList<SourceReference>? ParseSources(JsonElement root)
@@ -1641,7 +1738,9 @@ public sealed partial class ChatViewModel : ObservableObject
                 thinkingSegments,
                 toolCalls,
                 firstTokenSeconds,
-                generationSeconds));
+                generationSeconds,
+                item.TryGetProperty("persona_id", out var personaId) && personaId.ValueKind == JsonValueKind.String ? personaId.GetString() : null,
+                item.TryGetProperty("persona_name", out var personaName) && personaName.ValueKind == JsonValueKind.String ? personaName.GetString() : null));
         }
 
         var current = ReadInt(retry, "current") ?? Math.Max(0, attempts.Count - 1);
@@ -1974,6 +2073,9 @@ public sealed partial class ChatViewModel : ObservableObject
 
     partial void OnActiveProviderChanged(IChatProvider? value)
     {
+        OnPropertyChanged(nameof(CanEditHistory));
+        OnPropertyChanged(nameof(IsRoleChat));
+        RefreshInteractionMode();
         OnPropertyChanged(nameof(ActiveProviderLabel));
     }
 

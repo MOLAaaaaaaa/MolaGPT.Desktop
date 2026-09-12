@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Net.Http.Headers;
@@ -6,9 +6,11 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
+using Avalonia.VisualTree;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Providers;
@@ -171,6 +173,14 @@ public partial class SettingsWindow : MolaContentWindow
         ];
         PAGE_Agent.DataContext = _agentStatus;
         PAGE_Personas.DataContext = _personas;
+        PART_ContentScroll.SizeChanged += (_, _) => UpdatePersonaViewport();
+        PART_PersonaPageHeader.SizeChanged += (_, _) => UpdatePersonaViewport();
+        PART_PersonaModeFilter.SelectionChanged += (_, _) => RefreshPersonaLibrary();
+        PART_ClearPersonaSearch.Click += (_, _) =>
+        {
+            PART_PersonaSearch.Clear();
+            PART_PersonaSearch.Focus();
+        };
 
         PART_Nav.SelectionChanged += (_, _) => ShowSelectedPage();
         PART_Nav.SelectedIndex = 1;
@@ -240,7 +250,7 @@ public partial class SettingsWindow : MolaContentWindow
         RefreshSpecializedModelChoices();
         RefreshSkills();
         LoadPersonaForm(null);
-        if (_personas.Personas.Count > 0) PART_PersonaList.SelectedIndex = 0;
+        RefreshPersonaLibrary();
         Closing += (_, _) => PersistEditingPersona();
 
         Opened += (_, _) =>
@@ -279,6 +289,44 @@ public partial class SettingsWindow : MolaContentWindow
         _settings.PropertyChanged += settingsChanged;
         Closed += (_, _) => _settings.PropertyChanged -= settingsChanged;
         KeyDown += OnSettingsKeyDown;
+        AddHandler(Button.ClickEvent, OnSectionHeaderClicked, RoutingStrategies.Bubble);
+    }
+
+    /// <summary>Every fold in this window sits near the bottom of a scrolling
+    /// page, so opening one usually reveals fields below the fold: the chevron
+    /// flips and, from where the user is looking, nothing else happens.
+    ///
+    /// The header's click is the signal, not <c>Expander.Expanded</c>: this app
+    /// replaces the Expander template (Theme/Controls.axaml drives IsExpanded
+    /// from PART_toggle), and Avalonia's own expand events never fire through
+    /// it. Watching IsExpanded instead would catch the folds the code opens
+    /// while loading a persona, and scrolling the page out from under someone
+    /// who clicked nothing is worse than not scrolling at all.</summary>
+    private void OnSectionHeaderClicked(object? sender, RoutedEventArgs e)
+    {
+        // ToggleButton flips IsChecked before it raises Click, and the template
+        // binds that to IsExpanded, so this already reads the new state.
+        if (e.Source is ToggleButton { TemplatedParent: Expander { IsExpanded: true } expander })
+            _ = FollowRevealAsync(expander);
+    }
+
+    /// <summary>The fold's body animates from zero height (see
+    /// <see cref="Rendering.RevealPresenter"/>), so a single BringIntoView at
+    /// click time asks for a strip a few pixels tall and the page barely moves.
+    /// Following the panel while it opens is what puts the new fields on
+    /// screen — and it reads as scrolling rather than as a jump.</summary>
+    private static async Task FollowRevealAsync(Expander expander)
+    {
+        // RevealPresenter.Duration is 200ms; a couple of frames of margin covers
+        // the settling measure pass.
+        var deadline = DateTime.UtcNow + TimeSpan.FromMilliseconds(260);
+        while (DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(16);
+            // Folded again mid-animation, or the window closed under us.
+            if (!expander.IsExpanded || !expander.IsAttachedToVisualTree()) return;
+            expander.BringIntoView();
+        }
     }
 
     public event EventHandler? AccountRequested;
@@ -302,11 +350,17 @@ public partial class SettingsWindow : MolaContentWindow
         ShowSelectedPage();
     }
 
-    internal void OpenPersonaPage(bool startNew)
+    internal void OpenPersonaPage(bool startNew, string? personaId = null)
     {
         PART_Nav.SelectedItem = PART_PersonasNav;
         ShowSelectedPage();
         if (startNew) OnNewPersona(this, new RoutedEventArgs());
+        else if (_personas.Find(personaId) is { } persona)
+        {
+            PART_PersonaSearch.Clear();
+            RefreshPersonaLibrary();
+            PART_PersonaList.SelectedItem = persona;
+        }
     }
 
     internal void RefreshAccountUi()
@@ -817,6 +871,8 @@ public partial class SettingsWindow : MolaContentWindow
             Thinking = row.Thinking,
             ReasoningEffort = row.ReasoningEffort,
             Tools = row.Tools,
+            SupportsTemperature = row.SupportsTemperature,
+            SupportsTopP = row.SupportsTopP,
             ContextWindow = ParseNullableInt(row.ContextWindowText),
             ThinkingParamKind = thinkingKind,
             ThinkingBudgetMin = row.Thinking ? ParseNullableInt(row.BudgetMinText) : null,
@@ -951,6 +1007,8 @@ public partial class SettingsWindow : MolaContentWindow
             Thinking = model.Thinking,
             ReasoningEffort = model.ReasoningEffort,
             Tools = model.Tools,
+            SupportsTemperature = model.SupportsTemperature,
+            SupportsTopP = model.SupportsTopP,
             ContextWindowText = model.ContextWindow?.ToString() ?? string.Empty,
             ThinkingKindIndex = ModelRow.ThinkingKindIndexFor(model.ThinkingParamKind),
             BudgetMinText = model.ThinkingBudgetMin?.ToString() ?? string.Empty,
@@ -2198,10 +2256,16 @@ public partial class SettingsWindow : MolaContentWindow
         _loadingPersonaForm = true;
         try
         {
+            var switched = !ReferenceEquals(PART_PersonaEditor.DataContext, persona);
             PART_PersonaEditor.IsVisible = persona is not null;
-            PART_PersonaEmpty.IsVisible = persona is null;
+            PART_PersonaRail.IsVisible = persona is null;
+            PART_PersonaEditorSurface.IsVisible = persona is not null;
+            PART_PersonaBack.IsVisible = persona is not null;
+            PART_PersonaLibraryActions.IsVisible = persona is null;
+            PART_PersonaPageTitle.Text = persona is null ? "角色" : _editingPersonaIsDraft ? "新建角色" : "编辑角色";
             PART_PersonaFooter.IsVisible = persona is not null;
             PART_PersonaEditor.DataContext = persona;
+            if (switched) PART_PersonaTabs.SelectedIndex = 0;
 
             if (persona is null)
             {
@@ -2222,7 +2286,9 @@ public partial class SettingsWindow : MolaContentWindow
             PART_DuplicatePersona.IsEnabled = !isDraft;
             PART_DeletePersona.IsEnabled = editable && !isDraft;
             PART_SavePersona.IsEnabled = editable;
-            PART_SavePersona.Content = isDraft ? "创建角色" : "保存角色";
+            PART_SavePersona.Content = isDraft ? "创建" : "保存";
+            PART_PersonaMode.SelectedIndex = (int)persona.Mode;
+            LoadRoleProfile();
         }
         finally
         {
@@ -2233,6 +2299,7 @@ public partial class SettingsWindow : MolaContentWindow
     private void OnNewPersona(object? sender, RoutedEventArgs e)
     {
         PersistEditingPersona();
+        PART_PersonaSearch.Clear();
         _loadingPersonaForm = true;
         PART_PersonaList.SelectedItem = null;
         _loadingPersonaForm = false;
@@ -2250,6 +2317,7 @@ public partial class SettingsWindow : MolaContentWindow
 
         PersistEditingPersona();
         var copy = _personas.Duplicate(_editingPersona);
+        RefreshPersonaLibrary();
         PART_PersonaList.SelectedItem = copy;
         PART_PersonaName.Focus();
         PART_PersonaName.SelectAll();
@@ -2285,9 +2353,10 @@ public partial class SettingsWindow : MolaContentWindow
             _loadingPersonaForm = false;
         }
 
-        _editingPersona = next;
+        _editingPersona = null;
         _editingPersonaIsDraft = false;
-        LoadPersonaForm(next);
+        LoadPersonaForm(null);
+        RefreshPersonaLibrary();
     }
 
     private void OnSavePersona(object? sender, RoutedEventArgs e)
@@ -2301,6 +2370,7 @@ public partial class SettingsWindow : MolaContentWindow
         _editingPersonaIsDraft = false;
         _personas.Save(saved);
 
+        RefreshPersonaLibrary();
         _loadingPersonaForm = true;
         PART_PersonaList.SelectedItem = saved;
         _loadingPersonaForm = false;
@@ -2322,6 +2392,10 @@ public partial class SettingsWindow : MolaContentWindow
         if (sender is not Control { Tag: string glyph } || glyph.Length == 0) return;
 
         _editingPersona.Avatar = glyph;
+        _editingPersona.Profile.CardAvatarChanged = true;
+        _editingPersona.Profile.AvatarSourceFile = null;
+        _editingPersona.PendingAvatarSource = null;
+        PART_PersonaIconPicker.Flyout?.Hide();
         if (!_editingPersonaIsDraft) _personas.Save(_editingPersona);
     }
 
@@ -2335,6 +2409,7 @@ public partial class SettingsWindow : MolaContentWindow
         var end = Math.Max(PART_PersonaPrompt.SelectionStart, PART_PersonaPrompt.SelectionEnd);
         PART_PersonaPrompt.Text = text[..start] + token + text[end..];
         PART_PersonaPrompt.CaretIndex = start + token.Length;
+        PART_PersonaVariables.Flyout?.Hide();
         PART_PersonaPrompt.Focus();
 
         if (!_editingPersonaIsDraft)
@@ -2350,9 +2425,13 @@ public partial class SettingsWindow : MolaContentWindow
 
         _editingPersona.Name = PART_PersonaName.Text ?? string.Empty;
         _editingPersona.SystemPrompt = PART_PersonaPrompt.Text ?? string.Empty;
-        _editingPersona.DefaultEnableNetwork = PART_PersonaNetwork.IsChecked;
-        _editingPersona.DefaultEnableWebFetch = PART_PersonaWebFetch.IsChecked;
-        _editingPersona.DefaultThinking = PART_PersonaThinking.IsChecked;
+        _editingPersona.DefaultEnableNetwork = PART_PersonaNetwork.SelectedIndex == 1;
+        _editingPersona.DefaultEnableWebFetch = PART_PersonaWebFetch.SelectedIndex == 1;
+        _editingPersona.DefaultThinking = PART_PersonaThinking.SelectedIndex == 1;
+        _editingPersona.Profile.EnablePython = ToolChoiceValue(PART_PersonaPython.SelectedIndex);
+        _editingPersona.Profile.EnableFileTools = ToolChoiceValue(PART_PersonaFileTools.SelectedIndex);
+        _editingPersona.Profile.EnableImageGeneration = ToolChoiceValue(PART_PersonaImageGeneration.SelectedIndex);
+        _editingPersona.Profile.EnableMcp = ToolChoiceValue(PART_PersonaMcp.SelectedIndex);
     }
 
     private void PersistEditingPersona()

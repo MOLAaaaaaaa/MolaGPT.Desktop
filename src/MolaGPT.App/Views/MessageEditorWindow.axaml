@@ -1,0 +1,19 @@
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
+                        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                        xmlns:views="clr-namespace:MolaGPT.App.Views"
+                        x:Class="MolaGPT.App.Views.MessageEditorWindow"
+                        Title="编辑消息" Width="740" Height="600" MinWidth="480" MinHeight="360"
+                        WindowStartupLocation="CenterOwner">
+  <Grid RowDefinitions="*,Auto" Margin="24,16,24,20">
+    <TextBox Name="PART_Text" Classes="field" AcceptsReturn="True" TextWrapping="Wrap"
+             ScrollViewer.VerticalScrollBarVisibility="Auto" Padding="14,12" />
+    <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,16,0,0">
+      <TextBlock Name="PART_Hint" Classes="hint" VerticalAlignment="Center" Margin="0"
+                 Text="Ctrl+Enter 保存 · Esc 取消" />
+      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10">
+        <Button Name="PART_Cancel" Content="取消" Classes="outline" Padding="18,7" IsCancel="True" />
+        <Button Name="PART_Save" Content="保存" Classes="pillprimary" Padding="18,7" HotKey="Ctrl+Enter" />
+      </StackPanel>
+    </Grid>
+  </Grid>
+</views:MolaContentWindow>

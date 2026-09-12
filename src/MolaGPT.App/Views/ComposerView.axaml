@@ -20,14 +20,14 @@
                          Foreground="{DynamicResource Brush.Primary}" VerticalAlignment="Center" />
               <TextBlock FontSize="12" Foreground="{DynamicResource Brush.Text.Secondary}"
                          VerticalAlignment="Center">
-                <Run Text="已上传 " />
+                <Run Text="已添加 " />
                 <Run Text="{Binding Attachments.Count}"
                      Foreground="{DynamicResource Brush.Primary}" FontWeight="SemiBold" />
                 <Run Text=" 个文件" />
               </TextBlock>
             </StackPanel>
             <Button Grid.Column="1" Padding="6,2" FontSize="12"
-                    Command="{Binding ClearAttachmentsCommand}" ToolTip.Tip="清空所有文件">
+                    Command="{Binding ClearAttachmentsCommand}" ToolTip.Tip="移除全部附件">
               <StackPanel Classes="inlinerow compact" Orientation="Horizontal">
                 <TextBlock Classes="icon" Text="&#xE74D;" FontSize="10" Margin="0,0,3,0"
                            VerticalAlignment="Center" />
@@ -82,52 +82,73 @@
       <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
         <Button Name="PART_Persona" Classes="toolchip"
                 IsVisible="{Binding IsPersonaPickerVisible}"
-                ToolTip.Tip="选择对话角色 / 系统提示词">
+                ToolTip.Tip="切换角色" AutomationProperties.Name="切换角色">
           <StackPanel Classes="inlinerow" Orientation="Horizontal">
-            <TextBlock Classes="icon" Text="{Binding Chat.ActivePersonaAvatar}"
-                       FontSize="13" Margin="0,0,6,0" VerticalAlignment="Center" />
-            <TextBlock Text="{Binding Chat.ActivePersonaName}" VerticalAlignment="Center" />
+            <views:PersonaAvatar Value="{Binding Chat.ActivePersona.Avatar}" Width="20" Height="20"
+                                 Margin="0,0,6,0" VerticalAlignment="Center" />
+            <TextBlock Text="{Binding Chat.ActivePersonaName}" VerticalAlignment="Center" MaxWidth="180" TextTrimming="CharacterEllipsis" />
           </StackPanel>
           <Button.Flyout>
             <Flyout Placement="TopEdgeAlignedLeft" FlyoutPresenterClasses="molaflyout">
-              <Border Classes="flyoutsurface personapanel" MinWidth="340" MaxWidth="420">
-                <Grid RowDefinitions="Auto,*,Auto">
+              <Border Classes="flyoutsurface personapanel" Width="360">
+                <Grid RowDefinitions="Auto,Auto,*,Auto">
                   <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="4,2,4,8">
                     <TextBlock Text="选择角色" FontWeight="SemiBold" FontSize="13"
                                VerticalAlignment="Center" />
                     <Button Grid.Column="1" Name="PART_ClearPersona" Classes="toolchip"
                             Padding="8,2" Height="26" MinHeight="26"
                             IsVisible="False"
-                            Content="清除角色" ToolTip.Tip="恢复默认助手" />
+                            Content="默认助手" ToolTip.Tip="切换为默认助手" />
                   </Grid>
 
-                  <ScrollViewer Grid.Row="1" MaxHeight="360"
-                                VerticalScrollBarVisibility="Auto"
-                                HorizontalScrollBarVisibility="Disabled">
-                    <!-- 图像工作台 used to open from a row at the top of this
-                         list. It moved to the sidebar, beside 新建对话: this
-                         flyout is for personas, and hanging the workbench here
-                         tied its visibility to IsPersonaPickerVisible — which is
-                         false in MolaGPT proxy mode, so users on the hosted
-                         provider could not reach the workbench at all even with
-                         an image model configured. The workbench keeps its own
-                         provider settings and never depended on the chat's. -->
-                    <StackPanel>
-                      <ItemsControl Name="PART_PersonaList">
+                  <!-- Outside the ScrollViewer on purpose: a search field that
+                       scrolls away with its own results is unusable the moment
+                       the list is longer than the popup. Same shape as the model
+                       picker's, from the shared Border.searchbox rule. -->
+                  <Border Grid.Row="1" Classes="searchbox" Height="36" Margin="0,0,0,8" Padding="12,6">
+                    <Grid ColumnDefinitions="Auto,*,Auto">
+                      <TextBlock Classes="icon" Text="&#xE721;" FontSize="12" Margin="0,0,8,0"
+                                 VerticalAlignment="Center" Foreground="{DynamicResource Brush.Text.Muted}" />
+                      <TextBox Grid.Column="1" Name="PART_PersonaSearch" PlaceholderText="搜索角色"
+                               FontSize="{DynamicResource Font.Size.Body}" />
+                      <Button Grid.Column="2" Name="PART_ClearPersonaSearch" Classes="toolchip"
+                              IsVisible="False" Width="24" Height="24" MinHeight="24" Padding="0"
+                              ToolTip.Tip="清空搜索" AutomationProperties.Name="清空搜索">
+                        <TextBlock Classes="icon" Text="&#xE711;" FontSize="10" />
+                      </Button>
+                    </Grid>
+                  </Border>
+
+                  <Panel Grid.Row="2">
+                    <ScrollViewer MaxHeight="320"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                      <!-- 图像工作台 used to open from a row at the top of this
+                           list. It moved to the sidebar, beside 新建对话: this
+                           flyout is for personas, and hanging the workbench here
+                           tied its visibility to IsPersonaPickerVisible — which is
+                           false in MolaGPT proxy mode, so users on the hosted
+                           provider could not reach the workbench at all even with
+                           an image model configured. The workbench keeps its own
+                           provider settings and never depended on the chat's. -->
+                      <ItemsControl Name="PART_PersonaList" XYFocus.NavigationModes="Enabled">
                         <ItemsControl.ItemTemplate>
                           <DataTemplate x:DataType="views:PersonaSelectorRow">
-                            <Button Classes="personarow" Tag="{Binding Id}" Click="OnPickPersona">
-                              <Grid ColumnDefinitions="Auto,*,Auto">
-                                <TextBlock Grid.Column="0" Classes="icon" Text="{Binding Avatar}"
-                                           FontSize="16" Width="28" TextAlignment="Center"
-                                           VerticalAlignment="Center" />
-                                <StackPanel Grid.Column="1" Margin="8,0,0,0">
-                                  <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="13"
-                                             TextTrimming="CharacterEllipsis" />
+                            <Button Classes="personarow" Tag="{Binding Id}" Click="OnPickPersona"
+                                    ToolTip.Tip="{Binding Preview}">
+                              <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+                                <views:PersonaAvatar Grid.Column="0" Value="{Binding Avatar}" VerticalAlignment="Center" />
+                                <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
+                                  <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="13" Foreground="{DynamicResource Brush.Text.Primary}"
+                                             TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                                   <TextBlock Text="{Binding Preview}" Classes="muted" FontSize="12"
-                                             TextTrimming="CharacterEllipsis" />
+                                             IsVisible="{Binding HasPreview}" Margin="0,1,0,0"
+                                             TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                                 </StackPanel>
-                                <TextBlock Grid.Column="2" Classes="icon" Text="&#xE73E;"
+                                <Border Grid.Column="2" Background="{DynamicResource Brush.Bg.Tertiary}" CornerRadius="{DynamicResource Radius.Sm}" Padding="6,2" Margin="8,0,0,0" VerticalAlignment="Center">
+                                  <TextBlock Text="{Binding ModeLabel}" FontSize="12" Foreground="{DynamicResource Brush.Text.Secondary}" />
+                                </Border>
+                                <TextBlock Grid.Column="3" Classes="icon" Text="&#xE73E;"
                                            IsVisible="{Binding IsActive}" FontSize="14"
                                            Foreground="{DynamicResource Brush.Primary}"
                                            Margin="8,0,0,0" VerticalAlignment="Center" />
@@ -136,20 +157,42 @@
                           </DataTemplate>
                         </ItemsControl.ItemTemplate>
                       </ItemsControl>
-                    </StackPanel>
-                  </ScrollViewer>
+                    </ScrollViewer>
+                    <TextBlock Name="PART_PersonaEmpty" Classes="emptystate" IsVisible="False"
+                               Margin="0,26" Text="没有匹配的角色" />
+                  </Panel>
 
-                  <Border Grid.Row="2" BorderBrush="{DynamicResource Brush.Divider}"
+                  <Border Grid.Row="3" BorderBrush="{DynamicResource Brush.Divider}"
                           BorderThickness="0,1,0,0" Padding="4,8,4,0" Margin="0,8,0,0">
-                    <Grid ColumnDefinitions="*,Auto">
-                      <Button Name="PART_NewPersona" Classes="toolchip" HorizontalAlignment="Left">
+                    <Grid ColumnDefinitions="Auto,Auto,*">
+                      <Button Name="PART_NewPersona" Classes="toolchip">
                         <StackPanel Classes="inlinerow compact" Orientation="Horizontal">
                           <TextBlock Classes="icon" Text="&#xE710;" FontSize="12" Margin="0,0,6,0" />
                           <TextBlock Text="新建角色" FontSize="12" />
                         </StackPanel>
                       </Button>
+                      <!-- The labels sit in the same inlinerow.compact box as
+                           「新建角色」 next door, rather than being plain string
+                           content. The class pins LineHeight to 14; a bare
+                           string gets the font's natural 15, and one pixel of
+                           line box is one pixel of baseline — the three labels
+                           did not sit on the same line. -->
                       <Button Grid.Column="1" Name="PART_ManagePersonas" Classes="toolchip"
-                              Content="管理角色" />
+                              Margin="6,0,0,0">
+                        <StackPanel Classes="inlinerow compact" Orientation="Horizontal">
+                          <TextBlock Text="管理角色" FontSize="12" />
+                        </StackPanel>
+                      </Button>
+                      <!-- Same chip vocabulary as its neighbours: a text link
+                           between two chips reads as a different class of
+                           action, which this is not. -->
+                      <Button Grid.Column="2" Name="PART_RoleNewChat" Classes="toolchip"
+                              HorizontalAlignment="Right"
+                              ToolTip.Tip="用当前角色新建对话">
+                        <StackPanel Classes="inlinerow compact" Orientation="Horizontal">
+                          <TextBlock Text="新对话" FontSize="12" />
+                        </StackPanel>
+                      </Button>
                     </Grid>
                   </Border>
                 </Grid>
@@ -504,7 +547,7 @@
       <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     </Style>
-    <Style Selector="Button.personarow:pointerover /template/ Border#PART_Root">
+    <Style Selector="Button.personarow:pointerover /template/ Border#PART_Root, Button.personarow:focus-visible /template/ Border#PART_Root">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
     </Style>
 

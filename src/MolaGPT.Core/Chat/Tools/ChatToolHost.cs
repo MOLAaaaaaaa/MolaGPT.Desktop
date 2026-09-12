@@ -63,7 +63,7 @@ public sealed class ChatToolHost : IChatToolHost
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // A broken MCP server should not prevent the chat request from starting.
+                throw new InvalidOperationException($"无法加载 MCP 服务 {server.Name} 的工具：{ex.Message}", ex);
             }
         }
 

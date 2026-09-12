@@ -28,6 +28,7 @@ public static partial class SystemPromptInterpolator
     {
         if (string.IsNullOrEmpty(template)) return string.Empty;
         if (template.IndexOf("{{", StringComparison.Ordinal) < 0) return template;
+        if (vars.RoleFields is not null) return ExpandRole(template, vars, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
 
         var promptVars = vars;
         return PlaceholderRegex().Replace(template, match =>
@@ -42,6 +43,8 @@ public static partial class SystemPromptInterpolator
                 "model_id"  => promptVars.ModelId ?? match.Value,
                 "provider"  => promptVars.ProviderDisplayName ?? match.Value,
                 "username"  => string.IsNullOrWhiteSpace(promptVars.Username) ? "用户" : promptVars.Username!,
+                "user"      => string.IsNullOrWhiteSpace(promptVars.UserName) ? "用户" : promptVars.UserName!,
+                "char"      => promptVars.CharacterName ?? match.Value,
                 _ => match.Value
             };
         });
@@ -80,4 +83,12 @@ public readonly struct PromptVariables
     public string? ModelId { get; init; }
     public string? ProviderDisplayName { get; init; }
     public string? Username { get; init; }
+    public string? UserName { get; init; }
+    public string? CharacterName { get; init; }
+    public IReadOnlyDictionary<string, string>? RoleFields { get; init; }
+    public string? Original { get; init; }
+    public string? StableSeed { get; init; }
+    public string? GenerationSeed { get; init; }
+    public bool KeepHiddenKeys { get; init; }
+    public IReadOnlyDictionary<string, string>? Outlets { get; init; }
 }

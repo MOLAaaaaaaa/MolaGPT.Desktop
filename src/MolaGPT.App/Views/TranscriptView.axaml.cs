@@ -19,6 +19,12 @@ namespace MolaGPT.App.Views;
 
 public partial class TranscriptView : UserControl
 {
+    public static readonly StyledProperty<bool> AllowMessageEditingProperty =
+        AvaloniaProperty.Register<TranscriptView, bool>(nameof(AllowMessageEditing));
+    public static readonly StyledProperty<bool> IsRoleChatProperty =
+        AvaloniaProperty.Register<TranscriptView, bool>(nameof(IsRoleChat));
+    public bool AllowMessageEditing { get => GetValue(AllowMessageEditingProperty); set => SetValue(AllowMessageEditingProperty, value); }
+    public bool IsRoleChat { get => GetValue(IsRoleChatProperty); set => SetValue(IsRoleChatProperty, value); }
     private const double WheelLinePixels = 32;
     private const double ScrollSpringFrequency = 20;
     private const double ScrollSettleEpsilon = 0.75;
@@ -672,11 +678,89 @@ public partial class TranscriptView : UserControl
 
     /// <summary>Raised for actions the composer owns rather than the row.</summary>
     public event EventHandler<MessageViewModel>? RetryRequested;
+    public event EventHandler<MessageViewModel>? EditRequested;
+    public event EventHandler<MessageViewModel>? ForkRequested;
+    public event EventHandler<MessageViewModel>? ContinueRequested;
+    public event Action<MessageViewModel, int>? BranchSelectionRequested;
+
+    /// <summary>
+    /// One menu for the whole transcript, rebuilt per click.
+    ///
+    /// It was a fresh <c>ContextMenu</c> assigned to <c>anchor.ContextMenu</c>
+    /// each time, which is two bugs in one line: the rows are not recycled, so
+    /// every 「更多」 button in a long conversation kept its own menu alive, and
+    /// assigning ContextMenu also bound the menu to right-click on that button
+    /// for the rest of the session. A MenuFlyout is also the presenter the theme
+    /// actually styles — a ContextMenu renders in its own template and picked up
+    /// none of the app's menu rules.
+    /// </summary>
+    private readonly MenuFlyout _messageMenu = new() { Placement = PlacementMode.BottomEdgeAlignedRight };
+    private readonly Flyout _attemptsFlyout = new() { Placement = PlacementMode.TopEdgeAlignedLeft };
+
+    private void OnChooseAttempt(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Control { DataContext: TranscriptRow row } anchor
+            || row.Message.RetryAttempts is not { Count: > 1 } attempts || row.Message.HistoryLocked) return;
+        var panel = new StackPanel { Spacing = 8 };
+        for (var i = 0; i < attempts.Count; i++)
+        {
+            var index = i;
+            var attempt = attempts[i];
+            var preview = attempt.Content.Replace("\r", "", StringComparison.Ordinal).Trim();
+            if (preview.Length > 260) preview = preview[..260] + "…";
+            var content = new StackPanel { Spacing = 5 };
+            content.Children.Add(new TextBlock { Text = $"版本 {i + 1}" + (i == row.Message.RetryCurrentIndex ? " · 当前" : ""),
+                FontWeight = FontWeight.SemiBold });
+            content.Children.Add(new TextBlock { Text = preview.Length > 0 ? preview : "空回复", TextWrapping = TextWrapping.Wrap });
+            var choose = new Button { Content = content, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                Padding = new Thickness(12, 10) };
+            choose.Classes.Add("outline");
+            choose.Click += (_, _) => { row.Message.ChooseAttempt(index); _attemptsFlyout.Hide(); };
+            panel.Children.Add(choose);
+        }
+        _attemptsFlyout.FlyoutPresenterClasses.Add("molaflyout");
+        _attemptsFlyout.Content = new Border { Classes = { "flyoutsurface" }, Padding = new Thickness(12),
+            Child = new ScrollViewer { Content = panel, Width = 390, MaxHeight = 460, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled } };
+        _attemptsFlyout.ShowAt(anchor);
+    }
+
+    private void OnMessageMore(object? sender, RoutedEventArgs e)
+    {
+        if (!AllowMessageEditing || sender is not Control { DataContext: TranscriptRow row } anchor) return;
+        var message = row.Message;
+
+        _messageMenu.Items.Clear();
+        _messageMenu.Items.Add(MenuEntry("编辑", () => EditRequested?.Invoke(this, message)));
+        if (message.Role == "assistant" && message.IsLatestAssistant && message.FullContent.Length > 0)
+            _messageMenu.Items.Add(MenuEntry("续写", () => ContinueRequested?.Invoke(this, message)));
+        _messageMenu.Items.Add(new MenuItem { Header = "-" });
+        _messageMenu.Items.Add(MenuEntry("从此处建立分支", () => ForkRequested?.Invoke(this, message)));
+        _messageMenu.ShowAt(anchor);
+    }
+
+    private static MenuItem MenuEntry(string header, Action invoke)
+    {
+        var item = new MenuItem { Header = header };
+        item.Click += (_, _) => invoke();
+        return item;
+    }
 
     private void OnRetry(object? sender, RoutedEventArgs e)
     {
         if (sender is Control { DataContext: TranscriptRow row })
             RetryRequested?.Invoke(this, row.Message);
+    }
+
+    private void OnPreviousBranch(object? sender, RoutedEventArgs e)
+    {
+        if (sender is Control { DataContext: TranscriptRow row })
+            BranchSelectionRequested?.Invoke(row.Message, -1);
+    }
+
+    private void OnNextBranch(object? sender, RoutedEventArgs e)
+    {
+        if (sender is Control { DataContext: TranscriptRow row })
+            BranchSelectionRequested?.Invoke(row.Message, 1);
     }
 
     /// <summary>当前打开的响应统计浮窗，以及因悬浮/点击分别持有多久的那个按钮。</summary>

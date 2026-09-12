@@ -24,7 +24,7 @@ public sealed class PiSidecarRuntimeManager
 {
     public const string DefaultManifestUrl =
         "https://chatgpt.wljay.cn/v2/pi-sidecar-win-x64.json";
-    public const int RequiredContractVersion = 2;
+    public const int RequiredContractVersion = 5;
 
     private const string RuntimeDirectoryName = "runtimes";
     private const string StampFileName = ".molagpt-pi-sidecar.json";
@@ -173,6 +173,7 @@ public sealed class PiSidecarRuntimeManager
         }
 
         progress?.Report(new SandboxProgress("extract", 0.88, "正在解压…"));
+        ct.ThrowIfCancellationRequested();
         var target = Path.Combine(
             RuntimeRootDirectory,
             SafeFileName($"{manifest.Version}-contract-{manifest.ContractVersion}"));
@@ -198,6 +199,7 @@ public sealed class PiSidecarRuntimeManager
                     manifest.Version, manifest.ContractVersion, manifest.NodeExecutable, manifest.CliJs, manifest.Extension,
                     DateTimeOffset.UtcNow)));
 
+            ct.ThrowIfCancellationRequested();
             if (Directory.Exists(target)) Directory.Delete(target, recursive: true);
             Directory.Move(staging, target);
         }

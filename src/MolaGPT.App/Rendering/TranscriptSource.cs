@@ -194,6 +194,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         nameof(MessageViewModel.IsPending),
         nameof(MessageViewModel.IsLatestAssistant),
         nameof(MessageViewModel.ModelLabel),
+        nameof(MessageViewModel.PersonaName),
         nameof(MessageViewModel.WasStopped)
     };
 

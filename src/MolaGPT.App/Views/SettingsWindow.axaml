@@ -1,6 +1,7 @@
 <v:MolaContentWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
+        xmlns:m="clr-namespace:MolaGPT.Core.Models;assembly=MolaGPT.Core"
         xmlns:v="clr-namespace:MolaGPT.App.Views"
         xmlns:agents="clr-namespace:MolaGPT.ViewModels.Agents;assembly=MolaGPT.ViewModels"
         xmlns:dto="clr-namespace:MolaGPT.Core.Chat.Agents;assembly=MolaGPT.Core"
@@ -10,7 +11,7 @@
         Title="设置 — MolaGPT"
         HeaderTitle="设置"
         Width="1044" Height="704"
-        CanResize="False"
+        CanResize="True" MinWidth="860" MinHeight="600"
         WindowStartupLocation="CenterOwner"
         Background="{DynamicResource Brush.Bg.Elevated}"
         FontFamily="{DynamicResource Font.Cjk}"
@@ -78,7 +79,7 @@
                 <ListBoxItem Content="会话标题" />
                 <ListBoxItem Content="图像生成" />
                 <ListBoxItem Content="视觉理解" />
-                <ListBoxItem Classes="navgroup" IsEnabled="False" Content="Harness 与环境" />
+                <ListBoxItem Classes="navgroup" IsEnabled="False" Content="工具与环境" />
                 <ListBoxItem Name="PART_SandboxNav" Content="沙箱与文件" />
                 <ListBoxItem Content="审批与安全" />
                 <ListBoxItem Content="MCP 服务器" />
@@ -338,14 +339,8 @@
 
                 <StackPanel Name="PART_ProviderEditor" IsVisible="False">
                   <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,18">
-                    <Button Grid.Column="0" Name="PART_BackProvider" Classes="outline"
-                            Height="34" Padding="10,0" Margin="0,0,12,0"
-                            VerticalAlignment="Center" ToolTip.Tip="返回模型服务">
-                      <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="5">
-                        <TextBlock Classes="icon" Text="&#xE72B;" FontSize="13" />
-                        <TextBlock Text="返回" />
-                      </StackPanel>
-                    </Button>
+                    <Button Grid.Column="0" Name="PART_BackProvider" Classes="outline back"
+                            ToolTip.Tip="返回模型服务" />
                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
                       <TextBlock Name="PART_ProviderEditorTitle" Classes="pagetitle"
                                  FontSize="{DynamicResource Font.Size.Heading}" />
@@ -555,6 +550,8 @@
                               <WrapPanel>
                                 <CheckBox Content="视觉" IsChecked="{Binding Vision, Mode=TwoWay}" Margin="0,0,14,6" />
                                 <CheckBox Content="工具调用" IsChecked="{Binding Tools, Mode=TwoWay}" Margin="0,0,14,6" />
+                                <CheckBox Content="Temperature" IsChecked="{Binding SupportsTemperature, Mode=TwoWay}" Margin="0,0,14,6" />
+                                <CheckBox Content="Top-p" IsChecked="{Binding SupportsTopP, Mode=TwoWay}" Margin="0,0,14,6" />
                                 <CheckBox Content="推理" IsChecked="{Binding Thinking, Mode=TwoWay}" Margin="0,0,14,6" />
                                 <CheckBox Content="推理强度" IsChecked="{Binding ReasoningEffort, Mode=TwoWay}" Margin="0,0,14,6" />
                                 <CheckBox Content="图像编辑" IsChecked="{Binding ImageEdit, Mode=TwoWay}"
@@ -665,150 +662,368 @@
               </StackPanel>
 
               <StackPanel Name="PAGE_Personas" IsVisible="False">
-                <TextBlock Classes="pagetitle" Text="角色" />
-                <TextBlock Classes="pagesubtitle"
-                           Text="为不同场景定义系统提示与默认行为，发起对话时一键切换。" />
+                <Grid Name="PART_PersonaPageHeader" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,18">
+                  <Button Grid.Column="0" Name="PART_PersonaBack" Classes="outline back"
+                          IsVisible="False" ToolTip.Tip="返回角色列表" Click="OnBackToPersonas" />
+                  <TextBlock Grid.Column="1" Name="PART_PersonaPageTitle" Classes="pagetitle" Text="角色" Margin="0" VerticalAlignment="Center" />
+                  <StackPanel Grid.Column="2" Name="PART_PersonaLibraryActions" Orientation="Horizontal" Spacing="8">
+                    <Button Classes="outline" Content="导入" Click="OnImportPersona" Padding="14,6" />
+                    <Button Name="PART_NewPersona" Classes="pillprimary" Content="新建角色" Click="OnNewPersona" Padding="14,6" />
+                  </StackPanel>
+                </Grid>
 
-                <Grid Name="PART_PersonaLayout" ColumnDefinitions="236,1,24,*" Height="500">
-                  <Grid Name="PART_PersonaRail" Grid.Column="0" RowDefinitions="Auto,*,Auto">
-                    <Button Grid.Row="0" Name="PART_NewPersona" Classes="outline"
-                            Content="新建角色" Padding="14,7" Margin="0,0,0,10"
-                            HorizontalAlignment="Stretch" Click="OnNewPersona" />
-
-                    <ListBox Grid.Row="1" Name="PART_PersonaList"
-                             Background="Transparent" BorderThickness="0" Padding="0"
-                             SelectionChanged="OnPersonaSelectionChanged">
+                <Grid Name="PART_PersonaLayout" Height="540">
+                  <Grid Name="PART_PersonaRail" RowDefinitions="Auto,*">
+                    <Grid ColumnDefinitions="*,12,136" Margin="0,0,0,12">
+                    <Border Classes="searchbox" Height="36" Padding="12,6">
+                      <Grid ColumnDefinitions="Auto,*,Auto">
+                        <TextBlock Classes="icon" Text="&#xE721;" FontSize="12" Margin="0,0,10,0" VerticalAlignment="Center" />
+                        <TextBox Grid.Column="1" Name="PART_PersonaSearch" PlaceholderText="搜索角色" TextChanged="OnPersonaSearchChanged" />
+                        <Button Grid.Column="2" Name="PART_ClearPersonaSearch" Classes="toolchip" Width="24" Height="24" MinHeight="24" Padding="0" IsVisible="False" ToolTip.Tip="清空搜索" AutomationProperties.Name="清空搜索">
+                          <TextBlock Classes="icon" Text="&#xE711;" FontSize="10" />
+                        </Button>
+                      </Grid>
+                    </Border>
+                    <ComboBox Grid.Column="2" Name="PART_PersonaModeFilter" Classes="field" Height="36" HorizontalAlignment="Stretch" SelectedIndex="0" AutomationProperties.Name="按角色模式筛选">
+                      <ComboBoxItem Content="全部模式" /><ComboBoxItem Content="对话" /><ComboBoxItem Content="氛围" />
+                    </ComboBox>
+                    </Grid>
+                    <ListBox Grid.Row="1" Name="PART_PersonaList" Classes="plainlist" SelectionChanged="OnPersonaSelectionChanged">
+                      <ListBox.ItemsPanel><ItemsPanelTemplate><UniformGrid Columns="2" VerticalAlignment="Top" /></ItemsPanelTemplate></ListBox.ItemsPanel>
                       <ListBox.ItemTemplate>
                         <DataTemplate x:DataType="vm:PersonaItemViewModel">
-                          <Grid ColumnDefinitions="Auto,*,Auto" Margin="3,6">
-                            <TextBlock Grid.Column="0" Classes="icon"
-                                       Text="{Binding DisplayAvatar}" FontSize="16"
-                                       Width="26" TextAlignment="Center"
-                                       VerticalAlignment="Center" />
-                            <StackPanel Grid.Column="1" Margin="7,0,4,0">
-                              <TextBlock Text="{Binding Name}" FontWeight="SemiBold"
-                                         TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-                              <TextBlock Text="{Binding Preview}"
-                                         FontSize="{DynamicResource Font.Size.XSmall}"
-                                         Foreground="{DynamicResource Brush.Text.Muted}"
-                                         TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-                            </StackPanel>
-                            <TextBlock Grid.Column="2" Classes="icon" Text="&#xE72E;"
-                                       FontSize="11" VerticalAlignment="Center"
-                                       Foreground="{DynamicResource Brush.Text.Muted}"
-                                       IsVisible="{Binding IsBuiltin}"
-                                       ToolTip.Tip="内置角色" />
-                          </Grid>
+                          <Border Classes="personacard" Padding="14" MinHeight="104">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                              <v:PersonaAvatar Value="{Binding Avatar}" Width="38" Height="38" VerticalAlignment="Top" Margin="0,2,12,0" />
+                              <StackPanel Grid.Column="1" Spacing="3">
+                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource Brush.Text.Primary}" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{Binding ModeLabel}" Classes="muted" FontSize="12" />
+                                <TextBlock Text="{Binding Preview}" IsVisible="{Binding HasPreview}" Classes="muted" FontSize="12" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Preview}" />
+                              </StackPanel>
+                              <TextBlock Grid.Column="2" Classes="icon" Text="&#xE72E;" FontSize="11" IsVisible="{Binding IsBuiltin}" ToolTip.Tip="内置角色" />
+                            </Grid>
+                          </Border>
                         </DataTemplate>
                       </ListBox.ItemTemplate>
                     </ListBox>
-
-                    <Border Grid.Row="2" Padding="0,12,0,0" Margin="0,12,0,0"
-                            BorderBrush="{DynamicResource Brush.Divider}"
-                            BorderThickness="0,1,0,0">
-                      <Grid ColumnDefinitions="*,8,*">
-                        <Button Grid.Column="0" Name="PART_DuplicatePersona" Classes="outline"
-                                Content="复制" Padding="12,6" HorizontalAlignment="Stretch"
-                                Click="OnDuplicatePersona" />
-                        <Button Grid.Column="2" Name="PART_DeletePersona" Classes="outline"
-                                Content="删除" Padding="12,6" HorizontalAlignment="Stretch"
-                                Click="OnDeletePersona" />
-                      </Grid>
-                    </Border>
+                    <TextBlock Grid.Row="1" Name="PART_PersonaEmpty" Classes="emptystate" Text="暂无角色" IsVisible="False" />
                   </Grid>
 
-                  <Border Name="PART_PersonaDivider" Grid.Column="1"
-                          Background="{DynamicResource Brush.Divider}" />
+                  <Grid Name="PART_PersonaEditorSurface" RowDefinitions="*,Auto" IsVisible="False">
+                    <Grid Name="PART_PersonaEditor" RowDefinitions="Auto,*" x:DataType="vm:PersonaItemViewModel">
+                      <StackPanel>
+                        <Border Name="PART_PersonaBuiltinHint" IsVisible="False" Margin="0,0,0,12">
+                          <TextBlock Text="内置角色，可复制编辑" Classes="hint" Margin="0" />
+                        </Border>
+                        <Grid ColumnDefinitions="Auto,16,*,16,124" RowDefinitions="Auto,Auto" Margin="0,0,0,12">
+                          <StackPanel Grid.RowSpan="2" Spacing="6" VerticalAlignment="Center">
+                            <Button Name="PART_PersonaIconPicker" Classes="outline" Padding="5" IsEnabled="{Binding !IsBuiltin}" ToolTip.Tip="更换头像">
+                              <v:PersonaAvatar Value="{Binding Avatar}" Width="44" Height="44" />
+                              <Button.Flyout>
+                                <Flyout FlyoutPresenterClasses="molaflyout">
+                                  <Border Classes="flyoutsurface" Padding="12" DataContext="{Binding #PART_PersonaEditor.DataContext}" x:DataType="vm:PersonaItemViewModel">
+                                    <StackPanel Spacing="10">
+                                    <StackPanel Orientation="Horizontal" Spacing="12">
+                                      <Button Name="PART_PersonaImage" Content="上传图片" Classes="textlink" Click="OnPersonaImage" IsEnabled="{Binding !IsBuiltin}" />
+                                      <Button Name="PART_PersonaImageClear" Content="移除图片" Classes="textlink" Click="OnPersonaImageClear" IsEnabled="{Binding !IsBuiltin}" IsVisible="{Binding HasImageAvatar}" />
+                                    </StackPanel>
+                                    <ItemsControl Name="PART_PersonaIcons" Width="234">
+                                      <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                      <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="v:PersonaIconRow">
+                                          <Button Classes="inlineaction" Width="34" Height="34" Margin="2" Tag="{Binding Glyph}" ToolTip.Tip="{Binding Label}" Click="OnPersonaIcon">
+                                            <TextBlock Classes="icon" Text="{Binding Glyph}" FontSize="16" />
+                                          </Button>
+                                        </DataTemplate>
+                                      </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    </StackPanel>
+                                  </Border>
+                                </Flyout>
+                              </Button.Flyout>
+                            </Button>
+                          </StackPanel>
+                          <Grid Grid.Column="2" ColumnDefinitions="*,Auto">
+                            <TextBlock Classes="label" Text="名称" Margin="0" VerticalAlignment="Center" />
+                            <CheckBox Grid.Column="1" Content="收藏" MinHeight="32" Margin="0" Padding="8,0,0,0" FontSize="12" VerticalAlignment="Center" IsChecked="{Binding Pinned, Mode=TwoWay}" IsEnabled="{Binding !IsBuiltin}" Click="OnPersonaFormChanged" />
+                          </Grid>
+                          <TextBlock Grid.Column="4" Classes="label" Text="模式" Margin="0" VerticalAlignment="Center" />
+                          <TextBox Grid.Row="1" Grid.Column="2" Name="PART_PersonaName" Classes="field" Margin="0,6,0,0" Text="{Binding Name, Mode=TwoWay}" LostFocus="OnPersonaFormChanged" />
+                          <ComboBox Grid.Row="1" Grid.Column="4" Name="PART_PersonaMode" Classes="field" Margin="0,6,0,0" HorizontalAlignment="Stretch" IsEnabled="{Binding !IsBuiltin}" SelectionChanged="OnPersonaModeChanged">
+                            <ComboBoxItem Content="对话" /><ComboBoxItem Content="氛围" />
+                          </ComboBox>
+                        </Grid>
+                      </StackPanel>
 
-                  <Grid Name="PART_PersonaEditorSurface" Grid.Column="3">
-                    <Grid RowDefinitions="*,Auto">
-                      <TextBlock Name="PART_PersonaEmpty" Grid.RowSpan="2" Classes="hint"
-                                 Text="选择左侧角色以编辑，或新建一个角色。"
-                                 HorizontalAlignment="Center" VerticalAlignment="Center" />
-
-                      <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto"
-                                    HorizontalScrollBarVisibility="Disabled">
-                        <StackPanel Name="PART_PersonaEditor" IsVisible="False"
-                                    x:DataType="vm:PersonaItemViewModel"
-                                    Margin="18,16,12,16">
-                          <Border Name="PART_PersonaBuiltinHint" IsVisible="False"
-                                  Background="{DynamicResource Brush.Primary.Soft}"
-                                  BorderBrush="{DynamicResource Brush.Primary.Border}"
-                                  BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}"
-                                  Padding="11,8" Margin="0,0,0,14">
-                            <TextBlock Text="此为内置角色。复制后即可编辑。"
-                                       Foreground="{DynamicResource Brush.Primary.Hover}"
-                                       TextWrapping="Wrap" />
-                          </Border>
-
-                          <TextBlock Classes="label" Text="角色名称" />
-                          <TextBox Name="PART_PersonaName" Classes="settingsinput"
-                                   Text="{Binding Name, Mode=TwoWay}"
-                                   LostFocus="OnPersonaFormChanged" />
-
-                          <TextBlock Classes="label" Text="头像图标" Margin="0,14,0,6" />
-                          <ItemsControl Name="PART_PersonaIcons" Margin="0,0,0,8">
-                            <ItemsControl.ItemsPanel>
-                              <ItemsPanelTemplate>
-                                <WrapPanel />
-                              </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                            <ItemsControl.ItemTemplate>
-                              <DataTemplate x:DataType="v:PersonaIconRow">
-                                <Button Classes="inlineaction" Width="32" Height="32"
-                                        Margin="0,0,5,5" Tag="{Binding Glyph}"
-                                        ToolTip.Tip="{Binding Label}" Click="OnPersonaIcon">
-                                  <TextBlock Classes="icon" Text="{Binding Glyph}" FontSize="15" />
-                                </Button>
-                              </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                          </ItemsControl>
-
-                          <TextBlock Classes="label" Text="系统提示词" />
-                          <TextBox Name="PART_PersonaPrompt" Classes="settingsinput"
-                                   Text="{Binding SystemPrompt, Mode=TwoWay}"
-                                   AcceptsReturn="True" TextWrapping="Wrap"
-                                   VerticalContentAlignment="Top"
-                                   ScrollViewer.VerticalScrollBarVisibility="Auto" Height="176"
-                                   LostFocus="OnPersonaFormChanged" />
-
-                          <WrapPanel Name="PART_PersonaVariables" Margin="0,8,0,2">
-                            <TextBlock Classes="hint" Text="插入变量" Margin="0,5,8,0" />
-                            <Button Classes="textlink" Content="{}{{date}}" Tag="{}{{date}}" Click="OnInsertPersonaVariable" />
-                            <Button Classes="textlink" Content="{}{{time}}" Tag="{}{{time}}" Click="OnInsertPersonaVariable" />
-                            <Button Classes="textlink" Content="{}{{model}}" Tag="{}{{model}}" Click="OnInsertPersonaVariable" />
-                            <Button Classes="textlink" Content="{}{{provider}}" Tag="{}{{provider}}" Click="OnInsertPersonaVariable" />
-                            <Button Classes="textlink" Content="{}{{username}}" Tag="{}{{username}}" Click="OnInsertPersonaVariable" />
-                          </WrapPanel>
-
-                          <Expander Name="PART_PersonaDefaultsExpander"
-                                    Header="默认行为" Margin="0,10,0,0">
-                            <StackPanel Name="PART_PersonaDefaults" Spacing="7" Margin="0,10,0,0">
-                              <TextBlock Classes="hint"
-                                         Text="选中后，使用此角色时默认开启对应能力。"
-                                         Margin="0,0,0,4" />
-                              <CheckBox Name="PART_PersonaNetwork" Content="默认开启联网搜索"
-                                        IsChecked="{Binding DefaultEnableNetwork, Mode=TwoWay}"
-                                        Click="OnPersonaFormChanged" />
-                              <CheckBox Name="PART_PersonaWebFetch" Content="默认开启网页阅读"
-                                        IsChecked="{Binding DefaultEnableWebFetch, Mode=TwoWay}"
-                                        Click="OnPersonaFormChanged" />
-                              <CheckBox Name="PART_PersonaThinking" Content="默认开启推理"
-                                        IsChecked="{Binding DefaultThinking, Mode=TwoWay}"
-                                        Click="OnPersonaFormChanged" />
+                      <TabControl Grid.Row="1" Name="PART_PersonaTabs" Classes="molatabs">
+                        <TabItem Header="设定">
+                          <ScrollViewer HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+                            <StackPanel Margin="0,14,0,8" IsEnabled="{Binding !IsBuiltin}">
+                              <TextBlock Classes="label" Text="简介" Margin="0,0,0,6" />
+                              <TextBox Classes="field" Text="{Binding Profile.Summary, Mode=TwoWay}" LostFocus="OnPersonaFormChanged" />
+                              <StackPanel IsVisible="{Binding IsAtmosphereMode}" Margin="0,14,0,0">
+                                <TextBlock Classes="label" Text="角色资料" Margin="0,0,0,6" />
+                                <TextBox Classes="field" Text="{Binding Profile.Description, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="100" MaxHeight="220" LostFocus="OnPersonaFormChanged" />
+                                <TextBlock Classes="label" Text="性格与表达" Margin="0,14,0,6" />
+                                <TextBox Classes="field" Text="{Binding Profile.Personality, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" MaxHeight="160" LostFocus="OnPersonaFormChanged" />
+                                <TextBlock Classes="label" Text="场景" Margin="0,14,0,6" />
+                                <TextBox Classes="field" Text="{Binding Profile.Scenario, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90" MaxHeight="180" LostFocus="OnPersonaFormChanged" />
+                                <!-- Same row as the drop-down, centred in it: see
+                                     ConversationRoleWindow, which carries the same pair. -->
+                                <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" Margin="0,14,0,0">
+                                  <TextBlock Classes="label" Text="我的身份" />
+                                  <ComboBox Grid.Row="1" Name="PART_RoleIdentity" Classes="field" HorizontalAlignment="Stretch" SelectionChanged="OnRoleIdentityChanged">
+                                    <ComboBox.ItemTemplate><DataTemplate x:DataType="v:RoleIdentityChoice"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                                  </ComboBox>
+                                  <Button Grid.Row="1" Grid.Column="1" Content="管理身份" Classes="textlink" Click="OnManageIdentities" Margin="12,0,0,0" VerticalAlignment="Center" />
+                                </Grid>
+                                <Expander Name="PART_RoleExtraDefinitions" Header="更多设定" Classes="settingssection" Margin="0,14,0,0">
+                                  <StackPanel Margin="0,10,0,0">
+                                    <StackPanel Name="PART_RoleManualIdentity">
+                                    <TextBlock Classes="label" Text="你的称呼" Margin="0,0,0,6" />
+                                    <TextBox Classes="field" Text="{Binding Profile.UserName, Mode=TwoWay}" LostFocus="OnPersonaFormChanged" />
+                                    <TextBlock Classes="label" Text="你的身份" Margin="0,14,0,6" />
+                                    <TextBox Classes="field" Text="{Binding Profile.UserDescription, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" MaxHeight="160" LostFocus="OnPersonaFormChanged" />
+                                    </StackPanel>
+                                    <TextBlock Classes="label" Text="对话示例" Margin="0,14,0,6" />
+                                    <TextBox Classes="field" Text="{Binding Profile.ExampleDialogue, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="100" MaxHeight="240" LostFocus="OnPersonaFormChanged" />
+                                    <TextBlock Classes="label" Text="补充指令" Margin="0,14,0,6" />
+                                    <TextBox Classes="field" Text="{Binding Profile.PostHistoryInstructions, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" MaxHeight="160" LostFocus="OnPersonaFormChanged" />
+                                  </StackPanel>
+                                </Expander>
+                              </StackPanel>
+                              <Expander Header="系统提示词" Classes="settingssection" Margin="0,14,0,0" IsExpanded="{Binding !IsAtmosphereMode}">
+                                <StackPanel Margin="0,10,0,0">
+                                  <TextBox Name="PART_PersonaPrompt" Classes="field" Text="{Binding SystemPrompt, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="176" MaxHeight="300" LostFocus="OnPersonaFormChanged" />
+                                  <Button Name="PART_PersonaVariables" Content="插入变量" Classes="textlink" HorizontalAlignment="Left" Margin="0,8,0,0">
+                                    <Button.Flyout>
+                                      <Flyout FlyoutPresenterClasses="molaflyout">
+                                        <Border Classes="flyoutsurface" Padding="12">
+                                          <WrapPanel Width="280">
+                                            <Button Classes="toolchip" Content="日期" Tag="{}{{date}}" Click="OnInsertPersonaVariable" Margin="2" />
+                                            <Button Classes="toolchip" Content="时间" Tag="{}{{time}}" Click="OnInsertPersonaVariable" Margin="2" />
+                                            <Button Classes="toolchip" Content="日期和时间" Tag="{}{{datetime}}" Click="OnInsertPersonaVariable" Margin="2" />
+                                            <Button Classes="toolchip" Content="模型" Tag="{}{{model}}" Click="OnInsertPersonaVariable" Margin="2" />
+                                            <Button Classes="toolchip" Content="模型服务" Tag="{}{{provider}}" Click="OnInsertPersonaVariable" Margin="2" />
+                                            <Button Classes="toolchip" Content="用户名" Tag="{}{{username}}" Click="OnInsertPersonaVariable" Margin="2" />
+                                            <Button Classes="toolchip" Content="角色名称" Tag="{}{{char}}" Click="OnInsertPersonaVariable" Margin="2" />
+                                            <Button Classes="toolchip" Content="你的称呼" Tag="{}{{user}}" Click="OnInsertPersonaVariable" Margin="2" />
+                                          </WrapPanel>
+                                        </Border>
+                                      </Flyout>
+                                    </Button.Flyout>
+                                  </Button>
+                                </StackPanel>
+                              </Expander>
                             </StackPanel>
-                          </Expander>
-                        </StackPanel>
-                      </ScrollViewer>
+                          </ScrollViewer>
+                        </TabItem>
 
-                      <Border Name="PART_PersonaFooter" Grid.Row="1"
-                              BorderBrush="{DynamicResource Brush.Divider}"
-                              BorderThickness="0,1,0,0" Padding="14,10" IsVisible="False">
-                        <Button Name="PART_SavePersona" Classes="pillprimary"
-                                Content="保存角色" Padding="18,7"
-                                HorizontalAlignment="Right" Click="OnSavePersona" />
-                      </Border>
+                        <TabItem Header="开场" IsVisible="{Binding IsAtmosphereMode}">
+                          <ScrollViewer HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+                            <StackPanel Margin="0,14,0,8" IsEnabled="{Binding !IsBuiltin}">
+                              <TextBlock Classes="label" Text="开场白" Margin="0,0,0,6" />
+                              <TextBox Classes="field" Text="{Binding Profile.Greeting, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="156" MaxHeight="280" LostFocus="OnPersonaFormChanged" />
+                              <Expander Name="PART_AlternateGreetingsExpander" Classes="settingssection" Header="备选开场" Margin="0,16,0,0">
+                                <StackPanel Spacing="10" Margin="0,10,0,0">
+                                  <ComboBox Name="PART_AlternateGreetings" Classes="field" HorizontalAlignment="Stretch" PlaceholderText="暂无备选开场白">
+                                    <!-- HorizontalAlignment 必须写死 Left：Avalonia 的 ArrangeCore 把
+                                         Stretch 和 Center 归到同一分支，被 MaxWidth 夹住之后剩余宽度
+                                         左右平分，于是 560 宽的文字在 696 宽的位置里向右挪了 68px。 -->
+                                    <ComboBox.ItemTemplate><DataTemplate x:DataType="x:String"><TextBlock Text="{Binding}" MaxWidth="560" HorizontalAlignment="Left" TextTrimming="CharacterEllipsis" /></DataTemplate></ComboBox.ItemTemplate>
+                                  </ComboBox>
+                                  <StackPanel Orientation="Horizontal" Spacing="14">
+                                    <Button Classes="textlink" Content="添加" Click="OnAddGreeting" />
+                                    <Button Name="PART_EditGreeting" Classes="textlink" Content="编辑" Click="OnEditGreeting" />
+                                    <Button Name="PART_DeleteGreeting" Classes="textlink" Content="删除" Click="OnDeleteGreeting" />
+                                  </StackPanel>
+                                </StackPanel>
+                              </Expander>
+                            </StackPanel>
+                          </ScrollViewer>
+                        </TabItem>
+
+                        <TabItem Header="世界书" IsVisible="{Binding IsAtmosphereMode}">
+                          <ScrollViewer HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+                          <StackPanel Margin="0,14,0,8">
+                            <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+                              <TextBlock Classes="label" Text="角色世界书" VerticalAlignment="Center" Margin="0" />
+                              <Button Grid.Column="1" Name="PART_RoleLorebooks" Classes="outline" Content="管理" Click="OnRoleLorebooks" IsEnabled="{Binding !IsBuiltin}" />
+                            </Grid>
+                            <ItemsControl Name="PART_RoleBooks" ItemTemplate="{StaticResource LorebookSummaryTemplate}" />
+                            <TextBlock Name="PART_RoleBooksEmpty" Classes="hint" Text="角色未添加世界书" Margin="0" />
+                            <Grid ColumnDefinitions="*,Auto" Margin="0,18,0,6">
+                              <TextBlock Classes="label" Text="共享世界书" VerticalAlignment="Center" Margin="0" />
+                              <Button Grid.Column="1" Classes="outline" Content="管理共享库" Click="OnSharedLorebooks" IsEnabled="{Binding !IsBuiltin}" />
+                            </Grid>
+                            <StackPanel Name="PART_SharedBooks" IsEnabled="{Binding !IsBuiltin}" />
+                            <TextBlock Name="PART_SharedBooksEmpty" Classes="hint" Text="共享库为空" Margin="0" />
+                            <StackPanel Name="PART_GlobalLoreBudgetRow" Margin="0,16,0,0" IsEnabled="{Binding !IsBuiltin}">
+                              <TextBlock Classes="label" Text="总预算（tokens）" />
+                              <NumericUpDown Classes="field" Value="{Binding Profile.LoreBudget, Mode=TwoWay}" Minimum="0" Maximum="1000000" FormatString="N0" Width="180" HorizontalAlignment="Left" LostFocus="OnPersonaFormChanged" />
+                            </StackPanel>
+                          </StackPanel>
+                          </ScrollViewer>
+                        </TabItem>
+
+                        <TabItem Header="卡片" IsVisible="{Binding !IsBuiltin}">
+                          <ScrollViewer HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+                            <StackPanel Margin="0,14,0,8" Spacing="12">
+                              <TextBlock Name="PART_CardSummary" Classes="muted" />
+                              <Grid ColumnDefinitions="*,12,*">
+                                <StackPanel>
+                                  <TextBlock Classes="label" Text="角色称呼" />
+                                  <TextBox Classes="field" Text="{Binding Profile.Nickname, Mode=TwoWay}" PlaceholderText="沿用角色名称" LostFocus="OnPersonaFormChanged" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                  <TextBlock Classes="label" Text="兼容方式" />
+                                  <ComboBox Name="PART_RoleCompatibility" Classes="field" HorizontalAlignment="Stretch" SelectionChanged="OnRoleCardOptionsChanged">
+                                    <ComboBoxItem Content="角色卡规范" /><ComboBoxItem Content="SillyTavern" />
+                                  </ComboBox>
+                                </StackPanel>
+                              </Grid>
+                              <Grid ColumnDefinitions="*,12,*">
+                                <StackPanel>
+                                  <TextBlock Classes="label" Text="作者" />
+                                  <TextBox Classes="field" Text="{Binding Profile.Creator, Mode=TwoWay}" LostFocus="OnPersonaFormChanged" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                  <TextBlock Classes="label" Text="角色版本" />
+                                  <TextBox Classes="field" Text="{Binding Profile.CharacterVersion, Mode=TwoWay}" LostFocus="OnPersonaFormChanged" />
+                                </StackPanel>
+                              </Grid>
+                              <StackPanel>
+                                <TextBlock Classes="label" Text="标签" />
+                                <TextBox Classes="field" Text="{Binding TagsText, Mode=TwoWay}" LostFocus="OnPersonaFormChanged" />
+                              </StackPanel>
+                              <StackPanel>
+                                <TextBlock Classes="label" Text="作者说明" />
+                                <TextBox Classes="field" Text="{Binding Profile.CreatorNotes, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="88" MaxHeight="180" LostFocus="OnPersonaFormChanged" />
+                              </StackPanel>
+                              <Expander Name="PART_ImportDetails" Classes="settingssection" Header="导入内容">
+                                <TextBlock Name="PART_ImportNotes" TextWrapping="Wrap" Classes="hint" Margin="0,10,0,0" />
+                              </Expander>
+                              <Expander Classes="settingssection" Header="角色补充" IsVisible="{Binding IsAtmosphereMode}">
+                                <StackPanel Spacing="10" Margin="0,10,0,0">
+                                  <TextBox Classes="field" Text="{Binding Profile.CharacterNote, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="72" LostFocus="OnPersonaFormChanged" />
+                                  <Grid ColumnDefinitions="*,12,*">
+                                    <StackPanel>
+                                      <TextBlock Classes="label" Text="距对话末尾" />
+                                      <NumericUpDown Classes="field" Value="{Binding Profile.CharacterNoteDepth, Mode=TwoWay}" Minimum="0" Maximum="1000" FormatString="0' 条消息'" ToolTip.Tip="0 表示放在对话末尾" LostFocus="OnPersonaFormChanged" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2">
+                                      <TextBlock Classes="label" Text="消息身份" />
+                                      <ComboBox Name="PART_RoleNoteRole" Classes="field" HorizontalAlignment="Stretch" SelectionChanged="OnRoleCardOptionsChanged">
+                                        <ComboBoxItem Content="系统" /><ComboBoxItem Content="用户" /><ComboBoxItem Content="角色" />
+                                      </ComboBox>
+                                    </StackPanel>
+                                  </Grid>
+                                </StackPanel>
+                              </Expander>
+                              <StackPanel Name="PART_ExportBookRow">
+                                <TextBlock Classes="label" Text="随卡导出的世界书" />
+                                <ComboBox Name="PART_ExportBook" Classes="field" HorizontalAlignment="Stretch" SelectionChanged="OnRoleCardOptionsChanged">
+                                  <ComboBox.ItemTemplate><DataTemplate x:DataType="m:Lorebook"><TextBlock Text="{Binding Name}" /></DataTemplate></ComboBox.ItemTemplate>
+                                </ComboBox>
+                              </StackPanel>
+                              <WrapPanel Orientation="Horizontal">
+                                <ComboBox Name="PART_CardExportVersion" Classes="field" Width="90" Margin="0,0,8,8" ToolTip.Tip="导出格式">
+                                  <ComboBoxItem Content="V3" /><ComboBoxItem Content="V2" />
+                                </ComboBox>
+                                <Button Classes="outline" Content="导出 JSON" Tag="json" Click="OnExportPersona" Margin="0,0,8,8" />
+                                <Button Classes="outline" Content="导出 PNG" Tag="png" Click="OnExportPersona" Margin="0,0,8,8" />
+                                <Button Name="PART_UpdateRoleCard" Classes="outline" Content="从文件更新" Click="OnUpdateRoleCard" Margin="0,0,0,8" />
+                              </WrapPanel>
+                            </StackPanel>
+                          </ScrollViewer>
+                        </TabItem>
+                        <TabItem Header="模型与工具">
+                          <ScrollViewer HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+                            <StackPanel Margin="0,14,0,8" IsEnabled="{Binding !IsBuiltin}">
+                              <TextBlock Classes="label" Text="默认模型" Margin="0,0,0,6" />
+                              <ComboBox Name="PART_RoleModel" Classes="field" SelectionChanged="OnRoleModelChanged" HorizontalAlignment="Stretch">
+                                <ComboBox.ItemTemplate><DataTemplate x:DataType="v:RoleModelChoice"><TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" /></DataTemplate></ComboBox.ItemTemplate>
+                              </ComboBox>
+                              <Expander Name="PART_PersonaDefaultsExpander" Classes="settingssection" Header="默认行为" Margin="0,16,0,0" IsExpanded="True">
+                                <StackPanel Name="PART_PersonaDefaults" Margin="0,10,0,0" Spacing="8">
+                                  <Grid ColumnDefinitions="*,12,*,12,*">
+                                    <StackPanel>
+                                      <TextBlock Classes="label" Text="联网搜索" Margin="0,0,0,6" />
+                                      <ComboBox Name="PART_PersonaNetwork" Classes="field" HorizontalAlignment="Stretch" SelectionChanged="OnPersonaFormChanged">
+                                        <ComboBoxItem Content="关闭" /><ComboBoxItem Content="开启" />
+                                      </ComboBox>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2">
+                                      <TextBlock Classes="label" Text="网页阅读" Margin="0,0,0,6" />
+                                      <ComboBox Name="PART_PersonaWebFetch" Classes="field" HorizontalAlignment="Stretch" SelectionChanged="OnPersonaFormChanged">
+                                        <ComboBoxItem Content="关闭" /><ComboBoxItem Content="开启" />
+                                      </ComboBox>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="4">
+                                      <TextBlock Classes="label" Text="推理" Margin="0,0,0,6" />
+                                      <ComboBox Name="PART_PersonaThinking" Classes="field" HorizontalAlignment="Stretch" SelectionChanged="OnPersonaFormChanged">
+                                        <ComboBoxItem Content="关闭" /><ComboBoxItem Content="开启" />
+                                      </ComboBox>
+                                    </StackPanel>
+                                  </Grid>
+                                  <TextBlock Classes="label" Text="工具" Margin="0,8,0,0" />
+                                  <Grid ColumnDefinitions="*,12,*,12,*,12,*">
+                                    <StackPanel>
+                                      <TextBlock Classes="label" Text="Python" Margin="0,0,0,6" />
+                                      <ComboBox Name="PART_PersonaPython" Classes="field" HorizontalAlignment="Stretch" SelectionChanged="OnPersonaFormChanged">
+                                        <ComboBoxItem Content="沿用全局" /><ComboBoxItem Content="启用" /><ComboBoxItem Content="禁用" />
+                                      </ComboBox>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2">
+                                      <TextBlock Classes="label" Text="文件读写" Margin="0,0,0,6" />
+                                      <ComboBox Name="PART_PersonaFileTools" Classes="field" HorizontalAlignment="Stretch" SelectionChanged="OnPersonaFormChanged">
+                                        <ComboBoxItem Content="沿用全局" /><ComboBoxItem Content="启用" /><ComboBoxItem Content="禁用" />
+                                      </ComboBox>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="4">
+                                      <TextBlock Classes="label" Text="图像生成" Margin="0,0,0,6" />
+                                      <ComboBox Name="PART_PersonaImageGeneration" Classes="field" HorizontalAlignment="Stretch" SelectionChanged="OnPersonaFormChanged">
+                                        <ComboBoxItem Content="沿用全局" /><ComboBoxItem Content="启用" /><ComboBoxItem Content="禁用" />
+                                      </ComboBox>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="6">
+                                      <TextBlock Classes="label" Text="MCP" Margin="0,0,0,6" />
+                                      <ComboBox Name="PART_PersonaMcp" Classes="field" HorizontalAlignment="Stretch" SelectionChanged="OnPersonaFormChanged">
+                                        <ComboBoxItem Content="沿用全局" /><ComboBoxItem Content="启用" /><ComboBoxItem Content="禁用" />
+                                      </ComboBox>
+                                    </StackPanel>
+                                  </Grid>
+                                </StackPanel>
+                              </Expander>
+                              <Expander Name="PART_PersonaSamplingExpander" Classes="settingssection" Header="生成参数" Margin="0,16,0,0">
+                                <StackPanel Spacing="8" Margin="0,10,0,0">
+                                  <TextBlock Classes="hint" Text="留空沿用模型设置" Margin="0,0,0,4" />
+                                  <Grid ColumnDefinitions="*,14,*">
+                                    <StackPanel>
+                                      <TextBlock Classes="label" Text="Temperature" Margin="0,0,0,6" />
+                                      <NumericUpDown Name="PART_RoleTemperature" Classes="field" Minimum="0" Maximum="2" Increment="0.1" FormatString="0.##" HorizontalAlignment="Stretch" Value="{Binding Profile.Temperature, Mode=TwoWay}" LostFocus="OnPersonaFormChanged" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2">
+                                      <TextBlock Classes="label" Text="Top-p" Margin="0,0,0,6" />
+                                      <NumericUpDown Name="PART_RoleTopP" Classes="field" Minimum="0" Maximum="1" Increment="0.05" FormatString="0.##" HorizontalAlignment="Stretch" Value="{Binding Profile.TopP, Mode=TwoWay}" LostFocus="OnPersonaFormChanged" />
+                                    </StackPanel>
+                                  </Grid>
+                                  <TextBlock Classes="label" Text="回复长度上限（tokens）" Margin="0,6,0,0" />
+                                  <NumericUpDown Classes="field" Minimum="1" Maximum="1000000" Increment="256" FormatString="0" HorizontalAlignment="Left" Width="180" Value="{Binding Profile.MaxTokens, Mode=TwoWay}" LostFocus="OnPersonaFormChanged" />
+                                </StackPanel>
+                              </Expander>
+                            </StackPanel>
+                          </ScrollViewer>
+                        </TabItem>
+                      </TabControl>
                     </Grid>
+                    <Border Name="PART_PersonaFooter" Grid.Row="1" BorderBrush="{DynamicResource Brush.Divider}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="0,12,0,0">
+                      <Grid ColumnDefinitions="Auto,Auto,*,Auto">
+                        <Button Name="PART_DuplicatePersona" Classes="outline" Content="复制" Padding="14,6" Click="OnDuplicatePersona" />
+                        <Button Grid.Column="1" Name="PART_DeletePersona" Classes="textlink" Content="删除" Margin="12,0,0,0" Click="OnDeletePersona" />
+                        <Button Grid.Column="3" Name="PART_SavePersona" Classes="pillprimary" Content="保存" Padding="18,6" Click="OnSavePersona" />
+                      </Grid>
+                    </Border>
                   </Grid>
                 </Grid>
               </StackPanel>
@@ -1624,20 +1839,9 @@
       <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
       <Setter Property="Margin" Value="0,0,0,6" />
     </Style>
-    <Style Selector="TextBlock.hint">
-      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
-      <Setter Property="TextWrapping" Value="Wrap" />
-      <Setter Property="Margin" Value="0,4,0,0" />
-    </Style>
-    <Style Selector="Border.settingscard">
-      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
-      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
-      <Setter Property="ClipToBounds" Value="True" />
-      <Setter Property="Margin" Value="0,0,0,12" />
-    </Style>
+    <!-- TextBlock.hint and Border.settingscard now live in Theme/Controls.axaml:
+         the role dialogs are separate windows and cannot borrow a rule defined
+         here. Values are unchanged. -->
     <Style Selector="Grid.settingrow">
       <Setter Property="Margin" Value="16,13" />
     </Style>
@@ -1747,6 +1951,23 @@
     <Style Selector="TextBox.settingsinput:focus">
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
     </Style>
+    <Style Selector="Grid#PART_PersonaEditor TextBox[AcceptsReturn=True]">
+      <Setter Property="VerticalContentAlignment" Value="Top" />
+    </Style>
+    <Style Selector="ListBox#PART_PersonaList ListBoxItem">
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Margin" Value="0,0,10,10" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    </Style>
+    <Style Selector="Border.personacard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+    </Style>
+    <Style Selector="ListBoxItem:pointerover Border.personacard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    </Style>
     <Style Selector="ComboBox.settingsinput">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
@@ -1845,6 +2066,24 @@
       <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
       <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
       <Setter Property="Padding" Value="4,2" />
+    </Style>
+    <!-- 二级页面的返回。箭头、文案和尺寸都由样式给，调用方只补一句
+         ToolTip 说明退回到哪一页；角色页原先自己画了一个 textlink 版本，
+         读起来像正文里的链接，而不是和模型服务同一件导航控件。 -->
+    <Style Selector="Button.back">
+      <Setter Property="Height" Value="34" />
+      <Setter Property="Padding" Value="10,0" />
+      <Setter Property="Margin" Value="0,0,12,0" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Content" Value="返回" />
+      <Setter Property="ContentTemplate">
+        <DataTemplate x:DataType="x:String">
+          <StackPanel Classes="inlinerow" Spacing="5">
+            <TextBlock Classes="icon" Text="&#xE72B;" FontSize="13" />
+            <TextBlock Text="{Binding}" />
+          </StackPanel>
+        </DataTemplate>
+      </Setter>
     </Style>
   </Window.Styles>
 </v:MolaContentWindow>

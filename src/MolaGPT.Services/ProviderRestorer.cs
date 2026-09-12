@@ -139,7 +139,9 @@ public static class ProviderRestorer
             SupportsToolCalling: entry.Tools,
             ContextWindow: entry.ContextWindow,
             ThinkingConfig: thinkingConfig,
-            CustomBody: CustomParamConverter.ToBodyDict(entry.CustomBody));
+            CustomBody: CustomParamConverter.ToBodyDict(entry.CustomBody),
+            SupportsTemperature: entry.SupportsTemperature,
+            SupportsTopP: entry.SupportsTopP);
     }
 
     /// <summary>

@@ -72,6 +72,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string _role;
     [ObservableProperty] private string _content;
     [ObservableProperty] private string? _messageId;
+    [ObservableProperty] private string? _parentMessageId;
     [ObservableProperty] private string? _thinking;
     [ObservableProperty] private DateTimeOffset _timestamp;
     [ObservableProperty] private bool _isStreaming;
@@ -83,7 +84,21 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string? _contentPartsJson;
     [ObservableProperty] private IReadOnlyList<MessageAttempt>? _retryAttempts;
     [ObservableProperty] private int _retryCurrentIndex;
-    [ObservableProperty] private bool _isLatestAssistant;
+    [ObservableProperty] private bool _historyLocked;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasPersona))]
+    private string? _personaId;
+    [ObservableProperty] private string? _personaName;
+    [ObservableProperty] private string? _personaAvatar;
+    public event EventHandler<int>? VersionSelected;
+    public bool HasPersona => !string.IsNullOrEmpty(PersonaId);
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanRegenerate))]
+    private bool _isLatestAssistant;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanRegenerate))]
+    private bool _hasPreviousUser;
+    public bool CanRegenerate => IsLatestAssistant && HasPreviousUser;
     [ObservableProperty] private bool _isPending;
     [ObservableProperty] private bool _isRoutesPending;
     [ObservableProperty] private bool _autoCollapseThinkingOnComplete = true;
@@ -260,8 +275,26 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public bool HasAttachments => Attachments is { Count: > 0 };
     public bool HasToolCalls => ToolCalls.Count > 0;
     public string VisibleContent => ProcessCitationRefs(StripSystemHints(Content));
+    public IReadOnlyList<string> BranchSiblingIds { get; private set; } = [];
+    public int BranchIndex { get; private set; }
+    public bool HasBranches => BranchSiblingIds.Count > 1;
+    public bool HasPreviousBranch => BranchIndex > 0;
+    public bool HasNextBranch => BranchIndex + 1 < BranchSiblingIds.Count;
+    public string BranchCounter => HasBranches ? $"{BranchIndex + 1}/{BranchSiblingIds.Count}" : string.Empty;
     public bool HasRetryBar => IsLatestAssistant && RetryAttempts is { Count: > 1 };
     public string RetryCounter => HasRetryBar ? $"{RetryCurrentIndex + 1}/{RetryAttempts!.Count}" : string.Empty;
+
+    public void SetBranchSiblings(IReadOnlyList<string> siblingIds, int currentIndex)
+    {
+        BranchSiblingIds = siblingIds;
+        BranchIndex = currentIndex;
+        OnPropertyChanged(nameof(BranchSiblingIds));
+        OnPropertyChanged(nameof(BranchIndex));
+        OnPropertyChanged(nameof(HasBranches));
+        OnPropertyChanged(nameof(HasPreviousBranch));
+        OnPropertyChanged(nameof(HasNextBranch));
+        OnPropertyChanged(nameof(BranchCounter));
+    }
 
     /// <summary>请求发出到首个输出的秒数；未打点时为空。</summary>
     public double? FirstTokenSeconds =>
@@ -797,6 +830,17 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         RetryCurrentIndex = attempts.Count - 1;
     }
 
+    public void BeginContinuationAttempt()
+    {
+        var previous = CaptureRetryAttempt();
+        BeginRetryAttempt();
+        Content = previous.Content;
+        Thinking = previous.Thinking;
+        if (previous.ToolCalls is not null)
+            foreach (var tool in previous.ToolCalls) ApplyToolDelta(tool);
+        if (previous.ThinkingSegments is not null) RestoreThinkingSegments(previous.ThinkingSegments);
+    }
+
     private MessageAttempt CaptureRetryAttempt()
     {
         var thinkingSegments = ThinkingSegments.Count == 0
@@ -836,7 +880,9 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             thinkingSegments,
             toolCalls,
             FirstTokenSeconds,
-            GenerationSeconds);
+            GenerationSeconds,
+            PersonaId,
+            PersonaName);
     }
 
     [RelayCommand(CanExecute = nameof(CanPreviousAttempt))]
@@ -845,14 +891,23 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(CanNextAttempt))]
     private void NextAttempt() => SelectAttempt(RetryCurrentIndex + 1);
 
-    private bool CanPreviousAttempt() => RetryAttempts is { Count: > 1 } && RetryCurrentIndex > 0;
-    private bool CanNextAttempt() => RetryAttempts is { Count: > 1 } && RetryCurrentIndex < RetryAttempts.Count - 1;
+    private bool CanPreviousAttempt() => !HistoryLocked && !IsStreaming && RetryAttempts is { Count: > 1 } && RetryCurrentIndex > 0;
+    private bool CanNextAttempt() => !HistoryLocked && !IsStreaming && RetryAttempts is { Count: > 1 } && RetryCurrentIndex < RetryAttempts.Count - 1;
 
-    private void SelectAttempt(int index)
+    public void ChooseAttempt(int index)
+    {
+        if (HistoryLocked || IsStreaming || RetryAttempts is null || index < 0 || index >= RetryAttempts.Count) return;
+        SelectAttempt(index);
+    }
+
+    private void SelectAttempt(int index, bool notify = true)
     {
         if (RetryAttempts is not { Count: > 0 } attempts) return;
+        var previousIndex = RetryCurrentIndex;
         index = Math.Max(0, Math.Min(index, attempts.Count - 1));
         var attempt = attempts[index];
+        _pacer.Reset();
+        StopPaceFrames();
 
         // Retry version switching should replace the whole rendered answer,
         // not keep tool/thinking UI fragments from another attempt.
@@ -866,6 +921,8 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         Content = attempt.Content;
         Thinking = attempt.Thinking;
         ModelLabel = attempt.ModelLabel;
+        PersonaId = attempt.PersonaId;
+        PersonaName = attempt.PersonaName;
         Usage = attempt.Usage;
         Sources = attempt.Sources;
         WasStopped = attempt.WasStopped;
@@ -883,6 +940,15 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         // 放在工具卡/思考段恢复之后：ApplyToolDelta 会记首个输出，这里必须覆盖它。
         RestoreTurnTiming(attempt.FirstTokenSeconds, attempt.GenerationSeconds);
         RetryCurrentIndex = index;
+        if (notify) VersionSelected?.Invoke(this, previousIndex);
+    }
+
+    internal void RestoreAttempt(int index) => SelectAttempt(index, false);
+
+    partial void OnHistoryLockedChanged(bool value)
+    {
+        PreviousAttemptCommand.NotifyCanExecuteChanged();
+        NextAttemptCommand.NotifyCanExecuteChanged();
     }
 
     public void StartPending(bool routes)
@@ -1352,7 +1418,9 @@ public sealed record MessageAttempt(
     IReadOnlyList<ThinkingSegmentDelta>? ThinkingSegments = null,
     IReadOnlyList<ToolCallDelta>? ToolCalls = null,
     double? FirstTokenSeconds = null,
-    double? GenerationSeconds = null);
+    double? GenerationSeconds = null,
+    string? PersonaId = null,
+    string? PersonaName = null);
 /// <summary>
 /// Lightweight representation of a sent attachment, kept on the message
 /// view-model after the original <see cref="MolaGPT.Core.Models.Attachment"/>

@@ -27,7 +27,7 @@ public sealed class McpClientManager
                     : tool.Description,
                 parameters = tool.InputSchema.ValueKind == JsonValueKind.Object
                     ? tool.InputSchema
-                    : JsonSerializer.Deserialize<JsonElement>("""{"type":"object","properties":{}}""")
+                    : throw new InvalidDataException($"MCP 工具 {tool.Name} 的参数定义不是对象。")
             }
         }).Cast<object>().ToArray();
     }

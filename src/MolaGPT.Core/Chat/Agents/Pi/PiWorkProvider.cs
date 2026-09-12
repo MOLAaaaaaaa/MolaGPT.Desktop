@@ -2,6 +2,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
@@ -122,6 +123,9 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         if (TakesOpenAiThinkingDialect(creds.Api))
             creds = creds with { ExtraBody = MergeThinking(creds.ExtraBody, request) };
 
+        if (request.HistorySeed is { } history)
+            await WriteHistoryAsync(request.ConversationId, history, creds, ct).ConfigureAwait(false);
+
         // Personas and per-model prompts arrive as system messages. Pi substitutes
         // its own coding-assistant prompt when nobody says otherwise, so failing to
         // forward these would quietly discard whatever the user selected.
@@ -131,10 +135,14 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // extension re-reads this catalogue every turn (before_agent_start) and
         // reconciles Pi's tools in place, so toggling 联网搜索 / 视觉 / MCP costs a
         // catalogue fetch rather than a respawn.
+        string? promptError = null;
+        RolePromptTrace? promptTrace = null;
         var binding = new PiWorkToolBridge.TurnBinding(
             (name, argsJson, toolCt) => _toolHost.ExecuteAsync(name, argsJson, toolContext, options, toolCt),
             () => toolCatalogJson,
-            () => systemPrompt);
+            () => systemPrompt,
+            request.RolePrompt,
+            message => Volatile.Write(ref promptError, message));
 
         var target = new PiWorkLlmShim.ForwardTarget(
             creds.Endpoint,
@@ -144,7 +152,9 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             creds.ExtraBody,
             creds.Auth,
             creds.DropBodyKeys ?? PiEndpointQuirks.DropBodyKeysFor(creds.Endpoint),
-            creds.PathMode);
+            creds.PathMode,
+            new PiWorkLlmShim.GenerationOptions(creds.Api, request.Temperature, request.TopP, request.MaxTokens),
+            request.RolePrompt is null ? null : body => Interlocked.Exchange(ref promptTrace, RolePromptTrace.Read(creds.Api, body)));
 
         // Waits when every slot is busy, which is the point: three turns really are
         // in flight and a fourth process costs more than the wait.
@@ -179,6 +189,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                            .SendTurnAsync(creds.Model, thinkingLevel, userText, images, ct)
                            .ConfigureAwait(false))
         {
+            if (Volatile.Read(ref promptError) is { } roleError) throw new InvalidOperationException(roleError);
+            if (Interlocked.Exchange(ref promptTrace, null) is { } trace) yield return new ChatChunk(PromptTrace: trace);
             var chunk = MapLine(
                 line,
                 options,
@@ -360,18 +372,30 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             creds.ExtraBody);
     }
 
-    /// <summary>
-    /// Forget the newest exchange so the retry that follows regenerates it.
-    ///
-    /// Pi owns the transcript, so the composer trimming its own message list buys
-    /// nothing here: without this, a retry arrives as an ordinary next turn and the
-    /// model answers it with the attempt being replaced — and that attempt's tool
-    /// results — still in view.
-    ///
-    /// Both copies of the turn have to go. A sidecar holds it in memory and the
-    /// next turn resumes from the file, so trimming one without the other just
-    /// moves the problem.
-    /// </summary>
+    /// <summary>Restore the selected history before an explicit session operation.</summary>
+    public Task ReplaceHistoryAsync(string? conversationId, string modelId, IReadOnlyList<ChatMessage> history, CancellationToken ct)
+    {
+        var creds = _config.ResolveCreds(new ChatRequest(modelId, []));
+        return WriteHistoryAsync(conversationId, history, creds, ct);
+    }
+
+    private async Task WriteHistoryAsync(string? conversationId, IReadOnlyList<ChatMessage> history, PiProviderCreds creds, CancellationToken ct)
+    {
+        var key = conversationId ?? PiRuntime.DraftKey;
+        await _runtime.EvictConversationAsync(key).ConfigureAwait(false);
+        var path = PiRuntime.ResolveSessionPath(_config.Spec.SessionRoot, key);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            await File.WriteAllTextAsync(temporaryPath,
+                PiHistorySnapshot.Create(_config.Spec.WorkingDirectory, creds.Api, creds.Model, history), ct).ConfigureAwait(false);
+            File.Move(temporaryPath, path, overwrite: true);
+        }
+        finally { File.Delete(temporaryPath); }
+    }
+
+    /// <summary>Remove the latest user turn and its responses before regenerating it.</summary>
     public async Task<bool> ForgetLastTurnAsync(string? conversationId, CancellationToken ct = default)
     {
         var key = conversationId ?? PiRuntime.DraftKey;

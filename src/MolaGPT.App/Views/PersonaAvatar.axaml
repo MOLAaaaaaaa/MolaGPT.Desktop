@@ -1,0 +1,12 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="MolaGPT.App.Views.PersonaAvatar"
+             Width="28" Height="28">
+  <Border CornerRadius="{DynamicResource Radius.Sm}" ClipToBounds="True">
+    <Grid>
+      <TextBlock Name="PART_Glyph" Classes="icon" FontSize="17" TextWrapping="NoWrap"
+                 HorizontalAlignment="Center" VerticalAlignment="Center" />
+      <Image Name="PART_Image" Stretch="UniformToFill" />
+    </Grid>
+  </Border>
+</UserControl>

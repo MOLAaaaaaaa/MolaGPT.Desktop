@@ -29,6 +29,9 @@ public sealed class BackgroundStreamTask
     /// second copy of the same bubble.
     /// </summary>
     public bool IsRegeneration { get; init; }
+    public bool IsContinuation { get; init; }
+    public IReadOnlyDictionary<string, MolaGPT.Core.Models.LoreActivationState>? RoleStates { get; set; }
+    public string? RoleRevision { get; set; }
 
     public string? SessionId { get; init; }
     public string? ApiUrl { get; set; }

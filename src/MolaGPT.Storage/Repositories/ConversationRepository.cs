@@ -7,7 +7,8 @@ public sealed class ConversationRepository
     private const string SelectColumns =
         "id AS Id, title AS Title, model_id AS ModelId, provider_id AS ProviderId, " +
         "created_at AS CreatedAt, updated_at AS UpdatedAt, pinned AS Pinned, deleted_at AS DeletedAt, " +
-        "system_prompt AS SystemPrompt, persona_id AS PersonaId, system_prompt_mode AS SystemPromptMode";
+        "system_prompt AS SystemPrompt, persona_id AS PersonaId, system_prompt_mode AS SystemPromptMode, " +
+        "role_context_json AS RoleContextJson, active_timeline_id AS ActiveTimelineId";
 
     private readonly MolaGptDatabase _db;
     public ConversationRepository(MolaGptDatabase db) => _db = db;
@@ -38,24 +39,160 @@ public sealed class ConversationRepository
             $"SELECT {SelectColumns} FROM conversations WHERE id = @id", new { id });
     }
 
+    public int CountRoleReference(string id, bool identity)
+    {
+        using var conn = _db.Open();
+        var condition = identity ? "json_extract(role_context_json, '$.userPersonaId') = @id"
+            : "EXISTS (SELECT 1 FROM json_each(role_context_json, '$.sharedLorebookIds') WHERE value = @id)";
+        return conn.ExecuteScalar<int>($"SELECT COUNT(*) FROM conversations WHERE deleted_at IS NULL AND {condition}", new { id });
+    }
+
     public void Upsert(ConversationRow row)
     {
         using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
         conn.Execute(
-            @"INSERT INTO conversations (id, title, model_id, provider_id, created_at, updated_at, pinned, deleted_at, system_prompt, persona_id, system_prompt_mode)
-              VALUES (@Id, @Title, @ModelId, @ProviderId, @CreatedAt, @UpdatedAt, @Pinned, @DeletedAt, @SystemPrompt, @PersonaId, @SystemPromptMode)
+            @"INSERT INTO conversations (id, title, model_id, provider_id, created_at, updated_at, pinned, deleted_at, system_prompt, persona_id, system_prompt_mode, role_context_json, active_timeline_id)
+              VALUES (@Id, @Title, @ModelId, @ProviderId, @CreatedAt, @UpdatedAt, @Pinned, @DeletedAt, @SystemPrompt, @PersonaId, @SystemPromptMode, @RoleContextJson, @ActiveTimelineId)
               ON CONFLICT(id) DO UPDATE SET
                 title=excluded.title, model_id=excluded.model_id, provider_id=excluded.provider_id,
                 updated_at=excluded.updated_at, pinned=excluded.pinned, deleted_at=excluded.deleted_at,
                 system_prompt=excluded.system_prompt, persona_id=excluded.persona_id,
-                system_prompt_mode=excluded.system_prompt_mode",
-            row);
+                system_prompt_mode=excluded.system_prompt_mode, role_context_json=excluded.role_context_json,
+                active_timeline_id=COALESCE(excluded.active_timeline_id, conversations.active_timeline_id)",
+            row, tx);
+
+        var timelineId = conn.ExecuteScalar<string?>(
+            "SELECT active_timeline_id FROM conversations WHERE id = @id", new { id = row.Id }, tx);
+        timelineId ??= row.Id + ":main";
+        conn.Execute(
+            @"INSERT OR IGNORE INTO conversation_timelines
+                (id, conversation_id, leaf_message_id, role_context_json, created_at, updated_at)
+              VALUES (@timelineId, @conversationId, NULL, @roleContext, @createdAt, @updatedAt)",
+            new
+            {
+                timelineId,
+                conversationId = row.Id,
+                roleContext = row.RoleContextJson,
+                createdAt = row.CreatedAt,
+                updatedAt = row.UpdatedAt
+            }, tx);
+        conn.Execute(
+            @"UPDATE conversations SET active_timeline_id = @timelineId WHERE id = @conversationId;
+              UPDATE conversation_timelines
+              SET role_context_json = @roleContext, updated_at = @updatedAt
+              WHERE id = @timelineId AND conversation_id = @conversationId;",
+            new { timelineId, conversationId = row.Id, roleContext = row.RoleContextJson, updatedAt = row.UpdatedAt }, tx);
+        tx.Commit();
     }
 
     public void SoftDelete(string id, long timestampMs)
     {
         using var conn = _db.Open();
         conn.Execute("UPDATE conversations SET deleted_at = @t WHERE id = @id", new { id, t = timestampMs });
+    }
+
+    public void CreateWithMessages(ConversationRow row, IReadOnlyList<MessageRow> messages)
+    {
+        using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
+        var timelineId = row.ActiveTimelineId ?? row.Id + ":main";
+        conn.Execute(
+            @"INSERT INTO conversations (id, title, model_id, provider_id, created_at, updated_at,
+                pinned, deleted_at, system_prompt, persona_id, system_prompt_mode, role_context_json, active_timeline_id)
+              VALUES (@Id, @Title, @ModelId, @ProviderId, @CreatedAt, @UpdatedAt,
+                @Pinned, @DeletedAt, @SystemPrompt, @PersonaId, @SystemPromptMode, @RoleContextJson, @timelineId)",
+            new
+            {
+                row.Id, row.Title, row.ModelId, row.ProviderId, row.CreatedAt, row.UpdatedAt,
+                row.Pinned, row.DeletedAt, row.SystemPrompt, row.PersonaId, row.SystemPromptMode,
+                row.RoleContextJson, timelineId
+            }, tx);
+
+        string? parentId = null;
+        var normalized = new List<MessageRow>(messages.Count);
+        foreach (var message in messages)
+        {
+            var item = message with { ParentId = message.ParentId ?? parentId };
+            normalized.Add(item);
+            parentId = item.Id;
+        }
+        conn.Execute(
+            @"INSERT INTO messages (id, conversation_id, role, content, meta, created_at, parent_id)
+              VALUES (@Id, @ConversationId, @Role, @Content, @Meta, @CreatedAt, @ParentId)", normalized, tx);
+        conn.Execute(
+            @"INSERT INTO conversation_timelines
+                (id, conversation_id, leaf_message_id, role_context_json, created_at, updated_at)
+              VALUES (@timelineId, @conversationId, @leafMessageId, @roleContext, @createdAt, @updatedAt)",
+            new
+            {
+                timelineId,
+                conversationId = row.Id,
+                leafMessageId = normalized.LastOrDefault()?.Id,
+                roleContext = row.RoleContextJson,
+                createdAt = row.CreatedAt,
+                updatedAt = row.UpdatedAt
+            }, tx);
+        tx.Commit();
+    }
+
+    public IReadOnlyList<ConversationTimelineRow> ListTimelines(string conversationId)
+    {
+        using var conn = _db.Open();
+        return conn.Query<ConversationTimelineRow>(
+            @"SELECT id AS Id, conversation_id AS ConversationId, leaf_message_id AS LeafMessageId,
+                     role_context_json AS RoleContextJson, created_at AS CreatedAt, updated_at AS UpdatedAt
+              FROM conversation_timelines
+              WHERE conversation_id = @conversationId
+              ORDER BY updated_at DESC, rowid DESC",
+            new { conversationId }).ToList();
+    }
+
+    public string CreateTimelineWithMessage(MessageRow message, string roleContext)
+    {
+        var timelineId = Guid.NewGuid().ToString("N");
+        using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
+        conn.Execute(
+            @"INSERT INTO messages (id, conversation_id, role, content, meta, created_at, parent_id)
+              VALUES (@Id, @ConversationId, @Role, @Content, @Meta, @CreatedAt, @ParentId)", message, tx);
+        conn.Execute(
+            @"INSERT INTO conversation_timelines
+                (id, conversation_id, leaf_message_id, role_context_json, created_at, updated_at)
+              VALUES (@timelineId, @conversationId, @leafMessageId, @roleContext, @now, @now)",
+            new
+            {
+                timelineId,
+                conversationId = message.ConversationId,
+                leafMessageId = message.Id,
+                roleContext,
+                now = message.CreatedAt
+            }, tx);
+        var updated = conn.Execute(
+            @"UPDATE conversations
+              SET active_timeline_id = @timelineId, role_context_json = @roleContext, updated_at = @now
+              WHERE id = @conversationId",
+            new { timelineId, conversationId = message.ConversationId, roleContext, now = message.CreatedAt }, tx);
+        if (updated != 1) throw new InvalidOperationException("找不到当前对话。");
+        tx.Commit();
+        return timelineId;
+    }
+
+    public void SelectTimeline(string conversationId, string timelineId)
+    {
+        using var conn = _db.Open();
+        var updated = conn.Execute(
+            @"UPDATE conversations
+              SET active_timeline_id = @timelineId,
+                   role_context_json = (
+                     SELECT role_context_json FROM conversation_timelines
+                     WHERE id = @timelineId AND conversation_id = @conversationId)
+              WHERE id = @conversationId
+                AND EXISTS (
+                  SELECT 1 FROM conversation_timelines
+                  WHERE id = @timelineId AND conversation_id = @conversationId)",
+            new { conversationId, timelineId });
+        if (updated != 1) throw new InvalidOperationException("找不到所选时间线。");
     }
 
     public void Rename(string id, string title, long timestampMs)

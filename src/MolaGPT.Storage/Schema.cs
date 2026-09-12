@@ -13,6 +13,8 @@ public sealed record ConversationRow
     public string? SystemPrompt { get; set; }
     public string? PersonaId { get; set; }
     public string? SystemPromptMode { get; set; }
+    public string RoleContextJson { get; set; } = "{}";
+    public string? ActiveTimelineId { get; set; }
 
     public ConversationRow() { }
 
@@ -49,6 +51,7 @@ public sealed record PersonaRow
     public string Name { get; set; } = string.Empty;
     public string? Avatar { get; set; }
     public string SystemPrompt { get; set; } = string.Empty;
+    public string ProfileJson { get; set; } = "{}";
     public bool? DefaultEnableNetwork { get; set; }
     public bool? DefaultEnableWebFetch { get; set; }
     public bool? DefaultThinking { get; set; }
@@ -67,7 +70,16 @@ public sealed record MessageRow(
     string Role,
     string Content,
     string? Meta,
-    long CreatedAt);
+    long CreatedAt,
+    string? ParentId = null);
+
+public sealed record ConversationTimelineRow(
+    string Id,
+    string ConversationId,
+    string? LeafMessageId,
+    string RoleContextJson,
+    long CreatedAt,
+    long UpdatedAt);
 
 public sealed record ImageWorkbenchMessageRow(
     string Id,

@@ -3,6 +3,8 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
 using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Models;
 using MolaGPT.Desktop.Services;
@@ -26,8 +28,31 @@ public partial class ComposerView : UserControl
         PART_ClearPersona.Click += (_, _) => ClearPersona();
         PART_NewPersona.Click += (_, _) => OpenPersonaSettings(true);
         PART_ManagePersonas.Click += (_, _) => OpenPersonaSettings(false);
+        PART_PersonaSearch.TextChanged += (_, _) => RefreshPersonaRows();
+        PART_PersonaSearch.AddHandler(KeyDownEvent, OnPersonaSearchKeyDown, RoutingStrategies.Tunnel);
+        PART_ClearPersonaSearch.Click += (_, _) =>
+        {
+            PART_PersonaSearch.Clear();
+            PART_PersonaSearch.Focus();
+        };
+        PART_RoleNewChat.Click += (_, _) =>
+        {
+            if (DataContext is not ComposerViewModel vm || vm.Chat.ActivePersonaId is not { } id) return;
+            PART_Persona.Flyout?.Hide();
+            try { vm.Chat.StartRoleConversation(id); }
+            catch (Exception ex) { PersonaSelectionFailed?.Invoke(this, ex.Message); }
+            FocusInput();
+        };
         if (PART_Persona.Flyout is { } personaFlyout)
-            personaFlyout.Opened += (_, _) => RefreshPersonaRows();
+            personaFlyout.Opened += (_, _) =>
+            {
+                RefreshPersonaRows();
+                Dispatcher.UIThread.Post(() =>
+                {
+                    PART_PersonaSearch.Focus();
+                    PART_PersonaSearch.SelectAll();
+                });
+            };
 
         // Drop is handled on the whole card, not just the text box: dropping on
         // the padding around the input is the same gesture to a user.
@@ -41,20 +66,35 @@ public partial class ComposerView : UserControl
     public void FocusInput() => PART_Input.Focus();
 
     public event EventHandler<bool>? PersonaSettingsRequested;
+    public event EventHandler<string>? PersonaSelectionFailed;
 
     private void RefreshPersonaRows()
     {
         if (DataContext is not ComposerViewModel vm) return;
 
         PART_ClearPersona.IsVisible = !string.IsNullOrWhiteSpace(vm.Chat.ActivePersonaId);
-        PART_PersonaList.ItemsSource = vm.Personas?.Personas
+        PART_RoleNewChat.IsEnabled = vm.Chat.CanEditHistory && vm.Chat.ActivePersonaId is not null;
+        PART_ClearPersonaSearch.IsVisible = !string.IsNullOrEmpty(PART_PersonaSearch.Text);
+        var search = PART_PersonaSearch.Text?.Trim() ?? "";
+        var rows = vm.Personas?.Personas
+            .Where(persona => search.Length == 0 || persona.Name.Contains(search, StringComparison.OrdinalIgnoreCase)
+                || persona.Preview.Contains(search, StringComparison.OrdinalIgnoreCase)
+                || persona.TagsText.Contains(search, StringComparison.OrdinalIgnoreCase)
+                || persona.Profile.Creator.Contains(search, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(persona => persona.Pinned).ThenBy(persona => persona.SortOrder)
             .Select(persona => new PersonaSelectorRow(
                 persona.Id,
-                persona.DisplayAvatar,
+                persona.Avatar ?? persona.DisplayAvatar,
                 persona.Name,
                 persona.Preview,
+                persona.ModeLabel,
                 string.Equals(persona.Id, vm.Chat.ActivePersonaId, StringComparison.Ordinal)))
-            .ToArray();
+            .ToArray() ?? [];
+        PART_PersonaList.ItemsSource = rows;
+        // Two different empties, two different sentences: "you have no roles" is
+        // an invitation, "your search matched nothing" is a dead end.
+        PART_PersonaEmpty.IsVisible = rows.Length == 0;
+        PART_PersonaEmpty.Text = search.Length > 0 ? "未找到匹配的角色" : "暂无角色";
     }
 
     private void ClearPersona()
@@ -62,15 +102,39 @@ public partial class ComposerView : UserControl
         if (DataContext is not ComposerViewModel vm) return;
         vm.Chat.SaveActivePersona(null);
         PART_Persona.Flyout?.Hide();
+        FocusInput();
     }
 
     private void OnPickPersona(object? sender, RoutedEventArgs e)
     {
-        if (DataContext is not ComposerViewModel vm) return;
         if (sender is not Control { Tag: string id } || string.IsNullOrWhiteSpace(id)) return;
+        PickPersona(id);
+    }
 
-        vm.Chat.SaveActivePersona(id);
+    private void OnPersonaSearchKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyModifiers != KeyModifiers.None || e.Key is not (Key.Down or Key.Up or Key.Enter)) return;
+        var rows = PART_PersonaList.GetVisualDescendants().OfType<Button>();
+        var row = e.Key == Key.Up ? rows.LastOrDefault() : rows.FirstOrDefault();
+        if (row is null) return;
+
+        e.Handled = true;
+        if (e.Key == Key.Enter && row.Tag is string id) PickPersona(id);
+        else
+        {
+            row.Focus(NavigationMethod.Directional);
+            row.BringIntoView();
+        }
+    }
+
+    private void PickPersona(string id)
+    {
+        if (DataContext is not ComposerViewModel vm) return;
+
+        try { vm.Chat.SaveActivePersona(id); }
+        catch (Exception ex) { PersonaSelectionFailed?.Invoke(this, ex.Message); }
         PART_Persona.Flyout?.Hide();
+        FocusInput();
     }
 
     private void OpenPersonaSettings(bool startNew)
@@ -287,4 +351,11 @@ public sealed record PersonaSelectorRow(
     string Avatar,
     string Name,
     string Preview,
-    bool IsActive);
+    string ModeLabel,
+    bool IsActive)
+{
+    /// <summary>Collapses the second line instead of leaving an empty one: a
+    /// blank sub-label still occupies its line box, so rows for personas with no
+    /// summary came out taller than their content.</summary>
+    public bool HasPreview => Preview.Length > 0;
+}

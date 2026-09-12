@@ -120,16 +120,18 @@ public sealed class PiSidecarSession : IAsyncDisposable
                  })
             psi.ArgumentList.Add(arg);
 
+        // Every one of these is required by the extension, which throws at load if
+        // one is missing rather than guessing a value for it. MOLA_PROVIDER_MODEL
+        // and MOLA_PROVIDER_REASONING used to be here too and are gone: the default
+        // model already travels as the `--model` argument above, and per-model
+        // reasoning is a field of each entry in MOLA_PROVIDER_MODELS.
         psi.Environment["MOLA_PROVIDER_BASE_URL"] = _launch.BaseUrl;
         psi.Environment["MOLA_PROVIDER_API_KEY"] = _launch.ApiKey;
-        psi.Environment["MOLA_PROVIDER_MODEL"] = _launch.Model;
         psi.Environment["MOLA_PROVIDER_API"] = _launch.Api;
         psi.Environment["MOLA_PROVIDER_AUTH_HEADER"] = _launch.AuthHeader ? "true" : "false";
-        psi.Environment["MOLA_PROVIDER_REASONING"] = _launch.Reasoning ? "true" : "false";
+        psi.Environment["MOLA_PROVIDER_MODELS"] = _launch.ModelsJson;
         psi.Environment["MOLA_TOOL_CALLBACK_URL"] = _launch.ToolCallbackUrl;
         psi.Environment["MOLA_TOOL_TOKEN"] = _launch.ToolCallbackToken;
-        if (!string.IsNullOrWhiteSpace(_launch.ModelsJson))
-            psi.Environment["MOLA_PROVIDER_MODELS"] = _launch.ModelsJson!;
 
         var proc = Process.Start(psi)
             ?? throw new InvalidOperationException("无法启动 Pi sidecar（node 未找到？）");
@@ -621,7 +623,6 @@ public sealed record PiSidecarLaunchOptions(
     string Model,
     string Api,
     bool AuthHeader,
-    bool Reasoning,
     string ToolCallbackUrl,
     string ToolCallbackToken,
-    string? ModelsJson = null);
+    string ModelsJson);

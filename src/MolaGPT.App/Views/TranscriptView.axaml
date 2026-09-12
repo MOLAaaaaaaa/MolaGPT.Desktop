@@ -5,6 +5,7 @@
              xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
              xmlns:cc="clr-namespace:MolaGPT.Core.Chat;assembly=MolaGPT.Core"
              xmlns:m="clr-namespace:MolaGPT.Core.Models;assembly=MolaGPT.Core"
+             xmlns:views="clr-namespace:MolaGPT.App.Views"
              x:Class="MolaGPT.App.Views.TranscriptView">
 
   <!--
@@ -153,11 +154,32 @@
             </ItemsControl>
 
             <ItemsControl ItemsSource="{Binding Blocks}" />
-            <Button Classes="inlineaction" Width="26" Height="24"
-                    HorizontalAlignment="Right" Margin="0,6,-4,-4"
-                    Click="OnCopyMessage" ToolTip.Tip="复制消息">
-              <TextBlock Classes="icon" Text="&#xE8C8;" FontSize="13" />
-            </Button>
+            <StackPanel Orientation="Horizontal" Spacing="2"
+                        HorizontalAlignment="Right" Margin="0,6,-4,-4">
+              <StackPanel Orientation="Horizontal" IsVisible="{Binding Message.HasBranches}"
+                          IsEnabled="{Binding $parent[views:TranscriptView].AllowMessageEditing}">
+                <Button Classes="inlineaction" Width="26" Height="24" Click="OnPreviousBranch"
+                        IsEnabled="{Binding Message.HasPreviousBranch}" ToolTip.Tip="上一条时间线">
+                  <TextBlock Classes="icon" Text="&#xE72B;" FontSize="11" />
+                </Button>
+                <TextBlock Text="{Binding Message.BranchCounter}" MinWidth="30" FontSize="11"
+                           TextAlignment="Center" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Brush.Text.Muted}" />
+                <Button Classes="inlineaction" Width="26" Height="24" Click="OnNextBranch"
+                        IsEnabled="{Binding Message.HasNextBranch}" ToolTip.Tip="下一条时间线">
+                  <TextBlock Classes="icon" Text="&#xE72A;" FontSize="11" />
+                </Button>
+              </StackPanel>
+              <Button Classes="inlineaction" Width="26" Height="24" Click="OnCopyMessage" ToolTip.Tip="复制消息">
+                <TextBlock Classes="icon" Text="&#xE8C8;" FontSize="13" />
+              </Button>
+              <Button Classes="inlineaction" Width="26" Height="24" Click="OnMessageMore"
+                      ToolTip.Tip="编辑 · 从此处建立分支"
+                      IsVisible="{Binding $parent[views:TranscriptView].IsRoleChat}"
+                      IsEnabled="{Binding $parent[views:TranscriptView].AllowMessageEditing}">
+                <TextBlock Classes="icon" Text="&#xE712;" FontSize="13" />
+              </Button>
+            </StackPanel>
           </StackPanel>
         </Border>
         <Border Classes="useravatar">
@@ -172,9 +194,11 @@
     <DataTemplate DataType="r:HeaderRow">
       <StackPanel Orientation="Horizontal" Margin="0,10,0,8">
         <Border Classes="botavatar">
-          <TextBlock Classes="fa" Text="&#xF544;" FontSize="14"
-                     Foreground="{DynamicResource Brush.Text.Primary}"
-                     HorizontalAlignment="Center" VerticalAlignment="Center" />
+          <Grid>
+            <TextBlock Classes="fa" Text="&#xF544;" FontSize="14" IsVisible="{Binding !Message.HasPersona}"
+                       Foreground="{DynamicResource Brush.Text.Primary}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+            <views:PersonaAvatar Value="{Binding Message.PersonaAvatar}" Width="28" Height="28" IsVisible="{Binding Message.HasPersona}" />
+          </Grid>
         </Border>
         <TextBlock Text="{Binding Label}"
                    Margin="10,0,0,0"
@@ -182,6 +206,8 @@
                    FontSize="13"
                    FontWeight="Medium"
                    Foreground="{DynamicResource Brush.Text.Secondary}" />
+        <TextBlock Text="{Binding Message.ModelLabel}" IsVisible="{Binding Message.HasPersona}"
+                   FontSize="11" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{DynamicResource Brush.Text.Muted}" />
       </StackPanel>
     </DataTemplate>
 
@@ -478,16 +504,30 @@
       <Grid ColumnDefinitions="Auto,*">
         <StackPanel Orientation="Horizontal">
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
+                    Margin="0,0,10,0" IsVisible="{Binding Message.HasBranches}"
+                    IsEnabled="{Binding $parent[views:TranscriptView].AllowMessageEditing}">
+          <Button Classes="inlineaction" Width="28" Height="24" Click="OnPreviousBranch"
+                  IsEnabled="{Binding Message.HasPreviousBranch}" ToolTip.Tip="上一条时间线">
+            <TextBlock Classes="icon" Text="&#xE72B;" FontSize="11" />
+          </Button>
+          <TextBlock Text="{Binding Message.BranchCounter}" MinWidth="32" FontSize="11"
+                     TextAlignment="Center" VerticalAlignment="Center"
+                     Foreground="{DynamicResource Brush.Text.Muted}" />
+          <Button Classes="inlineaction" Width="28" Height="24" Click="OnNextBranch"
+                  IsEnabled="{Binding Message.HasNextBranch}" ToolTip.Tip="下一条时间线">
+            <TextBlock Classes="icon" Text="&#xE72A;" FontSize="11" />
+          </Button>
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
                     Margin="0,0,10,0"
                     IsVisible="{Binding Message.HasRetryBar}">
           <Button Classes="inlineaction" Width="28" Height="24" ToolTip.Tip="上一个回答版本"
                   Command="{Binding Message.PreviousAttemptCommand}">
             <TextBlock Classes="icon" Text="&#xE72B;" FontSize="11" />
           </Button>
-          <TextBlock Text="{Binding Message.RetryCounter}" MinWidth="36"
-                     TextAlignment="Center" VerticalAlignment="Center"
-                     FontSize="{DynamicResource Font.Size.Small}"
-                     Foreground="{DynamicResource Brush.Text.Secondary}" />
+          <Button Content="{Binding Message.RetryCounter}" Classes="inlineaction" MinWidth="36" Height="24"
+                  VerticalContentAlignment="Center" HorizontalContentAlignment="Center"
+                  ToolTip.Tip="查看回答版本" Click="OnChooseAttempt" />
           <Button Classes="inlineaction" Width="28" Height="24" ToolTip.Tip="下一个回答版本"
                   Command="{Binding Message.NextAttemptCommand}">
             <TextBlock Classes="icon" Text="&#xE72A;" FontSize="11" />
@@ -496,11 +536,17 @@
 
         <!-- Retry lives on the composer view model, so it is invoked through the
              view rather than bound: the row's DataContext is the transcript row. -->
-        <Button Classes="inlineaction" Click="OnRetry" ToolTip.Tip="重新回答（使用当前模型）">
+        <Button Classes="inlineaction" Click="OnRetry" ToolTip.Tip="重新回答（使用当前模型）"
+                IsVisible="{Binding Message.CanRegenerate}">
           <TextBlock Classes="icon" Text="&#xE72C;" FontSize="14" />
         </Button>
         <Button Classes="inlineaction" Click="OnCopyMessage" ToolTip.Tip="复制回答">
           <TextBlock Classes="icon" Text="&#xE8C8;" FontSize="14" />
+        </Button>
+        <Button Classes="inlineaction" Click="OnMessageMore" ToolTip.Tip="编辑 · 续写 · 从此处建立分支"
+                IsVisible="{Binding $parent[views:TranscriptView].IsRoleChat}"
+                IsEnabled="{Binding $parent[views:TranscriptView].AllowMessageEditing}">
+          <TextBlock Classes="icon" Text="&#xE712;" FontSize="14" />
         </Button>
         <!-- 悬浮即弹出统计浮窗，点击固定显示。tooltip 会与浮窗抢同一个位置，故不再设置。 -->
         <Button Classes="inlineaction" Click="OnShowStats"
@@ -625,9 +671,15 @@
             <DataTemplate x:DataType="vm:PersonaItemViewModel">
               <Button Classes="personacard liftable" Tag="{Binding Id}" Click="OnPersonaCard">
                 <StackPanel HorizontalAlignment="Center">
-                  <TextBlock Classes="icon" Text="{Binding DisplayAvatar}" FontSize="22"
-                             HorizontalAlignment="Center"
-                             Foreground="{DynamicResource Brush.Primary}" />
+                  <!-- An imported character card carries a portrait, and this
+                       is the one place it used to be dropped for the generic
+                       glyph: DisplayAvatar answers with the fallback glyph
+                       whenever the avatar is an image. PersonaAvatar draws
+                       either kind, and 36px keeps the glyph at the size this
+                       card has always drawn it. -->
+                  <views:PersonaAvatar Value="{Binding Avatar}" Width="36" Height="36"
+                                       HorizontalAlignment="Center"
+                                       Foreground="{DynamicResource Brush.Primary}" />
                   <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold"
                              HorizontalAlignment="Center" Margin="0,6,0,0"
                              TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />

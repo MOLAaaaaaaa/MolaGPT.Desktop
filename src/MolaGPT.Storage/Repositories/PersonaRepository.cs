@@ -5,7 +5,7 @@ namespace MolaGPT.Storage.Repositories;
 public sealed class PersonaRepository
 {
     private const string SelectColumns =
-        "id AS Id, name AS Name, avatar AS Avatar, system_prompt AS SystemPrompt, " +
+        "id AS Id, name AS Name, avatar AS Avatar, system_prompt AS SystemPrompt, profile_json AS ProfileJson, " +
         "default_enable_network AS DefaultEnableNetwork, default_enable_web_fetch AS DefaultEnableWebFetch, " +
         "default_thinking AS DefaultThinking, default_reasoning_effort AS DefaultReasoningEffort, " +
         "sort_order AS SortOrder, pinned AS Pinned, is_builtin AS IsBuiltin, " +
@@ -36,18 +36,27 @@ public sealed class PersonaRepository
         return conn.ExecuteScalar<int>("SELECT COUNT(*) FROM personas");
     }
 
+    public int CountRoleReference(string id, bool identity)
+    {
+        using var conn = _db.Open();
+        var condition = identity ? "json_extract(profile_json, '$.userPersonaId') = @id"
+            : "EXISTS (SELECT 1 FROM json_each(profile_json, '$.sharedLorebookIds') WHERE value = @id)";
+        return conn.ExecuteScalar<int>($"SELECT COUNT(*) FROM personas WHERE deleted_at IS NULL AND {condition}", new { id });
+    }
+
     public void Upsert(PersonaRow row)
     {
         using var conn = _db.Open();
         conn.Execute(
-            @"INSERT INTO personas (id, name, avatar, system_prompt,
+            @"INSERT INTO personas (id, name, avatar, system_prompt, profile_json,
                 default_enable_network, default_enable_web_fetch, default_thinking, default_reasoning_effort,
                 sort_order, pinned, is_builtin, created_at, updated_at, deleted_at)
-              VALUES (@Id, @Name, @Avatar, @SystemPrompt,
+              VALUES (@Id, @Name, @Avatar, @SystemPrompt, @ProfileJson,
                 @DefaultEnableNetwork, @DefaultEnableWebFetch, @DefaultThinking, @DefaultReasoningEffort,
                 @SortOrder, @Pinned, @IsBuiltin, @CreatedAt, @UpdatedAt, @DeletedAt)
               ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, avatar=excluded.avatar, system_prompt=excluded.system_prompt,
+                profile_json=excluded.profile_json,
                 default_enable_network=excluded.default_enable_network,
                 default_enable_web_fetch=excluded.default_enable_web_fetch,
                 default_thinking=excluded.default_thinking,
@@ -74,10 +83,10 @@ public sealed class PersonaRepository
         foreach (var row in seeds)
         {
             conn.Execute(
-                @"INSERT INTO personas (id, name, avatar, system_prompt,
+                @"INSERT INTO personas (id, name, avatar, system_prompt, profile_json,
                     default_enable_network, default_enable_web_fetch, default_thinking, default_reasoning_effort,
                     sort_order, pinned, is_builtin, created_at, updated_at, deleted_at)
-                  VALUES (@Id, @Name, @Avatar, @SystemPrompt,
+                  VALUES (@Id, @Name, @Avatar, @SystemPrompt, @ProfileJson,
                     @DefaultEnableNetwork, @DefaultEnableWebFetch, @DefaultThinking, @DefaultReasoningEffort,
                     @SortOrder, @Pinned, @IsBuiltin, @CreatedAt, @UpdatedAt, @DeletedAt)",
                 row,

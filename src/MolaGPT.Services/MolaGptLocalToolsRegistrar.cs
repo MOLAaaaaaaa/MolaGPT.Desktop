@@ -126,8 +126,7 @@ public sealed class MolaGptLocalToolsRegistrar
                     multiplexedRelay: true),
                 models[0].Id,
                 api,
-                AuthHeader: true,
-                Reasoning: models.Any(m => m.SupportsThinking)),
+                AuthHeader: true),
             request => new PiProviderCreds(
                 endpoint,
                 _ => Task.FromResult(_auth.CurrentJwt),

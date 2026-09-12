@@ -18,7 +18,11 @@ public sealed record ChatRequest(
     int? MaxTokens = null,
     Dictionary<string, object>? ExtraBody = null,
     int? ThinkingBudgetTokens = null,
-    Models.ThinkingParamKind? ThinkingParamKind = null);
+    Models.ThinkingParamKind? ThinkingParamKind = null,
+    double? TopP = null,
+    IReadOnlyList<ChatMessage>? HistorySeed = null,
+    string? HistoryRevision = null,
+    RolePromptPlan? RolePrompt = null);
 
 /// <summary>
 /// Keys the app packs into <see cref="ChatRequest.ExtraBody"/> for its own

@@ -1,0 +1,203 @@
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
+                        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                        xmlns:views="clr-namespace:MolaGPT.App.Views"
+                        xmlns:m="clr-namespace:MolaGPT.Core.Models;assembly=MolaGPT.Core"
+                        x:Class="MolaGPT.App.Views.ConversationRoleWindow"
+                        Title="对话设置" Width="760" Height="700" MinWidth="600" MinHeight="520"
+                        WindowStartupLocation="CenterOwner">
+
+  <!--
+    Everything in here is scoped to one conversation. The role's own defaults are
+    edited in 设置 › 角色; this window only records where they were overridden, so
+    every field falls back to the role when it is left alone.
+
+    Fields use the shared Classes="field" / Classes="label" vocabulary rather than
+    implicit TextBox rules of their own: the base TextBox theme is deliberately
+    chrome-less, and a second private form style drifts from the first the moment
+    either is touched.
+  -->
+
+  <Grid RowDefinitions="Auto,*,Auto" Margin="24,16,24,20">
+
+    <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,12">
+    <Grid ColumnDefinitions="Auto,*">
+      <views:PersonaAvatar Name="PART_Avatar" Width="38" Height="38" VerticalAlignment="Center" Margin="0,0,12,0" />
+      <StackPanel Grid.Column="1" VerticalAlignment="Center">
+        <TextBlock Name="PART_RoleName" FontWeight="SemiBold" FontSize="16" TextWrapping="NoWrap"
+                   TextTrimming="CharacterEllipsis" />
+        <TextBlock Classes="hint" Margin="0,1,0,0" Text="当前对话" />
+      </StackPanel>
+    </Grid>
+    <TextBlock Grid.Column="1" Name="PART_ModeLabel" Classes="hint" Margin="12,0,0,0" VerticalAlignment="Center" />
+    </Grid>
+
+    <TabControl Grid.Row="1" Name="PART_ConversationTabs" Classes="molatabs">
+      <TabItem Name="PART_PromptTab" Header="回复">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+          <StackPanel Margin="0,16,0,8">
+            <TextBlock Classes="label" Text="提示词" Margin="0,0,0,6" />
+            <ComboBox Name="PART_PromptSource" Classes="field" HorizontalAlignment="Stretch">
+              <ComboBoxItem Name="PART_InheritPrompt" Content="使用默认提示词" />
+              <ComboBoxItem Content="补充要求" />
+              <ComboBoxItem Name="PART_ReplacePrompt" Content="替换提示词" />
+            </ComboBox>
+            <TextBox Name="PART_ConversationPrompt" Classes="field" AcceptsReturn="True" TextWrapping="Wrap"
+                     MinHeight="220" MaxHeight="340" Margin="0,14,0,0" PlaceholderText="填写回复要求"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto" />
+            <Button Name="PART_PromptVariables" Content="插入变量" Classes="textlink" HorizontalAlignment="Left" Margin="0,8,0,0">
+              <Button.Flyout>
+                <Flyout FlyoutPresenterClasses="molaflyout">
+                  <Border Classes="flyoutsurface" Padding="12">
+                    <WrapPanel Width="280">
+                      <Button Classes="toolchip" Content="日期" Tag="{}{{date}}" Click="OnInsertPromptVariable" Margin="2" />
+                      <Button Classes="toolchip" Content="时间" Tag="{}{{time}}" Click="OnInsertPromptVariable" Margin="2" />
+                      <Button Classes="toolchip" Content="日期和时间" Tag="{}{{datetime}}" Click="OnInsertPromptVariable" Margin="2" />
+                      <Button Classes="toolchip" Content="模型" Tag="{}{{model}}" Click="OnInsertPromptVariable" Margin="2" />
+                      <Button Classes="toolchip" Content="模型服务" Tag="{}{{provider}}" Click="OnInsertPromptVariable" Margin="2" />
+                      <Button Classes="toolchip" Content="用户名" Tag="{}{{username}}" Click="OnInsertPromptVariable" Margin="2" />
+                      <Button Classes="toolchip" Content="角色名称" Tag="{}{{char}}" Click="OnInsertPromptVariable" Margin="2" />
+                      <Button Classes="toolchip" Content="你的称呼" Tag="{}{{user}}" Click="OnInsertPromptVariable" Margin="2" />
+                    </WrapPanel>
+                  </Border>
+                </Flyout>
+              </Button.Flyout>
+            </Button>
+            <Expander Name="PART_DefaultPromptExpander" Classes="settingssection" Header="默认提示词" Margin="0,14,0,0">
+              <StackPanel Margin="0,10,0,0">
+                <SelectableTextBlock Name="PART_DefaultPrompt" TextWrapping="Wrap" />
+                <Button Name="PART_UseDefaultPrompt" Classes="textlink" Content="基于默认提示词编辑" HorizontalAlignment="Left" Margin="0,8,0,0" />
+              </StackPanel>
+            </Expander>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- ============================== 设定 ============================= -->
+      <TabItem Name="PART_AtmosphereTab" Header="角色">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+          <StackPanel Margin="0,16,0,8">
+            <!-- The link gets the drop-down's own row and is centred in it. Bottom
+                 -aligning it against the label+field column instead put its single
+                 line 10px below the field's text, which reads as a misprint. -->
+            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" Margin="0,0,0,14">
+              <TextBlock Classes="label" Text="我的身份" />
+              <ComboBox Grid.Row="1" Name="PART_IdentityChoice" Classes="field" HorizontalAlignment="Stretch">
+                <ComboBox.ItemTemplate><DataTemplate x:DataType="views:RoleIdentityChoice"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+              </ComboBox>
+              <Button Grid.Row="1" Grid.Column="1" Name="PART_ManageIdentities" Content="管理身份" Classes="textlink" Click="OnManageIdentities" VerticalAlignment="Center" Margin="12,0,0,0" />
+            </Grid>
+            <TextBlock Classes="label" Text="称呼" Margin="0,0,0,6" />
+            <TextBox Name="PART_UserName" Classes="field" />
+
+            <TextBlock Classes="label" Text="身份设定" Margin="0,16,0,6" />
+            <TextBox Name="PART_UserDescription" Classes="field" AcceptsReturn="True" TextWrapping="Wrap"
+                     MinHeight="92" MaxHeight="170" ScrollViewer.VerticalScrollBarVisibility="Auto" />
+
+            <TextBlock Classes="label" Text="当前场景" Margin="0,16,0,6" />
+            <TextBox Name="PART_Scenario" Classes="field" AcceptsReturn="True" TextWrapping="Wrap"
+                     MinHeight="112" MaxHeight="210" ScrollViewer.VerticalScrollBarVisibility="Auto" />
+            <Expander Header="对话补充" Classes="settingssection" Margin="0,14,0,0">
+              <StackPanel Margin="0,10,0,0" Spacing="10">
+                <TextBox Name="PART_AuthorNote" Classes="field" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="80" MaxHeight="180" />
+                <Grid ColumnDefinitions="*,12,*">
+                  <StackPanel><TextBlock Classes="label" Text="距对话末尾" /><NumericUpDown Name="PART_AuthorNoteDepth" Classes="field" Minimum="0" Maximum="1000" FormatString="0' 条消息'" ToolTip.Tip="0 表示放在对话末尾" /></StackPanel>
+                  <StackPanel Grid.Column="2"><TextBlock Classes="label" Text="消息身份" /><ComboBox Name="PART_AuthorNoteRole" Classes="field" HorizontalAlignment="Stretch"><ComboBoxItem Content="系统" /><ComboBoxItem Content="用户" /><ComboBoxItem Content="角色" /></ComboBox></StackPanel>
+                </Grid>
+              </StackPanel>
+            </Expander>
+
+            <StackPanel Name="PART_GreetingPanel" Margin="0,16,0,0">
+              <TextBlock Classes="label" Text="开场白" Margin="0,0,0,6" />
+              <ComboBox Name="PART_Greetings" Classes="field" HorizontalAlignment="Stretch" />
+              <TextBlock Classes="hint" Text="保存后替换当前对话的开场白" />
+            </StackPanel>
+
+            <Button Name="PART_Reset" Content="恢复角色设定" Classes="textlink"
+                    HorizontalAlignment="Left" Margin="0,18,0,0" />
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- ============================== 剧情 ============================= -->
+      <TabItem Name="PART_StoryTab" Header="剧情">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+          <StackPanel Name="PART_StoryEditor" Margin="0,16,0,8">
+
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Classes="label" Text="剧情摘要" VerticalAlignment="Center" Margin="0" />
+              <Button Grid.Column="1" Name="PART_Generate" Content="整理剧情" Classes="outline" Padding="12,5" />
+            </Grid>
+            <TextBox Name="PART_Summary" Classes="field" AcceptsReturn="True" TextWrapping="Wrap"
+                     MinHeight="128" MaxHeight="230" Margin="0,6,0,0"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto" />
+            <TextBlock Name="PART_GenerateHint" Classes="hint" IsVisible="False" />
+            <CheckBox Name="PART_AutoSummary" Content="每 20 条消息自动整理" Margin="0,12,0,0" />
+
+            <Grid ColumnDefinitions="*,Auto" Margin="0,20,0,0">
+              <TextBlock Classes="label" Text="剧情事件" VerticalAlignment="Center" Margin="0" />
+              <Button Grid.Column="1" Name="PART_AddMemory" Content="添加事件" Classes="textlink" />
+            </Grid>
+
+            <!-- Edited in place, one card per event, rather than a list plus a
+                 detail box below it. Master-detail printed the selected event
+                 twice on the same screen — with a single short event the two
+                 copies sat 30px apart and read as a rendering fault. There are
+                 at most a handful of these, so they all fit open. -->
+            <StackPanel Name="PART_MemoryList" Spacing="8" Margin="0,8,0,0" />
+            <TextBlock Name="PART_MemoryEmpty" Classes="emptystate" Margin="0,20"
+                       Text="暂无剧情事件" />
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- ============================= 世界书 ============================ -->
+      <TabItem Name="PART_LoreTab" Header="世界书">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+          <StackPanel Margin="0,16,0,8" Spacing="12">
+            <StackPanel>
+              <TextBlock Classes="label" Text="角色世界书" Margin="0,0,0,8" />
+              <ItemsControl Name="PART_CharacterBooks" ItemTemplate="{StaticResource LorebookSummaryTemplate}" />
+              <TextBlock Name="PART_NoCharacterBooks" Classes="hint" Text="角色未添加世界书" Margin="0" />
+            </StackPanel>
+            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" Margin="0,4,0,0">
+                <TextBlock Classes="label" Text="共享世界书" Margin="0" VerticalAlignment="Center" />
+                <Button Grid.Column="1" Classes="outline" Content="管理共享库" Click="OnManageSharedBooks" Margin="12,0,0,0" />
+              <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Margin="0,8,0,0">
+                <ComboBox Name="PART_LoreSource" Classes="field" HorizontalAlignment="Stretch">
+                  <ComboBoxItem Content="沿用角色关联" /><ComboBoxItem Content="为当前对话选择" />
+                </ComboBox>
+              </StackPanel>
+            </Grid>
+            <ItemsControl Name="PART_InheritedBooks" ItemTemplate="{StaticResource LorebookSummaryTemplate}" />
+            <StackPanel Name="PART_ConversationBooks" />
+            <TextBlock Name="PART_NoSharedBooks" Classes="hint" Text="未关联共享世界书" Margin="0" />
+            <TextBlock Name="PART_LoreCaption" Classes="label" Text="匹配结果" Margin="0,12,0,0" />
+            <StackPanel Name="PART_LoreHits" Spacing="8" />
+            <TextBlock Name="PART_LoreEmpty" Classes="hint" Text="尚无匹配记录" Margin="0" />
+            <Expander Name="PART_LoreDecisionPanel" Header="匹配详情" Classes="settingssection">
+              <StackPanel Name="PART_LoreDecisions" Margin="0,10,0,0" />
+            </Expander>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Name="PART_ContextTab" Header="上下文">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+          <StackPanel Margin="0,16,0,8">
+            <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,14">
+              <TextBlock Name="PART_RequestCaption" Classes="hint" VerticalAlignment="Center" />
+              <Button Grid.Column="1" Name="PART_RefreshRequest" Content="刷新" Classes="textlink" />
+            </Grid>
+            <TextBlock Name="PART_ContextBudget" Classes="hint" Margin="0,0,0,12" TextWrapping="Wrap" />
+            <StackPanel Name="PART_RequestMessages" />
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+    </TabControl>
+
+    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10" Margin="0,16,0,0">
+      <Button Name="PART_Cancel" Content="取消" Classes="outline" Padding="18,7" IsCancel="True" />
+      <Button Name="PART_Save" Content="保存" Classes="pillprimary" Padding="18,7"
+              HotKey="Ctrl+Enter" ToolTip.Tip="保存 (Ctrl+Enter)" />
+    </StackPanel>
+  </Grid>
+</views:MolaContentWindow>

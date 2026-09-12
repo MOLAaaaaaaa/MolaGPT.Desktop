@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -85,6 +85,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// <summary>Generates a title for the first successful turn of a local
     /// BYOK/Work conversation. The desktop host supplies the persistence service.</summary>
     public Func<string, string?, string?, CancellationToken, Task<string?>>? LocalConversationTitleAsync { get; set; }
+    public Func<string, string?, string?, CancellationToken, Task>? AutoStorySummaryAsync { get; set; }
 
     private Func<Task<bool>>? _ensureAgentRuntimeAsync;
     public Func<Task<bool>>? EnsureAgentRuntimeAsync
@@ -148,9 +149,12 @@ public sealed partial class ComposerViewModel : ObservableObject
         _personas = personas;
         _attachmentStore = attachmentStore;
         _skills = skills;
+        _chat.RoleOptionsRequested += ApplyRoleOptions;
+        ApplyRoleOptions(true);
         WireContextGauge();
         _chat.PropertyChanged += (_, e) =>
         {
+            if (e.PropertyName == nameof(ChatViewModel.ActivePersona)) ApplyRoleOptions(true);
             if (e.PropertyName is nameof(ChatViewModel.ConversationId))
                 PruneOrphanedArtifactContexts();
             if (e.PropertyName is nameof(ChatViewModel.ActiveProvider) or nameof(ChatViewModel.ActiveModel))
@@ -290,7 +294,14 @@ public sealed partial class ComposerViewModel : ObservableObject
         {
             var model = _chat.ActiveModel?.Id
                         ?? throw new InvalidOperationException("尚未选择模型。");
-            var result = await agent.CompactAsync(_chat.ConversationId, model, null, ct);
+            var conversationId = _chat.ConversationId;
+            if (_chat.RoleContext.NeedsHistorySync)
+            {
+                var revision = _chat.RoleContext.HistoryRevision;
+                await agent.ReplaceHistoryAsync(conversationId, model, BuildContinuationHistorySeed(), ct);
+                if (conversationId is not null) _chat.MarkHistorySynchronized(conversationId, revision);
+            }
+            var result = await agent.CompactAsync(conversationId, model, null, ct);
             return new ContextGaugeViewModel.CompactionSizes(
                 result?.TokensBefore ?? 0,
                 result?.EstimatedTokensAfter ?? 0);
@@ -362,17 +373,20 @@ public sealed partial class ComposerViewModel : ObservableObject
     private bool CanUseByokImageGenerationTool =>
         _chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy
         && _chat.ActiveModel?.SupportsToolCalling == true
-        && _settings?.IsImageGenerationConfigured == true;
+        && _settings?.IsImageGenerationConfigured == true
+        && _chat.ActivePersona?.Profile.EnableImageGeneration != false;
 
     private bool CanUseByokPythonTool =>
         _chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy
         && _chat.ActiveModel?.SupportsToolCalling == true
-        && _settings?.PythonToolEnabled == true;
+        && _settings is not null
+        && (_chat.ActivePersona?.Profile.EnablePython ?? _settings.PythonToolEnabled);
 
     private bool CanUseByokFileTools =>
         _chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy
         && _chat.ActiveModel?.SupportsToolCalling == true
-        && _settings?.FileToolsEnabled == true;
+        && _settings is not null
+        && (_chat.ActivePersona?.Profile.EnableFileTools ?? _settings.FileToolsEnabled);
 
     public IReadOnlyList<ImageGenerationOption> ImageAspectRatioOptions { get; } =
     [
@@ -522,13 +536,15 @@ public sealed partial class ComposerViewModel : ObservableObject
         var isMolaGptImageGenerationSend =
             _chat.ActiveProvider.Kind == ProviderKind.MolaGptProxy && IsImageGenerationMode;
         var generateLocalTitleOnCompletion =
-            _chat.IsEmpty && _chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
+            !_chat.Messages.Any(message => message.Role == ChatMessage.RoleUser)
+            && _chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
         if (isMolaGptImageGenerationSend && string.IsNullOrWhiteSpace(Text))
             return;
 
         if (string.IsNullOrEmpty(_chat.ConversationId))
             _chat.ConversationId = CreateWebCompatibleConversationId();
 
+        _chat.EnsureRoleGreeting();
         var userText = Text;
         var queuedAttachments = Attachments.ToList();
         Text = string.Empty;
@@ -696,24 +712,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null))
             .ToList();
 
-        var systemPrompt = ResolveSystemPrompt();
-        if (!string.IsNullOrWhiteSpace(systemPrompt))
-            msgs.Insert(0, new ChatMessage("system", systemPrompt));
-
-        var extras = BuildExtras();
-        var thinkingKind = ResolveActiveThinkingParamKind();
-
-        var req = new ChatRequest(
-            ModelId: model.Id,
-            Messages: msgs,
-            ConversationId: conversationId,
-            SessionId: Guid.NewGuid().ToString("N"),
-            UseThinking: IsThinkingEnabled,
-            ReasoningEffort: IsReasoningEffortVisible ? ReasoningEffort : null,
-            ExtraBody: extras,
-            ThinkingBudgetTokens: IsThinkingEnabled ? ThinkingBudgetTokens : null,
-            ThinkingParamKind: thinkingKind);
-
+        var generationId = Guid.NewGuid().ToString("N");
         var streamContext = new BackgroundStreamTask
         {
             ConversationId = conversationId,
@@ -725,20 +724,33 @@ public sealed partial class ComposerViewModel : ObservableObject
             AssistantMessage = assistantMsg,
             Cts = cts,
             StreamTask = Task.CompletedTask,
-            SessionId = req.SessionId,
+            SessionId = generationId,
+            RoleRevision = _chat.RoleContext.HistoryRevision,
             GenerateTitleOnCompletion = generateLocalTitleOnCompletion
         };
         _activeTask = streamContext;
 
-        var streamTask = RunStreamLoopAsync(provider, req, assistantMsg, cts, streamContext);
-        streamContext.StreamTask = streamTask;
-        _activeStreamTask = streamTask;
         var wasCancelled = false;
         string? failureMessage = null;
 
         try
         {
+            var maxTokens = ResolveRoleMaxTokens(model);
+            var role = PrepareRolePrompt(assistantMsg, generationId, false, maxTokens);
+            streamContext.RoleStates = role?.Lore.States;
+            var systemPrompt = ResolveSystemPrompt(role?.SystemPrompt);
+            if (!string.IsNullOrWhiteSpace(systemPrompt)) msgs.Insert(0, new ChatMessage("system", systemPrompt));
+            var req = new ChatRequest(
+                ModelId: model.Id, Messages: msgs, ConversationId: conversationId, SessionId: generationId,
+                UseThinking: IsThinkingEnabled, ReasoningEffort: IsReasoningEffortVisible ? ReasoningEffort : null,
+                ExtraBody: BuildExtras(), ThinkingBudgetTokens: IsThinkingEnabled ? ThinkingBudgetTokens : null,
+                ThinkingParamKind: ResolveActiveThinkingParamKind(), RolePrompt: role?.Plan);
+            req = ApplyRoleRequestOptions(req, BuildHistorySeed(userMsg), maxTokens);
+            var streamTask = RunStreamLoopAsync(provider, req, assistantMsg, cts, streamContext);
+            streamContext.StreamTask = streamTask;
+            _activeStreamTask = streamTask;
             await streamContext.StreamTask;
+            _chat.MarkHistorySynchronized(conversationId, req.HistoryRevision);
         }
         catch (OperationCanceledException)
         {
@@ -930,6 +942,8 @@ public sealed partial class ComposerViewModel : ObservableObject
         assistantMsg.MarkRequestStarted();
         await foreach (var chunk in provider.StreamChatAsync(req, cts.Token).WithCancellation(cts.Token))
         {
+            if (chunk.PromptTrace is { } trace && trackingTask is not null)
+                _chat.SetRolePromptTrace(trackingTask.ConversationId, trace);
             ApplyStreamChunk(assistantMsg, chunk);
             if (trackingTask is not null && chunk.RawJson is not null)
                 trackingTask.ReceivedChunkCount++;
@@ -981,7 +995,9 @@ public sealed partial class ComposerViewModel : ObservableObject
             enabledTools["searchBaseUrl"] = _settings?.WebSearchBaseUrl;
             enabledTools["searchMaxResults"] = _settings?.WebSearchMaxResults ?? 6;
             enabledTools["webPageMaxCharacters"] = _settings?.WebPageMaxCharacters ?? 12000;
-            enabledTools["mcpServers"] = _settings?.BuildMcpServerOptions() ?? Array.Empty<MolaGPT.Core.Chat.LocalTools.McpServerOptions>();
+            enabledTools["mcpServers"] = _chat.ActivePersona?.Profile.EnableMcp == false
+                ? Array.Empty<MolaGPT.Core.Chat.LocalTools.McpServerOptions>()
+                : _settings?.BuildMcpServerOptions() ?? Array.Empty<MolaGPT.Core.Chat.LocalTools.McpServerOptions>();
             enabledTools["vision"] = _settings?.BuildVisionProxyOptions();
             if (CanUseByokImageGenerationTool)
                 enabledTools["image_generation"] = _settings!.BuildImageGenerationOptions();
@@ -1345,7 +1361,7 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     private const string SystemHintDelimiter = "✝";
 
-    private string? ResolveSystemPrompt()
+    private string? ResolveSystemPrompt(string? rolePrompt = null)
     {
         if (_chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy)
             return null;
@@ -1360,21 +1376,10 @@ public sealed partial class ComposerViewModel : ObservableObject
         // user can choose to "append" the override after the persona prompt
         // instead of replacing it (default: replace).
         var conversationPrompt = _chat.ConversationSystemPrompt;
-        var personaPrompt = _chat.ActivePersonaSystemPrompt;
+        var personaPrompt = _chat.ActivePersona?.SystemPrompt;
 
-        string? merged;
-        if (!string.IsNullOrWhiteSpace(personaPrompt) || !string.IsNullOrWhiteSpace(conversationPrompt))
-        {
-            merged = SystemPromptInterpolator.Combine(personaPrompt, conversationPrompt, _chat.SystemPromptMode);
-        }
-        else
-        {
-            // Neither persona nor conversation prompt — fall back to the
-            // legacy per-model default for backwards compatibility with the
-            // pre-persona ProviderModelEntry.SystemPrompt field.
-            var modelPrompt = _chat.ActiveModelSystemPrompt;
-            merged = string.IsNullOrWhiteSpace(modelPrompt) ? null : modelPrompt;
-        }
+        var basePrompt = string.IsNullOrWhiteSpace(personaPrompt) ? _chat.ActiveModelSystemPrompt : personaPrompt;
+        var merged = SystemPromptInterpolator.Combine(basePrompt, conversationPrompt, _chat.SystemPromptMode);
 
         // Appended after whatever the user configured: the environment block says
         // how this machine's workspace behaves, the skill catalog says what is
@@ -1386,18 +1391,17 @@ public sealed partial class ComposerViewModel : ObservableObject
             .Select(hint => hint!)
             .ToArray();
 
-        if (string.IsNullOrWhiteSpace(merged))
-            return appendices.Length == 0 ? null : string.Join("\n\n", appendices);
-
         var vars = new PromptVariables
         {
             Now = DateTimeOffset.Now,
             ModelDisplayName = _chat.ActiveModel?.DisplayName,
             ModelId = _chat.ActiveModel?.Id,
             ProviderDisplayName = _chat.ActiveProvider?.DisplayName,
-            Username = _settings?.MolaGptUsername
+            Username = _settings?.MolaGptUsername,
+            UserName = _chat.RoleContext.UserName ?? _chat.ActivePersona?.Profile.UserName,
+            CharacterName = _chat.ActivePersona?.Name
         };
-        var interpolated = SystemPromptInterpolator.Interpolate(merged, vars);
+        var interpolated = rolePrompt ?? SystemPromptInterpolator.Interpolate(merged, vars);
         return appendices.Aggregate(interpolated, AppendHiddenSystemHint);
     }
 
@@ -1455,25 +1459,48 @@ public sealed partial class ComposerViewModel : ObservableObject
     }
 
     [RelayCommand(CanExecute = nameof(CanRetry))]
-    public async Task RetryAsync(MessageViewModel? assistantMsg)
+    public Task RetryAsync(MessageViewModel? assistantMsg) => GenerateAgainAsync(assistantMsg, false);
+
+    [RelayCommand(CanExecute = nameof(CanContinue))]
+    public Task ContinueAsync(MessageViewModel? assistantMsg) => GenerateAgainAsync(assistantMsg, true);
+
+    public Task ReplyToExistingUserAsync(MessageViewModel? userMessage)
+    {
+        if (IsSending || userMessage is null || userMessage.Role != ChatMessage.RoleUser
+            || !ReferenceEquals(_chat.Messages.LastOrDefault(), userMessage)
+            || _chat.ActiveProvider is null || _chat.ActiveModel is null)
+            return Task.CompletedTask;
+        var assistant = _chat.BeginAssistantMessage();
+        MessageSubmitted?.Invoke();
+        return GenerateAgainAsync(assistant, false, newReply: true);
+    }
+
+    private async Task GenerateAgainAsync(MessageViewModel? assistantMsg, bool continuation, bool newReply = false)
     {
         var activeProvider = _chat.ActiveProvider;
         var activeModel = _chat.ActiveModel;
         if (assistantMsg is null || activeProvider is null || activeModel is null) return;
         var index = _chat.Messages.IndexOf(assistantMsg);
-        if (index <= 0 || !assistantMsg.IsLatestAssistant) return;
+        if (index < 0 || !assistantMsg.IsLatestAssistant) return;
 
         var previousUser = _chat.Messages
             .Take(index)
             .LastOrDefault(m => m.Role == ChatMessage.RoleUser);
-        if (previousUser is null) return;
+        if (previousUser is null && !continuation) return;
 
-        assistantMsg.BeginRetryAttempt();
+        if (!newReply)
+        {
+            if (continuation) assistantMsg.BeginContinuationAttempt();
+            else assistantMsg.BeginRetryAttempt();
+        }
         // Sync the assistant bubble's model/provider labels to whatever is
         // active *now*, not whatever produced the previous attempt — the
         // floating model name above the message must reflect the live model
         // during the retry stream and freeze on that value when committed.
         assistantMsg.ModelLabel = activeModel.DisplayName;
+        assistantMsg.PersonaId = _chat.CurrentMode.IsLocalAgent() ? _chat.ActivePersonaId : null;
+        assistantMsg.PersonaName = _chat.CurrentMode.IsLocalAgent() ? _chat.ActivePersona?.Name : null;
+        assistantMsg.PersonaAvatar = _chat.CurrentMode.IsLocalAgent() ? _chat.ActivePersona?.Avatar : null;
         assistantMsg.ProviderLabel = activeProvider.DisplayName;
         assistantMsg.IsStreaming = true;
         assistantMsg.StartPending(IsRoutesModel(activeModel));
@@ -1504,7 +1531,9 @@ public sealed partial class ComposerViewModel : ObservableObject
             Cts = cts,
             StreamTask = Task.CompletedTask,
             SessionId = sessionId,
-            IsRegeneration = true
+            IsRegeneration = !newReply,
+            IsContinuation = continuation,
+            RoleRevision = _chat.RoleContext.HistoryRevision
         };
         _activeTask = streamContext;
         var wasCancelled = false;
@@ -1521,12 +1550,12 @@ public sealed partial class ComposerViewModel : ObservableObject
             // the retry then fails, the provider has forgotten a turn the UI still
             // shows, which is recoverable. The other order leaves the old attempt
             // in the model's context, which is the bug.
-            if (activeProvider is IStatefulHistoryProvider stateful)
+            if (!newReply && !continuation && activeProvider is IStatefulHistoryProvider stateful)
                 await stateful.ForgetLastTurnAsync(conversationId, cts.Token);
 
             var backfillHistory = activeProvider.Kind != ProviderKind.MolaGptProxy;
             var msgs = _chat.Messages
-                .Take(index)
+                .Take(continuation ? index + 1 : index)
                 .Select(m => new ChatMessage(
                     m.Role,
                     BuildContentForHistory(m),
@@ -1536,9 +1565,21 @@ public sealed partial class ComposerViewModel : ObservableObject
                     ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null))
                 .ToList();
 
-            var systemPrompt = ResolveSystemPrompt();
+            var maxTokens = ResolveRoleMaxTokens(activeModel);
+            var role = PrepareRolePrompt(assistantMsg, sessionId, continuation, maxTokens);
+            streamContext.RoleStates = role?.Lore.States;
+            var systemPrompt = ResolveSystemPrompt(role?.SystemPrompt);
             if (!string.IsNullOrWhiteSpace(systemPrompt))
                 msgs.Insert(0, new ChatMessage("system", systemPrompt));
+
+            IReadOnlyList<ChatMessage>? seed;
+            if (continuation)
+            {
+                seed = _chat.RoleContext.NeedsHistorySync
+                    ? BuildContinuationHistorySeed() : null;
+                msgs.Add(new ChatMessage(ChatMessage.RoleUser, "接着上一条回复继续写，只输出后续内容。"));
+            }
+            else seed = BuildHistorySeed(previousUser);
 
             var extras = BuildExtras();
             var thinkingKind = ResolveActiveThinkingParamKind();
@@ -1552,12 +1593,15 @@ public sealed partial class ComposerViewModel : ObservableObject
                 ReasoningEffort: IsReasoningEffortVisible ? ReasoningEffort : null,
                 ExtraBody: extras,
                 ThinkingBudgetTokens: IsThinkingEnabled ? ThinkingBudgetTokens : null,
-                ThinkingParamKind: thinkingKind);
+                ThinkingParamKind: thinkingKind,
+                RolePrompt: role?.Plan);
+            req = ApplyRoleRequestOptions(req, seed, maxTokens);
 
             var streamTask = RunStreamLoopAsync(activeProvider, req, assistantMsg, cts, streamContext);
             streamContext.StreamTask = streamTask;
             _activeStreamTask = streamTask;
             await streamTask;
+            _chat.MarkHistorySynchronized(conversationId, req.HistoryRevision);
         }
         catch (OperationCanceledException)
         {
@@ -1589,7 +1633,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             assistantMsg.IsStreaming = false;
             assistantMsg.StopThinking();
             RewritePythonArtifactMarkdownLinks(assistantMsg);
-            assistantMsg.CommitRetryAttempt();
+            if (!newReply) assistantMsg.CommitRetryAttempt();
 
             CompleteStreamContext(streamContext, publishNotification: !wasCancelled, failureMessage);
             if (ReferenceEquals(_activeTask, streamContext))
@@ -1633,7 +1677,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     }
 
     private bool CanStop() => IsSending;
-    private bool CanRetry(MessageViewModel? message) =>
+    private bool CanGenerateReply(MessageViewModel? message) =>
         !IsSending
         && message is not null
         && message.Role == ChatMessage.RoleAssistant
@@ -1641,6 +1685,11 @@ public sealed partial class ComposerViewModel : ObservableObject
         && !message.IsStreaming
         && _chat.ActiveProvider is not null
         && _chat.ActiveModel is not null;
+
+    private bool CanRetry(MessageViewModel? message) => CanGenerateReply(message) && message!.HasPreviousUser;
+
+    private bool CanContinue(MessageViewModel? message) => CanGenerateReply(message)
+        && _chat.CurrentMode.IsLocalAgent() && !string.IsNullOrWhiteSpace(message?.FullContent);
 
     private bool HasUnsupportedImages(
         IEnumerable<Attachment> attachments,
@@ -1918,6 +1967,12 @@ public sealed partial class ComposerViewModel : ObservableObject
         else
             _chat.FinalizeAssistantMessage(streamContext.ConversationId, streamContext.AssistantMessage);
 
+        if (streamContext.ProviderKind != ProviderKind.MolaGptProxy)
+            _chat.CompleteRoleGeneration(streamContext.ConversationId, streamContext.AssistantMessage,
+                streamContext.RoleStates, streamContext.RoleRevision, streamContext.SessionId,
+                streamContext.IsRegeneration, streamContext.IsContinuation,
+                streamContext.CompletedSuccessfully && failureMessage is null);
+
         if (publishNotification && failureMessage is not null)
         {
             if (streamContext.IsDetached)
@@ -1950,6 +2005,9 @@ public sealed partial class ComposerViewModel : ObservableObject
                  && streamContext.CompletedSuccessfully
                  && streamContext.TryBeginTitleGeneration())
             _ = GenerateLocalConversationTitleAsync(streamContext);
+        if (streamContext.CompletedSuccessfully && failureMessage is null && !streamContext.IsRegeneration
+            && streamContext.RoleStates is not null && AutoStorySummaryAsync is { } summarize)
+            _ = summarize(streamContext.ConversationId, streamContext.ProviderId, streamContext.ModelId, CancellationToken.None);
     }
 
     private async Task GenerateLocalConversationTitleAsync(BackgroundStreamTask streamContext)
@@ -1998,17 +2056,20 @@ public sealed partial class ComposerViewModel : ObservableObject
         SendCommand.NotifyCanExecuteChanged();
         StopCommand.NotifyCanExecuteChanged();
         RetryCommand.NotifyCanExecuteChanged();
+        ContinueCommand.NotifyCanExecuteChanged();
     }
 
     partial void OnEnableThinkingChanged(bool value)
     {
         OnPropertyChanged(nameof(IsReasoningEffortVisible));
+        PersistRoleOptions();
     }
 
     partial void OnReasoningEffortChanged(string value)
     {
         OnPropertyChanged(nameof(ReasoningEffortLabel));
         OnPropertyChanged(nameof(ReasoningControlLabel));
+        PersistRoleOptions();
     }
 
     partial void OnThinkingBudgetTokensChanged(int value)
@@ -2044,7 +2105,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             : _chat.ActiveModel?.ThinkingConfig?.Kind
               ?? MolaGPT.Core.Models.ThinkingParamKindInference.InferFromModelId(_chat.ActiveModel?.Id);
 
-    private static string CreateWebCompatibleConversationId()
+    internal static string CreateWebCompatibleConversationId()
     {
         const string alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
         Span<char> suffix = stackalloc char[9];

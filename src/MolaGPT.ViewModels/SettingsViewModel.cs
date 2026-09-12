@@ -1166,7 +1166,9 @@ public sealed record ProviderModelEntry(
     string? SystemPrompt = null,
     bool ImageEdit = false,
     List<CustomBodyEntry>? CustomBody = null,
-    List<string>? EffortLevels = null);             // BYOK: 覆写/追加推理强度档位（如 max、ultra）
+    List<string>? EffortLevels = null,
+    bool SupportsTemperature = true,
+    bool SupportsTopP = true);
 
 /// <summary>A user-defined HTTP header appended to a BYOK provider's requests.</summary>
 public sealed record CustomHeaderEntry(string Name = "", string Value = "");

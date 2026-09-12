@@ -32,6 +32,10 @@
                 ToolTip.Tip="展开侧边栏">
           <TextBlock Classes="icon" Text="&#xE700;" FontSize="12" />
         </Button>
+        <!-- No role picker here. The composer already carries one, anchored to
+             the input box where the choice is acted on; a second trigger up here
+             opened the same flyout with a TopEdgeAlignedLeft placement meant for
+             the bottom of the window, so it had to flip to fit. -->
       </StackPanel>
 
       <!-- Centre: model selector pill -->
@@ -252,15 +256,17 @@
           </StackPanel>
         </Button>
 
-        <Button Name="PART_SystemPrompt" Classes="headericon"
+        <Button Name="PART_SystemPrompt" Classes="headericon" Width="76" Padding="10,5"
                 Background="{DynamicResource Brush.Bg.Elevated}"
                 BorderBrush="{DynamicResource Brush.Border}"
                 BorderThickness="1"
                 IsVisible="{Binding IsSystemPromptButtonVisible}"
-                ToolTip.Tip="会话提示词覆盖"
+                IsEnabled="{Binding Chat.CanEditHistory}"
+                ToolTip.Tip="对话设置"
                 Command="{Binding OpenSystemPromptCommand}">
-          <Grid>
-            <TextBlock Classes="icon" Text="&#xE8A5;" />
+          <Grid ColumnDefinitions="Auto,Auto">
+            <TextBlock Classes="icon" Text="&#xE713;" VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1" Text="{Binding Chat.InteractionModeLabel}" Margin="7,0,0,0" VerticalAlignment="Center" FontSize="12" />
             <Ellipse Name="PART_SystemPromptDot" Width="7" Height="7"
                      Fill="{DynamicResource Brush.Primary}"
                      HorizontalAlignment="Right" VerticalAlignment="Top"
@@ -324,15 +330,8 @@
       <Setter Property="BorderThickness" Value="1" />
       <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
     </Style>
-    <Style Selector="Border.searchbox">
-      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
-      <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
-    </Style>
-    <Style Selector="Border.searchbox:focus-within">
-      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
-    </Style>
+    <!-- Border.searchbox moved to Theme/Controls.axaml — the composer's persona
+         picker needs the same shape and cannot see a rule defined here. -->
     <Style Selector="TextBlock.pip">
       <Setter Property="FontSize" Value="11" />
       <Setter Property="Opacity" Value="0.55" />

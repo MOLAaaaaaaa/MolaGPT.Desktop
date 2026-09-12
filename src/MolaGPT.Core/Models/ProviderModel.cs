@@ -105,4 +105,6 @@ public sealed record ProviderModel(
     int? MaxOutputTokens = null,
     string? Description = null,
     ThinkingConfig? ThinkingConfig = null,
-    IReadOnlyDictionary<string, JsonElement>? CustomBody = null);
+    IReadOnlyDictionary<string, JsonElement>? CustomBody = null,
+    bool SupportsTemperature = true,
+    bool SupportsTopP = true);

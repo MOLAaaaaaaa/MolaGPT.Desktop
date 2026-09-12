@@ -83,7 +83,8 @@ public sealed class HeaderRow : TranscriptRow, INotifyPropertyChanged
     public void Refresh() => Label = LabelFor(Message);
 
     private static string LabelFor(MessageViewModel message) =>
-        message.ModelLabel is { Length: > 0 } model ? model : "Assistant";
+        message.PersonaName is { Length: > 0 } persona ? persona
+            : message.ModelLabel is { Length: > 0 } model ? model : "Assistant";
 
     public event PropertyChangedEventHandler? PropertyChanged;
 }

@@ -54,7 +54,11 @@ public sealed class PiWorkLlmShim : IDisposable
         IReadOnlyDictionary<string, JsonElement>? ExtraBody = null,
         AuthStyle Auth = AuthStyle.Bearer,
         IReadOnlyList<string>? DropBodyKeys = null,
-        TargetPathMode PathMode = TargetPathMode.Fixed);
+        TargetPathMode PathMode = TargetPathMode.Fixed,
+        GenerationOptions? Generation = null,
+        Action<string>? PromptPrepared = null);
+
+    public sealed record GenerationOptions(string Api, double? Temperature, double? TopP, int? MaxTokens);
 
     public enum TargetPathMode
     {
@@ -187,11 +191,13 @@ public sealed class PiWorkLlmShim : IDisposable
 
             using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
             var body = await reader.ReadToEndAsync().ConfigureAwait(false);
+            var preparedBody = RewriteBody(body, target.ExtraBody, target.DropBodyKeys, target.Generation);
+            target.PromptPrepared?.Invoke(preparedBody);
 
             using var upstream = new HttpRequestMessage(HttpMethod.Post, url)
             {
                 Content = new StringContent(
-                    RewriteBody(body, target.ExtraBody, target.DropBodyKeys),
+                    preparedBody,
                     Encoding.UTF8,
                     "application/json"),
             };
@@ -318,29 +324,45 @@ public sealed class PiWorkLlmShim : IDisposable
     private string RewriteBody(
         string body,
         IReadOnlyDictionary<string, JsonElement>? extra,
-        IReadOnlyList<string>? dropKeys)
+        IReadOnlyList<string>? dropKeys,
+        GenerationOptions? generation)
     {
         var hasExtra = extra is { Count: > 0 };
         var hasDrops = dropKeys is { Count: > 0 };
-        if (!hasExtra && !hasDrops) return body;
+        var hasGeneration = generation is not null
+            && (generation.Temperature is not null || generation.TopP is not null || generation.MaxTokens is not null);
+        if (!hasExtra && !hasDrops && !hasGeneration) return body;
+        var parsed = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body)
+            ?? throw new JsonException("Pi 请求体为空。");
+        var merged = parsed.ToDictionary(kv => kv.Key, kv => (object?)kv.Value, StringComparer.Ordinal);
+        if (hasExtra) CustomRequestParams.ApplyBody(merged, extra);
+        if (hasGeneration) ApplyGenerationOptions(merged, generation!);
+        if (hasDrops)
+            foreach (var key in dropKeys!) merged.Remove(key);
+        return JsonSerializer.Serialize(merged, RelaxedJson);
+    }
 
-        try
+    internal static void ApplyGenerationOptions(IDictionary<string, object?> body, GenerationOptions options)
+    {
+        if (options.Api == "google-generative-ai")
         {
-            var parsed = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body);
-            if (parsed is null) return body;
-
-            var merged = parsed.ToDictionary(kv => kv.Key, kv => (object?)kv.Value, StringComparer.Ordinal);
-            if (hasExtra) CustomRequestParams.ApplyBody(merged, extra);
-            if (hasDrops)
-                foreach (var key in dropKeys!)
-                    merged.Remove(key);
-            return JsonSerializer.Serialize(merged, RelaxedJson);
+            var config = body.TryGetValue("generationConfig", out var existing) && existing is JsonElement element
+                ? element.Deserialize<Dictionary<string, object?>>()! : new Dictionary<string, object?>();
+            if (options.Temperature is { } temperature) config["temperature"] = temperature;
+            if (options.TopP is { } topP) config["topP"] = topP;
+            if (options.MaxTokens is { } maxTokens) config["maxOutputTokens"] = maxTokens;
+            body["generationConfig"] = config;
         }
-        catch (JsonException ex)
+        else
         {
-            // Relaying the original is strictly better than failing the turn.
-            _log?.Invoke("[llm-shim] 请求体改写失败，按原样转发：" + ex.Message);
-            return body;
+            if (options.Temperature is { } temperature) body["temperature"] = temperature;
+            if (options.TopP is { } topP) body["top_p"] = topP;
+            if (options.MaxTokens is { } maxTokens)
+            {
+                var key = options.Api == "openai-responses" ? "max_output_tokens"
+                    : body.ContainsKey("max_completion_tokens") ? "max_completion_tokens" : "max_tokens";
+                body[key] = maxTokens;
+            }
         }
     }
 

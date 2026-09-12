@@ -574,15 +574,14 @@ public sealed record PiSidecarSpec(
     string ModelsJson,
     string DefaultModelId,
     string DefaultApi,
-    bool AuthHeader,
-    bool Reasoning)
+    bool AuthHeader)
 {
     /// <summary>Pool partition. The endpoint and the credential are deliberately
     /// absent: the shim supplies both per turn, so a rotating account token or a
     /// re-keyed provider never costs a respawn.</summary>
     public string Key =>
         $"{ProviderId}|{NodePath}|{CliJsPath}|{ExtensionPath}|{WorkingDirectory}|{SessionRoot}|" +
-        $"{DefaultModelId}|{DefaultApi}|{AuthHeader}|{Reasoning}|{ModelsJson}";
+        $"{DefaultModelId}|{DefaultApi}|{AuthHeader}|{ModelsJson}";
 
     internal PiSidecarLaunchOptions ToLaunchOptions(string shimBaseUrl, string token, string bridgeUrl) =>
         new(NodePath,
@@ -595,7 +594,6 @@ public sealed record PiSidecarSpec(
             DefaultModelId,
             DefaultApi,
             AuthHeader,
-            Reasoning,
             bridgeUrl,
             token,
             ModelsJson);

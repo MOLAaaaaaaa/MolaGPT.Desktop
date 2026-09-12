@@ -1,0 +1,1624 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MOLA / SYSTEM — MolaGPT V2 设计系统</title>
+<meta name="description" content="一个由自己的变量构成的物体。MolaGPT V2 设计系统。">
+<script>document.documentElement.classList.add('js');</script>
+<style>
+/* ═══════════════════════════════════════════════════════════════════════
+   MOLA / SYSTEM
+   一个由自己的变量构成的物体
+   ───────────────────────────────────────────────────────────────────────
+   本页所有颜色、圆角、阴影、缓动曲线均取自 MolaGPT V2 线上设计系统，
+   不新增任何色号与尺度。展示层排版（10vw+）属宣传层，非 UI 规范。
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── 令牌：与线上 molagpt.css / modern-clean.css 一致 ── */
+:root {
+    --primary-color: #be727f;
+    --primary-hover: #a05a66;
+    --brand-light:   #cf8996;
+    --brand-ink:     #e1a3af;
+
+    --bg-primary:   #ffffff;
+    --bg-secondary: #f8f9fa;
+    --bg-tertiary:  #f1f3f5;
+    --canvas:       #f2f4f7;
+
+    --text-primary:   #212529;
+    --text-secondary: #6c757d;
+    --border-color:   #dee2e6;
+
+    --shadow-sm: 0 1px 3px rgba(0,0,0,.08);
+    --shadow-md: 0 4px 6px rgba(0,0,0,.1);
+    --shadow-lg: 0 10px 15px rgba(0,0,0,.1);
+
+    --radius-none: 0;      --radius-2xs: 4px;   --radius-xs: 10px;
+    --radius-sm: 12px;     --radius-md: 16px;   --radius-lg: 20px;
+    --radius-xl: 24px;     --radius-xxl: 32px;
+    --radius-pill: 999px;  --radius-circle: 50%;
+
+    --transition: all .2s ease;
+    --ease-std:    cubic-bezier(.4, 0, .2, 1);
+    --ease-back:   cubic-bezier(.34, 1.56, .64, 1);
+    --ease-drawer: cubic-bezier(.25, .8, .25, 1);
+
+    /* 站点层 */
+    --hair: rgba(33,37,41,.11);
+    --wash: rgba(0,0,0,.05);
+    --pad:  clamp(20px, 4.4vw, 76px);
+    --micro: 10px;
+}
+
+body.dark-theme {
+    --bg-primary:   #1a1a1a;
+    --bg-secondary: #2d2d2d;
+    --bg-tertiary:  #3a3a3a;
+    --canvas:       #121212;
+    --text-primary:   #e0e0e0;
+    --text-secondary: #a0a0a0;
+    --border-color:   #404040;
+    --hair: rgba(255,255,255,.12);
+    --wash: rgba(255,255,255,.06);
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+
+html { -webkit-text-size-adjust:100%; scroll-behavior:smooth; }
+
+body {
+    font-family: 'Geist Latin', -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "Noto Sans CJK SC","Noto Sans SC","PingFang SC","Hiragino Sans GB",
+        "Microsoft YaHei UI","Microsoft YaHei","Helvetica Neue",Helvetica,Arial,sans-serif;
+    background: var(--canvas);
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+    transition: background-color .9s var(--ease-std), color .9s var(--ease-std);
+}
+
+.mono { font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,Courier,monospace; }
+
+/* ── 实时 3D：铺满视口，落在所有内容之后 ───────────────────────────── */
+#core {
+    position: fixed; inset: 0; z-index: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .5s linear;
+}
+#core.fallback {
+    background:
+        radial-gradient(38% 42% at 62% 44%, rgba(190,114,127,.34) 0%, rgba(190,114,127,.14) 45%, transparent 72%),
+        radial-gradient(26% 30% at 48% 58%, rgba(207,137,150,.26) 0%, transparent 70%);
+    filter: blur(6px);
+}
+
+/* ── 顶栏 ─────────────────────────────────────────────────────────── */
+.topbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 60;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px;
+    padding: 16px var(--pad) 14px;
+    font-size: var(--micro);
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    /* 巨型标题会一路撞到视口顶边（这是刻意的裁切），
+       所以顶栏必须自己有底 —— 否则两层文字叠在一起谁也读不了。 */
+    background: var(--canvas);
+    transition: background-color .9s var(--ease-std);
+}
+.topbar::after {
+    content:''; position:absolute; left:0; right:0; bottom:0;
+    height:1px; background: var(--hair);
+}
+.topbar b { font-weight:600; color:var(--text-primary); letter-spacing:.2em; }
+.topbar .sep { opacity:.4; }
+.tb-mid { display:flex; gap:18px; }
+@media (max-width: 860px){ .tb-mid { display:none; } }
+
+.tb-theme {
+    -webkit-appearance:none; appearance:none;
+    background:none; border:none; padding:0; margin:0;
+    font: inherit; letter-spacing:.16em; text-transform:uppercase;
+    color: var(--text-secondary); cursor:pointer;
+    display:inline-flex; align-items:center; gap:7px;
+    transition: color .2s ease;
+}
+.tb-theme:hover { color: var(--primary-color); }
+.tb-theme .bulb {
+    width:7px; height:7px; border-radius:50%;
+    background: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(190,114,127,.15);
+}
+
+.progress {
+    position: fixed; top: 0; left: 0; z-index: 61;
+    height: 1px; width: 0;
+    background: var(--primary-color);
+}
+
+/* ── 光标 ─────────────────────────────────────────────────────────── */
+.cursor, .cursor-ring {
+    position: fixed; top:0; left:0; z-index:200; pointer-events:none;
+    border-radius:50%; will-change: transform;
+}
+.cursor { width:5px; height:5px; background: var(--primary-color); margin:-2.5px 0 0 -2.5px; }
+.cursor-ring {
+    width:34px; height:34px; margin:-17px 0 0 -17px;
+    border:1px solid rgba(190,114,127,.5);
+    transform: scale(.42);
+    transition: transform .35s var(--ease-std), border-color .35s ease, opacity .3s ease;
+    opacity:.75;
+}
+.cursor-ring.wide { transform: scale(1); border-color: rgba(190,114,127,.85); opacity:1; }
+@media (hover: none), (max-width: 860px) { .cursor, .cursor-ring { display:none; } }
+
+/* ── 版式基元 ─────────────────────────────────────────────────────── */
+.wrap { position:relative; z-index:2; padding-left:var(--pad); padding-right:var(--pad); }
+
+/* 右侧留出一条「母题轨道」：宽屏下所有正文章节都不占满，
+   物体缩小后停在这条轨道里 —— 它始终在场，但永远不压字。
+   顺带把行长收回到可读区间。 */
+@media (min-width: 1100px) {
+    section[data-idx] > .wrap { padding-right: clamp(210px, 20vw, 340px); }
+}
+
+.disp {
+    font-weight: 800;
+    letter-spacing: -.045em;
+    line-height: .84;
+    text-transform: uppercase;
+}
+.d-xl { font-size: clamp(66px, 15.5vw, 300px); }
+.d-l  { font-size: clamp(44px, 8.4vw, 152px); letter-spacing:-.04em; line-height:.9; }
+.d-m  { font-size: clamp(30px, 4.6vw, 78px);  letter-spacing:-.032em; line-height:.98; }
+
+.micro {
+    font-size: var(--micro); letter-spacing:.18em; text-transform:uppercase;
+    color: var(--text-secondary);
+}
+.micro-b { font-size: 11px; letter-spacing:.14em; text-transform:uppercase; color: var(--primary-color); font-weight:600; }
+
+.lead {
+    font-size: clamp(15px, 1.35vw, 19px);
+    line-height: 1.72;
+    color: var(--text-secondary);
+    max-width: 46ch;
+}
+.lead strong { color: var(--text-primary); font-weight:600; }
+.lead code, .kbd {
+    font-family:'SFMono-Regular',Consolas,Menlo,monospace;
+    font-size:.86em; background:var(--wash); padding:1px 5px; border-radius:var(--radius-2xs);
+    color: var(--text-primary);
+}
+
+section { position:relative; z-index:2; }
+
+/* 章节头：编号 + 标签 + 细线 */
+.chap {
+    display:grid; grid-template-columns: 92px 1fr; gap: 0 24px;
+    align-items:start;
+    padding-top: clamp(80px, 11vh, 150px);
+}
+.chap-idx { font-size: var(--micro); letter-spacing:.2em; color: var(--primary-color); padding-top:.55em; }
+.chap-rule { grid-column:1 / -1; height:1px; background: var(--hair); margin: 22px 0 0; }
+@media (max-width: 720px){ .chap { grid-template-columns: 1fr; gap:10px; } }
+
+/* 进场揭示。
+   只在 .js 下才隐藏 —— 脚本没跑起来时内容必须是可读的，
+   绝不能让「整页正文可见性」依赖一段 JS 是否成功。 */
+.js .rv { opacity:0; transform: translateY(26px); clip-path: inset(0 0 100% 0);
+      transition: opacity .9s var(--ease-std), transform 1.05s var(--ease-std), clip-path 1.05s var(--ease-std); }
+.js .rv.in { opacity:1; transform:none; clip-path: inset(0 0 -12% 0); }
+.js .rv.d1 { transition-delay:.08s } .js .rv.d2 { transition-delay:.16s } .js .rv.d3 { transition-delay:.24s }
+
+/* ══ HERO ══════════════════════════════════════════════════════════ */
+.hero { min-height: 100vh; display:flex; flex-direction:column; justify-content:flex-end;
+        padding-bottom: clamp(24px, 4vh, 52px); }
+.hero-tag { position:absolute; top: clamp(84px, 13vh, 150px); left: var(--pad); z-index:3; }
+.hero-tag div { margin-bottom:5px; }
+
+.hero-type { position:relative; z-index:3; }
+.hero-mola {
+    position:absolute; z-index:1;
+    left: 0; bottom: 100%;
+    color: var(--text-primary);
+    opacity:.075;
+    font-size: clamp(120px, 26vw, 520px);
+    letter-spacing:-.06em; line-height:.72;
+    pointer-events:none; user-select:none;
+}
+.hero-line { display:block; position:relative; }
+.hero-line .thin { font-weight:200; letter-spacing:-.03em; }
+.hero-sub {
+    margin-top: clamp(22px, 3.4vh, 44px);
+    display:flex; flex-wrap:wrap; align-items:flex-end; gap: clamp(20px,4vw,64px);
+    justify-content: space-between;
+}
+.hero-claim { font-size: clamp(17px, 1.9vw, 26px); line-height:1.35; font-weight:500; letter-spacing:-.01em; max-width:22ch; }
+.hero-claim span { color: var(--primary-color); }
+
+.enter {
+    -webkit-appearance:none; appearance:none; background:none; border:none;
+    font: inherit; cursor:pointer; padding: 0 0 6px;
+    color: var(--text-primary);
+    font-size: 12px; letter-spacing:.2em; text-transform:uppercase; font-weight:600;
+    display:inline-flex; align-items:center; gap:12px;
+    border-bottom: 1px solid var(--text-primary);
+    transition: color .3s var(--ease-std), border-color .3s var(--ease-std), gap .3s var(--ease-std);
+}
+.enter:hover { color: var(--primary-color); border-color: var(--primary-color); gap: 22px; }
+.enter i { font-style:normal; }
+
+.strip {
+    margin-top: clamp(26px, 4.5vh, 58px);
+    border-top:1px solid var(--hair);
+    padding-top: 12px;
+    display:flex; flex-wrap:wrap; gap: clamp(14px, 3vw, 46px);
+}
+.strip span { font-size: var(--micro); letter-spacing:.18em; text-transform:uppercase; color: var(--text-secondary); }
+.strip span b { color: var(--text-primary); font-weight:600; }
+
+/* ══ 0001 论点 ═════════════════════════════════════════════════════ */
+.thesis { display:grid; grid-template-columns: 1fr 1fr; gap: clamp(28px,5vw,90px); align-items:end;
+          padding: clamp(60px,9vh,120px) 0 clamp(80px,12vh,170px); }
+@media (max-width: 900px){ .thesis { grid-template-columns:1fr; } }
+.thesis-list { display:flex; flex-direction:column; gap:0; }
+.tl-row {
+    display:grid; grid-template-columns: 1fr auto; gap:16px; align-items:baseline;
+    padding: 13px 0; border-bottom:1px solid var(--hair);
+}
+.tl-row:first-child { border-top:1px solid var(--hair); }
+.tl-k { font-size:13.5px; font-weight:500; }
+.tl-v { font-size:11.5px; color: var(--text-secondary); text-align:right; }
+
+/* ══ 通用：并排规格 ════════════════════════════════════════════════ */
+.cols { display:grid; grid-template-columns: 1fr 1fr; gap: clamp(28px,5vw,88px); }
+@media (max-width:900px){ .cols { grid-template-columns:1fr; } }
+
+.figure { padding: clamp(36px,6vh,76px) 0 clamp(64px,10vh,140px); }
+
+/* 玻璃/实底卡：需要遮住 3D 的地方 */
+.solid {
+    background: var(--bg-primary);
+    border: 1px solid var(--hair);
+    border-radius: var(--radius-xxl);
+    box-shadow: 0 4px 24px rgba(0,0,0,.04);
+}
+body.dark-theme .solid { box-shadow: 0 4px 24px rgba(0,0,0,.4); }
+
+/* ══ 0002 色彩：阶梯 ═══════════════════════════════════════════════ */
+.hex { font-size: clamp(52px, 11vw, 190px); font-weight:800; letter-spacing:-.05em; line-height:.9; color: var(--primary-color); }
+.ladder { display:grid; grid-template-columns: repeat(8, 1fr); border-radius: var(--radius-lg); overflow:hidden;
+          border:1px solid var(--hair); margin-top: clamp(24px,4vh,48px); }
+.ladder div { padding: clamp(44px,8vh,120px) 6px 14px; text-align:center; transition: transform .5s var(--ease-std); }
+.ladder div:hover { transform: translateY(-8px); }
+.ladder b { display:block; font-size:13px; font-weight:700; letter-spacing:-.02em; }
+.ladder em { display:block; font-style:normal; font-size:9.5px; letter-spacing:.05em; color:var(--text-secondary); margin-top:3px; }
+@media (max-width:720px){ .ladder { grid-template-columns: repeat(4,1fr); } }
+
+.chips { display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; margin-top:20px; }
+@media (max-width:720px){ .chips { grid-template-columns: repeat(2,1fr); } }
+.chip { border:1px solid var(--hair); border-radius: var(--radius-sm); overflow:hidden; cursor:pointer;
+        transition: transform .4s var(--ease-std); background: var(--bg-primary); }
+.chip:hover { transform: translateY(-4px); }
+.chip .sw { height:56px; }
+.chip .mt { padding:10px 11px 12px; }
+.chip .nm { font-size:11.5px; font-weight:600; }
+.chip .vl { font-size:10.5px; color:var(--text-secondary); margin-top:2px; }
+
+/* ══ 0003 字体 ═════════════════════════════════════════════════════ */
+.specimen { line-height:.92; letter-spacing:-.04em; font-weight:800; font-size: clamp(46px,9.5vw,168px); }
+.specimen .cjk { letter-spacing:-.02em; font-weight:700; }
+.range-bar { display:flex; border:1px solid var(--hair); border-radius: var(--radius-md); overflow:hidden; margin-top:26px; }
+.range-bar div { flex:1; padding:14px 12px; font-size:10.5px; letter-spacing:.08em; color:var(--text-secondary); }
+.range-bar div + div { border-left:1px solid var(--hair); }
+.range-bar b { display:block; color:var(--text-primary); font-size:12px; letter-spacing:0; margin-bottom:4px; font-weight:600; }
+.range-bar .on { background: rgba(190,114,127,.10); }
+body.dark-theme .range-bar .on { background: rgba(207,137,150,.18); }
+
+.scale-row { display:grid; grid-template-columns: 76px 1fr; gap:20px; align-items:baseline;
+             padding:9px 0; border-bottom:1px solid var(--hair); }
+.scale-row .n { font-size:11px; color:var(--text-secondary); letter-spacing:.06em; }
+
+/* ══ 0004 圆角 ═════════════════════════════════════════════════════ */
+.ruler { display:grid; grid-template-columns: repeat(10, 1fr); gap:10px; margin-top: clamp(26px,4vh,52px); }
+@media (max-width:900px){ .ruler { grid-template-columns: repeat(5,1fr); } }
+.rc { cursor:pointer; }
+.rc .bx {
+    height: clamp(56px, 8vw, 108px);
+    background: rgba(190,114,127,.10);
+    border:1px solid rgba(190,114,127,.25);
+    transition: background .3s ease, transform .45s var(--ease-back);
+}
+body.dark-theme .rc .bx { background: rgba(207,137,150,.18); border-color: rgba(207,137,150,.3); }
+.rc:hover .bx { background: rgba(190,114,127,.22); transform: translateY(-6px); }
+.rc .lb { font-size:10px; letter-spacing:.04em; color:var(--text-secondary); margin-top:9px; }
+.rc .lb b { display:block; color:var(--text-primary); font-size:11.5px; font-weight:600; letter-spacing:0; }
+
+.errata-inline {
+    margin-top: clamp(26px,4vh,50px);
+    border-left: 2px solid var(--primary-color);
+    padding: 4px 0 4px 20px;
+    max-width: 62ch;
+    font-size:13.5px; line-height:1.72; color: var(--text-secondary);
+}
+.errata-inline strong { color: var(--text-primary); font-weight:600; }
+
+/* ══ 0005 阴影 ═════════════════════════════════════════════════════ */
+.elev { display:grid; grid-template-columns: repeat(3,1fr); gap: clamp(14px,2.4vw,32px); margin-top: clamp(26px,4vh,52px); }
+@media (max-width:820px){ .elev { grid-template-columns:1fr; } }
+.el { text-align:center; }
+.el .bx { height: clamp(80px,11vw,140px); background: var(--bg-primary); border-radius: var(--radius-md);
+          border:1px solid var(--hair); transition: transform .5s var(--ease-std); }
+.el:hover .bx { transform: translateY(-6px); }
+.el .lb { font-size:11px; color:var(--text-secondary); margin-top:14px; }
+.el .lb b { display:block; color:var(--text-primary); font-size:12px; font-weight:600; margin-bottom:3px; }
+
+/* ══ 0006 动效 ═════════════════════════════════════════════════════ */
+.curves { display:grid; grid-template-columns: repeat(3,1fr); gap: clamp(16px,2.6vw,36px); margin-top: clamp(26px,4vh,52px); }
+@media (max-width:820px){ .curves { grid-template-columns:1fr; } }
+.cv { border:1px solid var(--hair); border-radius: var(--radius-lg); padding:20px; background: var(--bg-primary); }
+.cv svg { display:block; width:100%; height:auto; }
+.cv .pathbg { fill:none; stroke: var(--hair); stroke-width:1; }
+.cv .pathfg { fill:none; stroke: var(--primary-color); stroke-width:2; stroke-linecap:round; }
+.cv .nm { font-size:12.5px; font-weight:600; margin-top:14px; }
+.cv .fn { font-size:10px; color:var(--text-secondary); margin-top:3px; letter-spacing:.02em; }
+.cv .use { font-size:11.5px; color:var(--text-secondary); margin-top:10px; line-height:1.6; }
+.track { position:relative; height:26px; margin-top:14px; border-top:1px solid var(--hair); }
+.track i { position:absolute; top:11px; left:0; width:10px; height:10px; border-radius:50%;
+           background: var(--primary-color); }
+.cv:hover .track i, .cv.play .track i { animation: slide 1.5s infinite alternate; }
+@keyframes slide { from { left:0 } to { left: calc(100% - 10px) } }
+.cv.std   .track i { animation-timing-function: cubic-bezier(.4,0,.2,1); }
+.cv.back  .track i { animation-timing-function: cubic-bezier(.34,1.56,.64,1); }
+.cv.drawer .track i { animation-timing-function: cubic-bezier(.25,.8,.25,1); }
+
+/* ══ 0007 组件陈列 ═════════════════════════════════════════════════ */
+.vitrine { display:grid; grid-template-columns: repeat(2,1fr); gap: clamp(16px,2.4vw,28px); margin-top: clamp(26px,4vh,52px); }
+@media (max-width:900px){ .vitrine { grid-template-columns:1fr; } }
+.vt { border:1px solid var(--hair); border-radius: var(--radius-xl); overflow:hidden; background: var(--bg-primary); }
+.vt-top { padding:14px 18px; border-bottom:1px solid var(--hair); display:flex; justify-content:space-between; align-items:center; }
+.vt-top .t { font-size:12px; font-weight:600; }
+.vt-top .i { font-size:9.5px; letter-spacing:.16em; color:var(--text-secondary); }
+.vt-body { padding: clamp(24px,3.4vw,40px) clamp(18px,2.6vw,32px); background: var(--bg-secondary);
+           display:flex; flex-wrap:wrap; gap:12px; align-items:center; min-height:132px; }
+.vt-note { padding:12px 18px 15px; font-size:11.5px; line-height:1.65; color:var(--text-secondary); border-top:1px solid var(--hair); }
+
+/* — 真实组件（1:1 线上规格） — */
+.btn-new { background:var(--primary-color); color:#fff; border:none; border-radius:var(--radius-pill);
+    padding:12px 24px; font:inherit; font-weight:600; font-size:14px; cursor:pointer;
+    box-shadow:0 4px 12px rgba(190,114,127,.3);
+    transition: transform .2s var(--ease-back), background-color .2s ease; }
+.btn-new:hover { transform:scale(1.05); background:var(--primary-hover); }
+.mbtn { padding:8px 16px; border-radius:var(--radius-sm); border:none; font:inherit; font-size:14px;
+    cursor:pointer; transition:var(--transition); }
+.mbtn.p { background:var(--primary-color); color:#fff; } .mbtn.p:hover { background:var(--primary-hover); }
+.mbtn.s { background:var(--bg-secondary); color:var(--text-primary); border:1px solid var(--border-color); }
+.mbtn.s:hover { background:var(--bg-tertiary); }
+.ibtn { width:34px; height:34px; border-radius:50%; background:transparent; color:var(--text-secondary);
+    border:1px solid var(--border-color); display:inline-grid; place-items:center; cursor:pointer; transition:var(--transition); }
+.ibtn:hover { background:var(--wash); color:var(--text-primary); }
+
+.pill { height:30px; padding:5px 10px; background:transparent; border:1px solid transparent; border-radius:100px;
+    color:var(--text-secondary); font:inherit; font-size:12px; font-weight:500;
+    display:inline-flex; align-items:center; gap:6px; cursor:pointer;
+    transition: background .15s ease, color .15s ease, border-color .15s ease; }
+.pill:hover { background:var(--wash); color:var(--text-primary); }
+.pill.on { background:rgba(190,114,127,.10); color:var(--primary-hover); border-color:rgba(190,114,127,.25); }
+.pill.on:hover { background:rgba(190,114,127,.15); }
+body.dark-theme .pill.on { background:rgba(207,137,150,.18); color:var(--brand-ink); }
+
+.tgl { position:relative; width:34px; height:20px; display:inline-block; flex:none; }
+.tgl input { position:absolute; width:0; height:0; opacity:0; }
+.tgl > span { position:absolute; inset:0; border-radius:999px; background:var(--border-color); cursor:pointer; transition:background .18s ease; }
+.tgl > span::before { content:''; position:absolute; top:3px; left:3px; width:14px; height:14px; border-radius:50%;
+    background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .18s ease; }
+.tgl input:checked + span { background:var(--primary-color); }
+.tgl input:checked + span::before { transform:translateX(14px); }
+
+.bdg { padding:2px 7px; border-radius:999px; background:var(--primary-color); color:#fff; font-size:10px; font-weight:500; line-height:1.5; }
+
+.cnv { width:100%; max-width:300px; }
+.cnv-lb { font-size:11px; font-weight:600; letter-spacing:.04em; color:var(--text-secondary); opacity:.7; padding:4px 10px 6px; }
+.cnv-it { position:relative; border-radius:8px; padding:9px 12px; margin-bottom:2px; display:flex; align-items:center;
+    transition: background-color .15s ease, color .15s ease; cursor:pointer; }
+.cnv-it:hover { background:var(--wash); }
+.cnv-it.on { background:rgba(190,114,127,.10); color:var(--primary-hover); font-weight:500; }
+body.dark-theme .cnv-it.on { background:rgba(207,137,150,.18); color:var(--brand-ink); }
+.cnv-it .tt { font-size:13px; font-weight:500; line-height:1.35; flex:1; min-width:0; padding-right:38px;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.cnv-it .tm { position:absolute; right:12px; top:50%; transform:translateY(-50%); font-size:11px; color:var(--text-secondary); opacity:.7; }
+
+.msg { display:flex; flex-direction:column; gap:18px; width:100%; }
+.msg-u { display:flex; justify-content:flex-end; gap:12px; }
+.msg-u .bb { padding:10px 14px; background:rgba(190,114,127,.08); border:1px solid rgba(190,114,127,.22);
+    border-radius: var(--radius-md) 0 var(--radius-md) var(--radius-md); font-size:15px; line-height:1.6; }
+body.dark-theme .msg-u .bb { background:rgba(190,114,127,.14); border-color:rgba(190,114,127,.32); }
+.av { width:32px; height:32px; flex:none; border-radius:var(--radius-sm); display:grid; place-items:center; font-size:13px; }
+.av.u { background:var(--primary-color); color:#fff; }
+.av.b { background:var(--bg-tertiary); color:var(--text-primary); }
+.msg-b { display:grid; grid-template-columns:32px 1fr; gap:4px 8px; }
+.msg-b .mh { font-size:13px; font-weight:500; color:var(--text-secondary); align-self:center; }
+.msg-b .bd { grid-column:1/-1; font-size:15px; line-height:1.6; }
+
+.ntf-inner { display:flex; align-items:flex-start; gap:12px; padding:13px 14px; border-radius:var(--radius-md);
+    border:1px solid var(--border-color); background:var(--bg-primary); position:relative; overflow:hidden;
+    box-shadow:0 8px 24px rgba(0,0,0,.08), 0 2px 8px rgba(0,0,0,.04); width:100%; }
+.ntf-ic { width:30px; height:30px; border-radius:50%; display:grid; place-items:center; font-size:13px; flex:none; margin-top:1px; font-weight:700; }
+.ntf-ct { flex:1; font-size:13.5px; line-height:1.45; min-width:0; }
+.ntf-ct em { font-style:normal; display:block; color:var(--text-secondary); font-size:12.5px; margin-top:2px; }
+.ntf-bar { position:absolute; bottom:0; left:0; height:3px; width:62%; opacity:.45; }
+.ntf.ok  .ntf-inner { background:#edfaf1; border-color:#b7e4c7; } .ntf.ok  .ntf-ic { background:rgba(40,167,69,.12);  color:#28a745; } .ntf.ok  .ntf-bar { background:#28a745; }
+.ntf.err .ntf-inner { background:#fef2f2; border-color:#fecaca; } .ntf.err .ntf-ic { background:rgba(220,53,69,.12);  color:#dc3545; } .ntf.err .ntf-bar { background:#dc3545; }
+.ntf.wrn .ntf-inner { background:#fffbeb; border-color:#fde68a; } .ntf.wrn .ntf-ic { background:rgba(232,163,23,.12); color:#e8a317; } .ntf.wrn .ntf-bar { background:#e8a317; }
+.ntf.inf .ntf-inner { background:#eff6ff; border-color:#bfdbfe; } .ntf.inf .ntf-ic { background:rgba(59,130,246,.10); color:#3b82f6; } .ntf.inf .ntf-bar { background:#3b82f6; }
+body.dark-theme .ntf.ok  .ntf-inner { background:#1a2e1e; border-color:#2d5a35; }
+body.dark-theme .ntf.err .ntf-inner { background:#2c1515; border-color:#5c2626; }
+body.dark-theme .ntf.wrn .ntf-inner { background:#2a2010; border-color:#56420e; }
+body.dark-theme .ntf.inf .ntf-inner { background:#111b2e; border-color:#1e3a5f; }
+body.dark-theme .ntf-inner { box-shadow:0 10px 28px rgba(0,0,0,.4); }
+
+.composer { width:100%; max-width:340px; }
+.ibox { display:grid; grid-template-columns:auto 1fr; grid-template-areas:"u t" "x x"; gap:4px 6px;
+    padding:8px 10px; align-items:center; background:var(--bg-primary); border:1px solid var(--border-color);
+    border-radius:var(--radius-lg); box-shadow:var(--shadow-sm); }
+.ibox .u { grid-area:u } .ibox .t { grid-area:t; display:flex; gap:4px; flex-wrap:wrap; }
+.ibox .x { grid-area:x; font-size:15px; line-height:1.5; color:var(--text-secondary); padding:6px 4px; min-height:44px; }
+.ihints { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:4px; padding:4px 10px 0; }
+.send { width:34px; height:34px; border-radius:50%; border:none; background:var(--primary-color); color:#fff;
+    display:grid; place-items:center; cursor:pointer; transition:var(--transition); }
+.send:hover { background:var(--primary-hover); }
+
+/* ══ 0008 主题翻转 ═════════════════════════════════════════════════ */
+.flip { min-height: 190vh; position:relative; }
+.flip-sticky { position:sticky; top:0; height:100vh; display:flex; flex-direction:column; justify-content:center; }
+.flip-grid { display:grid; grid-template-columns:1fr 1fr; gap:clamp(24px,5vw,80px); align-items:center; }
+@media (max-width:900px){ .flip-grid { grid-template-columns:1fr; } }
+/* 实底：物体在这一章走到画内，卡片必须自己挡住它 */
+.flip-pair { display:grid; grid-template-columns: 1fr 1fr; border:1px solid var(--hair);
+             border-radius:var(--radius-xl); overflow:hidden; background: var(--bg-primary); }
+.fp { padding:22px 18px; }
+.fp + .fp { border-left:1px solid var(--hair); }
+.fp .h { font-size:9.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--text-secondary); margin-bottom:14px; }
+.fp .r { display:flex; align-items:center; gap:10px; padding:7px 0; font-size:11px; }
+.fp .r i { width:16px; height:16px; border-radius:5px; flex:none; font-style:normal; }
+.fp .r span { color:var(--text-secondary); }
+
+/* ══ 0009 铭牌 ═════════════════════════════════════════════════════ */
+.plate { margin-top: clamp(26px,4vh,52px); border:1px solid var(--hair); border-radius:var(--radius-xl);
+         overflow:hidden; background:var(--bg-primary); }
+.plate-h { padding:16px 22px; border-bottom:1px solid var(--hair); display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+.plate-h .a { font-size:12px; font-weight:700; letter-spacing:.2em; text-transform:uppercase; }
+.plate-h .b { font-size:9.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--text-secondary); }
+.plate-g { display:grid; grid-template-columns: repeat(3, 1fr); }
+@media (max-width:900px){ .plate-g { grid-template-columns: repeat(2,1fr); } }
+@media (max-width:560px){ .plate-g { grid-template-columns: 1fr; } }
+.pg { padding:18px 22px 20px; border-right:1px solid var(--hair); border-bottom:1px solid var(--hair); }
+.pg .k { font-size:9.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--text-secondary); }
+.pg .v { font-size:14px; font-weight:600; margin-top:7px; letter-spacing:-.01em; word-break:break-all; }
+.pg .n { font-size:10.5px; color:var(--text-secondary); margin-top:5px; line-height:1.55; }
+
+/* ══ 0010 勘误 ═════════════════════════════════════════════════════ */
+.err-row { display:grid; grid-template-columns: 58px 1fr; gap:0 22px; padding:22px 0; border-bottom:1px solid var(--hair); }
+.err-row:first-of-type { border-top:1px solid var(--hair); }
+.err-n { font-size:11px; letter-spacing:.16em; color:var(--primary-color); padding-top:.3em; }
+.err-t { font-size: clamp(17px,2vw,25px); font-weight:600; letter-spacing:-.02em; line-height:1.28; }
+.err-d { font-size:13.5px; line-height:1.72; color:var(--text-secondary); margin-top:9px; max-width:64ch; }
+@media (max-width:640px){ .err-row { grid-template-columns:1fr; gap:8px; } }
+
+/* ══ FINALE ════════════════════════════════════════════════════════ */
+.finale { min-height: 260vh; position:relative; }
+.fin-sticky { position:sticky; top:0; height:100vh; display:grid; place-items:center; text-align:center; }
+.fin-layer { position:absolute; inset:0; display:grid; place-items:center; padding:0 var(--pad);
+             opacity:0; transition:opacity .6s linear; }
+.fin-layer.on { opacity:1; }
+.fin-word { font-size: clamp(74px, 22vw, 420px); font-weight:800; letter-spacing:-.06em; line-height:.82; }
+.fin-line { font-size: clamp(22px, 4.2vw, 68px); font-weight:600; letter-spacing:-.03em; line-height:1.18; max-width:18ch; }
+.fin-line span { color: var(--primary-color); }
+
+.endbar { position:relative; z-index:2; border-top:1px solid var(--hair);
+          padding: 22px var(--pad) 30px; display:flex; flex-wrap:wrap; gap:16px 34px; justify-content:space-between; }
+.endbar a, .endbar span { font-size: var(--micro); letter-spacing:.18em; text-transform:uppercase;
+          color: var(--text-secondary); text-decoration:none; transition:color .2s ease; }
+.endbar a:hover { color: var(--primary-color); }
+
+/* ── 复制提示 ── */
+.toast { position:fixed; left:50%; bottom:28px; transform:translateX(-50%) translateY(8px);
+    background:var(--text-primary); color:var(--canvas); padding:9px 18px; border-radius:var(--radius-pill);
+    font-size:12px; letter-spacing:.04em; opacity:0; pointer-events:none; z-index:210;
+    transition: opacity .2s ease, transform .3s var(--ease-std); }
+.toast.on { opacity:1; transform:translateX(-50%) translateY(0); }
+
+@media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior:auto; }
+    *, *::before, *::after { transition-duration:.01ms !important; animation-duration:.01ms !important; animation-iteration-count:1 !important; }
+    .js .rv { opacity:1; transform:none; clip-path:none; }
+}
+</style>
+</head>
+<body>
+
+<canvas id="core"></canvas>
+<div class="progress" id="progress"></div>
+<div class="cursor" id="cur"></div>
+<div class="cursor-ring" id="ring"></div>
+<div class="toast" id="toast">已复制</div>
+
+<!-- ══════════════ 顶栏 ══════════════ -->
+<header class="topbar">
+    <div><b>MOLA</b> <span class="sep">/</span> SYSTEM</div>
+    <nav class="tb-mid">
+        <span id="tbIdx">0000</span>
+        <span id="tbName">Index</span>
+    </nav>
+    <button class="tb-theme" id="themeBtn"><span class="bulb"></span><span id="themeTxt">Light</span></button>
+</header>
+
+<!-- ══════════════ HERO ══════════════ -->
+<section class="hero wrap" id="s-hero">
+    <div class="hero-tag micro">
+        <div>MOLAGPT</div>
+        <div>V2 · DESIGN SYSTEM</div>
+        <div>2026</div>
+    </div>
+
+    <div class="hero-type">
+        <div class="disp d-xl hero-mola" aria-hidden="true">MOLA</div>
+        <h1 class="disp d-xl hero-line">SYS<span class="thin">TEM</span></h1>
+
+        <div class="hero-sub">
+            <div class="hero-claim">一个由自己的<span>变量</span><br>构成的物体。</div>
+            <button class="enter" id="enterBtn">进入系统 <i>↓</i></button>
+        </div>
+    </div>
+
+    <div class="strip">
+        <span><b>8</b> 色彩阶</span>
+        <span><b>10</b> 圆角档</span>
+        <span><b>3</b> 阴影令牌</span>
+        <span><b>3</b> 缓动曲线</span>
+        <span><b>2</b> 主题</span>
+        <span><b>13</b> 样式表</span>
+        <span><b>6</b> 处勘误</span>
+    </div>
+</section>
+
+<!-- ══════════════ 0001 论点 ══════════════ -->
+<section id="s1" data-idx="0001" data-name="Thesis">
+<div class="wrap">
+    <div class="chap">
+        <div class="chap-idx">0001</div>
+        <div>
+            <h2 class="disp d-l rv">物体<br>没有<br>固定形状</h2>
+        </div>
+        <div class="chap-rule"></div>
+    </div>
+
+    <div class="thesis">
+        <div>
+            <p class="lead rv d1">
+                你在整页背后看到的那个东西，不是找来的素材。
+                它的每一个视觉属性都直接取自这套系统自己的原语 ——
+                <strong>没有一处是为了「看起来高级」而额外加的</strong>。
+            </p>
+            <p class="lead rv d2" style="margin-top:22px">
+                这也是这套系统唯一想说的话：先定义材料，再谈造型。
+                当颜色、圆角、阴影、曲线都只有一个出处，
+                界面就不需要每次重新决定长什么样。
+            </p>
+        </div>
+        <div class="thesis-list rv d2">
+            <div class="tl-row"><span class="tl-k">形体柔和度</span><span class="tl-v">--radius-2xs → --radius-xxl</span></div>
+            <div class="tl-row"><span class="tl-k">表面色</span><span class="tl-v">rgba(190,114,127, .08 → .36)</span></div>
+            <div class="tl-row"><span class="tl-k">边缘光</span><span class="tl-v">#e1a3af · 深色态品牌文字</span></div>
+            <div class="tl-row"><span class="tl-k">明暗关系</span><span class="tl-v">--shadow-sm / md / lg</span></div>
+            <div class="tl-row"><span class="tl-k">呼吸节奏</span><span class="tl-v">cubic-bezier(.4, 0, .2, 1)</span></div>
+            <div class="tl-row"><span class="tl-k">聚散</span><span class="tl-v">scroll progress 0 → 1</span></div>
+        </div>
+    </div>
+</div>
+</section>
+
+<!-- ══════════════ 0002 色彩 ══════════════ -->
+<section id="s2" data-idx="0002" data-name="Color">
+<div class="wrap">
+    <div class="chap">
+        <div class="chap-idx">0002</div>
+        <div>
+            <div class="micro-b rv">Color</div>
+            <h2 class="disp d-m rv d1" style="margin-top:14px">一条阶梯<br>不是一张色板</h2>
+        </div>
+        <div class="chap-rule"></div>
+    </div>
+
+    <div class="figure">
+        <div class="cols">
+            <div>
+                <div class="hex rv mono" data-copy="#be727f">#be727f</div>
+                <p class="lead rv d1" style="margin-top:22px">
+                    一个偏灰的玫瑰粉。饱和度刻意压低，所以它可以<strong>大面积用作交互态而不刺眼</strong> ——
+                    这是整套视觉能保持安静的前提。
+                </p>
+            </div>
+            <div>
+                <p class="lead rv d2">
+                    系统里几乎所有「品牌色的柔和态」都不是新色号，而是同一个 RGB 上的一条透明度阶梯。
+                    新组件应该从这条阶梯里取值，<strong>而不是自己再调一个粉</strong>。
+                </p>
+                <p class="lead rv d3" style="margin-top:18px">
+                    深色主题下阶梯换用 <code>rgba(207,137,150, α)</code>，
+                    并整体加重 4–8 个百分点 —— 因为深底上的低透明度品牌色几乎看不见。
+                </p>
+            </div>
+        </div>
+
+        <div class="ladder rv d2">
+            <div style="background:rgba(190,114,127,.08)"><b>.08</b><em>用户气泡底</em></div>
+            <div style="background:rgba(190,114,127,.10)"><b>.10</b><em>激活底 / 胶囊开</em></div>
+            <div style="background:rgba(190,114,127,.12)"><b>.12</b><em>图标底</em></div>
+            <div style="background:rgba(190,114,127,.15)"><b>.15</b><em>激活 + 悬停</em></div>
+            <div style="background:rgba(190,114,127,.22)"><b>.22</b><em>气泡描边</em></div>
+            <div style="background:rgba(190,114,127,.25)"><b>.25</b><em>胶囊描边</em></div>
+            <div style="background:rgba(190,114,127,.30)"><b>.30</b><em>主按钮投影</em></div>
+            <div style="background:rgba(190,114,127,.36)"><b>.36</b><em>气泡悬停边</em></div>
+        </div>
+
+        <div class="chips rv d3">
+            <div class="chip" data-copy="var(--primary-color)"><div class="sw" style="background:#be727f"></div>
+                <div class="mt"><div class="nm">--primary-color</div><div class="vl mono">#be727f</div></div></div>
+            <div class="chip" data-copy="var(--primary-hover)"><div class="sw" style="background:#a05a66"></div>
+                <div class="mt"><div class="nm">--primary-hover</div><div class="vl mono">#a05a66</div></div></div>
+            <div class="chip" data-copy="var(--brand-color-light)"><div class="sw" style="background:#cf8996"></div>
+                <div class="mt"><div class="nm">--brand-color-light</div><div class="vl mono">#cf8996 · 仅深色</div></div></div>
+            <div class="chip" data-copy="#e1a3af"><div class="sw" style="background:#e1a3af"></div>
+                <div class="mt"><div class="nm">深色激活文字</div><div class="vl mono">#e1a3af · 硬编码</div></div></div>
+
+            <div class="chip" data-copy="#28a745"><div class="sw" style="background:#28a745"></div>
+                <div class="mt"><div class="nm">Success</div><div class="vl mono">底 #edfaf1 · 边 #b7e4c7</div></div></div>
+            <div class="chip" data-copy="#dc3545"><div class="sw" style="background:#dc3545"></div>
+                <div class="mt"><div class="nm">Error</div><div class="vl mono">底 #fef2f2 · 边 #fecaca</div></div></div>
+            <div class="chip" data-copy="#e8a317"><div class="sw" style="background:#e8a317"></div>
+                <div class="mt"><div class="nm">Warning</div><div class="vl mono">底 #fffbeb · 边 #fde68a</div></div></div>
+            <div class="chip" data-copy="#3b82f6"><div class="sw" style="background:#3b82f6"></div>
+                <div class="mt"><div class="nm">Info</div><div class="vl mono">底 #eff6ff · 边 #bfdbfe</div></div></div>
+        </div>
+    </div>
+</div>
+</section>
+
+<!-- ══════════════ 0003 字体 ══════════════ -->
+<section id="s3" data-idx="0003" data-name="Type">
+<div class="wrap">
+    <div class="chap">
+        <div class="chap-idx">0003</div>
+        <div>
+            <div class="micro-b rv">Type</div>
+            <h2 class="disp d-m rv d1" style="margin-top:14px">一条画在<br>码位上的边界</h2>
+        </div>
+        <div class="chap-rule"></div>
+    </div>
+
+    <div class="figure">
+        <div class="specimen rv">Geist<span class="cjk">・字体</span></div>
+
+        <div class="cols" style="margin-top:clamp(26px,4vh,52px)">
+            <div>
+                <p class="lead rv d1">
+                    西文走可变字重的 Geist，中文交给系统字体。真正的设计决策在
+                    <code>unicode-range</code> 那一行：Geist 只接管拉丁与通用标点，
+                    <strong>刻意避开 CJK 标点区</strong>。
+                </p>
+                <p class="lead rv d2" style="margin-top:18px">
+                    否则中文引号、书名号会被西文字体渲染成半角，在整段中文里错位。
+                    这是一行注释就能说清、但漏掉就会天天硌人的细节。
+                </p>
+                <div class="range-bar rv d2">
+                    <div class="on"><b>U+0000–024F</b>拉丁 + 扩展</div>
+                    <div class="on"><b>U+2000–206F</b>通用标点</div>
+                    <div><b>U+3000–303F</b>CJK 标点 · 交还系统</div>
+                </div>
+            </div>
+            <div class="rv d3">
+                <div class="micro" style="margin-bottom:14px">实际在用的 UI 字号阶梯</div>
+                <div class="scale-row"><span class="n mono">24 / 800</span><span style="font-size:24px;font-weight:800;letter-spacing:-.5px">侧栏标题</span></div>
+                <div class="scale-row"><span class="n mono">18 / 600</span><span style="font-size:18px;font-weight:600">模态标题</span></div>
+                <div class="scale-row"><span class="n mono">15 / 1.6</span><span style="font-size:15px">消息正文 —— 密度基准行</span></div>
+                <div class="scale-row"><span class="n mono">14</span><span style="font-size:14px">模态按钮 · 表单</span></div>
+                <div class="scale-row"><span class="n mono">13.5</span><span style="font-size:13.5px">通知正文 · 侧栏导航</span></div>
+                <div class="scale-row"><span class="n mono">13 / 500</span><span style="font-size:13px;font-weight:500">对话标题 · 模型名</span></div>
+                <div class="scale-row"><span class="n mono">12 / 500</span><span style="font-size:12px;font-weight:500">工具胶囊</span></div>
+                <div class="scale-row"><span class="n mono">11 / 600</span><span style="font-size:11px;font-weight:600;letter-spacing:.04em;opacity:.7">分组标题</span></div>
+                <div class="scale-row"><span class="n mono">10 / 500</span><span class="bdg">BETA</span></div>
+                <p class="lead" style="font-size:12px;margin-top:16px">
+                    没有 <code>--font-size-*</code> 令牌，字号直接写在组件里。
+                    13 与 13.5 并存属于历史累积。本页那些 15vw 的大字是宣传层，不是规范。
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+</section>
+
+<!-- ══════════════ 0004 圆角 ══════════════ -->
+<section id="s4" data-idx="0004" data-name="Radius">
+<div class="wrap">
+    <div class="chap">
+        <div class="chap-idx">0004</div>
+        <div>
+            <div class="micro-b rv">Radius</div>
+            <h2 class="disp d-m rv d1" style="margin-top:14px">十档</h2>
+        </div>
+        <div class="chap-rule"></div>
+    </div>
+
+    <div class="figure">
+        <div class="cols">
+            <div><p class="lead rv">
+                唯一一套命名完整的尺度令牌。整体偏大 —— 主舞台 32px、侧边栏 24px、输入器 20px ——
+                <strong>「浮岛」质感几乎全部来自这里</strong>。
+            </p></div>
+            <div><p class="lead rv d1">
+                圆角在这里是主张，不是妥协。所以它值得被单独拿出来放大看，
+                也值得为它的一处定义冲突单开一段勘误。
+            </p></div>
+        </div>
+
+        <div class="ruler rv d1">
+            <div class="rc" data-copy="var(--radius-none)"><div class="bx" style="border-radius:var(--radius-none)"></div><div class="lb"><b>none</b>0</div></div>
+            <div class="rc" data-copy="var(--radius-2xs)"><div class="bx" style="border-radius:var(--radius-2xs)"></div><div class="lb"><b>2xs</b>4px</div></div>
+            <div class="rc" data-copy="var(--radius-xs)"><div class="bx" style="border-radius:var(--radius-xs)"></div><div class="lb"><b>xs</b>10px</div></div>
+            <div class="rc" data-copy="var(--radius-sm)"><div class="bx" style="border-radius:var(--radius-sm)"></div><div class="lb"><b>sm</b>12px · 头像</div></div>
+            <div class="rc" data-copy="var(--radius-md)"><div class="bx" style="border-radius:var(--radius-md)"></div><div class="lb"><b>md</b>16px · 气泡</div></div>
+            <div class="rc" data-copy="var(--radius-lg)"><div class="bx" style="border-radius:var(--radius-lg)"></div><div class="lb"><b>lg</b>20px · 模态</div></div>
+            <div class="rc" data-copy="var(--radius-xl)"><div class="bx" style="border-radius:var(--radius-xl)"></div><div class="lb"><b>xl</b>24px · 侧栏</div></div>
+            <div class="rc" data-copy="var(--radius-xxl)"><div class="bx" style="border-radius:var(--radius-xxl)"></div><div class="lb"><b>xxl</b>32px · 舞台</div></div>
+            <div class="rc" data-copy="var(--radius-pill)"><div class="bx" style="border-radius:var(--radius-pill)"></div><div class="lb"><b>pill</b>999px</div></div>
+            <div class="rc" data-copy="var(--radius-circle)"><div class="bx" style="border-radius:50%"></div><div class="lb"><b>circle</b>50%</div></div>
+        </div>
+
+        <div class="errata-inline rv d2">
+            <strong>同名令牌被定义了两次。</strong>
+            <code>molagpt.css</code> 里 sm/md/lg = 6 / 10 / 16px，<code>modern-clean.css</code> 里 = 12 / 16 / 20px。
+            两者都挂在 <code>:root</code>，特异性相同，最终由加载顺序决定 —— 线上生效的是后者。
+            这意味着只要有人调整 CSS 引入顺序，全站圆角会整体变小，而且不会报任何错。
+        </div>
+    </div>
+</div>
+</section>
+
+<!-- ══════════════ 0005 阴影 ══════════════ -->
+<section id="s5" data-idx="0005" data-name="Elevation">
+<div class="wrap">
+    <div class="chap">
+        <div class="chap-idx">0005</div>
+        <div>
+            <div class="micro-b rv">Elevation</div>
+            <h2 class="disp d-m rv d1" style="margin-top:14px">三档令牌<br>六种用法</h2>
+        </div>
+        <div class="chap-rule"></div>
+    </div>
+
+    <div class="figure">
+        <p class="lead rv">令牌只有三档，但真正在用的层级比三档多。下面把散落在组件里的那几条一并列出 —— 它们该被收回令牌层。</p>
+
+        <div class="elev rv d1">
+            <div class="el" data-copy="var(--shadow-sm)"><div class="bx" style="box-shadow:var(--shadow-sm)"></div><div class="lb"><b>--shadow-sm</b><span class="mono">0 1px 3px rgba(0,0,0,.08)</span></div></div>
+            <div class="el" data-copy="var(--shadow-md)"><div class="bx" style="box-shadow:var(--shadow-md)"></div><div class="lb"><b>--shadow-md</b><span class="mono">0 4px 6px rgba(0,0,0,.1)</span></div></div>
+            <div class="el" data-copy="var(--shadow-lg)"><div class="bx" style="box-shadow:var(--shadow-lg)"></div><div class="lb"><b>--shadow-lg</b><span class="mono">0 10px 15px rgba(0,0,0,.1)</span></div></div>
+        </div>
+        <div class="elev rv d2" style="margin-top:clamp(16px,2.4vw,32px)">
+            <div class="el"><div class="bx" style="box-shadow:0 4px 24px rgba(0,0,0,.04)"></div><div class="lb"><b>主舞台</b><span class="mono">0 4px 24px / .04</span></div></div>
+            <div class="el"><div class="bx" style="box-shadow:0 8px 24px rgba(0,0,0,.08), 0 2px 8px rgba(0,0,0,.04)"></div><div class="lb"><b>通知 · 双层</b><span class="mono">0 8px 24px + 0 2px 8px</span></div></div>
+            <div class="el"><div class="bx" style="box-shadow:0 20px 60px rgba(0,0,0,.3), 0 8px 30px rgba(0,0,0,.15)"></div><div class="lb"><b>模态 · 双层</b><span class="mono">0 20px 60px + 0 8px 30px</span></div></div>
+        </div>
+        <div class="elev rv d3" style="margin-top:clamp(16px,2.4vw,32px)">
+            <div class="el"><div class="bx" style="box-shadow:0 4px 12px rgba(190,114,127,.3);background:var(--primary-color)"></div><div class="lb"><b>品牌投影</b><span class="mono">0 4px 12px rgba(190,114,127,.3)</span></div></div>
+            <div class="el"><div class="bx" style="box-shadow:0 0 0 3px rgba(190,114,127,.08), 0 4px 20px rgba(190,114,127,.1); border-color:var(--primary-color)"></div><div class="lb"><b>输入聚焦环</b><span class="mono">0 0 0 3px / .08</span></div></div>
+            <div class="el"><div class="bx" style="box-shadow:inset -1px 0 0 0 rgba(190,114,127,.2)"></div><div class="lb"><b>侧栏内投影</b><span class="mono">inset -1px 0 0 / .05</span></div></div>
+        </div>
+    </div>
+</div>
+</section>
+
+<!-- ══════════════ 0006 动效 ══════════════ -->
+<section id="s6" data-idx="0006" data-name="Motion">
+<div class="wrap">
+    <div class="chap">
+        <div class="chap-idx">0006</div>
+        <div>
+            <div class="micro-b rv">Motion</div>
+            <h2 class="disp d-m rv d1" style="margin-top:14px">三条曲线<br>覆盖全部场景</h2>
+        </div>
+        <div class="chap-rule"></div>
+    </div>
+
+    <div class="figure">
+        <div class="curves">
+            <div class="cv std rv">
+                <svg viewBox="0 0 200 120" aria-hidden="true">
+                    <path class="pathbg" d="M10 110 H190 M10 110 V10"/>
+                    <path class="pathfg" d="M10 110 C 82 110, 46 10, 190 10"/>
+                </svg>
+                <div class="nm">标准</div>
+                <div class="fn mono">cubic-bezier(.4, 0, .2, 1)</div>
+                <div class="use">布局、宽度、透明度、消息入场。默认选它。</div>
+                <div class="track"><i></i></div>
+            </div>
+            <div class="cv back rv d1">
+                <svg viewBox="0 0 200 120" aria-hidden="true">
+                    <path class="pathbg" d="M10 110 H190 M10 110 V10"/>
+                    <path class="pathfg" d="M10 110 C 71 -58, 125 -4, 190 10"/>
+                </svg>
+                <div class="nm">回弹</div>
+                <div class="fn mono">cubic-bezier(.34, 1.56, .64, 1)</div>
+                <div class="use">主按钮缩放、模态入场。只给「值得被注意」的元素。</div>
+                <div class="track"><i></i></div>
+            </div>
+            <div class="cv drawer rv d2">
+                <svg viewBox="0 0 200 120" aria-hidden="true">
+                    <path class="pathbg" d="M10 110 H190 M10 110 V10"/>
+                    <path class="pathfg" d="M10 110 C 55 30, 55 10, 190 10"/>
+                </svg>
+                <div class="nm">抽屉</div>
+                <div class="fn mono">cubic-bezier(.25, .8, .25, 1)</div>
+                <div class="use">移动端侧栏 transform。起步快、收尾稳。</div>
+                <div class="track"><i></i></div>
+            </div>
+        </div>
+
+        <div class="cols" style="margin-top:clamp(30px,5vh,60px)">
+            <div class="rv d1">
+                <div class="micro" style="margin-bottom:12px">时长</div>
+                <div class="tl-row"><span class="tl-k mono">0.15s</span><span class="tl-v">胶囊 / 列表项底色与文字色</span></div>
+                <div class="tl-row"><span class="tl-k mono">0.18s</span><span class="tl-v">开关滑块位移</span></div>
+                <div class="tl-row"><span class="tl-k mono">0.2s</span><span class="tl-v">--transition 通用兜底</span></div>
+                <div class="tl-row"><span class="tl-k mono">0.3s</span><span class="tl-v">侧栏宽度 / 模态 / 主题切换</span></div>
+                <div class="tl-row"><span class="tl-k mono">0.4s</span><span class="tl-v">侧栏整体（旧写法，已被主题层收窄）</span></div>
+            </div>
+            <div class="rv d2">
+                <div class="micro" style="margin-bottom:12px">两条硬约束</div>
+                <p class="lead" style="font-size:13.5px">
+                    <strong>窗口 resize 时全局掐断动画。</strong>
+                    JS 给 <code>body</code> 挂 <code>.resize-animation-stopper</code>，该类下所有 animation / transition 强制 none，
+                    解决拖窗卡顿与跨断点时侧栏宽度的诡异动画。唯一例外是移动端侧栏 transform。
+                </p>
+                <p class="lead" style="font-size:13.5px;margin-top:16px">
+                    <strong>尊重 prefers-reduced-motion。</strong>
+                    通知组件已完整实现：过渡、位移、倒计时进度条全部关闭，
+                    并把元素直接置为终态 —— <em>不会停在中间值</em>。新组件照抄这个写法。
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+</section>
+
+<!-- ══════════════ 0007 组件 ══════════════ -->
+<section id="s7" data-idx="0007" data-name="Components">
+<div class="wrap">
+    <div class="chap">
+        <div class="chap-idx">0007</div>
+        <div>
+            <div class="micro-b rv">Components</div>
+            <h2 class="disp d-m rv d1" style="margin-top:14px">系统的证据</h2>
+        </div>
+        <div class="chap-rule"></div>
+    </div>
+
+    <div class="figure">
+        <p class="lead rv">以下全部是线上规格 1:1 复刻，可以直接交互。它们不是插图 —— 它们是前面六章的结论。</p>
+
+        <div class="vitrine">
+            <div class="vt rv d1">
+                <div class="vt-top"><span class="t">按钮</span><span class="i mono">SPEC / 001</span></div>
+                <div class="vt-body">
+                    <button class="btn-new">+ 新建对话</button>
+                    <button class="mbtn p">保存</button>
+                    <button class="mbtn s">取消</button>
+                    <button class="ibtn" aria-label="设置"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+                </div>
+                <div class="vt-note">主按钮 12/24 内边距 · pill 圆角 · 品牌投影 .30 · 悬停 scale(1.05) 走回弹曲线。全站只应出现一个主按钮。</div>
+            </div>
+
+            <div class="vt rv d1">
+                <div class="vt-top"><span class="t">工具胶囊 / 开关</span><span class="i mono">SPEC / 002</span></div>
+                <div class="vt-body">
+                    <button class="pill">推理</button>
+                    <button class="pill on" aria-pressed="true">联网</button>
+                    <button class="pill">强度：高</button>
+                    <label class="tgl"><input type="checkbox"><span></span></label>
+                    <label class="tgl"><input type="checkbox" checked><span></span></label>
+                    <span class="bdg">BETA</span>
+                </div>
+                <div class="vt-note">未开启时完全透明，不抢注意力；开启后浮出 10% 品牌底 + 25% 品牌描边。三态由 <code>aria-pressed</code> 驱动。</div>
+            </div>
+
+            <div class="vt rv d2">
+                <div class="vt-top"><span class="t">对话列表</span><span class="i mono">SPEC / 003</span></div>
+                <div class="vt-body" style="align-items:flex-start">
+                    <div class="cnv">
+                        <div class="cnv-lb">今天</div>
+                        <div class="cnv-it on"><span class="tt">设计系统提取与整理</span><span class="tm">14:20</span></div>
+                        <div class="cnv-it"><span class="tt">Avalonia 渲染性能排查</span><span class="tm">11:05</span></div>
+                        <div class="cnv-lb">昨天</div>
+                        <div class="cnv-it"><span class="tt">点数配额客户端契约</span><span class="tm">昨天</span></div>
+                    </div>
+                </div>
+                <div class="vt-note">扁平单行，无左侧彩条。激活态只有底色与文字色变化 —— 不加边框、不加投影、不位移。</div>
+            </div>
+
+            <div class="vt rv d2">
+                <div class="vt-top"><span class="t">消息</span><span class="i mono">SPEC / 004</span></div>
+                <div class="vt-body" style="align-items:stretch">
+                    <div class="msg">
+                        <div class="msg-u"><div class="bb">帮我把 v2 的设计令牌整理成一页。</div><div class="av u">你</div></div>
+                        <div class="msg-b"><div class="av b">M</div><div class="mh">MolaGPT Routes</div>
+                            <div class="bd">令牌分三层：molagpt.css 定义真值，modern-clean.css 覆盖圆角阶梯，组件表只消费不定义。</div></div>
+                    </div>
+                </div>
+                <div class="vt-note">用户消息是气泡，助手消息不是 —— 去掉背景与内边距，内容铺满容器，长文与代码块才不会被挤窄。</div>
+            </div>
+
+            <div class="vt rv d3">
+                <div class="vt-top"><span class="t">输入器</span><span class="i mono">SPEC / 005</span></div>
+                <div class="vt-body" style="align-items:stretch">
+                    <div class="composer">
+                        <div class="ibox">
+                            <button class="pill u" aria-label="附件"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+                            <div class="t"><button class="pill on" aria-pressed="true">推理</button><button class="pill">联网</button></div>
+                            <div class="x">输入消息…</div>
+                        </div>
+                        <div class="ihints">
+                            <button class="ibtn" aria-label="工具"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+                            <button class="send" aria-label="发送"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg></button>
+                        </div>
+                    </div>
+                </div>
+                <div class="vt-note">2×2 网格：附件 + 工具条一行，textarea 跨满第二行（56 → 140px）。动作栏与输入框同级，共同构成单一输入器。</div>
+            </div>
+
+            <div class="vt rv d3">
+                <div class="vt-top"><span class="t">通知</span><span class="i mono">SPEC / 006</span></div>
+                <div class="vt-body" style="flex-direction:column; align-items:stretch; gap:10px">
+                    <div class="ntf ok"><div class="ntf-inner"><div class="ntf-ic">✓</div><div class="ntf-ct"><b>Python 环境已就绪</b><em>Python 3.12.4</em></div><div class="ntf-bar"></div></div></div>
+                    <div class="ntf wrn"><div class="ntf-inner"><div class="ntf-ic">▲</div><div class="ntf-ct"><b>额度将在 3 天后重置</b><em>本周期剩余 128 点</em></div><div class="ntf-bar"></div></div></div>
+                </div>
+                <div class="vt-note">四种语义各自有实底背景与描边，深浅两套都给足。底部 3px 进度条走倒计时，悬停即暂停。</div>
+            </div>
+        </div>
+    </div>
+</div>
+</section>
+
+<!-- ══════════════ 0008 主题翻转 ══════════════ -->
+<section class="flip" id="s8" data-idx="0008" data-name="Dark">
+    <div class="flip-sticky wrap">
+        <div class="micro-b">0008 / Theme</div>
+        <h2 class="disp d-l" style="margin:16px 0 clamp(24px,4vh,48px)">不是<br>取反</h2>
+        <div class="flip-grid">
+            <p class="lead">
+                深色主题靠 <code>body.dark-theme</code> 这一个类切换 —— 不是 <code>prefers-color-scheme</code>，
+                也不是 <code>data-theme</code> 属性。类挂上去，所有令牌整体换值，组件一行都不用改。
+                <br><br>
+                <strong>这一页刚刚就是这么翻的。</strong>
+                往下滚，你看到的不是配色说明，是这套机制本身在运行。
+            </p>
+            <div class="flip-pair">
+                <div class="fp">
+                    <div class="h">Light</div>
+                    <div class="r"><i style="background:#ffffff;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)"></i><span class="mono">#ffffff</span></div>
+                    <div class="r"><i style="background:#f8f9fa;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)"></i><span class="mono">#f8f9fa</span></div>
+                    <div class="r"><i style="background:#f1f3f5;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)"></i><span class="mono">#f1f3f5</span></div>
+                    <div class="r"><i style="background:#212529"></i><span class="mono">#212529</span></div>
+                    <div class="r"><i style="background:#6c757d"></i><span class="mono">#6c757d</span></div>
+                    <div class="r"><i style="background:#dee2e6"></i><span class="mono">#dee2e6</span></div>
+                    <div class="r"><i style="background:rgba(190,114,127,.10)"></i><span class="mono">品牌态 .10</span></div>
+                </div>
+                <div class="fp">
+                    <div class="h">Dark</div>
+                    <div class="r"><i style="background:#1a1a1a"></i><span class="mono">#1a1a1a</span></div>
+                    <div class="r"><i style="background:#2d2d2d"></i><span class="mono">#2d2d2d</span></div>
+                    <div class="r"><i style="background:#3a3a3a"></i><span class="mono">#3a3a3a</span></div>
+                    <div class="r"><i style="background:#e0e0e0"></i><span class="mono">#e0e0e0 · 非纯白</span></div>
+                    <div class="r"><i style="background:#a0a0a0"></i><span class="mono">#a0a0a0</span></div>
+                    <div class="r"><i style="background:#404040"></i><span class="mono">#404040</span></div>
+                    <div class="r"><i style="background:rgba(207,137,150,.18)"></i><span class="mono">品牌态 .18 ↑</span></div>
+                </div>
+            </div>
+        </div>
+        <div class="strip" style="margin-top:clamp(22px,3.6vh,44px)">
+            <span><b>中性擦色</b> rgba(0,0,0,.05) → rgba(255,255,255,.08)</span>
+            <span><b>品牌态</b> .10 → .18</span>
+            <span><b>阴影</b> .08 → .40</span>
+        </div>
+    </div>
+</section>
+
+<!-- ══════════════ 0009 铭牌 ══════════════ -->
+<section id="s9" data-idx="0009" data-name="Spec">
+<div class="wrap">
+    <div class="chap">
+        <div class="chap-idx">0009</div>
+        <div>
+            <div class="micro-b rv">Specification</div>
+            <h2 class="disp d-m rv d1" style="margin-top:14px">令牌铭牌</h2>
+        </div>
+        <div class="chap-rule"></div>
+    </div>
+
+    <div class="figure">
+        <div class="plate rv d1">
+            <div class="plate-h">
+                <span class="a">MolaGPT V2 · Design Tokens</span>
+                <span class="b">Source · chatgpt.wljay.cn/v2 · 2026-09-10</span>
+            </div>
+            <div class="plate-g">
+                <div class="pg"><div class="k">Brand</div><div class="v mono">#be727f</div><div class="n">--primary-color · 主按钮 / 发送键 / 激活文字</div></div>
+                <div class="pg"><div class="k">Brand Hover</div><div class="v mono">#a05a66</div><div class="n">--primary-hover · 也用作浅底上的品牌文字色</div></div>
+                <div class="pg"><div class="k">Brand Light</div><div class="v mono">#cf8996</div><div class="n">--brand-color-light · 仅深色主题定义</div></div>
+
+                <div class="pg"><div class="k">Surface</div><div class="v mono">#ffffff / #f8f9fa / #f1f3f5</div><div class="n">--bg-primary / secondary / tertiary</div></div>
+                <div class="pg"><div class="k">Ink</div><div class="v mono">#212529 / #6c757d</div><div class="n">--text-primary / secondary · tertiary 未定义</div></div>
+                <div class="pg"><div class="k">Border</div><div class="v mono">#dee2e6</div><div class="n">--border-color</div></div>
+
+                <div class="pg"><div class="k">Radius</div><div class="v mono">0 · 4 · 10 · 12 · 16 · 20 · 24 · 32 · 999 · 50%</div><div class="n">10 档 · 定义于 modern-clean.css</div></div>
+                <div class="pg"><div class="k">Elevation</div><div class="v mono">sm / md / lg</div><div class="n">3 档令牌 + 6 处组件内硬编码</div></div>
+                <div class="pg"><div class="k">Transition</div><div class="v mono">all .2s ease</div><div class="n">--transition · 通用兜底</div></div>
+
+                <div class="pg"><div class="k">Sidebar</div><div class="v mono">280px / 80px</div><div class="n">--sidebar-width · 折叠态 80px</div></div>
+                <div class="pg"><div class="k">Header Overlay</div><div class="v mono">64px</div><div class="n">--chat-header-overlay-height · 移动端 56px</div></div>
+                <div class="pg"><div class="k">Input Overlay</div><div class="v mono">168px</div><div class="n">静态兜底 · 运行时由 JS 按真实高度改写</div></div>
+
+                <div class="pg"><div class="k">Breakpoint</div><div class="v mono">768 / 769px</div><div class="n">全站唯一断点</div></div>
+                <div class="pg"><div class="k">Theme</div><div class="v mono">body.dark-theme</div><div class="n">类切换 · 非媒体查询</div></div>
+                <div class="pg"><div class="k">Type</div><div class="v mono">Geist Latin + CJK System</div><div class="n">unicode-range 分界 · 可变字重 1–1000</div></div>
+            </div>
+        </div>
+
+        <div class="cols rv d2" style="margin-top:clamp(24px,4vh,48px)">
+            <div>
+                <div class="micro" style="margin-bottom:12px">层叠顺序 · 后者覆盖前者</div>
+                <div class="tl-row"><span class="tl-k">令牌层</span><span class="tl-v mono">molagpt.css :root</span></div>
+                <div class="tl-row"><span class="tl-k">主题层</span><span class="tl-v mono">modern-clean.css</span></div>
+                <div class="tl-row"><span class="tl-k">组件层</span><span class="tl-v mono">*-uikit.css · extensions.css</span></div>
+                <div class="tl-row"><span class="tl-k">兜底层</span><span class="tl-v mono">molagpt_extra.css · _auth.css</span></div>
+            </div>
+            <div>
+                <p class="lead" style="font-size:13.5px">
+                    V2 没有单独的 <code>design-system.css</code>。这套系统是分层的 ——
+                    <strong>一份令牌 + 一层主题覆盖 + 若干组件表</strong>，全部靠同一组 CSS 变量串起来。
+                    搞清楚谁在覆盖谁，比记住某个颜色更重要。
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+</section>
+
+<!-- ══════════════ 0010 勘误 ══════════════ -->
+<section id="s10" data-idx="0010" data-name="Errata">
+<div class="wrap">
+    <div class="chap">
+        <div class="chap-idx">0010</div>
+        <div>
+            <div class="micro-b rv">Errata</div>
+            <h2 class="disp d-m rv d1" style="margin-top:14px">诚实<br>是系统的一部分</h2>
+        </div>
+        <div class="chap-rule"></div>
+    </div>
+
+    <div class="figure">
+        <p class="lead rv" style="margin-bottom:clamp(26px,4vh,50px)">
+            以下是整理过程中确认的问题，按会不会咬人排序。都是可查证的事实，不是风格偏好。
+            一套不敢列勘误的设计系统，通常只是没人认真看过。
+        </p>
+
+        <div class="err-row rv"><div class="err-n mono">01</div><div>
+            <div class="err-t">圆角令牌被定义两次且值不同</div>
+            <div class="err-d">molagpt.css 的 sm/md/lg = 6/10/16，modern-clean.css 的 = 12/16/20，同为 <code>:root</code>、靠加载顺序决胜负。调整 CSS 引入顺序会静默改变全站圆角。建议删掉 molagpt.css 里那三行，只留一处。</div>
+        </div></div>
+        <div class="err-row rv d1"><div class="err-n mono">02</div><div>
+            <div class="err-t">语义色只在深色主题存在变量，且与组件硬编码值不一致</div>
+            <div class="err-d"><code>--success-color: #4caf50</code>（仅深色）对上通知组件里的 <code>#28a745</code>（两个主题都用）。建议把四组语义色的前景 / 底 / 边，浅深各一套，提到令牌层。</div>
+        </div></div>
+        <div class="err-row rv d1"><div class="err-n mono">03</div><div>
+            <div class="err-t">画布底是硬编码</div>
+            <div class="err-d"><code>#f2f4f7</code> 是浮岛布局最外层的底色，却没有对应令牌；深色主题也没显式定义。建议补 <code>--canvas</code>。</div>
+        </div></div>
+        <div class="err-row rv d2"><div class="err-n mono">04</div><div>
+            <div class="err-t">--text-tertiary 被引用但从未定义</div>
+            <div class="err-d">extensions.css 已经写了兜底 <code>var(--text-tertiary, #8a8f98)</code>，并在注释里留言「站点后续补上会自动生效」。补一个就行。</div>
+        </div></div>
+        <div class="err-row rv d2"><div class="err-n mono">05</div><div>
+            <div class="err-t">没有间距与字号令牌</div>
+            <div class="err-d">实测间距集中在 2/4/6/8/10/12/16/20/24，字号集中在 10/11/12/13/13.5/14/15/18/24。其中 13 与 13.5 并存、8px 与 10px 圆角绕开令牌直写，属于可以顺手收敛的部分。</div>
+        </div></div>
+        <div class="err-row rv d3"><div class="err-n mono">06</div><div>
+            <div class="err-t">主题层大量使用 !important</div>
+            <div class="err-d">modern-clean.css 与两个 uikit 表几乎每条声明都带 <code>!important</code>，这是为了压过 bootstrap 与旧样式，代价是后续组件只能继续用 <code>!important</code> 才改得动。新组件尽量写在最后加载的表里、用更具体的选择器，而不是继续叠。</div>
+        </div></div>
+
+        <div class="solid rv d3" style="margin-top:clamp(34px,5vh,64px); padding: clamp(24px,3.6vw,42px)">
+            <div class="micro" style="margin-bottom:18px">给新组件的最短检查表</div>
+            <div class="tl-row"><span class="tl-k">颜色只从阶梯取</span><span class="tl-v">中性用 --bg-* / --text-*，不新调色号</span></div>
+            <div class="tl-row"><span class="tl-k">圆角只用 --radius-*</span><span class="tl-v">不写裸数值</span></div>
+            <div class="tl-row"><span class="tl-k">过渡默认 --transition</span><span class="tl-v">只在需要被注意时用回弹</span></div>
+            <div class="tl-row"><span class="tl-k">写完浅色立刻看深色</span><span class="tl-v">中性擦色与品牌透明度都要单独加重</span></div>
+            <div class="tl-row"><span class="tl-k">补 reduced-motion</span><span class="tl-v">并把元素直接置为终态</span></div>
+            <div class="tl-row"><span class="tl-k">新表挂在加载链末尾</span><span class="tl-v">别往 molagpt.css 里塞</span></div>
+        </div>
+    </div>
+</div>
+</section>
+
+<!-- ══════════════ FINALE ══════════════ -->
+<section class="finale" id="s-fin" data-idx="0011" data-name="End">
+    <div class="fin-sticky">
+        <div class="fin-layer" data-fin="0"><div class="disp fin-word">MOLA</div></div>
+        <div class="fin-layer" data-fin="1"><div class="fin-line">系统不是<br>一份文档。</div></div>
+        <div class="fin-layer" data-fin="2"><div class="fin-line">它是一次次<br><span>不用再想</span>的决定。</div></div>
+        <div class="fin-layer" data-fin="3">
+            <div>
+                <div class="disp d-l">MOLA<br>SYSTEM</div>
+                <div class="micro" style="margin-top:22px">V2 · 2026</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<footer class="endbar">
+    <span>MOLAGPT / V2</span>
+    <a href="molagpt-v2-design-system.html">设计系统文档</a>
+    <a href="https://chatgpt.wljay.cn/v2" target="_blank" rel="noopener">线上产品</a>
+    <span>2026</span>
+</footer>
+
+<script>
+(function () {
+'use strict';
+
+/* 脚本挂了就把 .js 摘掉 —— 进场动画的隐藏态随之失效，正文回到可读。
+   宁可没有动效，也不能因为一处报错让整页正文消失。 */
+addEventListener('error', function () { document.documentElement.classList.remove('js'); });
+
+var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+var isTouch = matchMedia('(hover: none)').matches || innerWidth < 861;
+
+/* ── 同源部署时才启用真实 Geist（跨域会被 CORS 拒） ─────────────── */
+if (/(^|\.)wljay\.cn$/.test(location.hostname)) {
+    var st = document.createElement('style');
+    st.textContent = "@font-face{font-family:'Geist Latin';font-style:normal;font-weight:1 1000;"
+        + "font-display:swap;src:url('https://chatgpt.wljay.cn/v2/webfonts/GeistVariableVF.ttf') format('truetype');"
+        + "unicode-range:U+0000-024F,U+2000-206F,U+2190-21FF,U+2200-22FF,U+25A0-25FF;}";
+    document.head.appendChild(st);
+}
+
+/* ═══════════ 实时 3D：玫瑰金属核心（原生 WebGL，无依赖） ═══════════ */
+var VERT = 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }';
+
+var FRAG = [
+'precision highp float;',
+'uniform vec2  uRes;',
+'uniform float uTime;',
+'uniform vec2  uMouse;',
+'uniform float uScroll;',
+'uniform float uDark;',
+'uniform vec2  uCtr;',
+'uniform float uZoom;',
+'',
+'float smin(float a, float b, float k){',
+'  float h = clamp(0.5 + 0.5*(b-a)/k, 0.0, 1.0);',
+'  return mix(b, a, h) - k*h*(1.0-h);',
+'}',
+'',
+'float map(vec3 p){',
+'  float t = uTime*0.22;',
+/* 基础分离度就足够大：任何时候都不该塌成一个普通球 */
+'  float sep = 0.50 + uScroll*0.72;',
+'  float d = 1e9;',
+'  for(int i=0;i<6;i++){',
+'    float fi = float(i);',
+'    float a  = t*(0.72 + fi*0.10) + fi*1.0472;',
+'    vec3 c = vec3(',
+'      cos(a)*sep*(0.92 + 0.26*sin(t*1.30 + fi)),',
+'      sin(a*0.83 + fi*0.7)*sep*0.76,',
+'      sin(a*1.17 + fi)*sep*0.62);',
+'    float r = 0.34 - fi*0.026 + 0.050*sin(t*1.9 + fi*2.1);',
+'    d = smin(d, length(p-c)-r, 0.30);',
+'  }',
+'  vec3 mp = vec3(uMouse.x*1.05, uMouse.y*0.72, 0.55);',
+'  d = smin(d, length(p-mp)-0.17, 0.42);',
+'  return d;',
+'}',
+'',
+'vec3 nrm(vec3 p){',
+'  vec2 e = vec2(0.0016, 0.0);',
+'  return normalize(vec3(',
+'    map(p+e.xyy)-map(p-e.xyy),',
+'    map(p+e.yxy)-map(p-e.yxy),',
+'    map(p+e.yyx)-map(p-e.yyx)));',
+'}',
+'',
+/* 假环境：顶部暖白，底部玫瑰，一枚柔和主光 + 一枚品牌补光 */
+'vec3 env(vec3 d){',
+'  float y = d.y*0.5 + 0.5;',
+'  vec3 top    = mix(vec3(1.00,0.99,0.99), vec3(0.46,0.44,0.46), uDark);',
+/* 暗部走石墨偏玫瑰，不能滑向褐色 —— 那是「巧克力」不是「玫瑰金属」 */
+'  vec3 bottom = mix(vec3(0.215,0.190,0.205), vec3(0.075,0.065,0.070), uDark);',
+'  vec3 c = mix(bottom, top, pow(y, 1.75));',
+'  float key  = pow(max(dot(d, normalize(vec3(-0.42, 0.76, 0.50))), 0.0), 8.0);',
+'  c += key * mix(vec3(0.62), vec3(0.36), uDark);',
+'  float fill = pow(max(dot(d, normalize(vec3( 0.80,-0.22, 0.42))), 0.0), 3.2);',
+'  c += fill * vec3(0.745, 0.447, 0.498) * 0.42;',
+'  return c;',
+'}',
+'',
+'mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }',
+'',
+'void main(){',
+/* 构图：物体位置由 JS 按章节驱动 —— 首屏与终章在画内，
+   正文密集的章节把它推到右缘之外，只留一道边，绝不压字 */
+/* 竖屏不能只按高度归一化，否则物体会胀成一张糊满全屏的雾 */
+'  float ref = min(uRes.y, uRes.x * 1.15);',
+'  vec2 uv = (gl_FragCoord.xy - uCtr*uRes) / ref;',
+/* uZoom 拉远相机：首屏与终章 1.0（雕塑本体），正文章节 ~2.1（右上角的复现母题） */
+'  vec3 ro = vec3(0.0, 0.0, 3.05);',
+'  vec3 rd = normalize(vec3(uv*1.16*uZoom, -1.78));',
+'  float ax =  uMouse.y*0.10;',
+'  float ay = -uMouse.x*0.14;',
+'  ro.yz *= rot(ax); rd.yz *= rot(ax);',
+'  ro.xz *= rot(ay); rd.xz *= rot(ay);',
+'',
+'  float t = 0.0, md = 1e9;',
+'  bool hit = false;',
+'  for(int i=0;i<STEPS;i++){',
+'    vec3 p = ro + rd*t;',
+'    float d = map(p);',
+'    md = min(md, d);',
+'    if(d < 0.0014){ hit = true; break; }',
+'    t += d*0.92;',
+'    if(t > 6.0) break;',
+'  }',
+'',
+'  vec3 rim = mix(vec3(0.882,0.639,0.686), vec3(0.812,0.537,0.588), uDark);',
+'',
+'  if(!hit){',
+/*   未命中：用最近距离画一圈极柔的光晕，边缘不硬 */
+/*   未命中：只留一道极窄的接触晕，绝不要做成发光球 */
+'    float g = smoothstep(0.022, 0.0, md);',
+'    gl_FragColor = vec4(rim, g*0.13);',
+'    return;',
+'  }',
+'',
+'  vec3 pos = ro + rd*t;',
+'  vec3 n   = nrm(pos);',
+'  vec3 r   = reflect(rd, n);',
+'  float fres = pow(1.0 - max(dot(n, -rd), 0.0), 3.2);',
+'',
+'  vec3 base = mix(vec3(0.930,0.905,0.915), vec3(0.42,0.36,0.38), uDark);',
+'  vec3 col  = env(r) * base;',
+'',
+/* 主光高光：小而硬，是「金属」与「橡皮糖」的分界 */
+'  vec3 L = normalize(vec3(-0.45, 0.72, 0.52));',
+'  float spec = pow(max(dot(r, L), 0.0), 210.0);',
+'  col += spec * mix(vec3(1.00,0.99,0.98), vec3(0.86,0.84,0.84), uDark) * 1.30;',
+'',
+/* 背侧轮廓光：品牌色，从下后方压出体积 */
+'  float back = pow(max(dot(n, normalize(vec3(0.58,-0.38,-0.72))), 0.0), 2.2);',
+'  col += back * vec3(0.745,0.447,0.498) * 0.50;',
+'',
+'  col += fres * rim * 1.05;',
+/* 极微弱虹彩薄膜，振幅刻意压到几乎看不出 */
+'  col += 0.026 * vec3(sin(fres*7.0), sin(fres*7.0+2.1), sin(fres*7.0+4.2));',
+/* 近似 AO：向法线方向再采一次距离场，让相接处真的暗下去 */
+'  float ao = clamp(map(pos + n*0.20)/0.20, 0.0, 1.0);',
+'  col *= mix(0.48, 1.0, ao);',
+'',
+'  gl_FragColor = vec4(col, 1.0);',
+'}'
+].join('\n');
+
+var cv = document.getElementById('core');
+var gl = null, prog = null, U = {}, dpr = 1, glOK = false;
+
+function compile(g, type, src) {
+    var s = g.createShader(type);
+    g.shaderSource(s, src);
+    g.compileShader(s);
+    if (!g.getShaderParameter(s, g.COMPILE_STATUS)) {
+        console.warn('[core] shader:', g.getShaderInfoLog(s));
+        return null;
+    }
+    return s;
+}
+
+function initGL() {
+    try {
+        gl = cv.getContext('webgl', { alpha: true, antialias: false, premultipliedAlpha: false,
+                                      powerPreference: 'high-performance' })
+          || cv.getContext('experimental-webgl', { alpha: true, antialias: false });
+    } catch (e) { gl = null; }
+    if (!gl) return false;
+
+    var steps = isTouch ? 40 : 72;
+    var vs = compile(gl, gl.VERTEX_SHADER, VERT);
+    var fs = compile(gl, gl.FRAGMENT_SHADER, FRAG.replace('STEPS', String(steps)));
+    if (!vs || !fs) return false;
+
+    prog = gl.createProgram();
+    gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        console.warn('[core] link:', gl.getProgramInfoLog(prog));
+        return false;
+    }
+    gl.useProgram(prog);
+
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+    var loc = gl.getAttribLocation(prog, 'p');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+    ['uRes','uTime','uMouse','uScroll','uDark','uCtr','uZoom'].forEach(function (n) {
+        U[n] = gl.getUniformLocation(prog, n);
+    });
+
+    gl.clearColor(0, 0, 0, 0);
+    gl.disable(gl.DEPTH_TEST);
+    return true;
+}
+
+function sizeGL() {
+    if (!glOK) return;
+    dpr = Math.min(devicePixelRatio || 1, isTouch ? 1.0 : 1.5);
+    var w = Math.max(1, Math.floor(innerWidth * dpr));
+    var h = Math.max(1, Math.floor(innerHeight * dpr));
+    if (cv.width !== w || cv.height !== h) {
+        cv.width = w; cv.height = h;
+        gl.viewport(0, 0, w, h);
+    }
+}
+
+glOK = initGL();
+if (!glOK) { cv.classList.add('fallback'); }
+else { sizeGL(); addEventListener('resize', sizeGL, { passive: true }); }
+
+/* ═══════════ 输入与滚动状态 ═══════════ */
+var mx = 0, my = 0, tmx = 0, tmy = 0;      // 指针，带惯性
+var scrollProg = 0, tScrollProg = 0;        // 物体聚散
+var coreAlpha = 0, tCoreAlpha = 0;          // 画布透明度
+var ctrX = 0.64, tCtrX = 0.64;              // 构图中心
+var ctrY = 0.50, tCtrY = 0.50;
+var zoom = 1.00, tZoom = 1.00;              // 相机拉远倍数
+var darkAmt = 0, tDarkAmt = 0;
+var visible = true;
+
+addEventListener('pointermove', function (e) {
+    tmx = (e.clientX / innerWidth) * 2 - 1;
+    tmy = -((e.clientY / innerHeight) * 2 - 1);
+    curX = e.clientX; curY = e.clientY;
+}, { passive: true });
+
+/* 3D 在各章节的存在感与位置。
+   首屏 / 论点 / 主题翻转 / 终章：物体在画内。
+   正文密集的章节：把它推到右缘之外，只留一道边 —— 不靠降透明度躲字，靠构图。
+   z = 相机拉远倍数：1 是雕塑本体，2.1 是右上角的小母题。 */
+var BANDS = [
+    { id: 's-hero', a: 0.96, x: 0.64, y: 0.50, z: 1.00 },
+    { id: 's1',     a: 0.86, x: 0.83, y: 0.60, z: 1.55 },
+    { id: 's2',     a: 0.80, x: 0.90, y: 0.86, z: 2.10 },
+    { id: 's3',     a: 0.80, x: 0.90, y: 0.86, z: 2.10 },
+    { id: 's4',     a: 0.80, x: 0.90, y: 0.86, z: 2.10 },
+    { id: 's5',     a: 0.80, x: 0.90, y: 0.86, z: 2.10 },
+    { id: 's6',     a: 0.80, x: 0.90, y: 0.86, z: 2.10 },
+    { id: 's7',     a: 0.72, x: 0.90, y: 0.86, z: 2.10 },
+    { id: 's8',     a: 0.90, x: 0.84, y: 0.46, z: 1.25 },
+    { id: 's9',     a: 0.76, x: 0.90, y: 0.86, z: 2.10 },
+    { id: 's10',    a: 0.76, x: 0.90, y: 0.86, z: 2.10 },
+    { id: 's-fin',  a: 0.96, x: 0.50, y: 0.50, z: 1.00 }
+];
+var bands = BANDS.map(function (b) {
+    return { el: document.getElementById(b.id), a: b.a, x: b.x, y: b.y, z: b.z };
+}).filter(function (b) { return b.el; });
+
+var progressEl = document.getElementById('progress');
+var tbIdx = document.getElementById('tbIdx');
+var tbName = document.getElementById('tbName');
+var secs = [].slice.call(document.querySelectorAll('section[data-idx]'));
+
+var finLayers = [].slice.call(document.querySelectorAll('.fin-layer'));
+var finSec = document.getElementById('s-fin');
+var flipSec = document.getElementById('s8');
+var themeLocked = false;
+
+function onScroll() {
+    var y = scrollY, vh = innerHeight;
+    revealPass();
+    var docH = document.documentElement.scrollHeight - vh;
+    progressEl.style.width = (docH > 0 ? (y / docH) * 100 : 0) + '%';
+
+    /* 物体聚散：整页进度 → 先展开再重新聚拢 */
+    var p = docH > 0 ? y / docH : 0;
+    tScrollProg = p < 0.78 ? (p / 0.78) : (1 - (p - 0.78) / 0.22);
+    tScrollProg = Math.max(0, Math.min(1, tScrollProg));
+
+    /* 当前可见章节 → 3D 的存在感、构图位置与尺度。
+       正文章节里它缩成右上角的小母题，不靠降透明度躲字，靠尺度和构图。 */
+    var bestA = 0.20, bestX = 0.90, bestY = 0.86, bestZ = 2.10, best = null;
+    for (var i = 0; i < bands.length; i++) {
+        var r = bands[i].el.getBoundingClientRect();
+        if (r.top < vh * 0.72 && r.bottom > vh * 0.28) {
+            bestA = bands[i].a; bestX = bands[i].x; bestY = bands[i].y; bestZ = bands[i].z;
+        }
+    }
+    /* 窄屏没有右侧母题轨道，正文章节里把小母题再推出去一点 */
+    if (innerWidth < 1100 && bestZ > 1.5) { bestX = 1.02; bestY = 0.92; }
+    tCoreAlpha = bestA;
+    tCtrX = bestX; tCtrY = bestY; tZoom = bestZ;
+
+    /* 章节索引 */
+    for (var j = 0; j < secs.length; j++) {
+        var rr = secs[j].getBoundingClientRect();
+        if (rr.top <= vh * 0.4 && rr.bottom > vh * 0.4) { best = secs[j]; }
+    }
+    if (best) {
+        tbIdx.textContent = best.getAttribute('data-idx');
+        tbName.textContent = best.getAttribute('data-name');
+    }
+
+    /* 0008：滚到这一章时，页面真的翻主题 */
+    if (!themeLocked && flipSec) {
+        var fr = flipSec.getBoundingClientRect();
+        var wantDark = fr.top < vh * 0.45;
+        setTheme(wantDark, false);
+    }
+
+    /* FINALE：四层交叉淡入 */
+    if (finSec) {
+        var f = finSec.getBoundingClientRect();
+        var total = finSec.offsetHeight - vh;
+        var fp = total > 0 ? Math.max(0, Math.min(1, -f.top / total)) : 0;
+        var idx = fp < 0.26 ? 0 : fp < 0.50 ? 1 : fp < 0.74 ? 2 : 3;
+        for (var k = 0; k < finLayers.length; k++) {
+            finLayers[k].classList.toggle('on', k === idx);
+        }
+    }
+}
+
+/* ═══════════ 主题 ═══════════ */
+var themeBtn = document.getElementById('themeBtn');
+var themeTxt = document.getElementById('themeTxt');
+function setTheme(dark, manual) {
+    var cur = document.body.classList.contains('dark-theme');
+    if (cur !== dark) {
+        document.body.classList.toggle('dark-theme', dark);
+        themeTxt.textContent = dark ? 'Dark' : 'Light';
+    }
+    tDarkAmt = dark ? 1 : 0;
+    if (manual) themeLocked = true;
+}
+themeBtn.addEventListener('click', function () {
+    setTheme(!document.body.classList.contains('dark-theme'), true);
+});
+
+/* ═══════════ 渲染循环 ═══════════ */
+var t0 = performance.now();
+function frame(now) {
+    requestAnimationFrame(frame);
+
+    var k = reduce ? 1 : 0.075;
+    mx += (tmx - mx) * k;  my += (tmy - my) * k;
+    scrollProg += (tScrollProg - scrollProg) * (reduce ? 1 : 0.05);
+    coreAlpha  += (tCoreAlpha  - coreAlpha)  * (reduce ? 1 : 0.06);
+    ctrX       += (tCtrX       - ctrX)       * (reduce ? 1 : 0.05);
+    ctrY       += (tCtrY       - ctrY)       * (reduce ? 1 : 0.05);
+    zoom       += (tZoom       - zoom)       * (reduce ? 1 : 0.05);
+    darkAmt    += (tDarkAmt    - darkAmt)    * (reduce ? 1 : 0.04);
+
+    cv.style.opacity = coreAlpha.toFixed(3);
+
+    if (glOK && visible) {
+        gl.uniform2f(U.uRes, cv.width, cv.height);
+        gl.uniform1f(U.uTime, reduce ? 8.0 : (now - t0) / 1000);
+        gl.uniform2f(U.uMouse, mx, my);
+        gl.uniform1f(U.uScroll, scrollProg);
+        gl.uniform1f(U.uDark, darkAmt);
+        gl.uniform2f(U.uCtr, ctrX, ctrY);
+        gl.uniform1f(U.uZoom, zoom);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    /* 光标惯性 */
+    if (!isTouch) {
+        ringX += (curX - ringX) * 0.18;
+        ringY += (curY - ringY) * 0.18;
+        curEl.style.transform  = 'translate(' + curX + 'px,' + curY + 'px)';
+        ringEl.style.transform = 'translate(' + ringX + 'px,' + ringY + 'px) scale(' + ringScale + ')';
+    }
+}
+
+/* 页面不可见时停画 */
+document.addEventListener('visibilitychange', function () { visible = !document.hidden; });
+
+/* ═══════════ 光标 ═══════════ */
+var curEl = document.getElementById('cur');
+var ringEl = document.getElementById('ring');
+var curX = innerWidth / 2, curY = innerHeight / 2;
+var ringX = curX, ringY = curY, ringScale = 0.42;
+if (!isTouch) {
+    var HOT = 'a,button,.chip,.rc,.el,.ladder div,.cv,.vt,.enter,[data-copy]';
+    document.addEventListener('pointerover', function (e) {
+        var hot = e.target.closest && e.target.closest(HOT);
+        ringScale = hot ? 1 : 0.42;
+        ringEl.classList.toggle('wide', !!hot);
+    });
+} else {
+    curEl.style.display = ringEl.style.display = 'none';
+}
+
+/* ═══════════ 揭示 ═══════════
+   刻意不用 IntersectionObserver：它在某些容器里根本不回调，
+   而这里一旦不回调，首屏以下就是一整片空白。改成挂在同一个滚动循环上，
+   再加一道兜底 —— 无论如何，3 秒后全部显示。 */
+var revealables = [].slice.call(document.querySelectorAll('.rv'));
+function revealPass() {
+    if (!revealables.length) return;
+    var line = innerHeight * 0.88;
+    for (var i = revealables.length - 1; i >= 0; i--) {
+        var el = revealables[i];
+        if (el.getBoundingClientRect().top < line) {
+            el.classList.add('in');
+            revealables.splice(i, 1);
+        }
+    }
+}
+function revealAll() {
+    revealables.forEach(function (el) { el.classList.add('in'); });
+    revealables.length = 0;
+}
+if (reduce) revealAll();
+setTimeout(revealPass, 60);
+
+/* ═══════════ 复制令牌 ═══════════ */
+var toast = document.getElementById('toast'), tTimer;
+document.addEventListener('click', function (e) {
+    var el = e.target.closest && e.target.closest('[data-copy]');
+    if (!el) return;
+    var text = el.getAttribute('data-copy');
+    var done = function () {
+        toast.textContent = '已复制 ' + text;
+        toast.classList.add('on');
+        clearTimeout(tTimer);
+        tTimer = setTimeout(function () { toast.classList.remove('on'); }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, done);
+    } else {
+        var ta = document.createElement('textarea');
+        ta.value = text; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); } catch (err) {}
+        document.body.removeChild(ta); done();
+    }
+});
+
+/* ═══════════ 进入 ═══════════ */
+document.getElementById('enterBtn').addEventListener('click', function () {
+    document.getElementById('s1').scrollIntoView({ behavior: reduce ? 'auto' : 'smooth' });
+});
+
+addEventListener('scroll', onScroll, { passive: true });
+addEventListener('resize', onScroll, { passive: true });
+onScroll();
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>

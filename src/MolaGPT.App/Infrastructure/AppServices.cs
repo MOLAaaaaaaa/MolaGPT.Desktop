@@ -208,7 +208,10 @@ internal static class AppServices
         services.AddSingleton<IChatToolHost, ChatToolHost>();
 
         // ---- view models ---------------------------------------------------
-        services.AddSingleton(sp => new PersonaListViewModel(sp.GetRequiredService<PersonaRepository>()));
+        services.AddSingleton(sp => new RoleLibraryViewModel(sp.GetRequiredService<SettingsRepository>(),
+            sp.GetRequiredService<PersonaRepository>(), sp.GetRequiredService<ConversationRepository>()));
+        services.AddSingleton(sp => new PersonaListViewModel(sp.GetRequiredService<PersonaRepository>(),
+            library: sp.GetRequiredService<RoleLibraryViewModel>()));
         services.AddSingleton(sp => new ConversationListViewModel(
             sp.GetRequiredService<ConversationRepository>(),
             sp.GetRequiredService<PersonaListViewModel>(),

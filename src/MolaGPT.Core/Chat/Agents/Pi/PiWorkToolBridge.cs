@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using MolaGPT.Core.Models;
 
 namespace MolaGPT.Core.Chat.Agents.Pi;
 
@@ -40,7 +41,9 @@ public sealed class PiWorkToolBridge : IDisposable
     public sealed record TurnBinding(
         ToolDispatcher Dispatcher,
         ToolCatalog Catalog,
-        SystemPrompt SystemPrompt);
+        SystemPrompt SystemPrompt,
+        RolePromptPlan? RolePlan = null,
+        Action<string>? PromptError = null);
 
     private readonly HttpListener _listener = new();
     private readonly CancellationTokenSource _cts = new();
@@ -113,7 +116,13 @@ public sealed class PiWorkToolBridge : IDisposable
             }
             else if (segments is ["system-prompt"])
             {
-                responseJson = JsonSerializer.Serialize(new { prompt = binding.SystemPrompt() });
+                responseJson = JsonSerializer.Serialize(new { prompt = binding.SystemPrompt(), rolePlan = binding.RolePlan }, RoleJson.Options);
+            }
+            else if (segments is ["prompt-error"])
+            {
+                using var error = JsonDocument.Parse(body);
+                binding.PromptError?.Invoke(error.RootElement.GetProperty("message").GetString() ?? "角色上下文处理失败。");
+                responseJson = "{}";
             }
             else
             {
