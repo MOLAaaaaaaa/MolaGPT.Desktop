@@ -290,6 +290,7 @@ public partial class MainWindow : MolaWindow
             _hasOpened = true;
             PART_Composer.FocusInput();
             StartActiveProviderPrewarm();
+            AnnounceStrandedAgentRuntime();
         };
         Closed += (_, _) =>
         {
@@ -549,7 +550,7 @@ public partial class MainWindow : MolaWindow
     /// else, one sticky banner on the shared key with the download behind its
     /// action button. Re-posting replaces in place, so tab-hopping never
     /// stacks banners; a dismissed banner comes back on the next entry.</summary>
-    private void AnnounceAgentRuntimeUpdate()
+    private void AnnounceAgentRuntimeUpdate(string? body = null)
     {
         if (_agentRuntimeSetupTask is not null) return; // progress banner owns the key
         var updating = _piSidecar.GetInstalled() is not null;
@@ -558,12 +559,45 @@ public partial class MainWindow : MolaWindow
             Key = AgentRuntimeNotificationKey,
             Kind = NotifyKind.Info,
             Title = updating ? "Agent 运行环境有更新" : "需要 Agent 运行环境",
-            Body = "使用 Work 与 BYOK 前需要此环境。",
+            Body = body ?? "使用 Work 与 BYOK 前需要此环境。",
             ActionText = updating ? "更新" : "下载",
             Action = StartAgentRuntimeDownload,
             Sticky = true
         });
     }
+
+    /// <summary>
+    /// Say so when the runtime went stale underneath the user rather than waiting
+    /// for them to walk into it.
+    ///
+    /// Raising <see cref="PiSidecarRuntimeManager.RequiredContractVersion"/> strands
+    /// every install built against the older contract, and the app installer does
+    /// not touch the runtime directory — so an upgrade can empty Work and every
+    /// BYOK row out of the picker with nothing on screen to explain it. That has
+    /// now shipped twice. The banner is the missing half of the contract gate.
+    ///
+    /// Deliberately narrow, because a banner on every launch is the failure mode on
+    /// the other side: a machine that never had a runtime is not announced here —
+    /// nothing was taken away, and entering Work already asks for it. Only the
+    /// "this worked yesterday" case qualifies, and only when the account has
+    /// something for it to have taken.
+    /// </summary>
+    private void AnnounceStrandedAgentRuntime()
+    {
+        if (_piSidecarLocator.TryResolve() is not null) return;
+        if (_piSidecar.GetInstalled() is null) return;
+        if (!HasLocalSideConfiguration()) return;
+
+        DiagnosticLog.Write("pi-sidecar", "已安装的 Agent 运行环境契约过旧，Work 与 BYOK 已从选择器中消失。");
+        AnnounceAgentRuntimeUpdate("本地模型暂时不可用，更新后恢复 Work 与 BYOK。");
+    }
+
+    /// <summary>Whether anything here expects the local side to work: a chat service
+    /// the user saved, or an account that carries Work.</summary>
+    private bool HasLocalSideConfiguration() =>
+        _settings.IsLoggedIn
+        || _settings.Providers.Any(entry =>
+            entry.Enabled && !SettingsViewModel.IsImagePurpose(entry.Purpose));
 
     private void StartAgentRuntimeDownload()
     {

@@ -53,6 +53,7 @@ internal static class AppServices
         // warmup → login → chat. The User-Agent is hashed into JWT.ua and must
         // stay constant for the process lifetime.
         services.AddSingleton<CookieContainer>();
+        services.AddTransient<MolaDeviceCookieHandler>();
 
         services.AddHttpClient(HttpClientNames.MolaGpt, (_, client) =>
             {
@@ -66,6 +67,7 @@ internal static class AppServices
                 client.DefaultRequestHeaders.TryAddWithoutValidation(
                     "X-MolaGPT-Client", UserAgentProvider.ClientMarker);
             })
+            .AddHttpMessageHandler<MolaDeviceCookieHandler>()
             .ConfigurePrimaryHttpMessageHandler(sp => new HttpClientHandler
             {
                 CookieContainer = sp.GetRequiredService<CookieContainer>(),

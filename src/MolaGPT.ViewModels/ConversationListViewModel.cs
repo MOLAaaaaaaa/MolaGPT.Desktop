@@ -958,8 +958,37 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
         IsGenerating = source.IsGenerating;
     }
 
-    public string TimeLabel => UpdatedAt.ToLocalTime().ToString(
-        UpdatedAt.Date == DateTime.UtcNow.Date ? "HH:mm" : "M/d");
+    /// <summary>
+    /// Sidebar timestamp, coarsening as the row gets older: today shows the
+    /// clock, the rest of this year shows month/day, anything older adds a
+    /// two-digit year. Without the last tier a row from last September reads
+    /// "9/12", exactly like one from this September.
+    /// <para>
+    /// The year tier is the widest label in the list — "25/12/28" measures 52px
+    /// at Font.Size.XSmall, against 30px for a clock — and it shares a
+    /// fixed-width slot with the delete button, so the slot in SidebarView.axaml
+    /// is sized for it. Lengthen this format and that slot has to grow with it.
+    /// </para>
+    /// <para>
+    /// All comparisons run in local time because that is the calendar the user
+    /// reads the row against; comparing against the UTC date flipped "today"
+    /// eight hours early here, so conversations from this morning showed up as
+    /// a date instead of a clock.
+    /// </para>
+    /// </summary>
+    public string TimeLabel
+    {
+        get
+        {
+            var local = UpdatedAt.ToLocalTime();
+            var now = DateTimeOffset.Now;
+            if (local.Date == now.Date)
+                return local.ToString("HH:mm");
+            return local.Year == now.Year
+                ? local.ToString("M/d")
+                : local.ToString("yy/M/d");
+        }
+    }
 }
 
 internal sealed class BulkObservableCollection<T> : ObservableCollection<T>

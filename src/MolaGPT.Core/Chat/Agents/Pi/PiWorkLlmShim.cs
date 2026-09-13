@@ -20,10 +20,8 @@ namespace MolaGPT.Core.Chat.Agents.Pi;
 ///     token is never baked into the Node process env (which also means no
 ///     credential ever lives inside the sidecar — a small security win).
 ///
-/// It is a transparent streaming reverse proxy: request body in → add auth →
-/// forward → copy the SSE response back byte-for-byte. It never parses or
-/// rewrites the OpenAI payload, so whatever the relay does upstream (real
-/// provider, chatv1.php, Responses translation, …) is completely unaffected.
+/// Applies request settings, injects auth, and relays the response byte-for-byte.
+/// An initial image-capability error permits one retry with image placeholders.
 /// </summary>
 public sealed class PiWorkLlmShim : IDisposable
 {
@@ -192,64 +190,79 @@ public sealed class PiWorkLlmShim : IDisposable
             using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
             var body = await reader.ReadToEndAsync().ConfigureAwait(false);
             var preparedBody = RewriteBody(body, target.ExtraBody, target.DropBodyKeys, target.Generation);
-            target.PromptPrepared?.Invoke(preparedBody);
-
-            using var upstream = new HttpRequestMessage(HttpMethod.Post, url)
+            for (var attempt = 0; attempt < 2; attempt++)
             {
-                Content = new StringContent(
-                    preparedBody,
-                    Encoding.UTF8,
-                    "application/json"),
-            };
-            var token = await target.TokenProvider(_cts.Token).ConfigureAwait(false);
-            if (!string.IsNullOrEmpty(token))
-            {
-                switch (target.Auth)
+                target.PromptPrepared?.Invoke(preparedBody);
+                using var upstream = new HttpRequestMessage(HttpMethod.Post, url)
                 {
-                    case AuthStyle.AnthropicApiKey:
-                        upstream.Headers.TryAddWithoutValidation("x-api-key", token);
-                        upstream.Headers.TryAddWithoutValidation("anthropic-version", AnthropicVersion);
-                        break;
-                    case AuthStyle.GoogleApiKey:
-                        upstream.Headers.TryAddWithoutValidation("x-goog-api-key", token);
-                        break;
-                    default:
-                        upstream.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
-                        break;
-                }
-            }
-            upstream.Headers.TryAddWithoutValidation("Accept", "text/event-stream");
-            OpenRouterAttribution.Apply(upstream, target.Endpoint, target.Headers);
-            CustomRequestParams.ApplyHeaders(upstream, target.Headers);
-
-            using var resp = await _http
-                .SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, _cts.Token)
-                .ConfigureAwait(false);
-
-            if (resp.StatusCode == HttpStatusCode.Unauthorized)
-            {
-                try { target.OnUnauthorized?.Invoke(); }
-                catch (Exception ex) { _log?.Invoke("[llm-shim] unauthorized handler: " + ex.Message); }
-            }
-
-            ctx.Response.StatusCode = (int)resp.StatusCode;
-            ctx.Response.ContentType = resp.Content.Headers.ContentType?.ToString() ?? "text/event-stream";
-            ctx.Response.SendChunked = true;
-
-            await using var upstreamStream = await resp.Content.ReadAsStreamAsync(_cts.Token).ConfigureAwait(false);
-            var buffer = new byte[8192];
-            int read;
-            while ((read = await upstreamStream.ReadAsync(buffer, _cts.Token).ConfigureAwait(false)) > 0)
-            {
-                try
+                    Content = new StringContent(preparedBody, Encoding.UTF8, "application/json"),
+                };
+                var token = await target.TokenProvider(_cts.Token).ConfigureAwait(false);
+                if (!string.IsNullOrEmpty(token))
                 {
-                    await ctx.Response.OutputStream.WriteAsync(buffer.AsMemory(0, read), _cts.Token).ConfigureAwait(false);
-                    await ctx.Response.OutputStream.FlushAsync(_cts.Token).ConfigureAwait(false); // push SSE promptly
+                    switch (target.Auth)
+                    {
+                        case AuthStyle.AnthropicApiKey:
+                            upstream.Headers.TryAddWithoutValidation("x-api-key", token);
+                            upstream.Headers.TryAddWithoutValidation("anthropic-version", AnthropicVersion);
+                            break;
+                        case AuthStyle.GoogleApiKey:
+                            upstream.Headers.TryAddWithoutValidation("x-goog-api-key", token);
+                            break;
+                        default:
+                            upstream.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
+                            break;
+                    }
                 }
-                catch (Exception ex) when (ex is HttpListenerException or IOException or ObjectDisposedException)
+                upstream.Headers.TryAddWithoutValidation("Accept", "text/event-stream");
+                OpenRouterAttribution.Apply(upstream, target.Endpoint, target.Headers);
+                CustomRequestParams.ApplyHeaders(upstream, target.Headers);
+
+                using var resp = await _http
+                    .SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, _cts.Token)
+                    .ConfigureAwait(false);
+
+                if (resp.StatusCode == HttpStatusCode.Unauthorized)
                 {
-                    return;
+                    try { target.OnUnauthorized?.Invoke(); }
+                    catch (Exception ex) { _log?.Invoke("[llm-shim] unauthorized handler: " + ex.Message); }
                 }
+
+                await using var upstreamStream = await resp.Content.ReadAsStreamAsync(_cts.Token).ConfigureAwait(false);
+                var prefix = attempt == 0
+                    ? await ReadResponsePrefixAsync(upstreamStream, resp, _cts.Token).ConfigureAwait(false)
+                    : (Bytes: Array.Empty<byte>(), UnsupportedImage: false);
+                if (prefix.UnsupportedImage && PiImageFallback.ReplaceImages(preparedBody) is { } textOnly)
+                {
+                    preparedBody = textOnly.ToJsonString(RelaxedJson);
+                    _log?.Invoke("[llm-shim] retrying request without image blocks");
+                    continue;
+                }
+
+                ctx.Response.StatusCode = (int)resp.StatusCode;
+                ctx.Response.ContentType = resp.Content.Headers.ContentType?.ToString() ?? "text/event-stream";
+                ctx.Response.SendChunked = true;
+                var buffer = new byte[8192];
+                ReadOnlyMemory<byte> chunk = prefix.Bytes;
+                do
+                {
+                    if (!chunk.IsEmpty)
+                    {
+                        try
+                        {
+                            await ctx.Response.OutputStream.WriteAsync(chunk, _cts.Token).ConfigureAwait(false);
+                            await ctx.Response.OutputStream.FlushAsync(_cts.Token).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is HttpListenerException or IOException or ObjectDisposedException)
+                        {
+                            return;
+                        }
+                    }
+                    var read = await upstreamStream.ReadAsync(buffer, _cts.Token).ConfigureAwait(false);
+                    chunk = buffer.AsMemory(0, read);
+                }
+                while (!chunk.IsEmpty);
+                return;
             }
         }
         catch (Exception ex)
@@ -259,6 +272,67 @@ public sealed class PiWorkLlmShim : IDisposable
             catch { /* client gone */ }
         }
         finally { try { ctx.Response.Close(); } catch { /* ignore */ } }
+    }
+
+    private static async Task<(byte[] Bytes, bool UnsupportedImage)> ReadResponsePrefixAsync(
+        Stream stream, HttpResponseMessage response, CancellationToken ct)
+    {
+        const int maxPrefixBytes = 64 * 1024;
+        var sse = string.Equals(response.Content.Headers.ContentType?.MediaType ?? "text/event-stream",
+            "text/event-stream", StringComparison.OrdinalIgnoreCase);
+        using var prefix = new MemoryStream();
+        var buffer = new byte[8192];
+        while (prefix.Length < maxPrefixBytes)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(0,
+                Math.Min(buffer.Length, maxPrefixBytes - (int)prefix.Length)), ct).ConfigureAwait(false);
+            if (read == 0) break;
+            prefix.Write(buffer, 0, read);
+            if (sse && TryReadFirstDataEvent(
+                    Encoding.UTF8.GetString(prefix.GetBuffer(), 0, (int)prefix.Length),
+                    !response.IsSuccessStatusCode, out var unsupported))
+                return (prefix.ToArray(), unsupported);
+        }
+        var bytes = prefix.ToArray();
+        return (bytes, (!sse || response.Content.Headers.ContentType is null) && PiImageFallback.ClassifyResponse(
+            Encoding.UTF8.GetString(bytes), !response.IsSuccessStatusCode) == PiImageFallback.ResponseKind.UnsupportedImage);
+    }
+
+    private static bool TryReadFirstDataEvent(string prefix, bool httpError, out bool unsupported)
+    {
+        unsupported = false;
+        using var reader = new StringReader(prefix.TrimStart('\uFEFF'));
+        var data = new StringBuilder();
+        string? eventName = null;
+        while (reader.ReadLine() is { } line)
+        {
+            if (line.Length > 0)
+            {
+                if (line.StartsWith("data:", StringComparison.Ordinal))
+                {
+                    if (data.Length > 0) data.Append('\n');
+                    data.Append(line.AsSpan(5).TrimStart(' '));
+                }
+                else if (line.StartsWith("event:", StringComparison.Ordinal))
+                    eventName = line[6..].Trim();
+                continue;
+            }
+            if (data.Length == 0)
+            {
+                eventName = null;
+                continue;
+            }
+            var kind = PiImageFallback.ClassifyResponse(data.ToString(), httpError, eventName);
+            if (kind == PiImageFallback.ResponseKind.EmptyStart)
+            {
+                data.Clear();
+                eventName = null;
+                continue;
+            }
+            unsupported = kind == PiImageFallback.ResponseKind.UnsupportedImage;
+            return true;
+        }
+        return false;
     }
 
     /// <summary>The throwaway credential the sidecar presented, in whichever header

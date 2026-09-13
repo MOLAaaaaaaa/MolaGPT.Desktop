@@ -1,6 +1,7 @@
 <v:MolaContentWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
+        xmlns:pres="clr-namespace:MolaGPT.Presentation;assembly=MolaGPT.Presentation"
         xmlns:m="clr-namespace:MolaGPT.Core.Models;assembly=MolaGPT.Core"
         xmlns:v="clr-namespace:MolaGPT.App.Views"
         xmlns:agents="clr-namespace:MolaGPT.ViewModels.Agents;assembly=MolaGPT.ViewModels"
@@ -20,9 +21,9 @@
 
   <Window.Resources>
     <v:AgentSessionLabelConverter x:Key="AgentSessionLabel" />
-    <DataTemplate x:Key="ProviderCardTemplate" x:DataType="vm:ProviderEntry">
+    <DataTemplate x:Key="ProviderCardTemplate" x:DataType="v:ProviderCardRow">
       <Border Classes="providercard">
-        <Grid ColumnDefinitions="*,Auto,Auto">
+        <Grid ColumnDefinitions="*,Auto,Auto,Auto">
           <StackPanel Grid.Column="0" Spacing="3">
             <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
             <TextBlock Text="{Binding BaseUrl}"
@@ -30,13 +31,24 @@
                        Foreground="{DynamicResource Brush.Text.Muted}"
                        TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
           </StackPanel>
-          <Border Grid.Column="1" Classes="countpill" VerticalAlignment="Center">
-            <TextBlock Text="{Binding Models.Count}"
+          <Border Grid.Column="1" Classes="countpill" VerticalAlignment="Center"
+                  IsVisible="{Binding IsInactive}"
+                  Background="{DynamicResource Brush.Warning.Surface}"
+                  BorderBrush="{DynamicResource Brush.Warning.Border}"
+                  BorderThickness="1"
+                  ToolTip.Tip="已保存，但没有出现在模型选择器中">
+            <TextBlock Text="{Binding InactiveReason}"
+                       FontSize="{DynamicResource Font.Size.XSmall}"
+                       FontWeight="SemiBold"
+                       Foreground="{DynamicResource Brush.Warning.Foreground}" />
+          </Border>
+          <Border Grid.Column="2" Classes="countpill" VerticalAlignment="Center">
+            <TextBlock Text="{Binding ModelCount}"
                        FontSize="{DynamicResource Font.Size.XSmall}"
                        FontWeight="SemiBold"
                        Foreground="{DynamicResource Brush.Text.Muted}" />
           </Border>
-          <StackPanel Grid.Column="2" Orientation="Horizontal"
+          <StackPanel Grid.Column="3" Orientation="Horizontal"
                       VerticalAlignment="Center" Margin="10,0,0,0">
             <Button Classes="inlineaction" Click="OnEditProvider" Tag="{Binding Id}"
                     ToolTip.Tip="编辑">
@@ -79,6 +91,7 @@
                 <ListBoxItem Content="会话标题" />
                 <ListBoxItem Content="图像生成" />
                 <ListBoxItem Content="视觉理解" />
+                <ListBoxItem Name="PART_PostProcessingNav" Content="后处理" />
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="工具与环境" />
                 <ListBoxItem Name="PART_SandboxNav" Content="沙箱与文件" />
                 <ListBoxItem Content="审批与安全" />
@@ -1240,6 +1253,79 @@
                     </Grid>
                     <TextBlock Classes="hint"
                                Text="仅列出已启用、且具备视觉能力的服务与模型。可在「模型服务」中为模型勾选视觉能力。" />
+                  </StackPanel>
+                </Border>
+              </StackPanel>
+
+              <StackPanel Name="PAGE_PostProcessing" IsVisible="False">
+                <TextBlock Classes="pagetitle" Text="后处理" />
+                <TextBlock Classes="pagesubtitle" Text="按需启用和配置后处理功能。" />
+                <Border Classes="settingscard">
+                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                    <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                      <TextBlock Classes="rowtitle" Text="自动替换" />
+                      <TextBlock Classes="hint" Text="回答完成后，自动应用已启用的替换规则。" />
+                    </StackPanel>
+                    <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                  IsChecked="{Binding ResponsePostProcessingEnabled, Mode=TwoWay}"
+                                  VerticalAlignment="Center" AutomationProperties.Name="自动替换" />
+                  </Grid>
+                </Border>
+
+                <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto" Margin="0,20,0,8">
+                  <TextBlock Classes="section" Text="替换规则" Margin="0" VerticalAlignment="Center" />
+                  <Button Grid.Column="1" Name="PART_MoveResponseRuleUp" Classes="outline" Content="上移" Padding="10,5" />
+                  <Button Grid.Column="2" Name="PART_MoveResponseRuleDown" Classes="outline" Content="下移" Padding="10,5" Margin="6,0,0,0" />
+                  <Button Grid.Column="3" Name="PART_DeleteResponseRule" Classes="outline" Content="删除" Padding="10,5" Margin="6,0,0,0" />
+                  <Button Grid.Column="4" Name="PART_AddResponseRule" Classes="pillprimary" Content="添加" Padding="12,5" Margin="6,0,0,0" />
+                </Grid>
+                <TextBlock Classes="hint" Text="按列表顺序依次处理，可添加自定义正则。" Margin="0,0,0,8" />
+                <ListBox Name="PART_ResponseRules" MinHeight="80" MaxHeight="200" Margin="0,0,0,12"
+                         Background="{DynamicResource Brush.Bg.Secondary}" BorderThickness="0">
+                  <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="pres:ResponseRegexRule">
+                      <Grid ColumnDefinitions="*,Auto" Margin="4,3">
+                        <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Grid.Column="1" Classes="hint" Text="停用" IsVisible="{Binding !Enabled}" Margin="12,0,0,0" />
+                      </Grid>
+                    </DataTemplate>
+                  </ListBox.ItemTemplate>
+                </ListBox>
+
+                <Border Name="PART_ResponseRuleEditor" Classes="settingscard" Padding="16" IsVisible="False">
+                  <StackPanel Spacing="8">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <TextBox Name="PART_ResponseRuleName" Classes="settingsinput" PlaceholderText="规则名称" />
+                      <CheckBox Grid.Column="1" Name="PART_ResponseRuleEnabled" Content="启用" Margin="14,0,0,0" />
+                    </Grid>
+                    <TextBlock Name="PART_ResponseRuleExample" TextWrapping="Wrap" Margin="0,4" IsVisible="False" />
+                    <Expander Name="PART_ResponseRegexEditor" Classes="settingssection" Header="编辑正则">
+                      <StackPanel Spacing="8" Margin="0,8,0,0">
+                        <TextBlock Classes="label" Text="正则表达式" />
+                        <TextBox Name="PART_ResponseRulePattern" Classes="settingsinput" AcceptsReturn="True"
+                                 TextWrapping="Wrap" MinHeight="64" MaxHeight="144" FontFamily="{DynamicResource Font.Mono}" />
+                        <TextBlock Classes="label" Text="替换为" />
+                        <TextBox Name="PART_ResponseRuleReplacement" Classes="settingsinput" AcceptsReturn="True"
+                                 TextWrapping="Wrap" MinHeight="40" MaxHeight="100" FontFamily="{DynamicResource Font.Mono}"
+                                 PlaceholderText="留空删除" />
+                      </StackPanel>
+                    </Expander>
+                    <Button Name="PART_SaveResponseRule" Classes="pillprimary" Content="保存"
+                            HorizontalAlignment="Right" Padding="14,6" Margin="0,4,0,0" />
+                  </StackPanel>
+                </Border>
+                <TextBlock Name="PART_ResponseRuleError" Classes="hint" IsVisible="False"
+                           Foreground="{DynamicResource Brush.Error}" TextWrapping="Wrap" Margin="0,8,0,0" />
+
+                <TextBlock Classes="section" Text="预览" />
+                <Border Classes="settingscard" Padding="16">
+                  <StackPanel Spacing="8">
+                    <TextBlock Classes="hint" Text="输入一段文字，查看替换效果。" />
+                    <TextBox Name="PART_ResponsePreviewInput" Classes="settingsinput" AcceptsReturn="True"
+                             TextWrapping="Wrap" MinHeight="78" MaxHeight="180" PlaceholderText="输入一段文字" />
+                    <TextBlock Classes="label" Text="结果" />
+                    <TextBox Name="PART_ResponsePreviewOutput" Classes="settingsinput" AcceptsReturn="True"
+                             TextWrapping="Wrap" IsReadOnly="True" MinHeight="78" MaxHeight="180" />
                   </StackPanel>
                 </Border>
               </StackPanel>

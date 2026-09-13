@@ -120,7 +120,7 @@ public partial class SettingsWindow : MolaContentWindow
 
     /// <summary>Nav index → page. The rail has non-selectable group headings in
     /// it, so the mapping is explicit rather than positional arithmetic.</summary>
-    private static readonly int[] PageForNavIndex = [-1, 0, 1, -1, 2, 3, 4, 5, 6, 7, -1, 8, 9, 10, 11, 12];
+    private static readonly int[] PageForNavIndex = [-1, 0, 1, -1, 2, 3, 4, 5, 6, 7, 13, -1, 8, 9, 10, 11, 12];
 
     public SettingsWindow(
         SettingsViewModel settings,
@@ -169,7 +169,8 @@ public partial class SettingsWindow : MolaContentWindow
         _pages =
         [
             PAGE_Account, PAGE_Appearance, PAGE_Providers, PAGE_Personas, PAGE_Search, PAGE_Titles,
-            PAGE_ImageGeneration, PAGE_Vision, PAGE_Sandbox, PAGE_Approval, PAGE_Mcp, PAGE_Agent, PAGE_Skills
+            PAGE_ImageGeneration, PAGE_Vision, PAGE_Sandbox, PAGE_Approval, PAGE_Mcp, PAGE_Agent, PAGE_Skills,
+            PAGE_PostProcessing
         ];
         PAGE_Agent.DataContext = _agentStatus;
         PAGE_Personas.DataContext = _personas;
@@ -200,6 +201,7 @@ public partial class SettingsWindow : MolaContentWindow
             .Select(icon => new PersonaIconRow(icon.Glyph, icon.Label));
         PART_McpServers.ItemsSource = _settings.McpServers;
         PART_SkillsList.ItemsSource = _skills.Skills;
+        InitializeResponsePostProcessing();
         _providerModels.CollectionChanged += (_, _) => RefreshProviderModelEmptyState();
 
         PART_AddProvider.Click += (_, _) => EditProvider(null, "chat");
@@ -693,15 +695,33 @@ public partial class SettingsWindow : MolaContentWindow
     {
         var chatProviders = _settings.Providers
             .Where(provider => !SettingsViewModel.IsImagePurpose(provider.Purpose))
+            .Select(provider => new ProviderCardRow(provider, ChatProviderInactiveReason(provider)))
             .ToArray();
+        // Image rows never go through the agent runtime, so they have no registry
+        // state to disagree with and are listed as they always were.
         var imageProviders = _settings.Providers
             .Where(provider => SettingsViewModel.IsImagePurpose(provider.Purpose))
+            .Select(provider => new ProviderCardRow(provider, null))
             .ToArray();
 
         PART_ChatProviderList.ItemsSource = chatProviders;
         PART_ImageProviderList.ItemsSource = imageProviders;
         PART_NoChatProviders.IsVisible = chatProviders.Length == 0;
         PART_NoImageProviders.IsVisible = imageProviders.Length == 0;
+    }
+
+    /// <summary>Why this saved row is not in the picker, or null when it is.</summary>
+    private string? ChatProviderInactiveReason(ProviderEntry entry)
+    {
+        // No registry to compare against (design-time): claiming either state would
+        // be a guess, and "inactive" is the one that would worry people wrongly.
+        if (_providerRegistry is null) return null;
+        if (!entry.Enabled) return "已停用";
+        if (_providerRegistry.Providers.Any(provider =>
+                string.Equals(provider.Id, entry.Id, StringComparison.Ordinal)))
+            return null;
+
+        return _piByokProviderFactory?.IsRuntimeAvailable == false ? "待更新运行环境" : "未生效";
     }
 
     private void OnEditProvider(object? sender, RoutedEventArgs e)
@@ -827,10 +847,12 @@ public partial class SettingsWindow : MolaContentWindow
         else
             _settings.Providers[_settings.Providers.IndexOf(current)] = result;
 
+        var outcome = ProviderApplyOutcome.NotApplicable;
         try
         {
             if (_providerRegistry is not null && _byokHttpFactory is not null)
-                ProviderRestorer.ApplyEntry(result, _providerRegistry, _byokHttpFactory, _toolHost, _piByokProviderFactory);
+                outcome = ProviderRestorer.ApplyEntry(
+                    result, _providerRegistry, _byokHttpFactory, _toolHost, _piByokProviderFactory);
         }
         catch (Exception ex)
         {
@@ -846,7 +868,34 @@ public partial class SettingsWindow : MolaContentWindow
         _editingProvider = result;
         PART_ProviderEditorTitle.Text = $"编辑「{result.Name}」";
         PART_DeleteEditingProvider.IsVisible = true;
-        ShowProviderStatus("设置已保存");
+        ShowProviderSaveOutcome(outcome);
+    }
+
+    /// <summary>
+    /// "已保存" and "可用" are two different states, and this page can only see the
+    /// first one: the save writes to the database, while the model picker reads the
+    /// registry. Reporting success on the strength of the write alone left users
+    /// re-saving a perfectly good configuration against a picker that never
+    /// changed — the save was never the thing that was broken.
+    /// </summary>
+    private void ShowProviderSaveOutcome(ProviderApplyOutcome outcome)
+    {
+        switch (outcome)
+        {
+            case ProviderApplyOutcome.RuntimeUnavailable:
+                FailProviderEdit(
+                    "设置已保存，但 Agent 运行环境需要更新，该服务暂时不会出现在模型选择器中。"
+                    + "请到「沙箱与文件」更新后重试。");
+                break;
+            case ProviderApplyOutcome.Unsupported:
+                FailProviderEdit(
+                    "设置已保存，但 Agent 运行时无法承载这个服务，它不会出现在模型选择器中。"
+                    + "请检查协议、接入地址、API Key 与模型列表。");
+                break;
+            default:
+                ShowProviderStatus("设置已保存");
+                break;
+        }
     }
 
     private static ProviderModelEntry ToProviderModel(ModelRow row)
@@ -1968,6 +2017,10 @@ public partial class SettingsWindow : MolaContentWindow
             var installed = await _piSidecar.DownloadAndInstallAsync(progress, CancellationToken.None);
             if (_agentRuntimeInstalled is not null)
                 await _agentRuntimeInstalled();
+            // The activation above is what puts the saved rows back in the registry,
+            // so the list two sections up is stale the moment it returns — repaint it
+            // rather than leaving "待更新运行环境" on services that just came back.
+            RefreshProviders();
             PART_PiSidecarStatus.Text = $"Agent 运行环境 · {installed.Version}";
             _notifications?.Success("Agent 运行环境已就绪", installed.Version, PiSidecarNotificationKey);
         }
@@ -2455,6 +2508,24 @@ public partial class SettingsWindow : MolaContentWindow
 }
 
 public sealed record PersonaIconRow(string Glyph, string Label);
+
+/// <summary>
+/// One row of the model-services list, reconciled against the registry.
+///
+/// This page reads saved rows and the model picker reads registered providers, and
+/// nothing used to compare the two — so a machine whose runtime had gone stale
+/// showed a full, healthy-looking list here and an empty picker there, with no
+/// screen in the app admitting the gap. The card is the place to admit it: it is
+/// where the user goes to ask why their service is missing.
+/// </summary>
+public sealed record ProviderCardRow(ProviderEntry Entry, string? InactiveReason)
+{
+    public string Id => Entry.Id;
+    public string Name => Entry.Name;
+    public string? BaseUrl => Entry.BaseUrl;
+    public int ModelCount => Entry.Models.Count;
+    public bool IsInactive => InactiveReason is not null;
+}
 
 public sealed record ProviderPresetRow(
     string Id,

@@ -356,9 +356,7 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
     }
 
     /// <summary>
-    /// Emits prose text, cut at Latin↔CJK boundaries and with punctuation
-    /// normalized — the two rules MarkdownPresenter applied to every non-mono
-    /// run before handing the document to WPF.
+    /// Emits prose text with font fallback at Latin↔CJK boundaries.
     /// </summary>
     private void AppendText(
         InlineCollection target, string text,
@@ -510,8 +508,6 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
         IBrush? foreground, TextDecorationCollection? decorations)
     {
         if (text.Length == 0) return;
-
-        text = CjkTypography.NormalizePunctuation(text);
 
         var latin = _latin;
         var cjk = _cjk;

@@ -21,6 +21,8 @@ public sealed class BackgroundStreamTask
     public bool IsCompleted { get; set; }
     public bool GenerateTitleOnCompletion { get; init; }
     public bool CompletedSuccessfully { get; set; }
+    internal int ResponsePostProcessingStartIndex { get; init; }
+    internal bool ResponsePostProcessingApplied { get; set; }
 
     /// <summary>
     /// This stream is replacing an answer that already exists rather than adding a
@@ -124,6 +126,7 @@ public sealed class BackgroundStreamService
                     if (data is not null)
                     {
                         task.AssistantMessage.ReplaceContent(data.Text);
+                        task.CompletedSuccessfully = true;
                         if (data.Sources is { Count: > 0 })
                             task.AssistantMessage.Sources = data.Sources;
                     }

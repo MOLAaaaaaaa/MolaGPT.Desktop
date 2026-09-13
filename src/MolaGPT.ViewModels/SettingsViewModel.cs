@@ -231,6 +231,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 StreamFadeEnabled = streamFade;
             if (bool.TryParse(_settingsRepo.Get(AutoCompactionKey), out var autoCompaction))
                 AutoCompactionEnabled = autoCompaction;
+            LoadResponsePostProcessing();
             if (bool.TryParse(_settingsRepo.Get(TracksEnabledKey), out var tracksEnabled))
                 TracksEnabled = tracksEnabled;
             if (bool.TryParse(_settingsRepo.Get(CompletionNotificationKey), out var completionNotification))

@@ -41,10 +41,7 @@ public static class PiModelCatalog
                 ["name"] = $"{displayName} · {model.DisplayName}",
                 ["api"] = api,
                 ["reasoning"] = model.SupportsThinking || model.SupportsReasoningEffort,
-                // Claimed for every model: Pi refuses to send an image to a model
-                // that does not declare it, and MolaGPT has already decided whether
-                // to send one by the time the turn reaches the sidecar.
-                ["input"] = new[] { "text", "image" },
+                ["input"] = model.SupportsVision ? new[] { "text", "image" } : new[] { "text" },
                 // Billing is MolaGPT's, upstream of Pi. Zeroes keep Pi's own cost
                 // display from inventing numbers we would then have to explain.
                 ["cost"] = new { input = 0, output = 0, cacheRead = 0, cacheWrite = 0 },

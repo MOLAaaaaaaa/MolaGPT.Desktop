@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Auth;
@@ -46,6 +47,8 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// <summary>Raised right after a user turn is committed to the transcript, so
     /// the chat view can re-take bottom-follow even if the user had scrolled up.</summary>
     public event Action? MessageSubmitted;
+
+    public event Action<string>? ResponsePostProcessingFailed;
 
     /// <summary>True when the user has tapped the lightbulb button on a
     /// reasoning-capable model. Becomes <c>use_thinking</c> in the request body.</summary>
@@ -873,6 +876,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 if (data is not null)
                 {
                     task.AssistantMessage.ReplaceContent(data.Text);
+                    task.CompletedSuccessfully = true;
                     if (data.Sources is { Count: > 0 })
                         task.AssistantMessage.Sources = data.Sources;
                 }
@@ -972,6 +976,9 @@ public sealed partial class ComposerViewModel : ObservableObject
                 trackingTask.ReceivedChunkCount++;
             if (chunk.FinishReason is not null) break;
         }
+
+        if (trackingTask is not null && !cts.IsCancellationRequested)
+            trackingTask.CompletedSuccessfully = true;
     }
 
     private Dictionary<string, object> BuildExtras()
@@ -1533,6 +1540,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             SessionId = sessionId,
             IsRegeneration = !newReply,
             IsContinuation = continuation,
+            ResponsePostProcessingStartIndex = continuation ? assistantMsg.FullContent.Length : 0,
             RoleRevision = _chat.RoleContext.HistoryRevision
         };
         _activeTask = streamContext;
@@ -1620,11 +1628,8 @@ public sealed partial class ComposerViewModel : ObservableObject
         {
             // Ahead of CompleteStreamContext, which persists: the stored meta and
             // the version switcher both read RetryAttempts, and capturing an
-            // attempt means capturing the text — so the artifact links have to be
-            // resolved before the snapshot is taken, or the saved version keeps
-            // the links this attempt showed on screen only until it finished.
-            // (CompleteStreamContext rewrites again; the second pass sees
-            // absolute URLs and leaves them alone.)
+            // attempt means capturing the text. Resolve artifact links and apply
+            // response rules before taking that snapshot.
             //
             // Everything downstream of here reads FullContent, so the pacer is
             // allowed to keep revealing the tail while this runs.
@@ -1632,7 +1637,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             assistantMsg.CompleteStreaming();
             assistantMsg.IsStreaming = false;
             assistantMsg.StopThinking();
-            RewritePythonArtifactMarkdownLinks(assistantMsg);
+            PrepareCompletedResponse(streamContext, failureMessage);
             if (!newReply) assistantMsg.CommitRetryAttempt();
 
             CompleteStreamContext(streamContext, publishNotification: !wasCancelled, failureMessage);
@@ -1957,8 +1962,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         bool publishNotification,
         string? failureMessage = null)
     {
-        RewritePythonArtifactMarkdownLinks(streamContext.AssistantMessage);
-        _pythonArtifactContexts.Remove(streamContext.AssistantMessage);
+        PrepareCompletedResponse(streamContext, failureMessage);
 
         // A regeneration's bubble is already a row; finalizing it the normal way
         // would insert a second one.
@@ -2008,6 +2012,29 @@ public sealed partial class ComposerViewModel : ObservableObject
         if (streamContext.CompletedSuccessfully && failureMessage is null && !streamContext.IsRegeneration
             && streamContext.RoleStates is not null && AutoStorySummaryAsync is { } summarize)
             _ = summarize(streamContext.ConversationId, streamContext.ProviderId, streamContext.ModelId, CancellationToken.None);
+    }
+
+    private void PrepareCompletedResponse(BackgroundStreamTask streamContext, string? failureMessage)
+    {
+        RewritePythonArtifactMarkdownLinks(streamContext.AssistantMessage);
+        _pythonArtifactContexts.Remove(streamContext.AssistantMessage);
+
+        if (!streamContext.CompletedSuccessfully || failureMessage is not null || streamContext.ResponsePostProcessingApplied)
+            return;
+
+        streamContext.ResponsePostProcessingApplied = true;
+        if (_settings?.ResponsePostProcessingEnabled != true) return;
+
+        streamContext.AssistantMessage.CompleteStreaming();
+        try
+        {
+            streamContext.AssistantMessage.ApplyResponsePostProcessing(
+                _settings.ResponseRegexRules, streamContext.ResponsePostProcessingStartIndex);
+        }
+        catch (Exception ex) when (ex is ArgumentException or RegexMatchTimeoutException)
+        {
+            ResponsePostProcessingFailed?.Invoke(ex.Message);
+        }
     }
 
     private async Task GenerateLocalConversationTitleAsync(BackgroundStreamTask streamContext)

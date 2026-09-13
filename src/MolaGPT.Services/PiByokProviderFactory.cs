@@ -85,6 +85,28 @@ public sealed class PiByokProviderFactory
         _log = log;
     }
 
+    /// <summary>
+    /// Whether this machine currently has a runtime any row could be wrapped onto.
+    ///
+    /// Split out from <see cref="TryWrap"/> because null has two very different
+    /// meanings for the user: "this particular row cannot be carried" is about the
+    /// row, while "there is no compatible runtime here" is about the machine and
+    /// takes every row down with it. Only the second one has a fix the user can
+    /// act on, so callers must be able to tell them apart before choosing words.
+    /// </summary>
+    public bool IsRuntimeAvailable
+    {
+        get
+        {
+            try { return _locator.TryResolve() is not null; }
+            catch (Exception ex)
+            {
+                _log?.Invoke("[pi-byok] 定位 Agent 运行时失败：" + ex.Message);
+                return false;
+            }
+        }
+    }
+
     /// <summary>Returns the provider for this row, or null when it cannot be
     /// carried — in which case the row stays out of the picker.</summary>
     public IChatProvider? TryWrap(

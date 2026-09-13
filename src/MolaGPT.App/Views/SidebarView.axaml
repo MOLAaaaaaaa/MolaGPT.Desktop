@@ -282,10 +282,15 @@
               <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Opacity="0.6" />
             </StackPanel>
 
-            <!-- Time and delete share one fixed 36×16 slot. Swapping them must
+            <!-- Time and delete share one fixed 54×16 slot. Swapping them must
                  never change the row's desired size, or every row would shift
-                 as the pointer travels down the list. -->
-            <Panel Width="36" Height="16" VerticalAlignment="Center">
+                 as the pointer travels down the list.
+                 54 is sized for the widest timestamp TimeLabel can produce —
+                 "25/12/28" measures 52px at Font.Size.XSmall — not for the 30px
+                 clock most rows show. Rows from earlier years would otherwise
+                 be silently clipped, so the cost is paid by every title's
+                 trimming width. -->
+            <Panel Width="54" Height="16" VerticalAlignment="Center">
               <TextBlock Classes="rowtime"
                          Text="{Binding TimeLabel}"
                          FontSize="{DynamicResource Font.Size.XSmall}"
@@ -323,11 +328,12 @@
               <Ellipse Width="4" Height="4" Fill="{DynamicResource Brush.Primary}" Opacity="0.6" />
             </StackPanel>
           </StackPanel>
-          <Panel Grid.Column="1" Width="36" Height="16">
+          <Panel Grid.Column="1" Width="54" Height="16">
             <TextBlock Classes="rowtime" Text="{Binding TimeLabel}"
                        FontSize="{DynamicResource Font.Size.XSmall}"
                        Foreground="{DynamicResource Brush.Text.Muted}"
-                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+                       HorizontalAlignment="Right" VerticalAlignment="Center"
+                       TextWrapping="NoWrap" />
             <Button Classes="rowdelete" Width="22" Height="16" Padding="0"
                     HorizontalAlignment="Right" Click="OnDeleteConversation"
                     Tag="{Binding Id}" ToolTip.Tip="删除对话">

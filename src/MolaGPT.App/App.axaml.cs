@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -89,10 +88,20 @@ public partial class App : Application
             ApplyTheme(settings.ThemeMode);
             settings.ThemeModeChanged += (_, mode) => ApplyTheme(mode);
 
-            ProviderRestorer.Restore(_services, line => Debug.WriteLine(line));
+            // DiagnosticLog, not Debug.WriteLine: the previous sink was compiled out
+            // of release builds, so on the machines where rows silently vanish from
+            // the picker the reason was the one thing not written down anywhere.
+            var restored = ProviderRestorer.Restore(
+                _services, line => DiagnosticLog.Write("provider", line));
+            if (restored.LostEverythingToRuntime)
+                DiagnosticLog.Write("provider",
+                    $"{restored.RuntimeUnavailable} 个已保存的服务全部未注册：Agent 运行环境不可用。"
+                    + "模型选择器的本地侧会是空的。");
 
             main.EnsureConversationDetailAsync = id => cloudSync.FetchConversationToLocalAsync(id);
             main.Composer.ConversationCompletedAsync = cloudSync.CompleteConversationTurnAsync;
+            main.Composer.ResponsePostProcessingFailed += message =>
+                notifications.Error("回答后处理失败", message, key: "response-postprocessing");
             main.Composer.LocalConversationTitleAsync = (conversationId, providerId, modelId, ct) =>
                 _services.GetRequiredService<ConversationTitleService>()
                     .GenerateAsync(conversationId, providerId, modelId, ct);
@@ -263,8 +272,10 @@ public partial class App : Application
         }
 
         if (!string.IsNullOrEmpty(auth.CurrentJwt)) providers.Register(proxy);
+        // Work disappearing from the picker used to leave nothing behind at all.
+        // Still non-fatal — Chat must come up either way — but it is written down.
         try { await localTools.RefreshAsync(); }
-        catch { }
+        catch (Exception ex) { DiagnosticLog.Write("pi-work", "启动时刷新 Work 失败：" + ex.Message); }
 
         if (string.IsNullOrEmpty(auth.CurrentJwt))
             accountSession.CleanupLoggedOutAccountState();

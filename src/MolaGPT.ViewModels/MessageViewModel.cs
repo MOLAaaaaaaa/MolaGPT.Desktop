@@ -7,6 +7,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Models;
+using MolaGPT.Presentation;
 
 namespace MolaGPT.ViewModels;
 
@@ -599,6 +600,25 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         StopPaceFrames();
         _streamedMarkupCloseTag = null;
         Content = text;
+    }
+
+    public void ApplyResponsePostProcessing(IReadOnlyList<ResponseRegexRule> rules, int startIndex = 0)
+    {
+        if (_disposed) return;
+        var full = FullContent;
+        var offsets = ToolCalls.Select(tool => tool.ContentOffset)
+            .Concat(ThinkingSegments.Select(segment => segment.ContentOffset))
+            .ToArray();
+        var processed = ResponsePostProcessor.Apply(full, rules, startIndex, offsets);
+        if (string.Equals(processed, full, StringComparison.Ordinal)) return;
+
+        for (var i = 0; i < ToolCalls.Count; i++)
+            ToolCalls[i].ContentOffset = offsets[i];
+        for (var i = 0; i < ThinkingSegments.Count; i++)
+            ThinkingSegments[i].ContentOffset = offsets[ToolCalls.Count + i];
+
+        FlushPendingThinking();
+        ReplaceContent(processed);
     }
 
     public void FinishStreaming()
