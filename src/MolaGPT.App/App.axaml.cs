@@ -15,6 +15,7 @@ using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Agents.Relay;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Desktop.Services;
@@ -102,6 +103,8 @@ public partial class App : Application
             main.Composer.ConversationCompletedAsync = cloudSync.CompleteConversationTurnAsync;
             main.Composer.ResponsePostProcessingFailed += message =>
                 notifications.Error("回答后处理失败", message, key: "response-postprocessing");
+
+            WireBrowserBridgeNotifications(notifications);
             main.Composer.LocalConversationTitleAsync = (conversationId, providerId, modelId, ct) =>
                 _services.GetRequiredService<ConversationTitleService>()
                     .GenerateAsync(conversationId, providerId, modelId, ct);
@@ -125,6 +128,16 @@ public partial class App : Application
             {
                 try { await cloudSync.PushDeletedConversationsAsync(ids); }
                 catch { }
+
+                // 会话的标签组归这个对话所有。对话删了标签还开着，用户就得自己去浏览器
+                // 里认领一堆没人管的标签页——而它们本来就是我们开的。
+                var browser = _services.GetService<BrowserControlTool>();
+                if (browser is null) return;
+                foreach (var id in ids)
+                {
+                    try { await browser.CloseSessionAsync(id, settings.BrowserToolEnabled); }
+                    catch { }
+                }
             };
 
             var window = new MainWindow(
@@ -144,6 +157,7 @@ public partial class App : Application
                  _services.GetRequiredService<PiWorkSidecarLocator>(),
                  notifications,
                 _services.GetRequiredService<SkillsViewModel>(),
+                 _services.GetRequiredService<BrowserActivityLog>(),
                  _services.GetRequiredService<IHttpClientFactory>(),
                  _services.GetRequiredService<IChatToolHost>(),
                  _services.GetRequiredService<PiByokProviderFactory>(),
@@ -362,6 +376,38 @@ public partial class App : Application
             main.UpdateInstallerSha256,
             Path.GetFileName(uri.LocalPath));
         return true;
+    }
+
+    /// <summary>
+    /// 桥断了要让人知道。
+    ///
+    /// 模型收到的是一句可执行的错误，但那句话只出现在工具卡里——用户可能正在别的
+    /// 地方等结果，而「浏览器没开」这件事他一秒钟就能修好。这是事件不是状态（刚发生、
+    /// 修好就没了），所以走横幅；同一个 key 反复替换，一次任务里连撞五次也只有一条。
+    /// </summary>
+    private void WireBrowserBridgeNotifications(NotificationCenter notifications)
+    {
+        if (_services?.GetService<BrowserActivityLog>() is not { } log) return;
+
+        log.Recorded += (_, entry) =>
+        {
+            if (!entry.IsBridgeFailure) return;
+            Dispatcher.UIThread.Post(() => notifications.Notify(new AppNotification
+            {
+                Key = "browser-bridge",
+                Kind = NotifyKind.Warning,
+                Title = "浏览器未连接",
+                Body = "模型想操作浏览器，但本机服务或 Kimi 扩展没接上。",
+                ActionText = "去检测",
+                Action = () => OpenBrowserSettings()
+            }));
+        };
+    }
+
+    private void OpenBrowserSettings()
+    {
+        if (ApplicationLifetime is not IClassicDesktopStyleApplicationLifetime desktop) return;
+        if (desktop.MainWindow is MainWindow window) window.OpenBrowserSettings();
     }
 
     private static async Task RunUpdateCheckAsync(

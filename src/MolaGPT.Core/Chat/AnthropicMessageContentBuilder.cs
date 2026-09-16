@@ -54,8 +54,7 @@ public static class AnthropicMessageContentBuilder
             });
         }
 
-        var fileSection = AttachedFilePrompt.Build(
-            message.Attachments.Where(a => a.Kind == AttachmentKind.File).ToList());
+        var fileSection = AttachedFilePrompt.Build(message.Attachments);
         if (!string.IsNullOrWhiteSpace(fileSection))
             parts.Add(new { type = "text", text = fileSection });
 

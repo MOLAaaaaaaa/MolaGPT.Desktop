@@ -1,0 +1,251 @@
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
+        x:Class="MolaGPT.App.Views.BrowserSetupWindow"
+        x:DataType="vm:BrowserBridgeStatusViewModel"
+        Title="浏览器配置"
+        HeaderTitle="浏览器配置"
+        Width="620" Height="800"
+        CanResize="True" MinWidth="540" MinHeight="540"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource Brush.Bg.Elevated}"
+        FontFamily="{DynamicResource Font.Cjk}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+  <views:MolaContentWindow.Styles>
+    <!-- Store mockups drawn with primitives rather than shipped as .svg: the app
+         has no SVG renderer, and a hand-built one follows the theme instead of
+         being a light-mode bitmap sitting in dark mode. -->
+    <Style Selector="Border.mockframe">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Primary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Divider}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+    <Style Selector="Border.mockchrome">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="Padding" Value="10,6" />
+    </Style>
+    <Style Selector="Border.mockurl">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Primary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Divider}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="9" />
+      <Setter Property="Padding" Value="9,3" />
+    </Style>
+    <Style Selector="Ellipse.mockdot">
+      <Setter Property="Width" Value="7" />
+      <Setter Property="Height" Value="7" />
+      <Setter Property="Fill" Value="{DynamicResource Brush.Divider}" />
+    </Style>
+    <Style Selector="Border.mockcta">
+      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="Padding" Value="14,6" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Border.mockcta > TextBlock">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <!-- Kimi 的方块标：底色跟着主题反色，右上角那个蓝点是品牌标识，不反色。 -->
+    <Style Selector="Border.mocklogo">
+      <Setter Property="Width" Value="40" />
+      <Setter Property="Height" Value="40" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+    <Style Selector="TextBlock.mocklogotext">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Bg.Primary}" />
+      <Setter Property="FontSize" Value="20" />
+      <Setter Property="FontWeight" Value="Bold" />
+      <Setter Property="HorizontalAlignment" Value="Center" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Ellipse.mocklogodot">
+      <Setter Property="Width" Value="5" />
+      <Setter Property="Height" Value="5" />
+      <Setter Property="Fill" Value="#2E6BF5" />
+      <Setter Property="HorizontalAlignment" Value="Right" />
+      <Setter Property="VerticalAlignment" Value="Top" />
+      <Setter Property="Margin" Value="0,9,8,0" />
+    </Style>
+    <Style Selector="TextBlock.mockmuted">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Tertiary}" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="Border.stepnum">
+      <Setter Property="Width" Value="21" />
+      <Setter Property="Height" Value="21" />
+      <Setter Property="CornerRadius" Value="11" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="VerticalAlignment" Value="Top" />
+      <Setter Property="Margin" Value="0,1,0,0" />
+    </Style>
+    <Style Selector="Border.stepnum > TextBlock">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="HorizontalAlignment" Value="Center" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Border.cmdbox">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Divider}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="Padding" Value="12,9" />
+    </Style>
+  </views:MolaContentWindow.Styles>
+
+  <Grid RowDefinitions="*,Auto">
+    <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
+      <StackPanel Margin="24,18,24,10" Spacing="14">
+
+        <TextBlock Classes="hint" TextWrapping="Wrap"
+                   Text="浏览器操作由 Kimi 浏览器扩展与本地服务提供，完成以下两步即可使用。" />
+
+        <!-- Step 1 -->
+        <StackPanel Spacing="9">
+          <Grid ColumnDefinitions="Auto,*">
+            <Border Classes="stepnum"><TextBlock Text="1" /></Border>
+            <StackPanel Grid.Column="1" Margin="10,0,0,0">
+              <TextBlock Classes="rowtitle" Text="安装浏览器扩展" />
+              <TextBlock Classes="hint" TextWrapping="Wrap" Margin="0,2,0,0"
+                         Text="在 Chrome 或 Edge 的扩展商店中添加 Kimi 扩展。" />
+            </StackPanel>
+          </Grid>
+
+          <Border Classes="mockframe">
+            <StackPanel>
+              <Border Classes="mockchrome">
+                <Grid ColumnDefinitions="Auto,*">
+                  <StackPanel Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                    <Ellipse Classes="mockdot" />
+                    <Ellipse Classes="mockdot" />
+                    <Ellipse Classes="mockdot" />
+                  </StackPanel>
+                  <Border Grid.Column="1" Classes="mockurl" Margin="10,0,0,0">
+                    <TextBlock Classes="mockmuted" Text="chromewebstore.google.com/detail/kimi" />
+                  </Border>
+                </Grid>
+              </Border>
+              <Grid ColumnDefinitions="Auto,*,Auto" Margin="14,12,14,14">
+                <Border Classes="mocklogo">
+                  <Panel>
+                    <TextBlock Classes="mocklogotext" Text="K" />
+                    <Ellipse Classes="mocklogodot" />
+                  </Panel>
+                </Border>
+                <StackPanel Grid.Column="1" Margin="12,0" VerticalAlignment="Center" Spacing="4">
+                  <TextBlock Text="Kimi" FontSize="14" FontWeight="SemiBold" />
+                  <TextBlock Classes="mockmuted" Text="扩展程序 · 工具" />
+                </StackPanel>
+                <Border Grid.Column="2" Classes="mockcta" Background="#1A73E8">
+                  <TextBlock Text="添加至 Chrome" />
+                </Border>
+              </Grid>
+            </StackPanel>
+          </Border>
+
+          <Border Classes="mockframe">
+            <StackPanel>
+              <Border Classes="mockchrome">
+                <Grid ColumnDefinitions="Auto,*">
+                  <StackPanel Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                    <Ellipse Classes="mockdot" />
+                    <Ellipse Classes="mockdot" />
+                    <Ellipse Classes="mockdot" />
+                  </StackPanel>
+                  <Border Grid.Column="1" Classes="mockurl" Margin="10,0,0,0">
+                    <TextBlock Classes="mockmuted" Text="microsoftedge.microsoft.com/addons/detail/kimi" />
+                  </Border>
+                </Grid>
+              </Border>
+              <Grid ColumnDefinitions="Auto,*,Auto" Margin="14,12,14,14">
+                <Border Classes="mocklogo">
+                  <Panel>
+                    <TextBlock Classes="mocklogotext" Text="K" />
+                    <Ellipse Classes="mocklogodot" />
+                  </Panel>
+                </Border>
+                <StackPanel Grid.Column="1" Margin="12,0" VerticalAlignment="Center" Spacing="4">
+                  <TextBlock Text="Kimi" FontSize="14" FontWeight="SemiBold" />
+                  <TextBlock Classes="mockmuted" Text="Microsoft Edge 加载项" />
+                </StackPanel>
+                <Border Grid.Column="2" Classes="mockcta" Background="#0F6CBD">
+                  <TextBlock Text="获取" />
+                </Border>
+              </Grid>
+            </StackPanel>
+          </Border>
+
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button Name="PART_OpenChromeStore" Classes="outline" Content="Chrome 应用商店" Padding="14,7" />
+            <Button Name="PART_OpenEdgeStore" Classes="outline" Content="Edge 加载项" Padding="14,7" />
+          </StackPanel>
+        </StackPanel>
+
+        <Border Classes="divider" />
+
+        <!-- Step 2 -->
+        <StackPanel Spacing="9">
+          <Grid ColumnDefinitions="Auto,*">
+            <Border Classes="stepnum"><TextBlock Text="2" /></Border>
+            <StackPanel Grid.Column="1" Margin="10,0,0,0">
+              <TextBlock Classes="rowtitle" Text="配置本地服务" />
+              <TextBlock Classes="hint" TextWrapping="Wrap" Margin="0,2,0,0"
+                         Text="运行 Kimi 官方安装命令，安装并启动本地服务。" />
+            </StackPanel>
+          </Grid>
+
+          <Border Classes="cmdbox">
+            <SelectableTextBlock Text="{Binding InstallCommandText}"
+                                 FontFamily="{DynamicResource Font.Mono}"
+                                 FontSize="12"
+                                 TextWrapping="Wrap" />
+          </Border>
+
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button Name="PART_RunInstall" Classes="primary" Content="开始配置"
+                    Padding="16,7" IsEnabled="{Binding !IsInstalling}"
+                    Command="{Binding InstallCommand}" />
+            <Button Name="PART_CopyCommand" Classes="outline" Content="复制命令" Padding="14,7" />
+            <TextBlock Classes="hint" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                       Text="{Binding InstallLog}" />
+          </StackPanel>
+
+          <TextBlock Classes="muted" FontSize="12" TextWrapping="Wrap"
+                     Text="单击「开始配置」通过 MolaGPT 一键配置或复制命令后手动执行；脚本来自 Kimi 官方；MolaGPT 不会改动其他 Agent 的配置。" />
+        </StackPanel>
+
+        <Border Classes="divider" />
+
+        <!-- Step 3 -->
+        <Grid ColumnDefinitions="Auto,*">
+          <Border Classes="stepnum"><TextBlock Text="3" /></Border>
+          <StackPanel Grid.Column="1" Margin="10,0,0,0">
+            <TextBlock Classes="rowtitle" Text="检测连接" />
+            <TextBlock Classes="hint" TextWrapping="Wrap" Margin="0,2,0,0"
+                       Text="保持 Chrome/Edge 打开并返回检测，状态为「已连接」即可使用。" />
+          </StackPanel>
+        </Grid>
+
+      </StackPanel>
+    </ScrollViewer>
+
+    <Border Grid.Row="1" BorderBrush="{DynamicResource Brush.Divider}" BorderThickness="0,1,0,0">
+      <Grid ColumnDefinitions="Auto,*,Auto" Margin="24,12">
+        <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+          <Button Name="PART_OpenOfficial" Classes="textlink" Content="安装说明" />
+          <Button Name="PART_OpenHelp" Classes="textlink" Content="帮助中心" />
+        </StackPanel>
+        <Button Grid.Column="2" Name="PART_CheckNow" Classes="primary" Content="完成并检测" Padding="16,7" />
+      </Grid>
+    </Border>
+  </Grid>
+</views:MolaContentWindow>

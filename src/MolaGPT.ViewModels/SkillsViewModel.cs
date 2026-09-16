@@ -11,8 +11,9 @@ namespace MolaGPT.ViewModels;
 /// <summary>
 /// Registry of Agent Skills (built-in + user-imported). Drives the settings
 /// "技能" tab and supplies the tier-1 skill catalog injected into the system
-/// prompt. Skills are executed via the local Python tool, so the catalog is
-/// only meaningful for BYOK chats with that tool enabled.
+/// prompt. A skill is a file the model opens on demand, so the catalog is
+/// meaningful to any BYOK chat with either the read-only file tools or the
+/// Python tool; only skills that bundle scripts additionally need Python.
 ///
 /// Enabled state is persisted as a set of DISABLED skill names, so any newly
 /// shipped built-in skill is enabled by default.
@@ -21,9 +22,20 @@ public sealed partial class SkillsViewModel : ObservableObject
 {
     private const string DisabledNamesKey = "skills_disabled";
 
+    /// <summary>
+    /// 与「设置 → 浏览器 → 启用浏览器使用」共用一个状态的技能。
+    ///
+    /// 对用户来说这是一个功能：工具没有技能，模型是在凭空发明点击顺序；技能没有
+    /// 工具，那是一份指向不存在的东西的说明书。所以两个开关联动，任一处改动另一
+    /// 处跟随。
+    /// </summary>
+    public const string BrowserSkillName = "browser-use";
+
     private readonly SkillManager _manager;
     private readonly SettingsRepository? _settingsRepo;
+    private readonly SettingsViewModel? _settings;
     private bool _loading;
+    private bool _syncingBrowserLink;
 
     public ObservableCollection<SkillItemViewModel> Skills { get; } = new();
 
@@ -33,11 +45,19 @@ public sealed partial class SkillsViewModel : ObservableObject
 
     public SkillsViewModel() : this(new SkillManager(), null) { }
 
-    public SkillsViewModel(SkillManager manager, SettingsRepository? settingsRepo)
+    public SkillsViewModel(SkillManager manager, SettingsRepository? settingsRepo, SettingsViewModel? settings = null)
     {
         _manager = manager;
         _settingsRepo = settingsRepo;
+        _settings = settings;
         Reload();
+        if (_settings is null) return;
+        _settings.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(SettingsViewModel.BrowserToolEnabled))
+                PullBrowserSkillFromSettings();
+        };
+        PullBrowserSkillFromSettings();
     }
 
     public string BuiltinSkillsDirectory => _manager.BuiltinSkillsDirectory;
@@ -69,6 +89,9 @@ public sealed partial class SkillsViewModel : ObservableObject
         {
             _loading = false;
         }
+        // 重新发现会重建整份列表，浏览器技能的勾选状态要重新对齐开关，
+        // 否则刷新一次就能把两者拆开。
+        PullBrowserSkillFromSettings();
         SkillsChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -76,16 +99,47 @@ public sealed partial class SkillsViewModel : ObservableObject
     {
         if (_loading || e.PropertyName != nameof(SkillItemViewModel.Enabled))
             return;
+        if (sender is SkillItemViewModel { Name: BrowserSkillName } browser)
+            PushBrowserSkillToSettings(browser.Enabled);
         PersistDisabledNames();
         SkillsChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    private void PullBrowserSkillFromSettings()
+    {
+        if (_settings is null || _syncingBrowserLink) return;
+        if (Skills.FirstOrDefault(skill => skill.Name == BrowserSkillName) is not { } item) return;
+        if (item.Enabled == _settings.BrowserToolEnabled) return;
+
+        // 只挡住回写设置那一步：勾选变化仍然要走 OnItemPropertyChanged，
+        // 才会落盘并通知 composer 刷新技能目录。
+        _syncingBrowserLink = true;
+        try { item.Enabled = _settings.BrowserToolEnabled; }
+        finally { _syncingBrowserLink = false; }
+    }
+
+    private void PushBrowserSkillToSettings(bool enabled)
+    {
+        if (_settings is null || _syncingBrowserLink) return;
+        if (_settings.BrowserToolEnabled == enabled) return;
+
+        _syncingBrowserLink = true;
+        try { _settings.BrowserToolEnabled = enabled; }
+        finally { _syncingBrowserLink = false; }
+    }
+
     /// <summary>
     /// Tier-1 catalog: each enabled skill's name + description + SKILL.md path,
-    /// plus instructions telling the model to read the file on demand and run it
-    /// via the Python tool. Returns null when there is nothing to inject.
+    /// plus instructions for opening the file on demand. Returns null when there
+    /// is nothing to inject.
+    ///
+    /// The instruction is worded for the tools this chat actually has. Three
+    /// combinations exist and they are not interchangeable: naming
+    /// <c>execute_python_code</c> to a chat without it sends the model after a
+    /// tool that is not in its list, and promising it can run a skill's scripts
+    /// when it cannot is how a "done" comes back for work that never happened.
     /// </summary>
-    public string? BuildCatalogForPrompt(bool canUseReadTool = false)
+    public string? BuildCatalogForPrompt(bool canUseReadTool = false, bool canRunPython = true)
     {
         var enabled = Skills.Where(s => s.Enabled).ToArray();
         if (enabled.Length == 0)
@@ -93,12 +147,20 @@ public sealed partial class SkillsViewModel : ObservableObject
 
         var sb = new StringBuilder();
         sb.AppendLine("## 可用技能（Skills）");
-        if (canUseReadTool)
+        if (canUseReadTool && canRunPython)
         {
             sb.AppendLine(
                 "下面是已启用的技能。当用户的任务匹配某个技能时，先用 read_file 工具读取该技能的 SKILL.md "
                 + "（用其绝对路径），按其中的完整步骤操作；技能文件夹内可能还有 scripts/ 等资源，"
                 + "用 read_file 查看、用 execute_python_code 运行。不要凭空臆造步骤。");
+        }
+        else if (canUseReadTool)
+        {
+            sb.AppendLine(
+                "下面是已启用的技能。当用户的任务匹配某个技能时，先用 read_file 工具读取该技能的 SKILL.md "
+                + "（用其绝对路径），按其中的完整步骤操作；技能文件夹内的 scripts/ 等资源同样用 read_file 查看。"
+                + "本对话没有代码执行能力，技能里需要运行脚本的步骤做不了，如实说明，不要假装执行。"
+                + "不要凭空臆造步骤。");
         }
         else
         {

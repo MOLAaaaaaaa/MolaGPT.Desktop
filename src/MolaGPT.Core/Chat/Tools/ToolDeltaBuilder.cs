@@ -1,5 +1,6 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
@@ -96,6 +97,8 @@ public static class ToolDeltaBuilder
 
             if (name == "web_fetch")
                 return ReadString(root, "url") ?? "等待网页地址";
+            if (name == BrowserControlTool.ToolName)
+                return BrowserControlTool.DisplayNameFor(ReadString(root, "action"));
             if (name == VisionProxyTool.ToolName)
                 return ReadString(root, "query") ?? "查看图片";
             if (name == ImageAnalysisTool.ToolName)
@@ -137,6 +140,8 @@ public static class ToolDeltaBuilder
         }
         if (name == "web_fetch")
             return "读取页面标题、正文和链接";
+        if (name == BrowserControlTool.ToolName)
+            return "在本机 Chrome/Edge 中操作网页";
         if (name == VisionProxyTool.ToolName)
             return "通过视觉模型读取图片";
         if (name == ImageAnalysisTool.ToolName)
@@ -278,6 +283,7 @@ public static class ToolDeltaBuilder
         "read_file" => "读取文件",
         "glob_files" => "查找文件",
         "grep_files" => "搜索内容",
+        BrowserControlTool.ToolName => "浏览器",
         PythonExecutionTool.ToolName => "执行 Python",
         VisionProxyTool.ToolName => "查看图片",
         ImageAnalysisTool.ToolName => "图片分析",

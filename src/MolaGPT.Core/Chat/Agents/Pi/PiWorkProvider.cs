@@ -87,7 +87,14 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // relative paths against this conversation's workspace — the same folder
         // the composer copied the attachments into — so the `path` values in this
         // section are directly usable by the agent.
-        var fileSection = AttachedFilePrompt.Build(files, AttachmentPromptOptions.From(options, modelSupportsTools: true));
+        //
+        // Built from the whole attachment list, not just `files`: an image the
+        // model is looking at through a content part still needs its workspace
+        // name stated here, or analyze_image has nothing to be pointed at.
+        var fileSection = AttachedFilePrompt.Build(
+            latestUser?.Attachments ?? (IReadOnlyList<Attachment>)Array.Empty<Attachment>(),
+            AttachmentPromptOptions.From(options, modelSupportsTools: true)
+                with { ModelSeesImages = modelSupportsVision });
         if (!string.IsNullOrWhiteSpace(fileSection))
         {
             userText = string.IsNullOrWhiteSpace(userText)

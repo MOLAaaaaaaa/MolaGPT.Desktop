@@ -19,7 +19,7 @@
   <Border Background="Transparent" Margin="16,16,16,0" Padding="16,8">
     <Grid ColumnDefinitions="Auto,*,Auto">
 
-      <!-- Left: expand-sidebar pill, shown only while the sidebar is collapsed -->
+      <!-- Left: sidebar shortcuts, shown only while the sidebar is collapsed -->
       <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
         <Button Name="PART_ExpandSidebar"
                 Classes="headericon"
@@ -31,6 +31,16 @@
                 IsVisible="False"
                 ToolTip.Tip="展开侧边栏">
           <TextBlock Classes="icon" Text="&#xE700;" FontSize="12" />
+        </Button>
+        <Button Name="PART_NewConversation"
+                Classes="headericon"
+                Background="{DynamicResource Brush.Bg.Elevated}"
+                BorderBrush="{DynamicResource Brush.Border}"
+                BorderThickness="1"
+                Width="32" Height="32"
+                IsVisible="False"
+                ToolTip.Tip="新建对话">
+          <TextBlock Classes="icon" Text="&#xE710;" FontSize="13" />
         </Button>
         <!-- No role picker here. The composer already carries one, anchored to
              the input box where the choice is acted on; a second trigger up here
@@ -284,7 +294,8 @@
     <!-- Opaque even on hover: the global headericon hover is a translucent
          overlay, which reads scrolling text through it. -->
     <Style Selector="Button#PART_SystemPrompt:pointerover /template/ Border#PART_Root,
-                     Button#PART_ExpandSidebar:pointerover /template/ Border#PART_Root">
+                     Button#PART_ExpandSidebar:pointerover /template/ Border#PART_Root,
+                     Button#PART_NewConversation:pointerover /template/ Border#PART_Root">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
     </Style>
     <!-- Same tokens as ToolApprovalWindow's danger banner, so "this costs you

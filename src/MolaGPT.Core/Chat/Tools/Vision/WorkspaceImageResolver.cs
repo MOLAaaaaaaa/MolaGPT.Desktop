@@ -185,9 +185,14 @@ public static class WorkspaceImageResolver
         var images = ListImages(root);
         if (images.Count == 0)
         {
-            return string.IsNullOrEmpty(message)
-                ? "工作目录里目前没有图片文件。"
-                : message + " 工作目录里目前没有图片文件。";
+            // The name is never something to guess at: an uploaded image is listed
+            // with its path in the message's attachment section, and a generated one
+            // comes back in the tool result that produced it. A model that invented
+            // a name ("1.png") is the reason this sentence exists.
+            const string empty = "工作目录里目前没有图片文件。"
+                + "本工具只能看工作目录里的文件；用户上传的图片会在消息的附件段里给出 path，"
+                + "工具生成的图片会在它自己的返回里给出路径——不要凭空构造文件名。";
+            return string.IsNullOrEmpty(message) ? empty : message + " " + empty;
         }
 
         var listed = $"工作目录下可分析的图片：{string.Join("、", images)}"

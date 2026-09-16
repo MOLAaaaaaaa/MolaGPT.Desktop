@@ -63,6 +63,11 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string VisionPermissionModeKey = "vision_permission_mode";
     private const string McpPermissionModeKey = "mcp_permission_mode";
     private const string PythonExecutionPermissionModeKey = "python_execution_permission_mode";
+    private const string BrowserToolEnabledKey = "browser_tool_enabled";
+    private const string BrowserPermissionModeKey = "browser_tool_permission_mode";
+    private const string BrowserAllowedHostsKey = "browser_tool_allowed_hosts";
+    private const string BrowserBlockedHostsKey = "browser_tool_blocked_hosts";
+    private const string BrowserSensitiveHostsKey = "browser_tool_sensitive_hosts";
     private const string PythonToolAllowedImportsKey = "python_tool_allowed_imports";
     private const string PythonToolDeniedImportsKey = "python_tool_denied_imports";
     private const string PythonToolAllowedPathPrefixesKey = "python_tool_allowed_path_prefixes";
@@ -150,6 +155,22 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private ToolPermissionMode _visionPermissionMode = ToolPermissionMode.Approval;
     [ObservableProperty] private ToolPermissionMode _mcpPermissionMode = ToolPermissionMode.Approval;
     [ObservableProperty] private ToolPermissionMode _pythonExecutionPermissionMode = ToolPermissionMode.Approval;
+
+    /// <summary>Master switch for the browser tool. Off by default: it depends on
+    /// a third-party local service, so it stays invisible until the user has been
+    /// to the settings page and seen whether that service is actually there.</summary>
+    [ObservableProperty] private bool _browserToolEnabled;
+    [ObservableProperty] private ToolPermissionMode _browserPermissionMode = ToolPermissionMode.Approval;
+
+    /// <summary>Comma-separated sites. An allow-list, once non-empty, is also a
+    /// standing approval for those sites — matching what the user just said they
+    /// want the browser tool used for.</summary>
+    [ObservableProperty] private string? _browserAllowedHosts;
+    [ObservableProperty] private string? _browserBlockedHosts;
+
+    /// <summary>可以去，但每次写操作都要重新确认的网站。「始终允许」对它们无效——
+    /// 网银和邮箱正是那种「这个站点随便点」不成立的地方。</summary>
+    [ObservableProperty] private string? _browserSensitiveHosts;
     [ObservableProperty] private string? _pythonToolAllowedImports;
     [ObservableProperty] private string? _pythonToolDeniedImports;
     [ObservableProperty] private string? _pythonToolAllowedPathPrefixes;
@@ -303,6 +324,12 @@ public sealed partial class SettingsViewModel : ObservableObject
                 McpPermissionMode = mcpMode;
             if (Enum.TryParse<ToolPermissionMode>(_settingsRepo.Get(PythonExecutionPermissionModeKey), true, out var pyMode))
                 PythonExecutionPermissionMode = pyMode;
+            BrowserToolEnabled = bool.TryParse(_settingsRepo.Get(BrowserToolEnabledKey), out var browserEnabled) && browserEnabled;
+            if (Enum.TryParse<ToolPermissionMode>(_settingsRepo.Get(BrowserPermissionModeKey), true, out var browserMode))
+                BrowserPermissionMode = browserMode;
+            BrowserAllowedHosts = _settingsRepo.Get(BrowserAllowedHostsKey);
+            BrowserBlockedHosts = _settingsRepo.Get(BrowserBlockedHostsKey);
+            BrowserSensitiveHosts = _settingsRepo.Get(BrowserSensitiveHostsKey);
             PythonToolAllowedImports = _settingsRepo.Get(PythonToolAllowedImportsKey);
             PythonToolDeniedImports = _settingsRepo.Get(PythonToolDeniedImportsKey);
             PythonToolAllowedPathPrefixes = _settingsRepo.Get(PythonToolAllowedPathPrefixesKey);
@@ -582,6 +609,36 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(FileToolsEnabledKey, value.ToString());
+    }
+
+    partial void OnBrowserToolEnabledChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(BrowserToolEnabledKey, value.ToString());
+    }
+
+    partial void OnBrowserPermissionModeChanged(ToolPermissionMode value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(BrowserPermissionModeKey, value.ToString());
+    }
+
+    partial void OnBrowserAllowedHostsChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(BrowserAllowedHostsKey, value);
+    }
+
+    partial void OnBrowserBlockedHostsChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(BrowserBlockedHostsKey, value);
+    }
+
+    partial void OnBrowserSensitiveHostsChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(BrowserSensitiveHostsKey, value);
     }
 
     partial void OnPythonToolExecutablePathChanged(string? value)

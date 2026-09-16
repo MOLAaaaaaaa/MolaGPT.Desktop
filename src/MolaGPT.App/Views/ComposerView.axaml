@@ -263,25 +263,17 @@
           </Button.Flyout>
         </Button>
 
+        <!-- One switch, not two. 搜索和读页是同一件事的两半——单开搜索，模型拿到
+             的只有摘要片段；单开读页，它没有办法找到要读的地址。分开放只是把一个
+             决定拆成两个都得答对的问题。 -->
         <ToggleButton Name="PART_Network" Classes="toolchip"
                       IsChecked="{Binding EnableNetwork, Mode=TwoWay}"
                       IsEnabled="{Binding AreNetworkToolsEnabled}"
-                      ToolTip.Tip="联网搜索">
+                      ToolTip.Tip="搜索网页并读取页面内容">
           <StackPanel Classes="inlinerow" Orientation="Horizontal">
             <TextBlock Classes="icon" Text="&#xE721;" FontSize="12" Margin="0,0,6,0"
                        VerticalAlignment="Center" />
-            <TextBlock Text="联网搜索" VerticalAlignment="Center" />
-          </StackPanel>
-        </ToggleButton>
-
-        <ToggleButton Name="PART_WebFetch" Classes="toolchip"
-                      IsChecked="{Binding EnableWebFetch, Mode=TwoWay}"
-                      IsEnabled="{Binding AreNetworkToolsEnabled}"
-                      ToolTip.Tip="网页阅读">
-          <StackPanel Classes="inlinerow" Orientation="Horizontal">
-            <TextBlock Classes="icon" Text="&#xE774;" FontSize="12" Margin="0,0,6,0"
-                       VerticalAlignment="Center" />
-            <TextBlock Text="网页阅读" VerticalAlignment="Center" />
+            <TextBlock Text="网络访问" VerticalAlignment="Center" />
           </StackPanel>
         </ToggleButton>
       </StackPanel>

@@ -364,13 +364,13 @@
                       Background="{DynamicResource Brush.Primary.Tint}"
                       Classes.compact="{Binding !Tool.HasHeaderArgPreview}"
                       Classes.errored="{Binding Tool.IsError}">
-                <TextBlock Classes="icon" Text="{Binding Tool.IconGlyph}"
+                <TextBlock Classes="icon" Text="{Binding Tool.DisplayIconGlyph}"
                            HorizontalAlignment="Center" VerticalAlignment="Center"
                            Foreground="{DynamicResource Brush.Primary}" />
               </Border>
 
               <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="2">
-                <TextBlock Text="{Binding Tool.Label}" FontSize="13" FontWeight="Medium"
+                <TextBlock Text="{Binding Tool.DisplayLabel}" FontSize="13" FontWeight="Medium"
                            TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
                 <TextBlock Text="{Binding Tool.HeaderArgPreview}"
                            IsVisible="{Binding Tool.HasHeaderArgPreview}"
@@ -438,7 +438,7 @@
                                FontSize="{DynamicResource Font.Size.XSmall}"
                                Foreground="{DynamicResource Brush.Text.Secondary}"
                                TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-                    <TextBlock Text="{Binding Label}"
+                    <TextBlock Text="{Binding DisplayLabel}"
                                IsVisible="{Binding !HasHeaderArgPreview}"
                                FontSize="{DynamicResource Font.Size.XSmall}"
                                Foreground="{DynamicResource Brush.Text.Secondary}"

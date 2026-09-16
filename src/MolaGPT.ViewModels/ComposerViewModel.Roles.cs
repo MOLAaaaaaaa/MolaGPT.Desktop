@@ -27,8 +27,10 @@ public sealed partial class ComposerViewModel
                 && profile?.ProviderId is { Length: > 0 } providerId && profile.ModelId is { Length: > 0 } modelId)
                 _chat.SetActiveByIds(providerId, modelId);
             var context = _chat.RoleContext;
-            EnableNetwork = (restoring ? context.EnableNetwork : null) ?? persona?.DefaultEnableNetwork ?? false;
-            EnableWebFetch = (restoring ? context.EnableWebFetch : null) ?? persona?.DefaultEnableWebFetch ?? false;
+            EnableNetwork =
+                (restoring ? Merged(context.EnableNetwork, context.EnableWebFetch) : null)
+                ?? Merged(persona?.DefaultEnableNetwork, persona?.DefaultEnableWebFetch)
+                ?? true;
             EnableThinking = (restoring ? context.EnableThinking : null) ?? persona?.DefaultThinking ?? false;
             var effort = (restoring ? context.ReasoningEffort : null) ?? persona?.DefaultReasoningEffort;
             if (!string.IsNullOrEmpty(effort) && AvailableEffortLevels.Contains(effort)) ReasoningEffort = effort;
@@ -38,19 +40,26 @@ public sealed partial class ComposerViewModel
         finally { _applyingRoleOptions = false; }
     }
 
+    /// <summary>
+    /// 「联网搜索」与「网页阅读」合并成「网络访问」之前，两者是分开存的。旧对话
+    /// 和旧角色里两个值都可能存在：任一为开就算开，两个都没设过才算没设过——落回
+    /// 默认（开），而不是被一个从没出现过的 false 悄悄关掉。
+    /// </summary>
+    private static bool? Merged(bool? search, bool? fetch) =>
+        search is null && fetch is null ? null : search == true || fetch == true;
+
     private void PersistRoleOptions()
     {
         if (_applyingRoleOptions || _chat.IsConversationLoading || !_chat.CurrentMode.IsLocalAgent()) return;
         var context = _chat.RoleContext;
         context.EnableNetwork = EnableNetwork;
-        context.EnableWebFetch = EnableWebFetch;
+        context.EnableWebFetch = EnableNetwork;
         context.EnableThinking = EnableThinking;
         context.ReasoningEffort = ReasoningEffort;
         _chat.SaveRoleContext(context);
     }
 
     partial void OnEnableNetworkChanged(bool value) => PersistRoleOptions();
-    partial void OnEnableWebFetchChanged(bool value) => PersistRoleOptions();
 
     private RolePromptBuildResult? PrepareRolePrompt(MessageViewModel assistant, string generationId, bool continuation, int? maxTokens)
     {

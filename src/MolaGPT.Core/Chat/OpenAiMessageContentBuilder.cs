@@ -71,8 +71,9 @@ public static class OpenAiMessageContentBuilder
             parts.Add(new { type = "image_url", image_url = new { url } });
         }
 
-        var files = message.Attachments.Where(a => a.Kind == AttachmentKind.File).ToList();
-        var fileSection = AttachedFilePrompt.Build(files, options);
+        var fileSection = AttachedFilePrompt.Build(
+            message.Attachments,
+            options with { ModelSeesImages = !replaceImagesWithText });
         if (!string.IsNullOrWhiteSpace(fileSection))
             parts.Add(new { type = "text", text = fileSection });
 

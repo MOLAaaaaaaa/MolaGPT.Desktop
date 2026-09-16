@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -8,6 +8,7 @@ using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Models;
 using MolaGPT.Presentation;
+using MolaGPT.ViewModels.Services;
 
 namespace MolaGPT.ViewModels;
 
@@ -1590,11 +1591,13 @@ public sealed partial class ToolGroupViewModel : ObservableObject
 
     public string CountText => Name switch
     {
+        ToolCallViewModel.SkillLoadKey => $"{Count} 个技能",
         "read_file" => $"{Count} 个文件",
         "glob_files" => $"{Count} 次查找",
         "grep_files" => $"{Count} 次搜索",
         "web_search" => $"{Count} 次搜索",
         "web_fetch" => $"{Count} 个网页",
+        "browser" => $"{Count} 步操作",
         _ => $"{Count} 次"
     };
 
@@ -1720,6 +1723,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
     {
         "search_web" or "web_search" => true,
         "web_fetch" or "steel_browser" => true,
+        "browser" => true,
         "execute_python_code" => true,
         "view_image" or "analyze_image" => true,
         "generate_image" => true,
@@ -1736,6 +1740,44 @@ public sealed partial class ToolCallViewModel : ObservableObject
     public bool IsFileOperation => IsFileOperationTool(Name);
 
     /// <summary>
+    /// Synthetic group key for skill reads. Not a tool name — no model ever emits
+    /// it — but it flows through the same label/glyph/count switches as the real
+    /// ones, so the group card needs no special case.
+    /// </summary>
+    public const string SkillLoadKey = "load_skill";
+
+    /// <summary>
+    /// The skill this call is opening, or null when it is an ordinary read.
+    ///
+    /// These are two different events to a user, and collapsing them is what the
+    /// old card did: "读取文件 · 3 个文件" over a path they have never seen reads
+    /// as the model rummaging through their disk, when in fact it is fetching a
+    /// manual this app handed it. Naming it also makes the skill visible at all —
+    /// otherwise the only evidence a skill took effect is that the answer got
+    /// better.
+    ///
+    /// Scoped to <c>read_file</c> on purpose. A glob or grep inside a skill folder
+    /// is browsing, not loading, and the agent-bridge <c>Read</c> works on the
+    /// user's own repos, where a <c>skills/</c> folder would be theirs, not ours.
+    /// A skill opened from inside Python code is not detected either — the args
+    /// are a code blob, and guessing at its intent would mislabel more than it
+    /// catches.
+    /// </summary>
+    public string? SkillName =>
+        Name.Equals("read_file", StringComparison.OrdinalIgnoreCase)
+        && ArgsView.IsPathPrimary
+        && SkillManager.TryGetSkillFromPath(ArgsView.PrimaryArg!.Value, out var skill)
+            ? skill
+            : null;
+
+    public bool IsSkillLoad => SkillName is not null;
+
+    /// <summary>What the card actually shows. <see cref="Label"/> stays the tool's
+    /// own name so nothing else has to know about skills.</summary>
+    public string DisplayLabel => IsSkillLoad ? LabelFor(SkillLoadKey) : Label;
+    public string DisplayIconGlyph => IsSkillLoad ? IconGlyphFor(SkillLoadKey) : IconGlyph;
+
+    /// <summary>
     /// Canonical grouping key for tools we merge into one card when called back to
     /// back, or null for tools that always stand alone. Aliases collapse to a
     /// single key so a run holds together even if the backend alternates names
@@ -1746,15 +1788,21 @@ public sealed partial class ToolCallViewModel : ObservableObject
     /// </summary>
     public static string? GroupKeyFor(string name) => name switch
     {
+        SkillLoadKey => SkillLoadKey,
         "read_file" => "read_file",
         "glob_files" => "glob_files",
         "grep_files" => "grep_files",
         "search_web" or "web_search" => "web_search",
         "web_fetch" or "steel_browser" => "web_fetch",
+        // A browser task is navigate → snapshot → click → snapshot …: a dozen
+        // calls that are one errand. They group like the file reads do.
+        "browser" => "browser",
         _ => null
     };
 
-    public string? GroupKey => GroupKeyFor(Name);
+    /// <summary>Skill loads form their own run: absorbed into a "读取文件 · 3 个文件"
+    /// card they would be invisible again, which is the thing this exists to fix.</summary>
+    public string? GroupKey => IsSkillLoad ? SkillLoadKey : GroupKeyFor(Name);
     public bool IsGroupable => GroupKey is not null;
 
     /// <summary>
@@ -1772,6 +1820,11 @@ public sealed partial class ToolCallViewModel : ObservableObject
     private string BuildHeaderArgPreview()
     {
         var view = ArgsView;
+
+        // "加载技能 · browser-use" beats the absolute path it came from: the path
+        // is ours, not something the user picked, and the name is the only part
+        // they can act on.
+        if (SkillName is { Length: > 0 } skill) return skill;
 
         if (view.HasSearchQueries)
         {
@@ -1815,8 +1868,10 @@ public sealed partial class ToolCallViewModel : ObservableObject
     public string IconGlyph => IconGlyphFor(Name);
     public static string IconGlyphFor(string name) => name switch
     {
+        SkillLoadKey => "\uE736", // an open book, vs. read_file's single page
         "search_web" or "web_search" => "\uE721",
         "web_fetch" or "steel_browser" => "\uE774",
+        "browser" => "\uE774",
         "execute_python_code" => "\uE943",
         "read_file" => "\uE8A5",
         "glob_files" => "\uE8B7",
@@ -1883,9 +1938,9 @@ public sealed partial class ToolCallViewModel : ObservableObject
         OnPropertyChanged(nameof(ShowArgumentsFold));
         OnPropertyChanged(nameof(IsFileOperation));
         ArgsView = ToolArgsExtractor.Extract(value, ArgumentsJson);
-        OnPropertyChanged(nameof(HeaderArgPreview));
-        OnPropertyChanged(nameof(HasHeaderArgPreview));
+        RefreshArgDerived();
     }
+    partial void OnLabelChanged(string value) => OnPropertyChanged(nameof(DisplayLabel));
     partial void OnSummaryChanged(string? value) => OnPropertyChanged(nameof(HasSummary));
     partial void OnDetailChanged(string? value) => OnPropertyChanged(nameof(HasDetail));
     partial void OnArgumentsJsonChanged(string? value)
@@ -1893,6 +1948,18 @@ public sealed partial class ToolCallViewModel : ObservableObject
         OnPropertyChanged(nameof(HasArguments));
         OnPropertyChanged(nameof(DisplayArgumentsJson));
         ArgsView = ToolArgsExtractor.Extract(Name, value);
+        RefreshArgDerived();
+    }
+
+    /// <summary>Everything downstream of <see cref="ArgsView"/>. Skill-ness is one
+    /// of them: arguments arrive after the name, so a card that only refreshed on
+    /// the name would stay labelled 读取文件 for the whole turn.</summary>
+    private void RefreshArgDerived()
+    {
+        OnPropertyChanged(nameof(SkillName));
+        OnPropertyChanged(nameof(IsSkillLoad));
+        OnPropertyChanged(nameof(DisplayLabel));
+        OnPropertyChanged(nameof(DisplayIconGlyph));
         OnPropertyChanged(nameof(HeaderArgPreview));
         OnPropertyChanged(nameof(HasHeaderArgPreview));
     }
@@ -1913,8 +1980,10 @@ public sealed partial class ToolCallViewModel : ObservableObject
     private static string ToolLabelFor(string name) => LabelFor(name);
     public static string LabelFor(string name) => name switch
     {
+        SkillLoadKey => "加载技能",
         "search_web" or "web_search" => "联网搜索",
         "web_fetch" or "steel_browser" => "网页阅读",
+        "browser" => "浏览器",
         "execute_python_code" => "Python",
         "read_file" => "读取文件",
         "glob_files" => "查找文件",

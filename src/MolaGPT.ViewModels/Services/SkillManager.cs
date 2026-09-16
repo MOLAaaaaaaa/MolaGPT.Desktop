@@ -4,9 +4,10 @@ namespace MolaGPT.ViewModels.Services;
 
 /// <summary>
 /// One discovered Agent Skill: a folder containing a <c>SKILL.md</c> whose YAML
-/// frontmatter provides <c>name</c> and <c>description</c>. Skills are executed
-/// through the local Python tool — the model reads <see cref="SkillMdPath"/> on
-/// demand (progressive disclosure tier 2/3) and runs the bundled instructions.
+/// frontmatter provides <c>name</c> and <c>description</c>. The model opens
+/// <see cref="SkillMdPath"/> on demand (progressive disclosure tier 2/3) with
+/// whichever read tool the chat has — <c>read_file</c> or the Python tool — and
+/// follows the instructions; only bundled scripts need Python to run.
 /// </summary>
 public sealed record SkillInfo(
     string Name,
@@ -70,6 +71,41 @@ public sealed class SkillManager
             .OrderByDescending(s => s.IsBuiltin)
             .ThenBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    /// <summary>
+    /// 从一个路径反推它属于哪个技能，认不出来就返回 false。
+    ///
+    /// 只看路径形状，不碰磁盘：调用方是流式渲染中的工具卡片，每来一个 delta 就重算
+    /// 一次，那里不能有 IO。两个信号各自独立成立——文件名是 <c>SKILL.md</c>（说明书
+    /// 本身，不管它放在哪），或者路径里有一段叫 <c>skills</c>（两个技能根目录都以它
+    /// 结尾，开发期的 <c>src/skills</c> 也是），此时紧随其后的那一段就是技能名。
+    /// </summary>
+    public static bool TryGetSkillFromPath(string? path, out string? skillName)
+    {
+        skillName = null;
+        if (string.IsNullOrWhiteSpace(path)) return false;
+
+        var segments = path.Split(
+            new[] { '/', '\\' },
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        if (segments.Length >= 2
+            && segments[^1].Equals(SkillFileName, StringComparison.OrdinalIgnoreCase))
+        {
+            skillName = segments[^2];
+            return true;
+        }
+
+        for (var i = 0; i < segments.Length; i++)
+        {
+            if (!segments[i].Equals(RuntimeDirectoryName, StringComparison.OrdinalIgnoreCase))
+                continue;
+            skillName = i + 1 < segments.Length ? segments[i + 1] : null;
+            return true;
+        }
+
+        return false;
     }
 
     public void EnsureUserDirectory()

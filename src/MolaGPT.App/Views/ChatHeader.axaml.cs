@@ -22,6 +22,7 @@ public partial class ChatHeader : UserControl
     {
         InitializeComponent();
         PART_ExpandSidebar.Click += (_, _) => ExpandSidebarRequested?.Invoke(this, EventArgs.Empty);
+        PART_NewConversation.Click += (_, _) => NewConversationRequested?.Invoke(this, EventArgs.Empty);
 
         PART_ModelSearch.TextChanged += (_, _) => RebuildModelList();
         PART_ModelList.SelectionChanged += OnModelPicked;
@@ -46,6 +47,8 @@ public partial class ChatHeader : UserControl
     }
 
     public event EventHandler? ExpandSidebarRequested;
+
+    public event EventHandler? NewConversationRequested;
 
     /// <summary>Raised after a model is chosen, so the shell can start a new
     /// conversation when the pick crosses the Chat ↔ local-agent boundary.</summary>
@@ -75,9 +78,12 @@ public partial class ChatHeader : UserControl
     /// "换个模型" button routes here rather than carrying its own copy of the list.</summary>
     public void OpenModelSelector() => PART_ModelSelector.Flyout?.ShowAt(PART_ModelSelector);
 
-    /// <summary>Shown only while the sidebar is collapsed, as in the WPF header.</summary>
-    public void SetSidebarCollapsed(bool collapsed) =>
+    /// <summary>Shows the sidebar shortcuts only while the sidebar is collapsed.</summary>
+    public void SetSidebarCollapsed(bool collapsed)
+    {
         PART_ExpandSidebar.IsVisible = collapsed;
+        PART_NewConversation.IsVisible = collapsed;
+    }
 
     public void SetModeLabel(string? label) =>
         PART_ModeLabel.Text = string.IsNullOrEmpty(label) ? string.Empty : "  " + label;

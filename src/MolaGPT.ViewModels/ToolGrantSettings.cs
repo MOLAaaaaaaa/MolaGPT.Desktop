@@ -1,5 +1,6 @@
 using System.Text.Json;
 using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Storage.Repositories;
 
 namespace MolaGPT.ViewModels;
@@ -51,7 +52,9 @@ public static class ToolGrantSettings
             ? "读写路径　" + entry[ToolGrantStore.WritablePathGrantPrefix.Length..]
             : entry.StartsWith(ToolGrantStore.PathGrantPrefix, StringComparison.Ordinal)
                 ? "读取路径　" + entry[ToolGrantStore.PathGrantPrefix.Length..]
-                : entry;
+                : entry.StartsWith(BrowserControlTool.GrantPrefix, StringComparison.Ordinal)
+                    ? "浏览器网站　" + entry[BrowserControlTool.GrantPrefix.Length..]
+                    : entry;
 
     /// <summary>Revoke one standing grant.</summary>
     public static void Revoke(SettingsRepository settings, string toolName) =>

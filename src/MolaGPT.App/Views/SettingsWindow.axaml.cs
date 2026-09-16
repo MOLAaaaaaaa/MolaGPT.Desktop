@@ -16,6 +16,7 @@ using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Models;
@@ -48,12 +49,14 @@ public partial class SettingsWindow : MolaContentWindow
     private const string PythonRuntimeNotificationKey = "python-runtime";
     private const string PiSidecarNotificationKey = "pi-sidecar";
     private readonly SkillsViewModel _skills;
+    private readonly BrowserActivityLog? _browserActivity;
     private readonly Func<HttpClient>? _byokHttpFactory;
     private readonly ProviderRegistry? _providerRegistry;
     private readonly IChatToolHost? _toolHost;
     private readonly PiByokProviderFactory? _piByokProviderFactory;
     private readonly Func<Task>? _agentRuntimeInstalled;
     private readonly Action? _agentRuntimeRemoving;
+    private readonly BrowserBridgeStatusViewModel _browserBridge;
     private readonly StackPanel[] _pages;
     private readonly ObservableCollection<ModelRow> _providerModels = [];
     private readonly ObservableCollection<HeaderRow> _providerHeaders = [];
@@ -120,7 +123,7 @@ public partial class SettingsWindow : MolaContentWindow
 
     /// <summary>Nav index → page. The rail has non-selectable group headings in
     /// it, so the mapping is explicit rather than positional arithmetic.</summary>
-    private static readonly int[] PageForNavIndex = [-1, 0, 1, -1, 2, 3, 4, 5, 6, 7, 13, -1, 8, 9, 10, 11, 12];
+    private static readonly int[] PageForNavIndex = [-1, 0, 1, -1, 2, 3, 4, 5, 6, 7, 13, -1, 8, 14, 9, 10, 11, 12];
 
     public SettingsWindow(
         SettingsViewModel settings,
@@ -135,6 +138,7 @@ public partial class SettingsWindow : MolaContentWindow
         PiSidecarRuntimeManager? piSidecar = null,
         NotificationCenter? notifications = null,
         SkillsViewModel? skills = null,
+        BrowserActivityLog? browserActivity = null,
         Func<HttpClient>? byokHttpFactory = null,
         ProviderRegistry? providerRegistry = null,
         IChatToolHost? toolHost = null,
@@ -155,6 +159,7 @@ public partial class SettingsWindow : MolaContentWindow
         _piSidecar = piSidecar;
         _notifications = notifications;
         _skills = skills ?? new SkillsViewModel();
+        _browserActivity = browserActivity;
         _byokHttpFactory = byokHttpFactory;
         _providerRegistry = providerRegistry;
         _toolHost = toolHost;
@@ -170,10 +175,16 @@ public partial class SettingsWindow : MolaContentWindow
         [
             PAGE_Account, PAGE_Appearance, PAGE_Providers, PAGE_Personas, PAGE_Search, PAGE_Titles,
             PAGE_ImageGeneration, PAGE_Vision, PAGE_Sandbox, PAGE_Approval, PAGE_Mcp, PAGE_Agent, PAGE_Skills,
-            PAGE_PostProcessing
+            PAGE_PostProcessing, PAGE_Browser
         ];
         PAGE_Agent.DataContext = _agentStatus;
         PAGE_Personas.DataContext = _personas;
+
+        // Only the connection card watches the bridge; the rest of the page edits
+        // settings, so it keeps the window's SettingsViewModel context.
+        _browserBridge = new BrowserBridgeStatusViewModel(
+            new WebBridgeClient(_byokHttpFactory?.Invoke() ?? new HttpClient()));
+        PART_BrowserBridgeCard.DataContext = _browserBridge;
         PART_ContentScroll.SizeChanged += (_, _) => UpdatePersonaViewport();
         PART_PersonaPageHeader.SizeChanged += (_, _) => UpdatePersonaViewport();
         PART_PersonaModeFilter.SelectionChanged += (_, _) => RefreshPersonaLibrary();
@@ -278,13 +289,19 @@ public partial class SettingsWindow : MolaContentWindow
         PART_TestProvider.IsEnabled = _byokHttpFactory is not null;
         PART_ConfigureSandbox.IsEnabled = _pythonRuntime is not null && _piSidecar is not null;
         PART_BrowsePython.IsEnabled = _pythonRuntime is not null;
-        PART_SkillsNav.IsVisible = _settings.PythonToolEnabled;
+        // A skill is a SKILL.md the model opens on demand, so the page is useful
+        // as soon as the chat can open one — read_file is enough, Python is not
+        // required. Gating on Python alone used to hide the page (and with it the
+        // browser-use switch, which mirrors 浏览器使用) from a setup that could
+        // read skills perfectly well.
+        PART_SkillsNav.IsVisible = CanReachSkills();
         RefreshPythonBrowseButton();
 
         PropertyChangedEventHandler settingsChanged = (_, args) =>
         {
-            if (args.PropertyName == nameof(SettingsViewModel.PythonToolEnabled))
-                PART_SkillsNav.IsVisible = _settings.PythonToolEnabled;
+            if (args.PropertyName is nameof(SettingsViewModel.PythonToolEnabled)
+                or nameof(SettingsViewModel.FileToolsEnabled))
+                PART_SkillsNav.IsVisible = CanReachSkills();
             else if (args.PropertyName == nameof(SettingsViewModel.PythonToolExecutablePath))
                 RefreshPythonBrowseButton();
         };
@@ -342,6 +359,39 @@ public partial class SettingsWindow : MolaContentWindow
     internal void OpenSandboxPage()
     {
         PART_Nav.SelectedItem = PART_SandboxNav;
+    }
+
+    /// <summary>Where the「浏览器未连接」banner lands: the connection card, already re-checking.</summary>
+    internal void OpenBrowserPage()
+    {
+        PART_Nav.SelectedItem = PART_BrowserNav;
+        ShowSelectedPage();
+    }
+
+    private void RefreshBrowserActivity()
+    {
+        var entries = _browserActivity?.Recent() ?? Array.Empty<BrowserActivityEntry>();
+        var ok = this.FindResource("Brush.Text.Secondary") as Avalonia.Media.IBrush
+                 ?? Avalonia.Media.Brushes.Gray;
+        var bad = this.FindResource("Brush.Error") as Avalonia.Media.IBrush
+                  ?? Avalonia.Media.Brushes.IndianRed;
+
+        PART_BrowserActivity.ItemsSource = entries
+            .Select(entry => new BrowserActivityRow(
+                entry.At.ToString("MM-dd HH:mm"),
+                BrowserControlTool.DisplayNameFor(entry.Action),
+                entry.Note is { Length: > 0 } note
+                    ? (entry.Host is { Length: > 0 } h ? $"{h} · {note}" : note)
+                    : entry.Host ?? string.Empty,
+                entry.Success ? ok : bad))
+            .ToArray();
+        PART_BrowserActivityEmpty.IsVisible = entries.Count == 0;
+    }
+
+    private void OnClearBrowserActivity(object? sender, RoutedEventArgs e)
+    {
+        _browserActivity?.Clear();
+        RefreshBrowserActivity();
     }
 
     /// <summary>Where image services are added, which is what every 「去设置」
@@ -467,6 +517,13 @@ public partial class SettingsWindow : MolaContentWindow
         if (page != 2) CloseProviderEditor();
         if (page == 2) RefreshProviders();
         if (page == 11 && _agentStatus is not null) _ = _agentStatus.LoadAsync();
+        // Opening the page is the question "does this work" — answer it without
+        // making the user press 检测 first.
+        if (page == 14)
+        {
+            _ = _browserBridge.CheckAsync();
+            RefreshBrowserActivity();
+        }
     }
 
     // ---- choice lists ------------------------------------------------------
@@ -518,6 +575,8 @@ public partial class SettingsWindow : MolaContentWindow
             mode => _settings.McpPermissionMode = mode);
         Bind(PART_PythonPermission, _settings.PythonExecutionPermissionMode,
             mode => _settings.PythonExecutionPermissionMode = mode);
+        Bind(PART_BrowserPermission, _settings.BrowserPermissionMode,
+            mode => _settings.BrowserPermissionMode = mode);
 
         PART_PerToolPermissions.IsEnabled = _settings.LocalToolPermissionMode == ToolPermissionMode.Approval;
         return;
@@ -2141,6 +2200,11 @@ public partial class SettingsWindow : MolaContentWindow
     private string? NormalizedPythonPath() =>
         _settings.PythonToolExecutablePath?.Trim().Trim('"');
 
+    /// <summary>Whether any enabled tool can open a SKILL.md — the condition for
+    /// the 技能 page to be worth showing.</summary>
+    private bool CanReachSkills() =>
+        _settings.PythonToolEnabled || _settings.FileToolsEnabled;
+
     private void RefreshPythonBrowseButton()
     {
         var path = NormalizedPythonPath();
@@ -2478,8 +2542,10 @@ public partial class SettingsWindow : MolaContentWindow
 
         _editingPersona.Name = PART_PersonaName.Text ?? string.Empty;
         _editingPersona.SystemPrompt = PART_PersonaPrompt.Text ?? string.Empty;
-        _editingPersona.DefaultEnableNetwork = PART_PersonaNetwork.SelectedIndex == 1;
-        _editingPersona.DefaultEnableWebFetch = PART_PersonaWebFetch.SelectedIndex == 1;
+        // 一个「网络访问」写两列：旧版本读到的仍是同一个答案。
+        var network = PART_PersonaNetwork.SelectedIndex == 1;
+        _editingPersona.DefaultEnableNetwork = network;
+        _editingPersona.DefaultEnableWebFetch = network;
         _editingPersona.DefaultThinking = PART_PersonaThinking.SelectedIndex == 1;
         _editingPersona.Profile.EnablePython = ToolChoiceValue(PART_PersonaPython.SelectedIndex);
         _editingPersona.Profile.EnableFileTools = ToolChoiceValue(PART_PersonaFileTools.SelectedIndex);
@@ -2494,6 +2560,18 @@ public partial class SettingsWindow : MolaContentWindow
         _personas.Save(_editingPersona);
     }
 
+    // ---- browser bridge ----------------------------------------------------
+
+    private async void OnOpenBrowserSetupGuide(object? sender, RoutedEventArgs e)
+    {
+        var guide = new BrowserSetupWindow(_browserBridge);
+        await guide.ShowDialog(this);
+        // Closing with 「装好了，去检测」 means the answer they came for is the
+        // detection result, so run it for them rather than leaving a stale card.
+        if (guide.CheckRequested)
+            await _browserBridge.CheckAsync();
+    }
+
     // ---- tool grants -------------------------------------------------------
 
     private void RefreshGrants() =>
@@ -2506,6 +2584,10 @@ public partial class SettingsWindow : MolaContentWindow
         RefreshGrants();
     }
 }
+
+/// <summary>One line of the browser activity list. Pre-formatted rather than
+/// bound through converters: the tone is a two-way choice, not a theme axis.</summary>
+public sealed record BrowserActivityRow(string Time, string Action, string Detail, Avalonia.Media.IBrush Tone);
 
 public sealed record PersonaIconRow(string Glyph, string Label);
 

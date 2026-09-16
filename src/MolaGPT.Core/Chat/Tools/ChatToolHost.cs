@@ -1,5 +1,6 @@
 using System.Text.Json;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
@@ -14,7 +15,9 @@ public sealed class ChatToolHost : IChatToolHost
     private readonly ImageAnalysisTool _imageAnalysis;
     private readonly ImageGenerationTool _imageGeneration;
     private readonly PythonExecutionTool _python;
+    private readonly BrowserControlTool _browser;
     private readonly IToolApprovalService? _approval;
+    private readonly BrowserActivityLog? _browserActivity;
 
     public ChatToolHost(
         McpClientManager mcp,
@@ -22,14 +25,18 @@ public sealed class ChatToolHost : IChatToolHost
         ImageAnalysisTool imageAnalysis,
         ImageGenerationTool imageGeneration,
         PythonExecutionTool python,
-        IToolApprovalService? approval = null)
+        BrowserControlTool browser,
+        IToolApprovalService? approval = null,
+        BrowserActivityLog? browserActivity = null)
     {
         _mcp = mcp;
         _vision = vision;
         _imageAnalysis = imageAnalysis;
         _imageGeneration = imageGeneration;
         _python = python;
+        _browser = browser;
         _approval = approval;
+        _browserActivity = browserActivity;
     }
 
     public async Task<IReadOnlyList<object>> BuildToolDefinitionsAsync(
@@ -54,6 +61,9 @@ public sealed class ChatToolHost : IChatToolHost
 
         if (options.Python?.Enabled == true)
             tools.Add(PythonExecutionTool.BuildOpenAiToolDefinition(options.Python));
+
+        if (options.Browser?.Enabled == true)
+            tools.Add(BrowserControlTool.BuildOpenAiToolDefinition(options.Browser));
 
         foreach (var server in options.McpServers?.Where(s => s.Enabled) ?? Enumerable.Empty<McpServerOptions>())
         {
@@ -151,6 +161,63 @@ public sealed class ChatToolHost : IChatToolHost
 
         if (string.Equals(toolName, PythonExecutionTool.ToolName, StringComparison.Ordinal))
             return await _python.ExecuteAsync(argumentsJson, options.Python, context.Request.ConversationId, ct).ConfigureAwait(false);
+
+        if (string.Equals(toolName, BrowserControlTool.ToolName, StringComparison.Ordinal))
+        {
+            // Read actions auto-approve under Approval mode; only navigate/click/
+            // fill/close_session carry Write and raise the dialog. The plan also
+            // resolves which site the call lands on, so the prompt can name it
+            // and a "始终允许" is recorded against that site alone.
+            var plan = await _browser
+                .PlanApprovalAsync(argumentsJson, options.Browser, context.Request.ConversationId, ct)
+                .ConfigureAwait(false);
+
+            if (plan.Refusal is { } refusal)
+            {
+                RecordBrowserActivity(plan, success: false, note: refusal);
+                return BrowserControlTool.Error(refusal);
+            }
+
+            if (!plan.PreApproved)
+            {
+                var mode = EffectiveMode(options.PermissionMode, options.BrowserPermissionMode);
+                var request = new ToolApprovalRequest(
+                    plan.GrantKey,
+                    plan.DisplayName,
+                    plan.Capabilities,
+                    argumentsJson,
+                    "通过本机 Kimi 浏览器扩展操作你的 Chrome/Edge（登录态保留在本机）",
+                    // Two different reasons to force the dialog, and they are not
+                    // the same rule:
+                    //
+                    // AlwaysAsk-because-no-host stops an unscoped "始终允许" from
+                    // being recorded. It defers to the user's mode — under
+                    // FullAccess there is no dialog and so no grant to widen, and
+                    // forcing one would just override their choice.
+                    //
+                    // AlwaysAsk-because-protected ignores the mode on purpose.
+                    // Downloads, consent pages and checkout pages are the class of
+                    // thing a standing authorization cannot cover: turning on
+                    // FullAccess means "stop asking me about clicks", not "put the
+                    // payment page through too".
+                    AlwaysAsk: plan.IsProtected || (plan.AlwaysAsk && mode == ToolPermissionMode.Approval));
+                if (!await IsApprovedAsync(request, mode, ct).ConfigureAwait(false))
+                {
+                    RecordBrowserActivity(plan, success: false, note: "用户拒绝");
+                    return PermissionDenied(toolName);
+                }
+            }
+
+            var result = await _browser.ExecuteAsync(
+                argumentsJson,
+                options.Browser,
+                context.Request.ConversationId,
+                options.WorkspaceRoot,
+                ct).ConfigureAwait(false);
+
+            RecordBrowserResult(plan, result);
+            return result;
+        }
 
         if (McpToolName.TryDecode(toolName, out var serverSlug, out var toolSlug))
             return await ExecuteMcpAsync(serverSlug, toolSlug, argumentsJson, options, ct).ConfigureAwait(false);
@@ -259,6 +326,52 @@ public sealed class ChatToolHost : IChatToolHost
         var workspace = PythonExecutionTool.GetSessionDirectory(context.Request.ConversationId);
         Directory.CreateDirectory(workspace);
         return options with { WorkspaceRoot = workspace };
+    }
+
+    /// <summary>
+    /// 一行流水账。只写元数据——站点、动作、成败、原因；页面内容和填入的值不记，
+    /// 那正是这套架构承诺不外流的东西。
+    /// </summary>
+    private void RecordBrowserActivity(BrowserApprovalPlan plan, bool success, string? note)
+    {
+        if (_browserActivity is null) return;
+        _browserActivity.Record(new BrowserActivityEntry(
+            DateTimeOffset.Now,
+            plan.Action ?? BrowserControlTool.ToolName,
+            plan.Host,
+            success,
+            note));
+    }
+
+    private void RecordBrowserResult(BrowserApprovalPlan plan, string resultJson)
+    {
+        if (_browserActivity is null) return;
+
+        // 只读动作太频繁，逐条记会把真正值得看的写操作淹掉——除非它们失败了，
+        // 那时候用户想知道的恰恰是「什么时候开始连不上的」。
+        var isRead = BrowserControlTool.ClassifyAction(plan.Action) == BrowserActionKind.Read;
+        var (success, error) = ReadToolOutcome(resultJson);
+        if (isRead && success) return;
+
+        RecordBrowserActivity(plan, success, error);
+    }
+
+    private static (bool Success, string? Error) ReadToolOutcome(string resultJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(resultJson);
+            var root = doc.RootElement;
+            var failed = root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False;
+            var error = root.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String
+                ? e.GetString()
+                : null;
+            return (!failed, failed ? error : null);
+        }
+        catch (JsonException)
+        {
+            return (true, null);
+        }
     }
 
     private async Task<bool> IsApprovedAsync(

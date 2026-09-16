@@ -14,6 +14,7 @@ using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Models;
@@ -49,6 +50,7 @@ public partial class MainWindow : MolaWindow
     private readonly PiWorkSidecarLocator _piSidecarLocator;
     private readonly NotificationCenter _notifications;
     private readonly SkillsViewModel _skills;
+    private readonly BrowserActivityLog _browserActivity;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IChatToolHost _toolHost;
     private readonly PiByokProviderFactory _piByokProviderFactory;
@@ -99,6 +101,7 @@ public partial class MainWindow : MolaWindow
         PiWorkSidecarLocator piSidecarLocator,
         NotificationCenter notifications,
         SkillsViewModel skills,
+        BrowserActivityLog browserActivity,
         IHttpClientFactory httpClientFactory,
         IChatToolHost toolHost,
         PiByokProviderFactory piByokProviderFactory,
@@ -126,6 +129,7 @@ public partial class MainWindow : MolaWindow
         _piSidecarLocator = piSidecarLocator;
         _notifications = notifications;
         _skills = skills;
+        _browserActivity = browserActivity;
         _httpClientFactory = httpClientFactory;
         _toolHost = toolHost;
         _piByokProviderFactory = piByokProviderFactory;
@@ -204,6 +208,7 @@ public partial class MainWindow : MolaWindow
 
         PART_Sidebar.CollapseRequested += (_, _) => SetSidebarCollapsed(true);
         PART_Header.ExpandSidebarRequested += (_, _) => SetSidebarCollapsed(false);
+        PART_Header.NewConversationRequested += (_, _) => NewConversation();
         PART_Sidebar.NewConversationRequested += (_, _) => NewConversation();
         PART_Sidebar.NewImageTaskRequested += (_, _) => _main.OpenImageWorkbenchTask();
         PART_TitleBar.ModeRequested += (_, mode) => SwitchMode(mode);
@@ -852,6 +857,13 @@ public partial class MainWindow : MolaWindow
         OpenSettings(openAgent: true);
     }
 
+    /// <summary>Open settings on the browser page — the「浏览器未连接」banner's action.</summary>
+    internal void OpenBrowserSettings()
+    {
+        OpenSettings(openAgent: false);
+        _settingsWindow?.OpenBrowserPage();
+    }
+
     private void OpenSettings(bool openAgent)
     {
         if (_settingsWindow is { } existing)
@@ -863,7 +875,7 @@ public partial class MainWindow : MolaWindow
 
         var window = new SettingsWindow(
             _settings, _auth, _cloudSync, _conversations, _agentStatus, _main.Personas, _mcpHttpClient,
-            _imageGenerationTool, _pythonRuntime, _piSidecar, _notifications, _skills,
+            _imageGenerationTool, _pythonRuntime, _piSidecar, _notifications, _skills, _browserActivity,
             () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory,
             ActivateAgentRuntimeAsync, DeactivateAgentRuntime, _personalization);
         window.AccountRequested += async (_, _) =>

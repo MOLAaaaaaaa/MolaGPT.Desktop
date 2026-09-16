@@ -1,10 +1,22 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
 
 namespace MolaGPT.ViewModels;
 
+/// <summary>
+/// Rewrites the relative image links a model writes into paths the transcript can
+/// actually load.
+///
+/// Named for Python because that was the only producer at first; it now also
+/// covers generated-image attachments and browser screenshots. The rule is the
+/// same for all three: a tool wrote a file somewhere the renderer knows nothing
+/// about, and the model refers to it by the short name the tool gave back. Only
+/// tools that report a real on-disk path get a context, so nothing here can
+/// invent a file that does not exist.
+/// </summary>
 internal static partial class PythonArtifactMarkdownRewriter
 {
     public static ArtifactContext? CreateContext(string? resultJson)
@@ -43,6 +55,41 @@ internal static partial class PythonArtifactMarkdownRewriter
             : new ArtifactContext(byRelativePath, workingDirectories.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
+    /// <summary>
+    /// A browser screenshot's context: the file it wrote, keyed by its bare name.
+    ///
+    /// The tool hands back an absolute path, and the model — told elsewhere never
+    /// to print absolute local paths — routinely shortens it to the file name when
+    /// it embeds the shot as evidence. Without this the link resolves against the
+    /// process working directory and the image silently fails to load.
+    ///
+    /// Deliberately keyed by name only, with no working directory: a screenshot is
+    /// one known file, so there is nothing to gain from making the whole folder
+    /// addressable through it.
+    /// </summary>
+    public static ArtifactContext? CreateBrowserScreenshotContext(string? resultJson)
+    {
+        if (string.IsNullOrWhiteSpace(resultJson))
+            return null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(resultJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+
+            var path = ReadString(doc.RootElement, "path");
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
+
+            var byRelativePath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            AddPath(byRelativePath, Path.GetFileName(path), path!);
+            return new ArtifactContext(byRelativePath, Array.Empty<string>());
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     public static IReadOnlyList<ArtifactContext> CreateContexts(IEnumerable<ToolCallDelta>? toolCalls)
     {
         if (toolCalls is null)
@@ -51,10 +98,12 @@ internal static partial class PythonArtifactMarkdownRewriter
         var contexts = new List<ArtifactContext>();
         foreach (var toolCall in toolCalls)
         {
-            if (!string.Equals(toolCall.Name, PythonExecutionTool.ToolName, StringComparison.Ordinal))
-                continue;
-
-            var context = CreateContext(toolCall.ResultPreviewJson);
+            var context = toolCall.Name switch
+            {
+                PythonExecutionTool.ToolName => CreateContext(toolCall.ResultPreviewJson),
+                BrowserControlTool.ToolName => CreateBrowserScreenshotContext(toolCall.ResultPreviewJson),
+                _ => null
+            };
             if (context is not null)
                 contexts.Add(context);
         }

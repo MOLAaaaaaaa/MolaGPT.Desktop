@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text.Json;
 using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.Browser;
 
 namespace MolaGPT.Core.Chat.LocalTools;
 
@@ -27,7 +28,9 @@ public sealed record LocalToolOptions(
     ToolPermissionMode VisionPermissionMode = ToolPermissionMode.Approval,
     ToolPermissionMode McpPermissionMode = ToolPermissionMode.Approval,
     string? WorkspaceRoot = null,
-    string? ReadableRootPrefixes = null)
+    string? ReadableRootPrefixes = null,
+    BrowserControlOptions? Browser = null,
+    ToolPermissionMode BrowserPermissionMode = ToolPermissionMode.Approval)
 {
     public bool HasAny =>
         Network
@@ -36,7 +39,8 @@ public sealed record LocalToolOptions(
         || McpServers?.Any(server => server.Enabled) == true
         || Vision?.Enabled == true
         || ImageGeneration?.Enabled == true
-        || Python?.Enabled == true;
+        || Python?.Enabled == true
+        || Browser?.Enabled == true;
 
     /// <summary>
     /// Denied path prefixes as a list (split from the comma string), with the
@@ -93,7 +97,35 @@ public sealed record LocalToolOptions(
             ReadEnum(raw, "visionPermissionMode", ToolPermissionMode.Approval),
             ReadEnum(raw, "mcpPermissionMode", ToolPermissionMode.Approval),
             WorkspaceRoot: null,
-            ReadableRootPrefixes: ReadString(raw, "fileToolsReadableRoots"));
+            ReadableRootPrefixes: ReadString(raw, "fileToolsReadableRoots"),
+            Browser: ReadBrowser(raw),
+            BrowserPermissionMode: ReadEnum(raw, "browserPermissionMode", ToolPermissionMode.Approval));
+    }
+
+    private static BrowserControlOptions? ReadBrowser(object raw)
+    {
+        var node = ReadValue(raw, "browser");
+        if (node is null) return null;
+
+        if (node is bool enabled)
+            return new BrowserControlOptions(Enabled: enabled);
+
+        if (node is JsonElement element
+            && element.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            return new BrowserControlOptions(Enabled: element.ValueKind == JsonValueKind.True);
+        }
+
+        return new BrowserControlOptions(
+            ReadBool(node, "enabled"),
+            // An unusable or non-loopback address falls back to whatever the
+            // daemon's own config says, not to a hardcoded port.
+            WebBridgeAddress.Resolve(ReadString(node, "daemonUrl")),
+            ReadInt(node, "snapshotMaxCharacters") is { } snap ? Math.Clamp(snap, 1000, 80000) : 20000,
+            ReadInt(node, "timeoutSeconds") is { } timeout ? Math.Clamp(timeout, 5, 180) : 45,
+            ReadString(node, "allowedHosts"),
+            ReadString(node, "blockedHosts"),
+            ReadString(node, "sensitiveHosts"));
     }
 
     private static IReadOnlyList<McpServerOptions> ReadMcpServers(object raw)

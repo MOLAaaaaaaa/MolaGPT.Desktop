@@ -9,6 +9,7 @@ using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
+using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
@@ -30,6 +31,8 @@ namespace MolaGPT.App.Infrastructure;
 /// </summary>
 internal static class AppServices
 {
+    private const string BrowserActivityStorageKey = "browser_tool_activity";
+
     public static ServiceProvider Build()
     {
         var services = new ServiceCollection();
@@ -207,6 +210,17 @@ internal static class AppServices
         services.AddSingleton<IToolApprovalService>(sp => sp.GetRequiredService<ToolApprovalService>());
 
         services.AddSingleton<PythonExecutionTool>();
+        services.AddSingleton(sp => new BrowserControlTool(
+            new WebBridgeClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok))));
+        // 浏览器流水账落在 settings 表里而不是新开一张表：200 条元数据的 JSON 很小，
+        // 而这份记录的价值在于「重启之后还在」——出事之后才去翻的记录已经晚了。
+        services.AddSingleton(sp =>
+        {
+            var settings = sp.GetRequiredService<SettingsRepository>();
+            return new BrowserActivityLog(
+                load: () => settings.Get(BrowserActivityStorageKey),
+                save: json => settings.Set(BrowserActivityStorageKey, json));
+        });
         services.AddSingleton<IChatToolHost, ChatToolHost>();
 
         // ---- view models ---------------------------------------------------
@@ -235,7 +249,8 @@ internal static class AppServices
         services.AddSingleton<SkillManager>();
         services.AddSingleton(sp => new SkillsViewModel(
             sp.GetRequiredService<SkillManager>(),
-            sp.GetRequiredService<SettingsRepository>()));
+            sp.GetRequiredService<SettingsRepository>(),
+            sp.GetRequiredService<SettingsViewModel>()));
         services.AddSingleton(sp => new ComposerViewModel(
             sp.GetRequiredService<ChatViewModel>(),
             sp.GetRequiredService<BackgroundStreamService>(),

@@ -49,6 +49,13 @@ public sealed record Attachment(
     /// <c>read_file</c> / <c>execute_python_code</c>.</summary>
     public bool IsWorkspaceFile => Kind == AttachmentKind.File && !string.IsNullOrWhiteSpace(WorkspaceRelativePath);
 
+    /// <summary>True when a copy of this image lives in the per-conversation
+    /// workspace, so <c>analyze_image</c> can be pointed at it by name. Images
+    /// used to skip the copy — they travel as content parts and a vision model
+    /// sees them directly — which left <c>analyze_image</c> unable to reach a
+    /// single picture the user had uploaded.</summary>
+    public bool IsWorkspaceImage => Kind == AttachmentKind.Image && !string.IsNullOrWhiteSpace(WorkspaceRelativePath);
+
     public string DisplayName => string.IsNullOrWhiteSpace(FileName) ? "附件" : FileName!;
 }
 

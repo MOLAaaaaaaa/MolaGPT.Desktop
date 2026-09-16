@@ -127,6 +127,7 @@ public sealed class ToolCallContentSynthesizer
         "search_web" => "正在联网搜索",
         // BYOK 使用 web_fetch；代理服务端历史上发的是 steel_browser，两者都映射到同一个文案
         "web_fetch" or "steel_browser" => "正在访问互联网",
+        "browser" => "正在操作浏览器",
         "analyze_sandbox_image" => "正在分析图片",
         "generate_image" => "正在生成图片",
         "draw_with_canvas" => "正在绘制",

@@ -13,7 +13,13 @@ public sealed record AttachmentPromptOptions(
     bool CanUsePython = false,
     bool CanAnalyzeImage = false,
     int MaxInlineCharsPerFile = AttachedFilePrompt.DefaultInlineCharsPerFile,
-    int MaxInlineCharsTotal = AttachedFilePrompt.DefaultInlineCharsTotal)
+    int MaxInlineCharsTotal = AttachedFilePrompt.DefaultInlineCharsTotal,
+    /// <summary>Whether this turn's images actually reach the model as pictures.
+    /// False on the vision-proxy path, where the model is handed a placeholder and
+    /// <c>analyze_image</c> is the only way to learn what is in them — a difference
+    /// worth one sentence, since "看清细节再用" and "不用就什么都看不到" are
+    /// opposite instructions.</summary>
+    bool ModelSeesImages = true)
 {
     public static readonly AttachmentPromptOptions Default = new();
 
@@ -66,29 +72,88 @@ public static class AttachedFilePrompt
 
     private const string CloseTag = "</attached_file>";
 
-    public static string? Build(IReadOnlyList<Attachment> files, AttachmentPromptOptions? options = null)
+    /// <summary>
+    /// Renders the model-visible attachment section for one message.
+    ///
+    /// Accepts the whole attachment list, images included. Images carry no text to
+    /// inline and are not what this file is mostly about, but they do get a block
+    /// of their own once a workspace copy exists — without it the model has a
+    /// picture with no name, and any tool that takes a path is reduced to guessing
+    /// one.
+    /// </summary>
+    public static string? Build(IReadOnlyList<Attachment> attachments, AttachmentPromptOptions? options = null)
     {
-        if (files.Count == 0) return null;
         var opts = options ?? AttachmentPromptOptions.Default;
 
+        var files = attachments.Where(a => a.Kind == AttachmentKind.File).ToList();
+        // Only images that actually landed in the workspace: without a path there
+        // is nothing to say that the model cannot already see.
+        var images = opts.CanAnalyzeImage || opts.CanUsePython
+            ? attachments.Where(a => a.IsWorkspaceImage).ToList()
+            : new List<Attachment>();
+
+        if (files.Count == 0 && images.Count == 0) return null;
+
         var sb = new StringBuilder();
-        sb.Append("[附件] 用户随消息上传了以下文件：\n");
 
-        var remaining = Math.Max(0, opts.MaxInlineCharsTotal);
-        var anyTruncated = false;
-        var anyWorkspaceFile = false;
-        var anyPdf = false;
-
-        foreach (var file in files)
+        if (files.Count > 0)
         {
-            if (file.IsWorkspaceFile) anyWorkspaceFile = true;
-            if (IsPdf(file)) anyPdf = true;
+            sb.Append("[附件] 用户随消息上传了以下文件：\n");
 
-            sb.Append('\n').Append(RenderFile(file, opts, ref remaining, ref anyTruncated)).Append('\n');
+            var remaining = Math.Max(0, opts.MaxInlineCharsTotal);
+            var anyTruncated = false;
+            var anyWorkspaceFile = false;
+            var anyPdf = false;
+
+            foreach (var file in files)
+            {
+                if (file.IsWorkspaceFile) anyWorkspaceFile = true;
+                if (IsPdf(file)) anyPdf = true;
+
+                sb.Append('\n').Append(RenderFile(file, opts, ref remaining, ref anyTruncated)).Append('\n');
+            }
+
+            AppendGuidance(sb, opts, anyTruncated, anyWorkspaceFile, anyPdf);
         }
 
-        AppendGuidance(sb, opts, anyTruncated, anyWorkspaceFile, anyPdf);
+        if (images.Count > 0)
+        {
+            if (files.Count > 0) sb.Append('\n');
+            AppendImages(sb, images, opts);
+        }
+
         return sb.ToString();
+    }
+
+    private static void AppendImages(StringBuilder sb, List<Attachment> images, AttachmentPromptOptions options)
+    {
+        sb.Append("[附件图片] 用户随消息上传了以下图片，已存入当前对话的工作目录：\n");
+        foreach (var image in images)
+        {
+            sb.Append('\n').Append(RenderSelfClosing(new List<(string, string)>
+            {
+                ("name", image.DisplayName),
+                ("mime", image.MimeType),
+                ("path", image.WorkspaceRelativePath!)
+            })).Append('\n');
+        }
+
+        sb.Append("\n说明：\n");
+        if (options.CanAnalyzeImage)
+        {
+            sb.Append(options.ModelSeesImages
+                // Said first and plainly: the failure this replaces was a model
+                // that could see the picture, did not know its name, and called
+                // the tool with an invented one.
+                ? "- 图片本身已经随消息送到你眼前，不需要再调用任何工具去「找」它。只有要看清细节"
+                  + "（读小字、取坐标值、数清条目、辨认颜色）时，才用 analyze_image 配上面的 path。\n"
+                : "- 你看不到这些图片本身，上文里它们只是占位符。要知道图里有什么，"
+                  + "必须用 analyze_image 配上面的 path。\n");
+            sb.Append("- 调 analyze_image 时附上 query 说明你要看什么，比不带问题的泛泛描述有用得多。\n");
+        }
+
+        if (options.CanUsePython)
+            sb.Append("- 需要裁剪、拼接、读取像素或做测量时，用 execute_python_code 按上面的 path 打开原图。\n");
     }
 
     private static string RenderFile(

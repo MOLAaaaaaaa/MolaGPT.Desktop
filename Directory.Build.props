@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <WarningsAsErrors>nullable</WarningsAsErrors>
-    <Version>1.2.9</Version>
+    <Version>1.3.0</Version>
     <Authors>MolaGPT</Authors>
     <Company>MolaGPT</Company>
     <Product>MolaGPT Desktop</Product>

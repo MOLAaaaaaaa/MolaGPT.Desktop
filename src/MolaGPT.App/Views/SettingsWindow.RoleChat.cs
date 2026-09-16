@@ -87,8 +87,9 @@ public partial class SettingsWindow
             + (entryCount > 0 ? $" · 世界书 {entryCount} 条" : "");
         PART_ImportDetails.IsVisible = persona.Profile.ImportNotes.Count > 0;
         PART_ImportNotes.Text = string.Join("\n", persona.Profile.ImportNotes);
-        PART_PersonaNetwork.SelectedIndex = persona.DefaultEnableNetwork == true ? 1 : 0;
-        PART_PersonaWebFetch.SelectedIndex = persona.DefaultEnableWebFetch == true ? 1 : 0;
+        // 合并前分两列存，任一为开即算开启。
+        PART_PersonaNetwork.SelectedIndex =
+            persona.DefaultEnableNetwork == true || persona.DefaultEnableWebFetch == true ? 1 : 0;
         PART_PersonaThinking.SelectedIndex = persona.DefaultThinking == true ? 1 : 0;
         PART_PersonaPython.SelectedIndex = ToolChoiceIndex(persona.Profile.EnablePython);
         PART_PersonaFileTools.SelectedIndex = ToolChoiceIndex(persona.Profile.EnableFileTools);

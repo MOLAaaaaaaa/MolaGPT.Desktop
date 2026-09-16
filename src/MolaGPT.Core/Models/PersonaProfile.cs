@@ -179,6 +179,8 @@ public sealed class ConversationRoleContext
     public Dictionary<string, LoreActivationState> LoreStates { get; set; } = [];
     public string HistoryRevision { get; set; } = "";
     public bool NeedsHistorySync { get; set; }
+    /// <summary>「网络访问」。<see cref="EnableWebFetch"/> 是它合并前的另一半，
+    /// 仍然写入，只为旧版本读到的仍是同一个答案。</summary>
     public bool? EnableNetwork { get; set; }
     public bool? EnableWebFetch { get; set; }
     public bool? EnableThinking { get; set; }
