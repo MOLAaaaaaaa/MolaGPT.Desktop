@@ -1,11 +1,12 @@
+using System.Buffers;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
+using System.Threading.Channels;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat.Agents.Relay;
 using MolaGPT.Core.Sse;
@@ -27,12 +28,14 @@ namespace MolaGPT.Desktop.Services;
 /// only the transcript event is serialized through the <c>kind</c>-discriminated
 /// polymorphic converter; the PHP relay stores/forwards it without reinterpreting.
 /// </summary>
-public sealed class HttpRelayProducer : IRelayProducer
+public sealed partial class HttpRelayProducer : IRelayProducer
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
     };
+
+    private const string AuthUnavailable = "Relay auth is not available.";
 
     private readonly HttpClient _http;
     private readonly MolaGptAuthService _auth;
@@ -55,6 +58,8 @@ public sealed class HttpRelayProducer : IRelayProducer
             ? Environment.MachineName
             : machineName.Trim();
     }
+
+    public bool IsAuthAvailable => !string.IsNullOrEmpty(_auth.CurrentJwt);
 
     public async Task<IReadOnlyDictionary<string, RelaySessionCursor>> ListSessionCursorsAsync(CancellationToken ct)
     {
@@ -118,6 +123,8 @@ public sealed class HttpRelayProducer : IRelayProducer
 
     public async Task PostEventAsync(RelayEventEnvelope envelope, CancellationToken ct)
     {
+        if (!IsAuthAvailable) throw new InvalidOperationException(AuthUnavailable);
+
         // Serialize the event through the polymorphic converter (embeds its "kind"
         // discriminator), then re-parse to a JsonNode so the PHP relay gets plain
         // JSON it stores and forwards opaquely — it never reinterprets the event.
@@ -132,16 +139,33 @@ public sealed class HttpRelayProducer : IRelayProducer
 
     public async Task ReplaceSessionEventsAsync(string sessionId, IReadOnlyList<RelayEventEnvelope> events, CancellationToken ct)
     {
-        // Serialize each envelope through the polymorphic converter (like
-        // PostEventAsync), then ship the whole ordered set in ONE request. The relay
-        // replaces the session's events atomically (temp file + rename), so a phone
-        // reading mid-projection sees either the old or the new complete transcript —
+        // The whole ordered set ships in ONE request. The relay replaces the
+        // session's events atomically (temp file + rename), so a phone reading
+        // mid-projection sees either the old or the new complete transcript —
         // never a partial rebuild.
-        var arr = new JsonArray();
-        foreach (var envelope in events)
-            arr.Add(JsonNode.Parse(JsonSerializer.SerializeToUtf8Bytes(envelope, Json)));
-        var body = new { kind = "replace", sessionId, events = arr };
-        await PostAsync("/api/auth/agent_events.php", body, ct).ConfigureAwait(false);
+        //
+        // Each envelope is written through the polymorphic converter (which embeds
+        // its "kind" discriminator) directly into a single UTF-8 buffer. Going via
+        // a JsonNode per envelope and then serializing the assembled tree to a
+        // string materialized a 30-turn transcript four times over — per-envelope
+        // bytes, a DOM, a UTF-16 string, then the request body — and on a session
+        // with large tool results every one of those lands on the LOH.
+        if (!IsAuthAvailable) throw new InvalidOperationException(AuthUnavailable);
+
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("kind", "replace");
+            writer.WriteString("sessionId", sessionId);
+            writer.WriteStartArray("events");
+            foreach (var envelope in events)
+                JsonSerializer.Serialize(writer, envelope, Json);
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+        }
+
+        using var _ = await SendJsonAsync("/api/auth/agent_events.php", buffer.WrittenMemory, ct).ConfigureAwait(false);
     }
 
     public async Task PostMetaAsync(RelaySessionMeta meta, CancellationToken ct)
@@ -198,54 +222,66 @@ public sealed class HttpRelayProducer : IRelayProducer
     public async IAsyncEnumerable<RelayCommand> SubscribeCommandsAsync(
         [EnumeratorCancellation] CancellationToken ct)
     {
-        while (!ct.IsCancellationRequested)
+        var wake = Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
+        using var realtimeStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var realtime = RealtimeLoopAsync(wake.Writer, realtimeStop.Token);
+        try
         {
-            Stream? stream;
-            try { stream = await OpenCommandStreamAsync(ct).ConfigureAwait(false); }
-            catch (OperationCanceledException) { yield break; }
-            catch
+            while (!ct.IsCancellationRequested)
             {
-                try { await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false); }
+                Stream? stream;
+                try { stream = await OpenCommandStreamAsync(ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) { yield break; }
-                continue;
-            }
-
-            if (stream is null)
-            {
-                try { await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false); }
-                catch (OperationCanceledException) { yield break; }
-                continue;
-            }
-
-            using (stream)
-            {
-                var reader = SseStreamReader.ReadAsync(stream, ct).GetAsyncEnumerator(ct);
-                try
+                catch
                 {
-                    while (!ct.IsCancellationRequested)
+                    try { await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { yield break; }
+                    continue;
+                }
+
+                if (stream is null)
+                {
+                    try { await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { yield break; }
+                    continue;
+                }
+
+                using (stream)
+                {
+                    var reader = SseStreamReader.ReadAsync(stream, ct).GetAsyncEnumerator(ct);
+                    try
                     {
-                        bool hasNext;
-                        try { hasNext = await reader.MoveNextAsync().ConfigureAwait(false); }
-                        catch (OperationCanceledException) { yield break; }
-                        catch { break; }
+                        while (!ct.IsCancellationRequested)
+                        {
+                            bool hasNext;
+                            try { hasNext = await reader.MoveNextAsync().ConfigureAwait(false); }
+                            catch (OperationCanceledException) { yield break; }
+                            catch { break; }
 
-                        if (!hasNext) break;
+                            if (!hasNext) break;
 
-                        var payload = reader.Current;
-                        if (payload.IsDone) yield break;
-                        if (TryParseCommand(payload.Data, out var cmd) && cmd is not null)
-                            yield return cmd;
+                            var payload = reader.Current;
+                            if (payload.IsDone) yield break;
+                            if (TryParseCommand(payload.Data, out var cmd) && cmd is not null)
+                                yield return cmd;
+                        }
+                    }
+                    finally
+                    {
+                        await reader.DisposeAsync().ConfigureAwait(false);
                     }
                 }
-                finally
-                {
-                    await reader.DisposeAsync().ConfigureAwait(false);
-                }
-            }
 
-            try { await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false); }
-            catch (OperationCanceledException) { yield break; }
-            // Stream ended (relay/proxy drop) — loop reconnects after a short backoff.
+                using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                wait.CancelAfter(TimeSpan.FromSeconds(_realtimeConnected ? 30 : 2));
+                try { await wake.Reader.ReadAsync(wait.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+            }
+        }
+        finally
+        {
+            realtimeStop.Cancel();
+            await realtime.ConfigureAwait(false);
         }
     }
 
@@ -254,7 +290,7 @@ public sealed class HttpRelayProducer : IRelayProducer
         var url = _base + "/api/auth/agent_command_stream.php";
         if (!string.IsNullOrWhiteSpace(_machineId))
             url += "?machine=" + Uri.EscapeDataString(_machineId);
-        var req = new HttpRequestMessage(HttpMethod.Get, url);
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
         if (!TryAttachAuth(req)) return null;
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
@@ -291,11 +327,23 @@ public sealed class HttpRelayProducer : IRelayProducer
 
     private async Task<JsonDocument> PostJsonAsync(string path, object body, CancellationToken ct)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, _base + path)
-        {
-            Content = new StringContent(JsonSerializer.Serialize(body, body.GetType(), Json), Encoding.UTF8, "application/json")
-        };
-        if (!TryAttachAuth(req)) throw new InvalidOperationException("Relay auth is not available.");
+        // Auth first. Serializing a body we cannot send was the entire cost of a
+        // post that was always going to throw, and with the bridge enabled but
+        // signed out that is every post the app makes.
+        if (!IsAuthAvailable) throw new InvalidOperationException(AuthUnavailable);
+        return await SendJsonAsync(path, JsonSerializer.SerializeToUtf8Bytes(body, body.GetType(), Json), ct)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>POST an already-encoded UTF-8 JSON body. Bodies are built as UTF-8
+    /// rather than as a string so a large transcript is not also materialized in
+    /// UTF-16 on the way out.</summary>
+    private async Task<JsonDocument> SendJsonAsync(string path, ReadOnlyMemory<byte> utf8Body, CancellationToken ct)
+    {
+        var content = new ReadOnlyMemoryContent(utf8Body);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
+        using var req = new HttpRequestMessage(HttpMethod.Post, _base + path) { Content = content };
+        if (!TryAttachAuth(req)) throw new InvalidOperationException(AuthUnavailable);
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
         await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
@@ -304,8 +352,8 @@ public sealed class HttpRelayProducer : IRelayProducer
 
     private async Task<JsonDocument> GetAgentSessionsRootAsync(CancellationToken ct)
     {
-        var req = new HttpRequestMessage(HttpMethod.Get, _base + "/api/auth/agent_sessions.php?include_offline=1");
-        if (!TryAttachAuth(req)) throw new InvalidOperationException("Relay auth is not available.");
+        using var req = new HttpRequestMessage(HttpMethod.Get, _base + "/api/auth/agent_sessions.php?include_offline=1");
+        if (!TryAttachAuth(req)) throw new InvalidOperationException(AuthUnavailable);
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
         using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);

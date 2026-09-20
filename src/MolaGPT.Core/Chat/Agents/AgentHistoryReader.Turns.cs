@@ -14,24 +14,42 @@ public sealed partial class AgentHistoryReader
         if (string.IsNullOrWhiteSpace(entry.FilePath) || !File.Exists(entry.FilePath))
             throw new FileNotFoundException("History transcript was not found.", entry.FilePath);
 
-        return await Task.Run(() =>
+        return await Task.Run(() => entry.BackendId switch
         {
-            var turns = entry.BackendId switch
-            {
-                ClaudeCodeBackend.BackendId => ReadClaudeTurns(entry.FilePath, ct),
-                CodexBackend.BackendId => ReadCodexTurns(entry.FilePath, ct),
-                _ => new List<AgentHistoryTurn>()
-            };
-
-            return turns.Count <= maxTurns
-                ? turns
-                : turns.Skip(turns.Count - maxTurns).ToList();
+            ClaudeCodeBackend.BackendId => ReadClaudeTurns(entry.FilePath, maxTurns, ct),
+            CodexBackend.BackendId => ReadCodexTurns(entry.FilePath, maxTurns, ct),
+            _ => new List<AgentHistoryTurn>()
         }, ct).ConfigureAwait(false);
     }
 
-    private static List<AgentHistoryTurn> ReadClaudeTurns(string path, CancellationToken ct)
+    /// <summary>
+    /// The last <c>capacity</c> committed turns, and nothing else.
+    ///
+    /// Callers only ever want a tail — the relay projects 30 — but the readers
+    /// used to build every turn in the file and slice afterwards. On a 50 MB
+    /// Claude transcript that materialized the whole conversation, tool arguments
+    /// and results included, to throw all but the last 30 away; the discarded
+    /// multi-megabyte strings land on the LOH, which an idle app never collects.
+    /// Dropping the head as we go keeps the retained set proportional to what we
+    /// actually return.
+    /// </summary>
+    private sealed class TurnWindow(int capacity)
     {
-        var turns = new List<AgentHistoryTurn>();
+        private readonly Queue<AgentHistoryTurn> _turns = new();
+
+        public void Add(AgentHistoryTurn turn)
+        {
+            if (capacity <= 0) return;
+            if (_turns.Count == capacity) _turns.Dequeue();
+            _turns.Enqueue(turn);
+        }
+
+        public List<AgentHistoryTurn> ToList() => [.. _turns];
+    }
+
+    private static List<AgentHistoryTurn> ReadClaudeTurns(string path, int maxTurns, CancellationToken ct)
+    {
+        var turns = new TurnWindow(maxTurns);
         var events = new List<RelayTranscriptEvent>();
         var answer = new StringBuilder();
         var thinking = new StringBuilder();
@@ -88,7 +106,7 @@ public sealed partial class AgentHistoryReader
         }
 
         Commit(openTail: true);
-        return turns;
+        return turns.ToList();
 
         void AppendClaudeAssistantContent(JsonElement content)
         {
@@ -212,9 +230,9 @@ public sealed partial class AgentHistoryReader
         }
     }
 
-    private static List<AgentHistoryTurn> ReadCodexTurns(string path, CancellationToken ct)
+    private static List<AgentHistoryTurn> ReadCodexTurns(string path, int maxTurns, CancellationToken ct)
     {
-        var turns = new List<AgentHistoryTurn>();
+        var turns = new TurnWindow(maxTurns);
         var events = new List<RelayTranscriptEvent>();
         var toolsById = new Dictionary<string, AgentToolEvent>(StringComparer.Ordinal);
         var inTurn = false;
@@ -248,7 +266,7 @@ public sealed partial class AgentHistoryReader
         }
 
         Commit(openTail: true);
-        return turns;
+        return turns.ToList();
 
         void AppendCodexEventMessage(JsonElement payload)
         {

@@ -844,6 +844,7 @@ public partial class TranscriptView : UserControl
         if (message.TokensText is { } tokens) rows.Add(("Tokens", tokens));
         if (message.Usage?.CacheReadTokens is { } cacheRead) rows.Add(("缓存命中", $"{cacheRead:N0} tokens"));
         if (message.Usage?.TotalTokens is { } total) rows.Add(("合计", $"{total:N0} tokens"));
+        if (message.CostText is { } cost) rows.Add(("费用", cost));
         if (message.SpeedText is { } speed) rows.Add(("生成速度", speed));
         if (rows.Count == 0) rows.Add(("响应统计", "无数据"));
 
@@ -906,19 +907,7 @@ public partial class TranscriptView : UserControl
     /// </summary>
     private void OnOpenSource(object? sender, RoutedEventArgs e)
     {
-        if (sender is not Control { Tag: string url } || url.Length == 0) return;
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return;
-        if (uri.Scheme is not ("http" or "https")) return;
-
-        try
-        {
-            System.Diagnostics.Process.Start(
-                new System.Diagnostics.ProcessStartInfo { FileName = uri.AbsoluteUri, UseShellExecute = true });
-        }
-        catch
-        {
-            // No default browser, or the shell refused; not worth a dialog.
-        }
+        if (sender is Control { Tag: string url }) LinkLauncher.Open(url);
     }
 
     /// <summary>The one-tap fix on a recoverable failure. The only action the

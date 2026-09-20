@@ -81,7 +81,7 @@ public sealed partial class ComposerViewModel
             StableSeed = _chat.ConversationId + ":" + persona.Id, GenerationSeed = generationId,
             RoleFields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["persona"] = identity.Description }
         };
-        var result = RolePromptBuilder.Build(persona, _chat.ActiveModelSystemPrompt, _chat.ConversationSystemPrompt,
+        var result = RolePromptBuilder.Build(persona, _chat.DefaultPersonaSystemPrompt, _chat.ConversationSystemPrompt,
             _chat.SystemPromptMode, _chat.RoleContext, history, _chat.GetRoleLorebooks(), vars,
             assistant.MessageId ?? "pending:" + generationId,
             maxTokens, continuation);

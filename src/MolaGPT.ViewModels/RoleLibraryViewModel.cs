@@ -34,10 +34,28 @@ public sealed class RoleLibraryViewModel
         .Select(id => Books.FirstOrDefault(book => book.Id == id)
             ?? throw new InvalidOperationException("关联的世界书不存在，请重新选择。")).ToArray();
 
+    /// <summary>
+    /// Supplies <see cref="UserPersona.ProfileId"/>, set at composition time from
+    /// the memory page's profile.md. Null in hosts that have no memory at all
+    /// (tests, the render probe), and null again whenever 称呼 is blank — both
+    /// cases fall through to the character's own 称呼 rather than failing.
+    /// </summary>
+    public Func<UserPersona?>? ProfileSource { get; set; }
+
+    public bool SupportsProfileIdentity => ProfileSource is not null;
+
+    /// <summary>The 「沿用个人资料」 identity as it stands right now. Read fresh every
+    /// time: the user can edit profile.md in a text editor mid-conversation.</summary>
+    public UserPersona? ProfileIdentity => ProfileSource?.Invoke();
+
     public UserPersona? ResolveIdentity(string? id)
     {
         if (id is null) id = DefaultIdentityId;
         if (string.IsNullOrEmpty(id)) return null;
+        // Not in Identities and never will be — it is a view onto profile.md.
+        // Returning null instead of throwing also matters for a conversation
+        // saved with this choice and reopened in a host without memory.
+        if (string.Equals(id, UserPersona.ProfileId, StringComparison.Ordinal)) return ProfileIdentity;
         return Identities.FirstOrDefault(identity => identity.Id == id)
             ?? throw new InvalidOperationException("关联的用户身份不存在，请重新选择。");
     }

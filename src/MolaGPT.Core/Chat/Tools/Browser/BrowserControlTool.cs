@@ -47,8 +47,13 @@ public sealed partial class BrowserControlTool
                 + "snapshot to verify. Reach for a full snapshot only when you need to survey an unfamiliar "
                 + "page; on a big one it costs tens of thousands of tokens, while find costs a few hundred. "
                 + "read_page is the cheap way to read an article's text. "
+                + "click is synthetic (fast, default). mouse_click is a real pointer click — only when click "
+                + "is ignored. A failed mouse_click may still have taken effect; verify page state before retrying. "
                 + "Use status to check whether the daemon and browser extension are connected. "
-                + "Never enter passwords, payment details or one-time codes, and never solve captchas."
+                + "Never enter passwords, payment details or one-time SMS/email codes. "
+                + "Interactive human-verification widgets (Cloudflare Turnstile, reCAPTCHA checkbox) "
+                + "you MAY complete for the user: focus the challenge iframe shell with click, then send_keys "
+                + "\"Tab Space\" — do not hunt for internal cross-origin selectors."
                 + HostRuleHint(options),
             parameters = new
             {
@@ -62,12 +67,13 @@ public sealed partial class BrowserControlTool
                         {
                             "status", "list_tabs", "find", "snapshot", "read_page", "screenshot",
                             "scroll", "hover", "wait",
-                            "navigate", "click", "fill", "select_option", "send_keys", "close_session"
+                            "navigate", "click", "mouse_click", "fill", "select_option", "send_keys", "close_session"
                         },
                         description =
                             "Read-only: status, list_tabs, find, snapshot, read_page, screenshot, scroll, hover, wait. "
-                            + "navigate/click/fill/select_option/send_keys/close_session change the browser "
-                            + "and need approval in Approval mode."
+                            + "navigate/click/mouse_click/fill/select_option/send_keys/close_session change the browser "
+                            + "and need approval in Approval mode. Prefer click for normal UI; use mouse_click only "
+                            + "when a control ignores synthetic clicks (strict isTrusted checks, some challenge widgets)."
                     },
                     url = new
                     {
@@ -91,7 +97,7 @@ public sealed partial class BrowserControlTool
                     {
                         type = "string",
                         description = "An @e ref from find/snapshot, or a standard CSS selector. Nothing else "
-                            + "parses — text=, XPath and :has-text() all fail. Used by click, fill, "
+                            + "parses — text=, XPath and :has-text() all fail. Used by click, mouse_click, fill, "
                             + "select_option, hover, screenshot, scroll (scroll the element into view) and "
                             + "wait (wait until it is visible)."
                     },
@@ -177,7 +183,7 @@ public sealed partial class BrowserControlTool
         {
             "status" or "list_tabs" or "find" or "snapshot" or "read_page" or "screenshot"
                 or "scroll" or "hover" or "wait" => BrowserActionKind.Read,
-            "navigate" or "click" or "fill" or "select_option" or "send_keys" or "close_session"
+            "navigate" or "click" or "mouse_click" or "fill" or "select_option" or "send_keys" or "close_session"
                 => BrowserActionKind.Write,
             _ => BrowserActionKind.Unknown
         };
@@ -205,6 +211,7 @@ public sealed partial class BrowserControlTool
             "wait" => "等待页面",
             "navigate" => "打开网页",
             "click" => "浏览器点击",
+            "mouse_click" => "物理鼠标点击",
             "fill" => "填写表单",
             "select_option" => "选择下拉项",
             "send_keys" => "发送按键",
@@ -226,6 +233,7 @@ public sealed partial class BrowserControlTool
             "wait" => "正在等待页面",
             "navigate" => "正在打开网页",
             "click" => "正在点击页面元素",
+            "mouse_click" => "正在物理点击页面元素",
             "fill" => "正在填写表单",
             "select_option" => "正在选择下拉项",
             "send_keys" => "正在发送按键",
@@ -324,7 +332,7 @@ public sealed partial class BrowserControlTool
     /// </summary>
     private static bool NeedsSessionHost(string? action, BrowserControlOptions options) => action switch
     {
-        "click" or "fill" or "select_option" or "send_keys" => true,
+        "click" or "mouse_click" or "fill" or "select_option" or "send_keys" => true,
         "snapshot" or "screenshot" or "find" or "read_page" or "scroll" or "hover" or "wait"
             => options.HasHostRules,
         _ => false
@@ -390,7 +398,7 @@ public sealed partial class BrowserControlTool
         var action = NormalizeAction(args.Action);
         if (action is null)
             return Error("缺少或无法识别 action。支持：status, list_tabs, find, snapshot, read_page, screenshot, "
-                         + "scroll, hover, wait, navigate, click, fill, select_option, send_keys, close_session。");
+                         + "scroll, hover, wait, navigate, click, mouse_click, fill, select_option, send_keys, close_session。");
 
         var timeout = TimeSpan.FromSeconds(Math.Clamp(options.RequestTimeoutSeconds, 5, 180));
 
@@ -426,7 +434,19 @@ public sealed partial class BrowserControlTool
             .ConfigureAwait(false);
 
         if (!response.Success)
+        {
+            // A physical click can navigate successfully and still report that
+            // the event did not reach the old page. Retrying a write here can
+            // click a different page with a stale @e ref. Return an explicit
+            // unknown-state result and make the model verify before acting again.
+            if (action == "mouse_click" && LooksLikeAmbiguousMouseClick(response.ErrorMessage))
+            {
+                return Error("mouse_click 返回状态不确定，实际点击可能已经生效。"
+                             + "不要直接重复点击；先用 list_tabs、find 或 read_page 检查页面是否变化。"
+                             + $"原始错误：{response.ErrorMessage}");
+            }
             return Error(TranslateDaemonError(response.ErrorMessage));
+        }
 
         var body = PreferInnerData(response.BodyText);
 
@@ -438,6 +458,16 @@ public sealed partial class BrowserControlTool
 
         return body;
     }
+
+    /// <summary>
+    /// daemon 对物理点击结果不确定时使用的几种原话。只认这些明确提示，
+    /// 避免把普通选择器错误也包装成「可能已生效」。
+    /// </summary>
+    private static bool LooksLikeAmbiguousMouseClick(string? message) =>
+        !string.IsNullOrWhiteSpace(message)
+        && (message.Contains("backgrounded", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("occluded", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("did not reach the page", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// 收掉某个对话留下的标签组，尽力而为。
@@ -674,9 +704,10 @@ public sealed partial class BrowserControlTool
                 };
             }
             case "click":
+            case "mouse_click":
             {
                 if (string.IsNullOrWhiteSpace(args.Selector))
-                    throw new ArgumentException("click 需要 selector（优先使用 snapshot 的 @e 引用）。");
+                    throw new ArgumentException($"{action} 需要 selector（优先使用 snapshot 的 @e 引用）。");
                 return new JsonObject { ["selector"] = args.Selector!.Trim() };
             }
             case "fill":

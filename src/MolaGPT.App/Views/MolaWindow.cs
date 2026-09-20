@@ -12,11 +12,20 @@ public class MolaWindow : Window
 {
     private const double HighDensityRenderScaling = 2d;
     private const uint WmNcCalcSize = 0x0083;
+    private const uint WmNcPaint = 0x0085;
+    private const uint WmNcActivate = 0x0086;
     private const int SmCxSizeFrame = 32;
     private const int SmCySizeFrame = 33;
     private const int SmCxPaddedBorder = 92;
     private const uint WsCaption = 0x00C00000;
     private const uint WsSysMenu = 0x00080000;
+
+    /// <summary>
+    /// Windows 11 (build 22000) is where DWM gained the rounded frame renderer that
+    /// draws a window's border and drop shadow even when its non-client area is gone.
+    /// </summary>
+    private static readonly bool HasDwmFrameRenderer =
+        OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000);
 
     /// <summary>
     /// Raised whenever any MolaGPT window comes to the front.
@@ -79,6 +88,26 @@ public class MolaWindow : Window
         IntPtr lParam,
         ref bool handled)
     {
+        // Windows 10 has no DWM frame renderer of its own: the border and the drop
+        // shadow are whatever DefWindowProc paints in response to WM_NCPAINT, and the
+        // focused/unfocused shadow depth comes from WM_NCACTIVATE. Avalonia swallows
+        // both whenever decorations aren't Full (WindowImpl.HasFullDecorations), which
+        // leaves the window completely flat there — no shadow, no 1px border.
+        //
+        // Windows 11 draws the frame itself (the rounded-corner path, which is the only
+        // reason the window has a shadow today), so nothing about it changes here.
+        if (!HasDwmFrameRenderer && (message == WmNcPaint || message == WmNcActivate))
+        {
+            handled = true;
+
+            // WM_NCACTIVATE goes through with lParam = -1: that still lets DefWindowProc
+            // flip the frame's active state — which is what deepens the shadow on focus —
+            // while telling it not to repaint the border region itself. Repainting it is
+            // what leaves a stray caption bar over the client area on Windows 10.
+            var forward = message == WmNcActivate ? new IntPtr(-1) : lParam;
+            return DefWindowProc(hwnd, message, wParam, forward);
+        }
+
         if (message != WmNcCalcSize || wParam == IntPtr.Zero)
             return IntPtr.Zero;
 
@@ -100,6 +129,9 @@ public class MolaWindow : Window
         handled = true;
         return IntPtr.Zero;
     }
+
+    [DllImport("user32.dll", EntryPoint = "DefWindowProcW")]
+    private static extern IntPtr DefWindowProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

@@ -1,0 +1,67 @@
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  xmlns:views="clr-namespace:MolaGPT.App.Views"
+  x:Class="MolaGPT.App.Views.ModelPricingWindow" Title="确认模型价格"
+  Width="900" Height="600" MinWidth="780" MinHeight="440" WindowStartupLocation="CenterOwner">
+  <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="24,16,24,20">
+
+    <TextBlock Name="PART_Summary" Classes="hint" TextWrapping="Wrap" Margin="0,0,0,12" />
+
+    <!-- 四个数值列的表头只出现一次，省得每行重复四个小标签。列宽与下面的
+         模板逐列对齐，改一处要两处一起改。 -->
+    <Grid Grid.Row="1" ColumnDefinitions="*,250,8,76,76,76,76" Margin="14,0,14,6">
+      <TextBlock Grid.Column="1" Classes="hint" Text="来源" />
+      <TextBlock Grid.Column="3" Classes="hint" Text="输入" HorizontalAlignment="Center" />
+      <TextBlock Grid.Column="4" Classes="hint" Text="输出" HorizontalAlignment="Center" />
+      <TextBlock Grid.Column="5" Classes="hint" Text="缓存读取" HorizontalAlignment="Center" />
+      <TextBlock Grid.Column="6" Classes="hint" Text="缓存写入" HorizontalAlignment="Center" />
+    </Grid>
+
+    <Border Grid.Row="2" Classes="settingscard" Padding="0">
+      <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <ItemsControl Name="PART_Conflicts">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="views:PricingConflictRow">
+              <Border Padding="14,10" BorderThickness="0,0,0,1"
+                      BorderBrush="{DynamicResource Brush.Border.Subtle}">
+                <Grid ColumnDefinitions="*,250,8,76,76,76,76">
+                  <StackPanel Grid.Column="0" Margin="0,0,12,0" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding ModelId}" FontWeight="SemiBold"
+                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{Binding ProviderLabel}" Classes="hint" Margin="0,2,0,0"
+                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                  </StackPanel>
+
+                  <!-- 选中即把四个框填成该来源的报价；手改任意一个框，这里会退回
+                       空选中态并显示「自定义」。 -->
+                  <ComboBox Grid.Column="1" Classes="field" HorizontalAlignment="Stretch"
+                            PlaceholderText="自定义"
+                            ItemsSource="{Binding Candidates}"
+                            SelectedItem="{Binding Selected, Mode=TwoWay}" />
+
+                  <TextBox Grid.Column="3" Classes="field" Margin="0,0,4,0"
+                           TextAlignment="Right" Text="{Binding InputText, Mode=TwoWay}" />
+                  <TextBox Grid.Column="4" Classes="field" Margin="0,0,4,0"
+                           TextAlignment="Right" Text="{Binding OutputText, Mode=TwoWay}" />
+                  <TextBox Grid.Column="5" Classes="field" Margin="0,0,4,0"
+                           TextAlignment="Right" Text="{Binding CacheReadText, Mode=TwoWay}" />
+                  <TextBox Grid.Column="6" Classes="field"
+                           TextAlignment="Right" Text="{Binding CacheWriteText, Mode=TwoWay}" />
+                </Grid>
+              </Border>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </ScrollViewer>
+    </Border>
+
+    <Grid Grid.Row="3" ColumnDefinitions="*,Auto,Auto" Margin="0,16,0,0">
+      <TextBlock Grid.Column="0" Name="PART_Hint" Classes="hint" VerticalAlignment="Center"
+                 TextWrapping="Wrap" Text="计价为每 100 万 tokens 的美元价格；留空表示不记录该项价格。" />
+      <Button Grid.Column="1" Name="PART_Cancel" Content="取消" Classes="outline" IsCancel="True"
+              Margin="10,0,10,0" />
+      <Button Grid.Column="2" Name="PART_Save" Content="写入价格" Classes="pillprimary"
+              HotKey="Ctrl+Enter" />
+    </Grid>
+  </Grid>
+</views:MolaContentWindow>

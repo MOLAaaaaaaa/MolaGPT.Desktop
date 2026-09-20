@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -60,6 +61,13 @@ public partial class SettingsWindow : MolaContentWindow
     private readonly StackPanel[] _pages;
     private readonly ObservableCollection<ModelRow> _providerModels = [];
     private readonly ObservableCollection<HeaderRow> _providerHeaders = [];
+    /// <summary>Built on first use and kept for the window's life, so editing
+    /// several providers in one sitting parses the 4.7 MB catalogue once.</summary>
+    private ModelsDevCatalog? _modelsDevCatalog;
+    /// <summary>The last lookup and the providers it covered, held so the per-model
+    /// picker can be opened without re-matching everything against the catalogue.</summary>
+    private PricingMatch? _pricingMatch;
+    private IReadOnlyList<ProviderEntry> _pricingTargets = [];
     private readonly List<DetectedModelRow> _detectedModels = [];
     private ProviderEntry? _editingProvider;
     private PersonaItemViewModel? _editingPersona;
@@ -123,7 +131,7 @@ public partial class SettingsWindow : MolaContentWindow
 
     /// <summary>Nav index → page. The rail has non-selectable group headings in
     /// it, so the mapping is explicit rather than positional arithmetic.</summary>
-    private static readonly int[] PageForNavIndex = [-1, 0, 1, -1, 2, 3, 4, 5, 6, 7, 13, -1, 8, 14, 9, 10, 11, 12];
+    private static readonly int[] PageForNavIndex = [-1, 0, 1, 15, -1, 2, 3, 4, 5, 6, 7, 13, -1, 8, 14, 9, 10, 11, 12];
 
     public SettingsWindow(
         SettingsViewModel settings,
@@ -145,7 +153,8 @@ public partial class SettingsWindow : MolaContentWindow
         PiByokProviderFactory? piByokProviderFactory = null,
         Func<Task>? agentRuntimeInstalled = null,
         Action? agentRuntimeRemoving = null,
-        PersonalizationViewModel? personalization = null)
+        PersonalizationViewModel? personalization = null,
+        MemoryPageViewModel? memoryPage = null)
     {
         _settings = settings;
         _auth = auth;
@@ -175,8 +184,9 @@ public partial class SettingsWindow : MolaContentWindow
         [
             PAGE_Account, PAGE_Appearance, PAGE_Providers, PAGE_Personas, PAGE_Search, PAGE_Titles,
             PAGE_ImageGeneration, PAGE_Vision, PAGE_Sandbox, PAGE_Approval, PAGE_Mcp, PAGE_Agent, PAGE_Skills,
-            PAGE_PostProcessing, PAGE_Browser
+            PAGE_PostProcessing, PAGE_Browser, PAGE_Memory
         ];
+        InitializeMemoryPage(memoryPage);
         PAGE_Agent.DataContext = _agentStatus;
         PAGE_Personas.DataContext = _personas;
 
@@ -211,7 +221,6 @@ public partial class SettingsWindow : MolaContentWindow
         PART_PersonaIcons.ItemsSource = PersonaIconCatalog.All
             .Select(icon => new PersonaIconRow(icon.Glyph, icon.Label));
         PART_McpServers.ItemsSource = _settings.McpServers;
-        PART_SkillsList.ItemsSource = _skills.Skills;
         InitializeResponsePostProcessing();
         _providerModels.CollectionChanged += (_, _) => RefreshProviderModelEmptyState();
 
@@ -229,6 +238,9 @@ public partial class SettingsWindow : MolaContentWindow
         PART_SaveProvider.Click += (_, _) => SaveProvider();
         PART_DeleteEditingProvider.Click += OnDeleteEditingProvider;
         PART_DetectProviderModels.Click += OnDetectProviderModels;
+        PART_FetchAllPricing.Click += OnFetchAllPricing;
+        PART_ResolvePricingConflicts.Click += OnResolvePricingConflicts;
+        PART_ClosePricingResult.Click += (_, _) => PART_PricingResult.IsVisible = false;
         PART_TestProvider.Click += OnTestProvider;
         PART_ProviderPreset.SelectionChanged += OnProviderPresetChanged;
         PART_ProviderType.SelectionChanged += OnProviderTypeChanged;
@@ -286,6 +298,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_TestImageGeneration.IsEnabled = _imageGenerationTool is not null;
         PART_TestSearch.IsEnabled = _byokHttpFactory is not null;
         PART_DetectProviderModels.IsEnabled = _byokHttpFactory is not null;
+        PART_FetchAllPricing.IsEnabled = _byokHttpFactory is not null;
         PART_TestProvider.IsEnabled = _byokHttpFactory is not null;
         PART_ConfigureSandbox.IsEnabled = _pythonRuntime is not null && _piSidecar is not null;
         PART_BrowsePython.IsEnabled = _pythonRuntime is not null;
@@ -519,6 +532,7 @@ public partial class SettingsWindow : MolaContentWindow
         if (page == 11 && _agentStatus is not null) _ = _agentStatus.LoadAsync();
         // Opening the page is the question "does this work" — answer it without
         // making the user press 检测 first.
+        if (page == 15) _memoryPage?.Refresh();
         if (page == 14)
         {
             _ = _browserBridge.CheckAsync();
@@ -890,6 +904,45 @@ public partial class SettingsWindow : MolaContentWindow
         if (sender is Control { DataContext: BodyRow row }) row.Owner.CustomBodyRows.Remove(row);
     }
 
+    private void OnAddCustomEffortLevel(object? sender, RoutedEventArgs e)
+    {
+        if (sender is Control { DataContext: ModelRow row }) row.AddCustomEffortLevel();
+    }
+
+    private void OnRemoveCustomEffortLevel(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Control { DataContext: EffortLevelItem item }) return;
+        item.Owner.RemoveEffortLevel(item);
+    }
+
+    private void OnCustomEffortKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        if (sender is Control { DataContext: ModelRow row }) row.AddCustomEffortLevel();
+        e.Handled = true;
+    }
+
+    private void OnApplyBudgetPreset(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Control control) return;
+        if (control.DataContext is not BudgetPreset preset) return;
+        if (FindOwningModelRow(control) is { } row) row.ApplyBudgetPreset(preset);
+    }
+
+    /// <summary>The preset button's DataContext is the preset itself, so the
+    /// owning model row is resolved by walking up to the first ancestor that
+    /// carries one (the model card keeps ModelRow as its DataContext).</summary>
+    private static ModelRow? FindOwningModelRow(StyledElement element)
+    {
+        var current = element.Parent;
+        while (current is not null)
+        {
+            if (current is Control { DataContext: ModelRow row }) return row;
+            current = current.Parent;
+        }
+        return null;
+    }
+
     private void SaveProvider()
     {
         if (!TryCollectProvider(out var result)) return;
@@ -920,6 +973,7 @@ public partial class SettingsWindow : MolaContentWindow
         }
 
         _settings.RefreshTitleProviderModels();
+        _settings.RefreshMemoryProviderModels();
         _settings.RefreshVisionProviderModels();
         _settings.RefreshImageGenerationProviderModels();
         RefreshProviders();
@@ -986,11 +1040,11 @@ public partial class SettingsWindow : MolaContentWindow
             ThinkingBudgetMin = row.Thinking ? ParseNullableInt(row.BudgetMinText) : null,
             ThinkingBudgetMax = row.Thinking ? ParseNullableInt(row.BudgetMaxText) : null,
             ThinkingBudgetDefault = row.Thinking ? ParseNullableInt(row.BudgetDefaultText) : null,
-            DefaultEffort = row.Thinking && !string.IsNullOrWhiteSpace(row.DefaultEffort) ? row.DefaultEffort.Trim() : null,
-            SystemPrompt = string.IsNullOrWhiteSpace(row.SystemPrompt) ? null : row.SystemPrompt.Trim(),
+            DefaultEffort = row.Thinking && !string.IsNullOrWhiteSpace(row.DefaultEffort) ? row.DefaultEffort.Trim().ToLowerInvariant() : null,
             ImageEdit = row.IsImageProvider && row.ImageEdit,
             CustomBody = customBody.Count > 0 ? customBody : null,
-            EffortLevels = effortLevels.Count > 0 ? effortLevels : null
+            EffortLevels = effortLevels.Count > 0 ? effortLevels : null,
+            Pricing = row.Pricing()
         };
     }
 
@@ -1118,21 +1172,36 @@ public partial class SettingsWindow : MolaContentWindow
             SupportsTemperature = model.SupportsTemperature,
             SupportsTopP = model.SupportsTopP,
             ContextWindowText = model.ContextWindow?.ToString() ?? string.Empty,
-            ThinkingKindIndex = ModelRow.ThinkingKindIndexFor(model.ThinkingParamKind),
+            ThinkingKindIndex = ModelRow.ThinkingKindIndexFor(model.ThinkingParamKind ?? DefaultThinkingKindForProvider()),
             BudgetMinText = model.ThinkingBudgetMin?.ToString() ?? string.Empty,
             BudgetMaxText = model.ThinkingBudgetMax?.ToString() ?? string.Empty,
             BudgetDefaultText = model.ThinkingBudgetDefault?.ToString() ?? string.Empty,
-            DefaultEffort = model.DefaultEffort ?? string.Empty,
-            SystemPrompt = model.SystemPrompt ?? string.Empty,
+            DefaultEffort = string.IsNullOrWhiteSpace(model.DefaultEffort) ? "high" : model.DefaultEffort,
             ImageEdit = model.ImageEdit,
             IsImageProvider = _editingProviderPurpose == "image",
             EffortLevelsText = string.Join(", ", model.EffortLevels ?? []),
-            Source = model
+            Source = model,
+            LoadedPricing = model.Pricing
         };
+        row.RefreshEffortLevelOptions();
+        row.LoadPricing(model.Pricing);
         foreach (var item in model.CustomBody ?? [])
             row.CustomBodyRows.Add(new BodyRow(row, item.Key, item.Type, item.Value));
         return row;
     }
+
+    /// <summary>Entries saved before ThinkingParamKind existed load with a null
+    /// kind, which used to display as "OpenAI Effort" (index 0) — wrong for
+    /// e.g. Claude Opus 5, which must use Anthropic Adaptive. Default by
+    /// provider type instead, matching the preset a new provider of the same
+    /// type would get.</summary>
+    private string DefaultThinkingKindForProvider() =>
+        (_editingProvider?.Type ?? ProviderTypes[Math.Max(0, PART_ProviderType.SelectedIndex)]) switch
+        {
+            "anthropic" => nameof(ThinkingParamKind.AnthropicAdaptive),
+            "gemini" => nameof(ThinkingParamKind.GeminiThinkingLevel),
+            _ => nameof(ThinkingParamKind.OpenAiReasoningEffort),
+        };
 
     private void SetProviderPresetItems()
     {
@@ -1322,13 +1391,13 @@ public partial class SettingsWindow : MolaContentWindow
             foreach (var model in models)
             {
                 var alreadyExists = existing.Contains(model.Id);
-                _detectedModels.Add(new DetectedModelRow(model, !alreadyExists, !alreadyExists,
+                _detectedModels.Add(new DetectedModelRow(model, false, !alreadyExists,
                     alreadyExists ? "已存在" : string.Empty));
             }
 
             PART_DetectedModelsTitle.Text = $"检测到 {models.Count} 个模型";
             PART_DetectedModelSearch.Text = string.Empty;
-            PART_SelectAllDetectedModels.IsChecked = _detectedModels.Any(item => item.IsEnabled);
+            PART_SelectAllDetectedModels.IsChecked = false;
             PART_DetectedModelsPanel.IsVisible = true;
             RefreshDetectedModelFilter();
             ShowProviderStatus(models.Count == 0 ? "未获取到模型，请检查 API Key 或接入地址。" : "请选择要添加的模型。");
@@ -1342,6 +1411,171 @@ public partial class SettingsWindow : MolaContentWindow
             PART_DetectProviderModels.Content = "自动获取";
             PART_DetectProviderModels.IsEnabled = true;
         }
+    }
+
+    /// <summary>
+    /// Prices every model of every chat provider in one pass.
+    ///
+    /// One button rather than one per provider, because the catalogue is one
+    /// download and the question it raises — which of several quoted prices applies —
+    /// is the same question across all of them. Everything the catalogue can settle
+    /// on its own is written immediately; only genuine disagreements are reported,
+    /// and those are settled per model in <see cref="ModelPricingWindow"/>.
+    /// </summary>
+    private async void OnFetchAllPricing(object? sender, RoutedEventArgs e)
+    {
+        if (_byokHttpFactory is null) return;
+        var catalog = _modelsDevCatalog ??= new ModelsDevCatalog(_byokHttpFactory);
+
+        PART_FetchAllPricing.IsEnabled = false;
+        PART_FetchAllPricing.Content = "获取中...";
+        try
+        {
+            var catalogProviders = await catalog.LoadAsync(forceRefresh: false);
+            if (catalogProviders.Count == 0)
+            {
+                ShowPricingResult("未能获取 models.dev 的定价数据。", conflicts: 0);
+                return;
+            }
+
+            var targets = _settings.Providers
+                .Where(provider => !SettingsViewModel.IsImagePurpose(provider.Purpose))
+                .ToList();
+            var match = ModelsDevCatalog.Match(catalogProviders,
+                targets.SelectMany(provider => provider.Models).Select(model => model.Id));
+
+            var outcome = ApplyPricing(targets, _ => match.Agreed);
+            _pricingMatch = match;
+            _pricingTargets = targets;
+
+            var parts = new List<string>();
+            if (outcome.Written > 0) parts.Add($"已自动保存 {outcome.Written} 个模型的价格");
+            if (outcome.Kept > 0) parts.Add($"{outcome.Kept} 项保留手动价格");
+            if (match.Unmatched.Count > 0) parts.Add($"{match.Unmatched.Count} 项价格需手动填写");
+            if (match.Conflicts.Count > 0)
+                parts.Add($"还有 {match.Conflicts.Count} 个模型在 {match.Sources.Count} 个来源之间的价格不一致");
+            if (parts.Count == 0) parts.Add("没有可填入的价格");
+
+            ShowPricingResult(string.Join("，", parts) + "。", match.Conflicts.Count);
+        }
+        catch (Exception ex)
+        {
+            ShowPricingResult("获取定价失败：" + ex.Message, conflicts: 0);
+        }
+        finally
+        {
+            PART_FetchAllPricing.Content = "获取模型价格";
+            PART_FetchAllPricing.IsEnabled = true;
+        }
+    }
+
+    /// <summary>
+    /// Writes prices into the stored providers and persists them.
+    ///
+    /// Hand-entered prices are skipped: a user who typed a number meant it, and a
+    /// refresh that silently replaced it would make the field pointless.
+    /// </summary>
+    /// <param name="pricesFor">The prices to write for a given provider, keyed by
+    /// model id — the same map for every provider on the automatic pass, a
+    /// provider-specific one once the user has resolved conflicts.</param>
+    private PricingOutcome ApplyPricing(
+        IReadOnlyList<ProviderEntry> targets,
+        Func<ProviderEntry, IReadOnlyDictionary<string, ModelPricing>> pricesFor)
+    {
+        var written = 0;
+        var kept = 0;
+        foreach (var provider in targets)
+        {
+            var prices = pricesFor(provider);
+            if (prices.Count == 0) continue;
+
+            var models = new List<ProviderModelEntry>(provider.Models.Count);
+            var touched = false;
+            foreach (var model in provider.Models)
+            {
+                if (!prices.TryGetValue(model.Id.Trim(), out var pricing)) { models.Add(model); continue; }
+                if (model.Pricing is { IsManual: true }) { models.Add(model); kept++; continue; }
+                models.Add(model with { Pricing = pricing });
+                written++;
+                touched = true;
+            }
+            if (!touched) continue;
+
+            var updated = provider with { Models = models };
+            _settings.Save(updated);
+            var index = _settings.Providers.IndexOf(provider);
+            if (index >= 0) _settings.Providers[index] = updated;
+
+            // Saving is not enough for the price to bill anything: Pi is handed its
+            // rates at registerProvider time, so the running sidecar keeps the old
+            // ones until the entry is re-applied to the registry.
+            try
+            {
+                if (_providerRegistry is not null && _byokHttpFactory is not null)
+                    ProviderRestorer.ApplyEntry(
+                        updated, _providerRegistry, _byokHttpFactory, _toolHost, _piByokProviderFactory);
+            }
+            catch (Exception)
+            {
+                // The price is stored either way; it starts billing on next launch.
+            }
+        }
+
+        if (written > 0)
+        {
+            RefreshProviders();
+            RefreshSpecializedModelChoices();
+        }
+        return new PricingOutcome(written, kept);
+    }
+
+    private readonly record struct PricingOutcome(int Written, int Kept);
+
+    private void ShowPricingResult(string text, int conflicts)
+    {
+        PART_PricingResultText.Text = text;
+        PART_ResolvePricingConflicts.IsVisible = conflicts > 0;
+        PART_ResolvePricingConflicts.Content = $"完善价格（{conflicts}）";
+        PART_PricingResult.IsVisible = true;
+    }
+
+    /// <summary>
+    /// Opens the per-model picker for the disagreements the automatic pass left.
+    /// A row is created per provider that serves the model, because the same id
+    /// under two endpoints can legitimately settle on two different prices.
+    /// </summary>
+    private async void OnResolvePricingConflicts(object? sender, RoutedEventArgs e)
+    {
+        if (_pricingMatch is not { } match || match.Conflicts.Count == 0) return;
+
+        var rows = new List<PricingConflictRow>();
+        foreach (var provider in _pricingTargets)
+        {
+            var guess = ModelsDevCatalog.GuessProviderKey(provider.BaseUrl);
+            foreach (var model in provider.Models)
+            {
+                if (model.Pricing is { IsManual: true }) continue;
+                if (!match.Conflicts.TryGetValue(model.Id.Trim(), out var prices)) continue;
+                var candidates = prices
+                    .Select(price => new PricingCandidate(price.ProviderKey, price.ProviderName, price.Pricing))
+                    .ToList();
+                var preferred = candidates.FirstOrDefault(candidate =>
+                    candidate.ProviderKey.Equals(guess, StringComparison.OrdinalIgnoreCase));
+                rows.Add(new PricingConflictRow(provider.Id, provider.Name, model.Id, candidates, preferred));
+            }
+        }
+        if (rows.Count == 0) return;
+
+        var window = new ModelPricingWindow(rows);
+        await window.ShowDialog(this);
+        if (window.Result is not { } picks) return;
+
+        var outcome = ApplyPricing(_pricingTargets,
+            provider => picks.TryGetValue(provider.Id, out var models)
+                ? models
+                : new Dictionary<string, ModelPricing>());
+        _pricingMatch = null;
+        ShowPricingResult($"已按所选来源写入 {outcome.Written} 个模型的价格。", conflicts: 0);
     }
 
     private void RefreshDetectedModelFilter()
@@ -1575,7 +1809,10 @@ public partial class SettingsWindow : MolaContentWindow
                 ContextWindow: context,
                 Thinking: reasoning,
                 ReasoningEffort: reasoning && parameters.Any(value => value.Contains("effort", StringComparison.OrdinalIgnoreCase)),
-                Tools: parameters.Any(value => IsAny(value, "tools", "tool_choice"))));
+                Tools: parameters.Any(value => IsAny(value, "tools", "tool_choice")),
+                SupportsTemperature: SupportsSampling(parameters, "temperature"),
+                SupportsTopP: SupportsSampling(parameters, "top_p", "topP"),
+                Pricing: ReadEndpointPricing(item)));
         }
         return models.OrderByDescending(model => model.Tools)
             .ThenByDescending(model => model.Thinking)
@@ -1703,6 +1940,64 @@ public partial class SettingsWindow : MolaContentWindow
 
     private static bool IsAny(string value, params string[] candidates) =>
         candidates.Any(candidate => string.Equals(value, candidate, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Pricing straight out of the model list an OpenRouter-style endpoint already
+    /// returned, so it costs no extra request and the ids line up by construction.
+    ///
+    /// The wire unit is USD per single token, written as a string
+    /// (<c>"prompt": "0.0000025"</c>); <see cref="ModelPricing"/> is per million, so
+    /// everything is scaled by 1e6 on the way in. Getting that scale wrong is a
+    /// six-orders-of-magnitude error that still renders as a plausible-looking price.
+    /// </summary>
+    private static ModelPricing? ReadEndpointPricing(JsonElement item)
+    {
+        if (!item.TryGetProperty("pricing", out var pricing) || pricing.ValueKind != JsonValueKind.Object)
+            return null;
+        var input = ReadPerTokenPrice(pricing, "prompt", "input");
+        var output = ReadPerTokenPrice(pricing, "completion", "output");
+        // Free models are listed with "0" across the board. That is a real price,
+        // but a provider that reports nothing usable should stay unpriced rather
+        // than claim everything it serves is free.
+        if (input is null || output is null) return null;
+        return new ModelPricing(
+            input.Value,
+            output.Value,
+            ReadPerTokenPrice(pricing, "input_cache_read", "cache_read"),
+            ReadPerTokenPrice(pricing, "input_cache_write", "cache_write"),
+            ModelPricing.SourceEndpoint);
+    }
+
+    private static double? ReadPerTokenPrice(JsonElement pricing, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (!pricing.TryGetProperty(name, out var node)) continue;
+            double perToken;
+            switch (node.ValueKind)
+            {
+                case JsonValueKind.Number when node.TryGetDouble(out var number):
+                    perToken = number;
+                    break;
+                case JsonValueKind.String when double.TryParse(
+                    node.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed):
+                    perToken = parsed;
+                    break;
+                default:
+                    continue;
+            }
+            if (perToken < 0) continue;
+            return perToken * 1_000_000d;
+        }
+        return null;
+    }
+
+    /// <summary>Sampling support is only trustworthy when the endpoint actually
+    /// declares its parameters. Plenty of OpenAI-compatible endpoints omit
+    /// <c>supported_parameters</c> entirely, and treating that silence as "not
+    /// supported" would disable temperature for every model they serve.</summary>
+    private static bool SupportsSampling(IReadOnlyList<string> parameters, params string[] names) =>
+        parameters.Count == 0 || parameters.Any(value => IsAny(value, names));
 
     private void OnSettingsKeyDown(object? sender, KeyEventArgs e)
     {
@@ -2261,22 +2556,21 @@ public partial class SettingsWindow : MolaContentWindow
     private void RefreshSkills()
     {
         _skills.Reload();
-        PART_SkillsList.ItemsSource = _skills.Skills;
-        if (PART_SkillsList.SelectedItem is null && _skills.Skills.Count > 0)
-            PART_SkillsList.SelectedIndex = 0;
-        RefreshSelectedSkill();
+        // Two flat lists under two section headings, the way 模型服务 splits
+        // 对话服务 from 图像服务 — it replaces the per-row 内置 / 自定义 badge,
+        // and 删除 only ever appears in the half where it applies.
+        var builtin = _skills.Skills.Where(skill => skill.IsBuiltin).ToArray();
+        var user = _skills.Skills.Where(skill => !skill.IsBuiltin).ToArray();
+        PART_BuiltinSkills.ItemsSource = builtin;
+        PART_UserSkills.ItemsSource = user;
+        PART_NoBuiltinSkills.IsVisible = builtin.Length == 0;
+        PART_NoUserSkills.IsVisible = user.Length == 0;
     }
 
-    private void OnSkillSelectionChanged(object? sender, SelectionChangedEventArgs e) => RefreshSelectedSkill();
-
-    private void RefreshSelectedSkill()
+    private void SetSkillStatus(string? text)
     {
-        var skill = PART_SkillsList.SelectedItem as SkillItemViewModel;
-        PART_SkillDetail.DataContext = skill;
-        PART_SkillDetail.IsVisible = skill is not null;
-        PART_SkillEmpty.IsVisible = skill is null;
-        PART_DeleteSkill.IsVisible = skill is { IsBuiltin: false };
-        PART_SkillStatus.Text = string.Empty;
+        PART_SkillStatus.Text = text ?? string.Empty;
+        PART_SkillStatus.IsVisible = !string.IsNullOrEmpty(text);
     }
 
     private async void OnImportSkill(object? sender, RoutedEventArgs e)
@@ -2284,7 +2578,7 @@ public partial class SettingsWindow : MolaContentWindow
         if (StorageProvider is not { } storage) return;
         var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "选择技能压缩包（内含 SKILL.md）",
+            Title = "选择技能压缩包",
             AllowMultiple = false,
             FileTypeFilter = [new FilePickerFileType("技能压缩包") { Patterns = ["*.zip"] }]
         });
@@ -2293,12 +2587,12 @@ public partial class SettingsWindow : MolaContentWindow
         try
         {
             var name = _skills.ImportFromPath(path);
-            PART_SkillsList.SelectedItem = _skills.Skills.FirstOrDefault(skill => skill.Name == name);
-            PART_SkillStatus.Text = $"已导入技能：{name}";
+            RefreshSkills();
+            SetSkillStatus($"已导入：{name}");
         }
         catch (Exception ex)
         {
-            PART_SkillStatus.Text = "导入失败：" + ex.Message;
+            SetSkillStatus("导入失败：" + ex.Message);
         }
     }
 
@@ -2308,14 +2602,23 @@ public partial class SettingsWindow : MolaContentWindow
         OpenWithShell(_skills.UserSkillsDirectory);
     }
 
-    private void OnRefreshSkills(object? sender, RoutedEventArgs e) => RefreshSkills();
+    private void OnRefreshSkills(object? sender, RoutedEventArgs e)
+    {
+        RefreshSkills();
+        SetSkillStatus(null);
+    }
+
+    /// <summary>The row's own skill, carried on the button's Tag — the rows are a
+    /// plain ItemsControl now, so there is no selection to read it from.</summary>
+    private static SkillItemViewModel? SkillFor(object? sender) =>
+        (sender as Control)?.Tag as SkillItemViewModel;
 
     private void OnViewSkillMd(object? sender, RoutedEventArgs e)
     {
-        if (PART_SkillsList.SelectedItem is not SkillItemViewModel skill) return;
+        if (SkillFor(sender) is not { } skill) return;
         if (!File.Exists(skill.SkillMdPath))
         {
-            PART_SkillStatus.Text = "找不到 SKILL.md 文件。";
+            SetSkillStatus($"未找到「{skill.Name}」的 SKILL.md。");
             return;
         }
         RevealInExplorer(skill.SkillMdPath);
@@ -2323,11 +2626,11 @@ public partial class SettingsWindow : MolaContentWindow
 
     private async void OnDeleteSkill(object? sender, RoutedEventArgs e)
     {
-        if (PART_SkillsList.SelectedItem is not SkillItemViewModel { IsBuiltin: false } skill) return;
+        if (SkillFor(sender) is not { IsBuiltin: false } skill) return;
         if (!await Confirm.AskAsync(
                 this,
                 $"删除「{skill.Name}」？",
-                "该自定义技能及其文件夹会被永久删除。",
+                "将永久删除此技能及其文件夹。",
                 "删除"))
         {
             return;
@@ -2336,12 +2639,12 @@ public partial class SettingsWindow : MolaContentWindow
         try
         {
             _skills.DeleteUserSkill(skill);
-            PART_SkillsList.SelectedIndex = _skills.Skills.Count > 0 ? 0 : -1;
-            RefreshSelectedSkill();
+            RefreshSkills();
+            SetSkillStatus($"已删除：{skill.Name}");
         }
         catch (Exception ex)
         {
-            PART_SkillStatus.Text = "删除失败：" + ex.Message;
+            SetSkillStatus("删除失败：" + ex.Message);
         }
     }
 
@@ -2399,6 +2702,7 @@ public partial class SettingsWindow : MolaContentWindow
             PART_PersonaPrompt.IsEnabled = editable;
             PART_PersonaVariables.IsVisible = editable;
             PART_PersonaDefaults.IsEnabled = editable;
+            PART_PersonaSampling.IsEnabled = editable;
             PART_PersonaBuiltinHint.IsVisible = persona.IsBuiltin;
             PART_DuplicatePersona.IsEnabled = !isDraft;
             PART_DeletePersona.IsEnabled = editable && !isDraft;
@@ -2514,6 +2818,14 @@ public partial class SettingsWindow : MolaContentWindow
         _editingPersona.PendingAvatarSource = null;
         PART_PersonaIconPicker.Flyout?.Hide();
         if (!_editingPersonaIsDraft) _personas.Save(_editingPersona);
+    }
+
+    /// <summary>更新系统提示词的前缀缓存提示。</summary>
+    private void OnPersonaPromptTextChanged(object? sender, TextChangedEventArgs e)
+    {
+        var breaks = SystemPromptInterpolator.BreaksPrefixCache(PART_PersonaPrompt.Text);
+        PART_PersonaPromptCacheHint.Text = breaks ? SystemPromptInterpolator.PrefixCacheWarning : null;
+        PART_PersonaPromptCacheHint.IsVisible = breaks;
     }
 
     private void OnInsertPersonaVariable(object? sender, RoutedEventArgs e)

@@ -163,7 +163,9 @@ public partial class SettingsWindow
     private void RefreshRoleLibraryOptions()
     {
         if (_editingPersona is not { } persona) return;
-        var choices = new List<RoleIdentityChoice> { new(null, "默认身份"), new("", "使用角色内设定") };
+        var choices = new List<RoleIdentityChoice> { new(null, "默认身份") };
+        if (RoleIdentityChoice.Profile(_personas.Library) is { } profile) choices.Add(profile);
+        choices.Add(new("", "使用角色内设定"));
         choices.AddRange(_personas.Library.Identities.Select(identity => new RoleIdentityChoice(identity.Id, identity.Name)));
         PART_RoleIdentity.ItemsSource = choices;
         PART_RoleIdentity.SelectedItem = choices.FirstOrDefault(choice => choice.Id == persona.Profile.UserPersonaId);
@@ -398,4 +400,21 @@ public partial class SettingsWindow
 public sealed record RoleModelChoice(
     string? ProviderId, string? ModelId, string Label, bool SupportsTemperature, bool SupportsTopP);
 
-public sealed record RoleIdentityChoice(string? Id, string Label);
+public sealed record RoleIdentityChoice(string? Id, string Label)
+{
+    /// <summary>
+    /// 「沿用个人资料」, or null in a host with no memory behind it. The current 称呼
+    /// is spelled out in the label — 「沿用个人资料（阿罗）」 — because the whole point
+    /// of picking it is knowing what the character will call you, and 「未填写」 is
+    /// the honest label for a profile nobody has filled in rather than a silently
+    /// dead option.
+    /// </summary>
+    public static RoleIdentityChoice? Profile(RoleLibraryViewModel? library)
+    {
+        if (library is not { SupportsProfileIdentity: true }) return null;
+        var name = library.ProfileIdentity?.Name;
+        return new(UserPersona.ProfileId, string.IsNullOrWhiteSpace(name)
+            ? "沿用个人资料（未填写）"
+            : $"沿用个人资料（{name}）");
+    }
+}

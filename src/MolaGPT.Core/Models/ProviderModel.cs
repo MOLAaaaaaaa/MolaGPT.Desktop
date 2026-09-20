@@ -90,6 +90,27 @@ public static class ThinkingParamKindInference
 }
 
 /// <summary>
+/// What one million tokens cost, in USD. The unit matches both models.dev's
+/// <c>cost</c> block and the rates Pi's own <c>calculateCost</c> divides by
+/// 1,000,000 — so a price collected from either source goes through unconverted.
+/// </summary>
+/// <param name="Source">Where the numbers came from: <c>endpoint</c>, <c>models.dev</c>
+/// or <c>manual</c>. A manual price is never overwritten by a refresh.</param>
+public sealed record ModelPricing(
+    double Input,
+    double Output,
+    double? CacheRead = null,
+    double? CacheWrite = null,
+    string? Source = null)
+{
+    public const string SourceEndpoint = "endpoint";
+    public const string SourceModelsDev = "models.dev";
+    public const string SourceManual = "manual";
+
+    public bool IsManual => string.Equals(Source, SourceManual, StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>
 /// A model exposed by a provider. ProviderModel.Id is the wire-level model name
 /// (what gets sent in the request body's "model" field, e.g. "gpt-4o-mini",
 /// "claude-3-5-sonnet-20241022", or a MolaGPT routes key like "g3f").
@@ -107,4 +128,5 @@ public sealed record ProviderModel(
     ThinkingConfig? ThinkingConfig = null,
     IReadOnlyDictionary<string, JsonElement>? CustomBody = null,
     bool SupportsTemperature = true,
-    bool SupportsTopP = true);
+    bool SupportsTopP = true,
+    ModelPricing? Pricing = null);

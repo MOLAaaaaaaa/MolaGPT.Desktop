@@ -222,6 +222,19 @@
           </StackPanel>
         </ToggleButton>
 
+        <!-- 只在开口之前存在：话已经说出去、模型已经读过记忆之后再关，
+             关掉的只是下一轮，留着开关只会给出一个改不动过去的假选择。 -->
+        <ToggleButton Name="PART_Memory" Classes="toolchip"
+                      IsChecked="{Binding MemoryOnForConversation, Mode=TwoWay}"
+                      IsVisible="{Binding IsMemoryChipVisible}"
+                      ToolTip.Tip="本轮是否使用记忆。关闭后不读取、不写入，也不检索历史对话。">
+          <StackPanel Classes="inlinerow" Orientation="Horizontal">
+            <TextBlock Classes="icon" Text="&#xE81C;" FontSize="12" Margin="0,0,6,0"
+                       VerticalAlignment="Center" />
+            <TextBlock Text="记忆" VerticalAlignment="Center" />
+          </StackPanel>
+        </ToggleButton>
+
         <Button Name="PART_Effort" Classes="toolchip"
                 IsVisible="{Binding IsReasoningEffortVisible}"
                 ToolTip.Tip="{Binding ReasoningControlToolTip}">

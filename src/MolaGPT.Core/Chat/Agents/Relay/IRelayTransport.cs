@@ -9,6 +9,17 @@ namespace MolaGPT.Core.Chat.Agents.Relay;
 /// </summary>
 public interface IRelayProducer
 {
+    /// <summary>
+    /// Whether a credential is currently available to sign relay requests.
+    ///
+    /// Every post throws without one, so this exists to let callers skip the work
+    /// that would have produced the payload. History projection is the reason:
+    /// it parses a transcript and serializes the whole turn set before the post
+    /// discovers there is no JWT, and with the bridge enabled but signed out that
+    /// happened for every session on every retry, forever.
+    /// </summary>
+    bool IsAuthAvailable { get; }
+
     /// <summary>Read the relay's stored projection cursors per session. Used by
     /// the desktop to decide whether the relay already has the transcript for a
     /// local history session before publishing the session meta snapshot.</summary>

@@ -21,7 +21,7 @@ public abstract record AgentReplayEvent
 }
 
 /// <summary>The user submitted a turn (optimistic local echo of the prompt).</summary>
-public sealed record UserTurnSubmitted(string Text) : AgentReplayEvent
+public sealed record UserTurnSubmitted(string Text, string? CommandId = null) : AgentReplayEvent
 {
     public override void ApplyTo(AgentTranscriptReducer reducer) => reducer.AddUser(Text);
 }

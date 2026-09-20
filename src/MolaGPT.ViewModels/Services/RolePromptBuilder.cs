@@ -10,7 +10,10 @@ public sealed record RolePromptBuildResult(string SystemPrompt, RolePromptPlan P
 
 public static partial class RolePromptBuilder
 {
-    public static RolePromptBuildResult Build(PersonaItemViewModel persona, string? modelPrompt,
+    /// <param name="defaultPrompt">The built-in 通用助手 prompt this persona's own
+    /// prompt replaces. Only reachable through <c>{{original}}</c>; a persona with
+    /// an empty prompt stays empty rather than inheriting it.</param>
+    public static RolePromptBuildResult Build(PersonaItemViewModel persona, string? defaultPrompt,
         string? conversationPrompt, string? promptMode, ConversationRoleContext context,
         IReadOnlyList<MessageRow> history, IReadOnlyList<Lorebook> books, PromptVariables variables,
         string sourceMessageId, int? reserveOutputTokens, bool continuation = false)
@@ -25,7 +28,7 @@ public static partial class RolePromptBuilder
             ["charprompt"] = persona.SystemPrompt,
             ["charjailbreak"] = profile.PostHistoryInstructions
         };
-        variables = variables with { CharacterName = character, RoleFields = fields, Original = modelPrompt ?? "" };
+        variables = variables with { CharacterName = character, RoleFields = fields, Original = defaultPrompt ?? "" };
         var vars = variables;
         string Expand(string text) => SystemPromptInterpolator.Interpolate(text, vars);
         var scopes = context.SharedLorebookIds?.Distinct(StringComparer.Ordinal).ToDictionary(id => id, _ => -1, StringComparer.Ordinal);
@@ -42,7 +45,7 @@ public static partial class RolePromptBuilder
             .ToDictionary(group => group.Key, group => string.Join("\n", group.Select(hit => hit.Content)), StringComparer.Ordinal);
         vars = vars with { Outlets = outlets };
 
-        var main = string.IsNullOrWhiteSpace(persona.SystemPrompt) ? Expand(modelPrompt ?? "") : Expand(persona.SystemPrompt);
+        var main = Expand(persona.SystemPrompt);
         main = SystemPromptInterpolator.Combine(main,
             SystemPromptInterpolator.Interpolate(conversationPrompt, vars with { Original = main }), promptMode) ?? "";
         var sections = new List<string> { main };

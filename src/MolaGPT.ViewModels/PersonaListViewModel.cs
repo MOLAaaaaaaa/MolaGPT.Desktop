@@ -30,11 +30,22 @@ public sealed partial class PersonaListViewModel : ObservableObject
         "你是 MolaGPT 的默认助手。请用简洁、准确、友好的中文回答用户。\n\n" +
         "如果问题信息不足，先提出必要的澄清问题；如果可以直接解决，就给出清晰可执行的答案。";
 
-    private const string BuiltinDefaultPrompt =
+    /// <summary>包含分钟级占位符的历史版本，用于迁移旧内置提示词。</summary>
+    private const string TimestampedBuiltinDefaultPrompt =
         "你是 MolaGPT 的默认助手。请用简洁、准确、友好的中文回答用户。\n\n" +
         "当前背景：\n" +
         "- 日期：{{date}}\n" +
         "- 时间：{{time}}\n" +
+        "- 用户：{{username}}\n" +
+        "- 当前模型：{{model}}\n" +
+        "- 服务商：{{provider}}\n\n" +
+        "如果问题信息不足，先提出必要的澄清问题；如果可以直接解决，就给出清晰可执行的答案。";
+
+    // 默认提示词仅保留日期占位符，避免分钟级缓存失效。
+    private const string BuiltinDefaultPrompt =
+        "你是 MolaGPT 的默认助手。请用简洁、准确、友好的中文回答用户。\n\n" +
+        "当前背景：\n" +
+        "- 日期：{{date}}\n" +
         "- 用户：{{username}}\n" +
         "- 当前模型：{{model}}\n" +
         "- 服务商：{{provider}}\n\n" +
@@ -263,9 +274,11 @@ public sealed partial class PersonaListViewModel : ObservableObject
         _repo.Upsert(existing);
     }
 
+    // 仅迁移未修改过的内置提示词。
     private static bool ShouldUpdateDefaultPrompt(string? currentPrompt) =>
         string.IsNullOrWhiteSpace(currentPrompt) ||
-        string.Equals(currentPrompt.Trim(), LegacyBuiltinDefaultPrompt, StringComparison.Ordinal);
+        string.Equals(currentPrompt.Trim(), LegacyBuiltinDefaultPrompt, StringComparison.Ordinal) ||
+        string.Equals(currentPrompt.Trim(), TimestampedBuiltinDefaultPrompt, StringComparison.Ordinal);
 }
 
 /// <summary>

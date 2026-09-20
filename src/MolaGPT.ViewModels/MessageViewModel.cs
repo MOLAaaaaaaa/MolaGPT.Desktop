@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Memory;
 using MolaGPT.Core.Models;
 using MolaGPT.Presentation;
 using MolaGPT.ViewModels.Services;
@@ -337,6 +338,20 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public string? SpeedText =>
         OutputTokensPerSecond is { } speed ? $"{speed:0.#} tok/s" : null;
 
+    /// <summary>本轮花费，如 <c>$0.0123</c>；模型没有定价时为空。</summary>
+    public string? CostText => Usage?.CostUsd is { } cost ? FormatCost(cost) : null;
+
+    /// <summary>
+    /// 便宜的回合常在 $0.01 以下，两位小数会把它们一律显示成 $0.00，看着像没花钱。
+    /// 所以小额补到四位；上千美元的合计则收掉小数，那两位没有信息量。
+    /// </summary>
+    public static string FormatCost(double usd) => usd switch
+    {
+        >= 1000 => $"${usd:N0}",
+        >= 0.01 or 0 => $"${usd:0.00}",
+        _ => $"${usd:0.0000}"
+    };
+
     public bool HasInlineStats => InlineStatsText.Length > 0;
 
     /// <summary>
@@ -349,9 +364,10 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     {
         get
         {
-            var parts = new List<string>(3);
+            var parts = new List<string>(4);
             if (FirstTokenText is { } ttft) parts.Add($"TTFT: {ttft}");
             if (TokensText is { } tokens) parts.Add($"Tokens: {tokens}");
+            if (CostText is { } cost) parts.Add(cost);
             if (SpeedText is { } speed) parts.Add(speed);
             return string.Join(" · ", parts);
         }
@@ -408,6 +424,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(FirstTokenText));
         OnPropertyChanged(nameof(TokensText));
         OnPropertyChanged(nameof(SpeedText));
+        OnPropertyChanged(nameof(CostText));
         OnPropertyChanged(nameof(InlineStatsText));
         OnPropertyChanged(nameof(HasInlineStats));
     }
@@ -1598,6 +1615,8 @@ public sealed partial class ToolGroupViewModel : ObservableObject
         "web_search" => $"{Count} 次搜索",
         "web_fetch" => $"{Count} 个网页",
         "browser" => $"{Count} 步操作",
+        MemoryTools.RecallToolName => $"{Count} 次检索",
+        MemoryTools.WriteToolName => $"{Count} 次更新",
         _ => $"{Count} 次"
     };
 
@@ -1712,6 +1731,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
     public bool IsError => Status.Equals("error", StringComparison.OrdinalIgnoreCase);
     public bool IsSearch => Name.Equals("search_web", StringComparison.OrdinalIgnoreCase)
                             || Name.Equals("web_search", StringComparison.OrdinalIgnoreCase);
+    public bool IsMemoryTool => Name is MemoryTools.RecallToolName or MemoryTools.WriteToolName;
     public bool IsGenericTool => !IsSearch;
 
     /// <summary>
@@ -1774,7 +1794,11 @@ public sealed partial class ToolCallViewModel : ObservableObject
 
     /// <summary>What the card actually shows. <see cref="Label"/> stays the tool's
     /// own name so nothing else has to know about skills.</summary>
-    public string DisplayLabel => IsSkillLoad ? LabelFor(SkillLoadKey) : Label;
+    public string DisplayLabel => IsSkillLoad
+        ? LabelFor(SkillLoadKey)
+        : IsMemoryTool
+            ? LabelFor(Name)
+            : Label;
     public string DisplayIconGlyph => IsSkillLoad ? IconGlyphFor(SkillLoadKey) : IconGlyph;
 
     /// <summary>
@@ -1797,6 +1821,8 @@ public sealed partial class ToolCallViewModel : ObservableObject
         // A browser task is navigate → snapshot → click → snapshot …: a dozen
         // calls that are one errand. They group like the file reads do.
         "browser" => "browser",
+        MemoryTools.RecallToolName => MemoryTools.RecallToolName,
+        MemoryTools.WriteToolName => MemoryTools.WriteToolName,
         _ => null
     };
 
@@ -1876,6 +1902,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
         "read_file" => "\uE8A5",
         "glob_files" => "\uE8B7",
         "grep_files" => "\uE773",
+        MemoryTools.RecallToolName or MemoryTools.WriteToolName => "\uE81C",
         _ => "\uE90F"
     };
     public string StatusText => Status switch
@@ -1933,6 +1960,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(IconGlyph));
         OnPropertyChanged(nameof(IsSearch));
+        OnPropertyChanged(nameof(IsMemoryTool));
         OnPropertyChanged(nameof(IsGenericTool));
         OnPropertyChanged(nameof(IsKnownBuiltInTool));
         OnPropertyChanged(nameof(ShowArgumentsFold));
@@ -1991,6 +2019,8 @@ public sealed partial class ToolCallViewModel : ObservableObject
         "view_image" => "查看图片",
         "analyze_image" => "图片分析",
         "generate_image" => "生成图片",
+        MemoryTools.RecallToolName => "检索记忆",
+        MemoryTools.WriteToolName => "更新记忆",
         // Claude Code / Codex agent tools (PascalCase). Friendly labels so the
         // console cards read naturally instead of bare English tool names.
         "Read" => "读取文件",

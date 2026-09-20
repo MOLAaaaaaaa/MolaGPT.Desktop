@@ -314,7 +314,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
     public Task SendAsync(string conversationId, string text, CancellationToken ct = default)
         => SendAsync(conversationId, AgentTurnInput.TextOnly(text), ct);
 
-    public async Task SendAsync(string conversationId, AgentTurnInput input, CancellationToken ct = default)
+    public async Task SendAsync(string conversationId, AgentTurnInput input, CancellationToken ct = default, string? commandId = null)
     {
         if (!_sessions.TryGetValue(conversationId, out var entry))
             throw new InvalidOperationException($"未知 agent 会话：{conversationId}");
@@ -326,7 +326,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
 
         var reducer = entry.Reducer;
         reducer.AddUser(input.Text);
-        LogAndPublish(entry, new UserTurnSubmitted(input.Text));
+        LogAndPublish(entry, new UserTurnSubmitted(input.Text, commandId));
         reducer.BeginPending("连接中…");
         LogAndPublish(entry, new PendingShown("连接中…"));
         Mutate(entry, e => { e.Phase = AgentSessionPhase.Spawning; e.NeedsAttention = false; });

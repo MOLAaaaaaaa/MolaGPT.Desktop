@@ -29,6 +29,11 @@ public sealed class AgentRelayClient
     private static readonly TimeSpan CommandLeaseRenewInterval = TimeSpan.FromSeconds(30);
     private const int HistoryBackfillMaxTurns = 30;
 
+    /// <summary>How often the projection loop re-checks for a credential while it
+    /// is parked. Nothing pushes an auth-arrived signal into Core, and a projection
+    /// is not urgent enough to justify one.</summary>
+    private static readonly TimeSpan ProjectionAuthRecheckInterval = TimeSpan.FromSeconds(5);
+
     /// <summary>How stale an agent-history disk scan may be when one of the
     /// polling loops below asks for it. These loops run forever on a 10–15s
     /// clock; without a budget each one re-walked the whole ~/.claude and
@@ -59,11 +64,11 @@ public sealed class AgentRelayClient
     /// <summary>Minimum time between mid-segment "growing" snapshots of the same
     /// answer/thinking segment — the pseudo-streaming cadence. Internal-settable
     /// so tests can shrink it without waiting wall-clock seconds.</summary>
-    internal static TimeSpan StreamFlushInterval { get; set; } = TimeSpan.FromSeconds(2.5);
+    internal static TimeSpan StreamFlushInterval { get; set; } = TimeSpan.FromMilliseconds(500);
 
     /// <summary>Minimum growth (chars) since the last shipped snapshot before a
     /// mid-segment flush is worth a wire round-trip.</summary>
-    internal static int StreamFlushMinGrowth { get; set; } = 80;
+    internal static int StreamFlushMinGrowth { get; set; } = 16;
 
     /// <summary>Stop mid-segment flushing once a segment exceeds this size — each
     /// growing snapshot re-ships the full segment text, so very large answers
@@ -101,7 +106,9 @@ public sealed class AgentRelayClient
     private readonly ConcurrentDictionary<string, int> _projectionFailures = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, long> _projectionBackoffUntilMs = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _executingCommands = new(StringComparer.Ordinal);
-    private Task _eventPostTail = Task.CompletedTask;
+    private readonly Dictionary<string, Task> _eventPostTails = new(StringComparer.Ordinal);
+    private readonly RelayCommandJournal _commandJournal;
+    private long _metaVersion = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000;
     private CancellationTokenSource? _cts;
     private int _activeHistoryProjection;
     private bool _relayCursorsSeeded;
@@ -113,8 +120,10 @@ public sealed class AgentRelayClient
         AgentBridgeService bridge,
         IRelayProducer producer,
         IAgentConfigProvider? config = null,
-        Action<string>? log = null)
+        Action<string>? log = null,
+        RelayCommandJournal? commandJournal = null)
     {
+        _commandJournal = commandJournal ?? new RelayCommandJournal();
         _bridge = bridge;
         _producer = producer;
         _log = log;
@@ -219,7 +228,7 @@ public sealed class AgentRelayClient
             case UserTurnSubmitted u:
                 SetAwaitingTerminal(sessionId, true); // a turn is in flight until a terminal event
                 ResetTurnBuffers(sessionId);
-                Post(Envelope(sessionId, entry.Seq, new UserPromptEvent(u.Text)));
+                Post(Envelope(sessionId, entry.Seq, new UserPromptEvent(u.Text, u.CommandId)));
                 break;
 
             case CliEventAppended c:
@@ -346,12 +355,12 @@ public sealed class AgentRelayClient
         var nowMs = Environment.TickCount64;
         if (flushedAtMs == 0)
         {
-            // Clock starts at the segment's FIRST delta, so the first growing
-            // snapshot lands ~interval after streaming began — not "interval
-            // after the text happened to clear the growth gate", which for fast
-            // generations pushed the first ship past the end of the answer.
+            // Show the first delta immediately; later snapshots replace this segment.
             flushedAtMs = nowMs;
-            return null;
+            flushedLength = text.Length;
+            return Envelope(sessionId, bridgeSeq, isThinking
+                ? new ThinkingSnapshotEvent(text, SegmentId(true, segment))
+                : new AnswerSnapshotEvent(text, SegmentId(false, segment)));
         }
         if (text.Length > StreamFlushMaxSegmentChars) return null;
         if (text.Length - flushedLength < StreamFlushMinGrowth) return null;
@@ -425,7 +434,7 @@ public sealed class AgentRelayClient
         // arrival order, so unordered concurrent posts could scramble replay.
         lock (_gate)
         {
-            _eventPostTail = _eventPostTail
+            _eventPostTails[envelope.SessionId] = _eventPostTails.GetValueOrDefault(envelope.SessionId, Task.CompletedTask)
                 .ContinueWith(_ => PostSafeAsync(envelope), CancellationToken.None,
                     TaskContinuationOptions.None, TaskScheduler.Default)
                 .Unwrap();
@@ -516,6 +525,25 @@ public sealed class AgentRelayClient
     {
         while (!ct.IsCancellationRequested)
         {
+            // Park the queue rather than drain it when there is no credential.
+            // A projection reads a transcript off disk and serializes its whole
+            // turn set before the post discovers it cannot be sent, so with the
+            // bridge enabled but signed out this loop spent its life parsing
+            // multi-megabyte transcripts into garbage. Queued ids stay queued and
+            // run as soon as sign-in lands.
+            if (_historyProjectionQueue.IsEmpty)
+            {
+                try { await Task.Delay(TimeSpan.FromMilliseconds(250), ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { break; }
+                continue;
+            }
+            if (!_producer.IsAuthAvailable)
+            {
+                try { await Task.Delay(ProjectionAuthRecheckInterval, ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { break; }
+                continue;
+            }
+
             if (!_historyProjectionQueue.TryDequeue(out var sessionId))
             {
                 try { await Task.Delay(TimeSpan.FromMilliseconds(250), ct).ConfigureAwait(false); }
@@ -677,7 +705,7 @@ public sealed class AgentRelayClient
 
         // Replace atomically, with a reset marker and cursors newer than the old
         // snapshot, including when text changes without changing the event count.
-        await DrainEventPostsAsync().ConfigureAwait(false);
+        await DrainEventPostsAsync(sessionId).ConfigureAwait(false);
 
         var envelopes = new List<RelayEventEnvelope>();
         long seq = LastConfirmedRelaySeq(sessionId);
@@ -828,7 +856,8 @@ public sealed class AgentRelayClient
             phase, s.NeedsAttention, seq, nowMs, s.UpdatedAtMs,
             s.AvailableModels,
             string.IsNullOrWhiteSpace(_machineId) ? null : _machineId,
-            string.IsNullOrWhiteSpace(_machineName) ? null : _machineName);
+            string.IsNullOrWhiteSpace(_machineName) ? null : _machineName,
+            Interlocked.Increment(ref _metaVersion));
     }
 
     private void SetProjectedTailOpen(string sessionId, bool open)
@@ -883,7 +912,7 @@ public sealed class AgentRelayClient
                 var stop = _cts;
                 if (stop is null || stop.IsCancellationRequested) return;
 
-                // Keep requests strictly ordered through _eventPostTail. Retry a
+                // Keep each session ordered through its own post queue. Retry a
                 // short exponential burst, then a bounded 30s cadence until the
                 // bridge reconnects; no envelope is skipped or acknowledged early.
                 var seconds = attempt < EventPostRetryBurst
@@ -908,10 +937,10 @@ public sealed class AgentRelayClient
         catch { /* best-effort */ }
     }
 
-    private async Task DrainEventPostsAsync()
+    private async Task DrainEventPostsAsync(string sessionId)
     {
         Task tail;
-        lock (_gate) tail = _eventPostTail;
+        lock (_gate) tail = _eventPostTails.GetValueOrDefault(sessionId, Task.CompletedTask);
         try { await tail.ConfigureAwait(false); }
         catch { /* individual event posts are already best-effort */ }
     }
@@ -975,32 +1004,37 @@ public sealed class AgentRelayClient
         var renewTask = RenewCommandLeaseUntilCompleteAsync(cmd, renewCts.Token);
         try
         {
-            await DispatchAsync(cmd, stopCt).ConfigureAwait(false);
-            await _producer.CompleteCommandAsync(
-                cmd.SessionId, cmd.CmdId, succeeded: true, error: null, CancellationToken.None)
-                .ConfigureAwait(false);
+            var result = _commandJournal.Read(cmd.SessionId, cmd.CmdId);
+            if (result is null)
+            {
+                stopCt.ThrowIfCancellationRequested();
+                _commandJournal.Write(cmd.SessionId, cmd.CmdId, new(null, null));
+                try
+                {
+                    await DispatchAsync(cmd, stopCt).ConfigureAwait(false);
+                    result = new(true, null);
+                }
+                catch (Exception ex)
+                {
+                    result = new(false, CommandError(ex));
+                }
+                _commandJournal.Write(cmd.SessionId, cmd.CmdId, result);
+            }
+            else if (result.Succeeded is null)
+            {
+                result = new(false, "上次执行结果未确认，请检查会话后再决定是否重新发送。");
+                _commandJournal.Write(cmd.SessionId, cmd.CmdId, result);
+            }
+
+            // A failed acknowledgement must never turn a successful execution into
+            // a failed dispatch, or cause the same command to execute again.
+            await _producer.CompleteCommandAsync(cmd.SessionId, cmd.CmdId,
+                result.Succeeded == true, result.Error, CancellationToken.None).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (stopCt.IsCancellationRequested)
-        {
-            // Shutdown is intentionally not terminal: allow the lease to expire so
-            // the command can be recovered by the bridge after it reconnects.
-        }
+        catch (OperationCanceledException) when (stopCt.IsCancellationRequested) { }
         catch (Exception ex)
         {
-            try
-            {
-                await _producer.CompleteCommandAsync(
-                    cmd.SessionId,
-                    cmd.CmdId,
-                    succeeded: false,
-                    error: CommandError(ex),
-                    CancellationToken.None).ConfigureAwait(false);
-            }
-            catch
-            {
-                // Preserve at-least-once delivery: if the result post fails, the
-                // lease expires and the relay will offer the command again.
-            }
+            _log?.Invoke($"command {cmd.CmdId} result pending: {ex.Message}");
         }
         finally
         {
@@ -1051,7 +1085,7 @@ public sealed class AgentRelayClient
                 // bridge toggle, app-level reconnect loop) must not cancel it.
                 // The turn's lifecycle is bounded by an explicit Interrupt
                 // command (bridge TurnCts) and bridge disposal on app exit.
-                await _bridge.SendAsync(cmd.SessionId, new AgentTurnInput(text, images), CancellationToken.None).ConfigureAwait(false);
+                await _bridge.SendAsync(cmd.SessionId, new AgentTurnInput(text, images), CancellationToken.None, cmd.CmdId).ConfigureAwait(false);
                 break;
             case RelayCommandOp.Interrupt:
                 await _bridge.InterruptAsync(cmd.SessionId, ct).ConfigureAwait(false);

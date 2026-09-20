@@ -44,6 +44,7 @@
             <TextBox Name="PART_ConversationPrompt" Classes="field" AcceptsReturn="True" TextWrapping="Wrap"
                      MinHeight="220" MaxHeight="340" Margin="0,14,0,0" PlaceholderText="填写回复要求"
                      ScrollViewer.VerticalScrollBarVisibility="Auto" />
+            <TextBlock Name="PART_PromptCacheHint" Classes="hint" IsVisible="False" Margin="0,6,0,0" />
             <Button Name="PART_PromptVariables" Content="插入变量" Classes="textlink" HorizontalAlignment="Left" Margin="0,8,0,0">
               <Button.Flyout>
                 <Flyout FlyoutPresenterClasses="molaflyout">

@@ -191,7 +191,14 @@ public sealed partial class MainViewModel : ObservableObject
             {
                 OnPropertyChanged(nameof(IsQuotaChipVisible));
                 OnPropertyChanged(nameof(IsCloudSyncChipVisible));
+                OnPropertyChanged(nameof(IsSpendChipVisible));
                 _ = RefreshQuotaAsync();
+            }
+            if (e.PropertyName is nameof(ChatViewModel.Spend))
+            {
+                OnPropertyChanged(nameof(IsSpendChipVisible));
+                OnPropertyChanged(nameof(SpendChipText));
+                OnPropertyChanged(nameof(SpendChipTooltip));
             }
         };
         _settings.PropertyChanged += (_, e) =>
@@ -222,6 +229,32 @@ public sealed partial class MainViewModel : ObservableObject
 
     public bool IsCloudSyncChipVisible =>
         CloudSyncStatusVisible && Chat.CurrentMode == AppMode.Chat;
+
+    /// <summary>Only where the money is the user's: the official proxy bills in
+    /// credits, which the quota chip already shows and which must not be added
+    /// to a dollar figure.</summary>
+    public bool IsSpendChipVisible =>
+        Chat.Spend.HasSpend && Chat.CurrentMode.IsLocalAgent();
+
+    public string SpendChipText => MessageViewModel.FormatCost(Chat.Spend.CostUsd);
+
+    /// <summary>
+    /// Spelling out the basis is not optional: the total counts retried turns and
+    /// branches the user regenerated away from, so it is legitimately larger than
+    /// adding up the answers still on screen. Without this line it reads as a bug.
+    /// </summary>
+    public string SpendChipTooltip
+    {
+        get
+        {
+            var lines = new List<string> { $"本会话花费 {SpendChipText}" };
+            lines.AddRange(Chat.Spend.ByModel
+                .Take(6)
+                .Select(item => $"{item.Model}　{MessageViewModel.FormatCost(item.CostUsd)}（{item.Turns} 次）"));
+            lines.Add("含重试与未采用的分支");
+            return string.Join("\n", lines);
+        }
+    }
 
     /// <summary>
     /// The override edits the system prompt of the *chat* conversation. The
@@ -615,12 +648,7 @@ public sealed partial class MainViewModel : ObservableObject
     partial void OnIsImageWorkbenchVisibleChanged(bool value) =>
         OnPropertyChanged(nameof(IsSystemPromptButtonVisible));
 
-    private void RefreshActivePromptState()
-    {
+    private void RefreshActivePromptState() =>
         ConversationSystemPromptVisible = Chat.ActiveProvider is not null
             && Chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
-        Chat.ActiveModelSystemPrompt = ConversationSystemPromptVisible
-            ? Settings.GetModelSystemPrompt(Chat.ActiveProvider?.Id, Chat.ActiveModel?.Id)
-            : null;
-    }
 }

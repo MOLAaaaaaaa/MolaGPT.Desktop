@@ -5,6 +5,8 @@ using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Tools.Vision;
+using MolaGPT.Core.Memory;
+using MolaGPT.Core.Models;
 
 namespace MolaGPT.Core.Chat.Tools;
 
@@ -18,6 +20,7 @@ public sealed class ChatToolHost : IChatToolHost
     private readonly BrowserControlTool _browser;
     private readonly IToolApprovalService? _approval;
     private readonly BrowserActivityLog? _browserActivity;
+    private readonly IMemoryToolBackend? _memory;
 
     public ChatToolHost(
         McpClientManager mcp,
@@ -27,8 +30,10 @@ public sealed class ChatToolHost : IChatToolHost
         PythonExecutionTool python,
         BrowserControlTool browser,
         IToolApprovalService? approval = null,
-        BrowserActivityLog? browserActivity = null)
+        BrowserActivityLog? browserActivity = null,
+        IMemoryToolBackend? memory = null)
     {
+        _memory = memory;
         _mcp = mcp;
         _vision = vision;
         _imageAnalysis = imageAnalysis;
@@ -64,6 +69,13 @@ public sealed class ChatToolHost : IChatToolHost
 
         if (options.Browser?.Enabled == true)
             tools.Add(BrowserControlTool.BuildOpenAiToolDefinition(options.Browser));
+
+        // Two switches, two tools: 使用记忆 owns the write side, 回忆对话 owns the
+        // search side. They are independent because searching past chats sends
+        // conversation text to the API service while writing a memory does not.
+        if (_memory is not null && options.Memory) tools.Add(MemoryTools.BuildWriteDefinition());
+        if (_memory is not null && (options.Memory || options.MemoryRecall))
+            tools.Add(MemoryTools.BuildRecallDefinition());
 
         foreach (var server in options.McpServers?.Where(s => s.Enabled) ?? Enumerable.Empty<McpServerOptions>())
         {
@@ -219,10 +231,47 @@ public sealed class ChatToolHost : IChatToolHost
             return result;
         }
 
+        if (toolName is MemoryTools.RecallToolName or MemoryTools.WriteToolName)
+        {
+            // Trimmed against what this turn actually offered, not against what
+            // the model asked for. Models call tools they were never given —
+            // hallucinated, or talked into it by a page they just read — and
+            // 「关掉记忆」 has to mean the write cannot land, not merely that we
+            // kept quiet about the tool.
+            if (_memory is null) return ToolError("Memory is not available.");
+            var allowed = toolName == MemoryTools.WriteToolName
+                ? options.Memory
+                : options.Memory || options.MemoryRecall;
+            if (!allowed) return MemoryTools.Error("本轮未启用记忆工具。");
+
+            return await _memory.ExecuteAsync(
+                toolName,
+                argumentsJson,
+                context.Request.ConversationId,
+                LastUserText(context.Request.Messages),
+                ct).ConfigureAwait(false);
+        }
+
         if (McpToolName.TryDecode(toolName, out var serverSlug, out var toolSlug))
             return await ExecuteMcpAsync(serverSlug, toolSlug, argumentsJson, options, ct).ConfigureAwait(false);
 
         return ToolError($"Unknown tool: {toolName}");
+    }
+
+    /// <summary>
+    /// The turn's own user message, which is the only text a memory quote may
+    /// come from. Taken here rather than trusted from the model: a tool argument
+    /// saying which message it quoted would be the model vouching for itself.
+    /// </summary>
+    private static string? LastUserText(IReadOnlyList<ChatMessage> messages)
+    {
+        for (var i = messages.Count - 1; i >= 0; i--)
+        {
+            if (messages[i].Role != ChatMessage.RoleUser) continue;
+            var text = messages[i].AsText();
+            if (!string.IsNullOrWhiteSpace(text)) return text;
+        }
+        return null;
     }
 
     private async Task<string> ExecuteMcpAsync(

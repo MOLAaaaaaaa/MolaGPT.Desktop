@@ -36,7 +36,7 @@ public abstract record RelayTranscriptEvent;
 public sealed record HistoryResetEvent : RelayTranscriptEvent;
 
 /// <summary>The user's prompt for this turn (optimistic local echo).</summary>
-public sealed record UserPromptEvent(string Text) : RelayTranscriptEvent;
+public sealed record UserPromptEvent(string Text, string? CommandId = null) : RelayTranscriptEvent;
 
 /// <summary>A tool-call lifecycle event, shipped live per tool — the "progress"
 /// feed. Carries the normalized tool event; the phone renders/updates a tool card
@@ -155,4 +155,5 @@ public sealed record RelaySessionMeta(
     /// <summary>Owning desktop bridge machine. Null/empty for legacy metas
     /// written before multi-machine routing.</summary>
     string? MachineId = null,
-    string? MachineName = null);
+    string? MachineName = null,
+    long StateVersion = 0);

@@ -186,11 +186,17 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         var preview = new ToolPreviewTracker();
         var generationSpeed = new GenerationSpeedTracker();
 
+        var activeModel = Models.FirstOrDefault(m => m.Id.Equals(creds.Model, StringComparison.OrdinalIgnoreCase));
+
         // The same window Pi was catalogued with, so the gauge is measured against
         // the very number its auto-compaction is thresholded on.
-        var contextWindow = ModelContextWindows.ResolveOrDefault(
-            creds.Model,
-            Models.FirstOrDefault(m => m.Id.Equals(creds.Model, StringComparison.OrdinalIgnoreCase))?.ContextWindow);
+        var contextWindow = ModelContextWindows.ResolveOrDefault(creds.Model, activeModel?.ContextWindow);
+
+        // Pi always reports a cost, but it is only meaningful when it was given
+        // rates to work with. Deciding here — from our own price record rather
+        // than from whether the number came back as 0 — is what keeps "no price
+        // on file" distinct from "this turn happened to cost nothing".
+        var priced = activeModel?.Pricing is not null;
 
         await foreach (var line in lease.Session
                            .SendTurnAsync(creds.Model, thinkingLevel, userText, images, ct)
@@ -205,6 +211,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                 preview,
                 generationSpeed,
                 contextWindow,
+                priced,
                 ref errorMessage);
             if (chunk is not null) yield return chunk;
         }
@@ -447,6 +454,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         ToolPreviewTracker preview,
         GenerationSpeedTracker generationSpeed,
         int contextWindow,
+        bool priced,
         ref string? errorMessage)
     {
         JsonDocument doc;
@@ -582,7 +590,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                             output,
                             total,
                             cacheRead,
-                            generationSpeed.TokensPerSecond),
+                            generationSpeed.TokensPerSecond,
+                            SumTurnCost(root, priced)),
                         ContextUsage: new ContextUsageDelta(contextTokens, contextWindow));
                 }
 
@@ -1005,6 +1014,42 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
 
     private static int Int(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n)
+            ? n
+            : 0;
+
+    /// <summary>
+    /// The turn's USD cost: the sum over every message Pi produced, because a turn
+    /// that called tools produces several and only their sum is what the turn cost —
+    /// the same reason the token counts above are summed rather than taken from the
+    /// last message.
+    /// </summary>
+    /// <param name="priced">Whether the active model had a price on file. Pi reports
+    /// a cost either way, computed from the zeroes it was registered with, so without
+    /// this flag an unpriced model would read as costing exactly nothing.</param>
+    internal static double? SumTurnCost(JsonElement root, bool priced)
+    {
+        if (!priced) return null;
+        if (!root.TryGetProperty("messages", out var messages) || messages.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var total = 0d;
+        foreach (var message in messages.EnumerateArray())
+        {
+            if (message.ValueKind != JsonValueKind.Object) continue;
+            if (!message.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
+                continue;
+            total += ReadCostTotal(usage);
+        }
+        return total;
+    }
+
+    /// <summary>One message's USD cost, as Pi's <c>calculateCost</c> left it on the
+    /// usage block. Pi already summed its own input / output / cache components into
+    /// <c>total</c>; re-adding them here would double-count.</summary>
+    private static double ReadCostTotal(JsonElement usage) =>
+        usage.TryGetProperty("cost", out var cost) && cost.ValueKind == JsonValueKind.Object
+        && cost.TryGetProperty("total", out var v) && v.ValueKind == JsonValueKind.Number
+        && v.TryGetDouble(out var n)
             ? n
             : 0;
 

@@ -228,7 +228,8 @@ public static class ProviderRestorer
             ThinkingConfig: thinkingConfig,
             CustomBody: CustomParamConverter.ToBodyDict(entry.CustomBody),
             SupportsTemperature: entry.SupportsTemperature,
-            SupportsTopP: entry.SupportsTopP);
+            SupportsTopP: entry.SupportsTopP,
+            Pricing: entry.Pricing);
     }
 
     /// <summary>

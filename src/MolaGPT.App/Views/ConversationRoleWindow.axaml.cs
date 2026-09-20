@@ -51,6 +51,11 @@ public partial class ConversationRoleWindow : MolaContentWindow
         {
             if (PART_PromptSource.SelectedIndex == 0 && !string.IsNullOrWhiteSpace(PART_ConversationPrompt.Text))
                 PART_PromptSource.SelectedIndex = 1;
+
+            // 显示分钟级占位符对前缀缓存的影响。
+            var breaks = SystemPromptInterpolator.BreaksPrefixCache(PART_ConversationPrompt.Text);
+            PART_PromptCacheHint.Text = breaks ? SystemPromptInterpolator.PrefixCacheWarning : null;
+            PART_PromptCacheHint.IsVisible = breaks;
         };
         PART_UseDefaultPrompt.Click += (_, _) =>
         {
@@ -104,8 +109,7 @@ public partial class ConversationRoleWindow : MolaContentWindow
         PART_Avatar.Value = chat.ActivePersona?.Avatar;
         PART_RoleName.Text = chat.ActivePersona?.Name ?? "通用助手";
         PART_ConversationPrompt.Text = chat.ConversationSystemPrompt ?? "";
-        PART_DefaultPrompt.Text = string.IsNullOrWhiteSpace(chat.ActivePersona?.SystemPrompt)
-            ? chat.ActiveModelSystemPrompt ?? "" : chat.ActivePersona.SystemPrompt;
+        PART_DefaultPrompt.Text = chat.ActivePersona?.SystemPrompt ?? "";
         PART_DefaultPromptExpander.IsVisible = !string.IsNullOrWhiteSpace(PART_DefaultPrompt.Text);
         PART_PromptSource.SelectedIndex = string.IsNullOrWhiteSpace(chat.ConversationSystemPrompt) ? 0
             : chat.SystemPromptMode == "append" ? 1 : 2;
@@ -161,7 +165,9 @@ public partial class ConversationRoleWindow : MolaContentWindow
     private void LoadRoleChoices()
     {
         _loadingRoleChoices = true;
-        var choices = new List<RoleIdentityChoice> { new(null, "沿用角色"), new("", "自定义身份") };
+        var choices = new List<RoleIdentityChoice> { new(null, "沿用角色") };
+        if (RoleIdentityChoice.Profile(_chat.RoleLibrary) is { } profile) choices.Add(profile);
+        choices.Add(new("", "自定义身份"));
         choices.AddRange((_chat.RoleLibrary?.Identities ?? []).Select(identity => new RoleIdentityChoice(identity.Id, identity.Name)));
         PART_IdentityChoice.ItemsSource = choices;
         PART_IdentityChoice.SelectedItem = choices.FirstOrDefault(choice => choice.Id == _draft.UserPersonaId);
@@ -177,6 +183,9 @@ public partial class ConversationRoleWindow : MolaContentWindow
         var custom = PART_PromptSource.SelectedIndex > 0;
         PART_ConversationPrompt.IsVisible = custom;
         PART_PromptVariables.IsVisible = custom;
+        // 默认提示词模式下隐藏编辑器提示。
+        PART_PromptCacheHint.IsVisible = custom
+            && SystemPromptInterpolator.BreaksPrefixCache(PART_ConversationPrompt.Text);
         PART_ConversationPrompt.PlaceholderText = PART_PromptSource.SelectedIndex == 1 ? "填写补充要求" : "填写提示词";
         PART_DefaultPromptExpander.IsExpanded = !custom;
     }

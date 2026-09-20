@@ -5,6 +5,7 @@ using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Tools.Vision;
+using MolaGPT.Core.Memory;
 
 namespace MolaGPT.Core.Chat.Tools;
 
@@ -109,6 +110,12 @@ public static class ToolDeltaBuilder
                 return ReadString(root, "description")
                        ?? FirstNonEmptyLine(ReadString(root, "code"))
                        ?? "执行 Python";
+            if (name == MemoryTools.RecallToolName)
+                return ReadString(root, "query") ?? "等待检索内容";
+            if (name == MemoryTools.WriteToolName)
+                return ReadString(root, "text")
+                       ?? ReadString(root, "target")
+                       ?? "维护长期记忆";
             if (McpToolName.TryDecode(name, out var server, out var tool))
                 return $"{server} / {tool}";
         }
@@ -161,6 +168,10 @@ public static class ToolDeltaBuilder
 
             return "本地 Python 执行环境";
         }
+        if (name == MemoryTools.RecallToolName)
+            return "检索本机记忆和历史对话";
+        if (name == MemoryTools.WriteToolName)
+            return "维护本机长期记忆";
         if (McpToolName.TryDecode(name, out var server, out _))
             return $"MCP: {server}";
         return null;
@@ -288,6 +299,8 @@ public static class ToolDeltaBuilder
         VisionProxyTool.ToolName => "查看图片",
         ImageAnalysisTool.ToolName => "图片分析",
         ImageGenerationTool.ToolName => "生成图片",
+        MemoryTools.RecallToolName => "检索记忆",
+        MemoryTools.WriteToolName => "更新记忆",
         _ => "调用工具"
     };
 

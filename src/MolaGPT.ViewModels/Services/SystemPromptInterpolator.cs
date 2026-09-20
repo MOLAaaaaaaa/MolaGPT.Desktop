@@ -50,6 +50,25 @@ public static partial class SystemPromptInterpolator
         });
     }
 
+    /// <summary>提示词编辑器显示的前缀缓存提示。</summary>
+    public const string PrefixCacheWarning =
+        "使用 {{time}} 或 {{datetime}} 会使前缀缓存每分钟失效，可能增加输入成本；仅需日期时请使用 {{date}}。";
+
+    /// <summary>检测模板是否包含分钟级占位符。</summary>
+    public static bool BreaksPrefixCache(string? template)
+    {
+        if (string.IsNullOrEmpty(template)) return false;
+        if (template.IndexOf("{{", StringComparison.Ordinal) < 0) return false;
+        foreach (Match match in PlaceholderRegex().Matches(template))
+        {
+            var name = match.Groups["name"].Value;
+            if (name.Equals("time", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("datetime", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
     /// <summary>
     /// Combine a persona prompt and a conversation-level prompt using the
     /// configured mode. Returns null when both pieces are empty.

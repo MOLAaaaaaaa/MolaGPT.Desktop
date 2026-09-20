@@ -7,6 +7,7 @@
         xmlns:agents="clr-namespace:MolaGPT.ViewModels.Agents;assembly=MolaGPT.ViewModels"
         xmlns:dto="clr-namespace:MolaGPT.Core.Chat.Agents;assembly=MolaGPT.Core"
         xmlns:relay="clr-namespace:MolaGPT.Core.Chat.Agents.Relay;assembly=MolaGPT.Core"
+        xmlns:repo="clr-namespace:MolaGPT.Storage.Repositories;assembly=MolaGPT.Storage"
         x:Class="MolaGPT.App.Views.SettingsWindow"
         x:DataType="vm:SettingsViewModel"
         Title="设置 — MolaGPT"
@@ -62,6 +63,37 @@
         </Grid>
       </Border>
     </DataTemplate>
+    <!-- 技能行和模型服务行是同一种东西：一条摊在页面上的记录，勾选框管启用，
+         右边两个图标管「看文件」和「删掉」。所以借同一套卡片度量，不再另起
+         一个左右分栏的外壳把它们装起来。 -->
+    <DataTemplate x:Key="SkillCardTemplate" x:DataType="vm:SkillItemViewModel">
+      <Border Classes="providercard" Padding="14,12">
+        <Grid ColumnDefinitions="Auto,*,Auto">
+          <!-- Fluent 的 CheckBox 自带 32 的 MinHeight，勾选框在里面垂直居中，
+               贴着标题行放就会比标题矮半行。 -->
+          <CheckBox Grid.Column="0" IsChecked="{Binding Enabled, Mode=TwoWay}"
+                    MinHeight="0" VerticalAlignment="Top" Margin="0,0,12,0"
+                    ToolTip.Tip="启用此技能" />
+          <StackPanel Grid.Column="1" Spacing="3">
+            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+            <TextBlock Text="{Binding Description}" TextWrapping="Wrap"
+                       FontSize="{DynamicResource Font.Size.XSmall}"
+                       Foreground="{DynamicResource Brush.Text.Muted}" />
+          </StackPanel>
+          <StackPanel Grid.Column="2" Orientation="Horizontal"
+                      VerticalAlignment="Center" Margin="10,0,0,0">
+            <Button Classes="inlineaction" Click="OnViewSkillMd" Tag="{Binding}"
+                    ToolTip.Tip="{Binding DirectoryPath}">
+              <TextBlock Classes="icon" Text="&#xE8B7;" FontSize="13" />
+            </Button>
+            <Button Classes="inlineaction" Click="OnDeleteSkill" Tag="{Binding}"
+                    IsVisible="{Binding !IsBuiltin}" ToolTip.Tip="删除">
+              <TextBlock Classes="icon" Text="&#xE74D;" FontSize="13" />
+            </Button>
+          </StackPanel>
+        </Grid>
+      </Border>
+    </DataTemplate>
   </Window.Resources>
 
   <Grid>
@@ -78,12 +110,21 @@
               <ListBox Name="PART_Nav"
                        Background="Transparent"
                        BorderThickness="0"
-                       Margin="10,8,10,16"
+                       Margin="10,0,10,14"
                        Padding="0"
                        SelectedIndex="1">
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="通用" />
                 <ListBoxItem Content="账号与同步" />
                 <ListBoxItem Content="界面与偏好" />
+                <ListBoxItem Name="PART_MemoryNav">
+                  <StackPanel Orientation="Horizontal" Spacing="7">
+                    <TextBlock Text="本地记忆" VerticalAlignment="Center" />
+                    <!-- 自动整理开着但没选模型：它不会运行，这个点是唯一的提示。
+                         持续状态属于设置页行内，不发通知横幅。 -->
+                    <Ellipse Width="7" Height="7" Fill="{DynamicResource Brush.Error}"
+                             VerticalAlignment="Center" IsVisible="{Binding MemoryNeedsModel}" />
+                  </StackPanel>
+                </ListBoxItem>
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="模型" />
                 <ListBoxItem Name="PART_ProvidersNav" Content="模型服务" />
                 <ListBoxItem Name="PART_PersonasNav" Content="角色" />
@@ -264,6 +305,17 @@
                                     IsChecked="{Binding StreamFadeEnabled, Mode=TwoWay}"
                                     VerticalAlignment="Center" />
                     </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="状态提示点" />
+                        <TextBlock Classes="hint" Text="在部分尚未配置完成的设置项旁显示提示点。" />
+                      </StackPanel>
+                      <ToggleButton Grid.Column="1" Name="PART_StatusDots"
+                                    Classes="settingtoggle"
+                                    IsChecked="{Binding ShowStatusDots, Mode=TwoWay}"
+                                    VerticalAlignment="Center" />
+                    </Grid>
                   </StackPanel>
                 </Border>
 
@@ -327,12 +379,30 @@
                     </StackPanel>
                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"
                                 VerticalAlignment="Top">
+                      <Button Name="PART_FetchAllPricing" Classes="outline"
+                              Content="获取模型价格" Padding="14,8"
+                              ToolTip.Tip="从 models.dev 为所有对话服务的模型获取单价" />
                       <Button Name="PART_AddProvider" Classes="pillprimary"
                               Content="+ 对话服务" Padding="14,8" />
                       <Button Name="PART_AddImageProvider" Classes="outline"
                               Content="+ 图像服务" Padding="14,8" />
                     </StackPanel>
                   </Grid>
+
+                  <Border Name="PART_PricingResult" Classes="settingscard" Padding="14"
+                          Margin="0,12,0,0" IsVisible="False">
+                    <Grid ColumnDefinitions="*,Auto,Auto">
+                      <TextBlock Grid.Column="0" Name="PART_PricingResultText" Classes="hint"
+                                 TextWrapping="Wrap" VerticalAlignment="Center" />
+                      <Button Grid.Column="1" Name="PART_ResolvePricingConflicts" Classes="outline"
+                              Content="逐个确认" Padding="12,6" Margin="10,0,0,0"
+                              IsVisible="False" VerticalAlignment="Center" />
+                      <Button Grid.Column="2" Name="PART_ClosePricingResult" Classes="inlineaction"
+                              Margin="6,0,0,0" ToolTip.Tip="关闭" VerticalAlignment="Center">
+                        <TextBlock Classes="icon" Text="&#xE711;" FontSize="11" />
+                      </Button>
+                    </Grid>
+                  </Border>
 
                   <TextBlock Classes="section" Text="对话服务" Margin="2,4,2,8" />
                   <ItemsControl Name="PART_ChatProviderList"
@@ -438,7 +508,7 @@
                             </Button>
                           </Grid>
                         </Border>
-                        <TextBlock Classes="hint" Text="保存在本机凭据库，不写进对话记录，也不上传。" />
+                        <TextBlock Classes="hint" Text="API Key 将保存在本机加密凭据库中。" />
                       </StackPanel>
 
                       <Expander Header="自定义请求头（高级）">
@@ -564,17 +634,15 @@
                               <WrapPanel>
                                 <CheckBox Content="视觉" IsChecked="{Binding Vision, Mode=TwoWay}" Margin="0,0,14,6" />
                                 <CheckBox Content="工具调用" IsChecked="{Binding Tools, Mode=TwoWay}" Margin="0,0,14,6" />
-                                <CheckBox Content="Temperature" IsChecked="{Binding SupportsTemperature, Mode=TwoWay}" Margin="0,0,14,6" />
-                                <CheckBox Content="Top-p" IsChecked="{Binding SupportsTopP, Mode=TwoWay}" Margin="0,0,14,6" />
                                 <CheckBox Content="推理" IsChecked="{Binding Thinking, Mode=TwoWay}" Margin="0,0,14,6" />
                                 <CheckBox Content="推理强度" IsChecked="{Binding ReasoningEffort, Mode=TwoWay}" Margin="0,0,14,6" />
                                 <CheckBox Content="图像编辑" IsChecked="{Binding ImageEdit, Mode=TwoWay}"
                                           IsVisible="{Binding IsImageProvider}" Margin="0,0,14,6" />
                               </WrapPanel>
-                              <Expander Header="推理与高级参数">
+                              <Expander Header="推理与高级参数配置">
                                 <StackPanel Spacing="10" Margin="0,10,0,0">
                                   <StackPanel IsEnabled="{Binding Thinking}">
-                                    <TextBlock Classes="label" Text="思考参数格式" />
+                                    <TextBlock Classes="label" Text="推理参数格式" />
                                     <ComboBox Classes="settingsinput" SelectedIndex="{Binding ThinkingKindIndex, Mode=TwoWay}">
                                       <ComboBoxItem Content="OpenAI Effort" />
                                       <ComboBoxItem Content="Anthropic Adaptive" />
@@ -585,19 +653,69 @@
                                       <ComboBoxItem Content="Qwen Budget" />
                                     </ComboBox>
                                   </StackPanel>
-                                  <Grid ColumnDefinitions="*,10,*" IsEnabled="{Binding Thinking}">
+                                  <Grid ColumnDefinitions="*,10,*" IsEnabled="{Binding Thinking}"
+                                        IsVisible="{Binding IsEffortOptionsVisible}">
                                     <StackPanel Grid.Column="0">
                                       <TextBlock Classes="label" Text="默认强度" />
-                                      <TextBox Classes="settingsinput" Text="{Binding DefaultEffort, Mode=TwoWay}"
-                                               PlaceholderText="medium" />
+                                      <ComboBox Classes="settingsinput" ItemsSource="{Binding SelectedLevelNames}"
+                                               SelectedItem="{Binding DefaultEffort, Mode=TwoWay}"
+                                               HorizontalAlignment="Stretch" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="2">
                                       <TextBlock Classes="label" Text="强度档位" />
-                                      <TextBox Classes="settingsinput" Text="{Binding EffortLevelsText, Mode=TwoWay}"
-                                               PlaceholderText="low, medium, high" />
+                                      <ItemsControl ItemsSource="{Binding EffortLevelOptions}">
+                                        <ItemsControl.ItemsPanel>
+                                          <ItemsPanelTemplate>
+                                            <WrapPanel />
+                                          </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                          <DataTemplate x:DataType="v:EffortLevelItem">
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,6,6">
+                                              <ToggleButton Classes="toolchip" Content="{Binding Name}"
+                                                           IsChecked="{Binding IsSelected, Mode=TwoWay}" />
+                                              <Button Classes="inlineaction" Margin="2,0,0,0"
+                                                     IsVisible="{Binding IsCustom}"
+                                                     Click="OnRemoveCustomEffortLevel"
+                                                     ToolTip.Tip="移除该档位">
+                                                <TextBlock Classes="icon" Text="&#xE711;" FontSize="10" />
+                                              </Button>
+                                            </StackPanel>
+                                          </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                      </ItemsControl>
+                                      <Grid ColumnDefinitions="*,Auto">
+                                        <TextBox Grid.Column="0" Classes="settingsinput"
+                                                Text="{Binding CustomEffortInput, Mode=TwoWay}"
+                                                PlaceholderText="自定义强度名称"
+                                                Margin="0,0,6,0"
+                                                KeyDown="OnCustomEffortKeyDown" />
+                                        <Button Grid.Column="1" Classes="textlink" Content="+ 添加"
+                                               Click="OnAddCustomEffortLevel"
+                                               VerticalAlignment="Center" />
+                                      </Grid>
                                     </StackPanel>
                                   </Grid>
-                                  <Grid ColumnDefinitions="*,8,*,8,*" IsEnabled="{Binding Thinking}">
+                                  <StackPanel Orientation="Horizontal" Spacing="6" IsEnabled="{Binding Thinking}"
+                                             IsVisible="{Binding IsBudgetOptionsVisible}">
+                                    <TextBlock Classes="label" Text="预算预设" VerticalAlignment="Center" Margin="0" />
+                                    <ItemsControl ItemsSource="{Binding BudgetPresetOptions}">
+                                      <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                          <StackPanel Orientation="Horizontal" Spacing="6" />
+                                        </ItemsPanelTemplate>
+                                      </ItemsControl.ItemsPanel>
+                                      <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="v:BudgetPreset">
+                                          <Button Classes="toolchip" Content="{Binding Name}"
+                                                 ToolTip.Tip="{Binding Description}"
+                                                 Click="OnApplyBudgetPreset" />
+                                        </DataTemplate>
+                                      </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                  </StackPanel>
+                                  <Grid ColumnDefinitions="*,8,*,8,*" IsEnabled="{Binding Thinking}"
+                                        IsVisible="{Binding IsBudgetOptionsVisible}">
                                     <StackPanel Grid.Column="0">
                                       <TextBlock Classes="label" Text="最小 Budget" />
                                       <TextBox Classes="settingsinput" Text="{Binding BudgetMinText, Mode=TwoWay}" />
@@ -612,10 +730,34 @@
                                     </StackPanel>
                                   </Grid>
                                   <StackPanel>
-                                    <TextBlock Classes="label" Text="系统提示词（可选）" />
-                                    <TextBox Classes="settingsinput" Text="{Binding SystemPrompt, Mode=TwoWay}"
-                                             AcceptsReturn="True" TextWrapping="Wrap" MinHeight="72"
-                                             VerticalContentAlignment="Top" />
+                                    <TextBlock Classes="label" Text="生成参数" />
+                                    <WrapPanel>
+                                      <CheckBox Content="Temperature" IsChecked="{Binding SupportsTemperature, Mode=TwoWay}" Margin="0,0,14,6" />
+                                      <CheckBox Content="Top-p" IsChecked="{Binding SupportsTopP, Mode=TwoWay}" Margin="0,0,14,6" />
+                                    </WrapPanel>
+                                    <TextBlock Classes="hint" Text="勾选后即在请求中使用该参数，可在角色管理中配置。" />
+                                  </StackPanel>
+                                  <StackPanel>
+                                    <TextBlock Classes="label" Text="价格（USD / 1M tokens）" />
+                                    <Grid ColumnDefinitions="*,8,*,8,*,8,*">
+                                      <StackPanel Grid.Column="0">
+                                        <TextBlock Classes="hint" Text="输入" Margin="0,0,0,4" />
+                                        <TextBox Classes="settingsinput" Text="{Binding PriceInputText, Mode=TwoWay}" />
+                                      </StackPanel>
+                                      <StackPanel Grid.Column="2">
+                                        <TextBlock Classes="hint" Text="输出" Margin="0,0,0,4" />
+                                        <TextBox Classes="settingsinput" Text="{Binding PriceOutputText, Mode=TwoWay}" />
+                                      </StackPanel>
+                                      <StackPanel Grid.Column="4">
+                                        <TextBlock Classes="hint" Text="缓存读" Margin="0,0,0,4" />
+                                        <TextBox Classes="settingsinput" Text="{Binding PriceCacheReadText, Mode=TwoWay}" />
+                                      </StackPanel>
+                                      <StackPanel Grid.Column="6">
+                                        <TextBlock Classes="hint" Text="缓存写" Margin="0,0,0,4" />
+                                        <TextBox Classes="settingsinput" Text="{Binding PriceCacheWriteText, Mode=TwoWay}" />
+                                      </StackPanel>
+                                    </Grid>
+                                    <TextBlock Classes="hint" Text="{Binding PriceSourceLabel}" />
                                   </StackPanel>
                                   <StackPanel>
                                     <Grid ColumnDefinitions="*,Auto">
@@ -657,7 +799,7 @@
                   </ItemsControl>
 
                   <TextBlock Name="PART_NoProviderModels" Classes="hint"
-                             Text="至少添加一个模型，这个服务才会出现在模型选择器里。" />
+                             Text="至少添加一个模型。" />
                   <TextBlock Name="PART_ProviderStatus" Classes="hint" IsVisible="False"
                              Margin="0,12,0,0" />
                   <TextBlock Name="PART_ProviderError" Classes="hint" IsVisible="False"
@@ -808,7 +950,8 @@
                               </StackPanel>
                               <Expander Header="系统提示词" Classes="settingssection" Margin="0,14,0,0" IsExpanded="{Binding !IsAtmosphereMode}">
                                 <StackPanel Margin="0,10,0,0">
-                                  <TextBox Name="PART_PersonaPrompt" Classes="field" Text="{Binding SystemPrompt, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="176" MaxHeight="300" LostFocus="OnPersonaFormChanged" />
+                                  <TextBox Name="PART_PersonaPrompt" Classes="field" Text="{Binding SystemPrompt, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="176" MaxHeight="300" LostFocus="OnPersonaFormChanged" TextChanged="OnPersonaPromptTextChanged" />
+                                  <TextBlock Name="PART_PersonaPromptCacheHint" Classes="hint" IsVisible="False" Margin="0,6,0,0" />
                                   <Button Name="PART_PersonaVariables" Content="插入变量" Classes="textlink" HorizontalAlignment="Left" Margin="0,8,0,0">
                                     <Button.Flyout>
                                       <Flyout FlyoutPresenterClasses="molaflyout">
@@ -1004,8 +1147,8 @@
                                 </StackPanel>
                               </Expander>
                               <Expander Name="PART_PersonaSamplingExpander" Classes="settingssection" Header="生成参数" Margin="0,16,0,0">
-                                <StackPanel Spacing="8" Margin="0,10,0,0">
-                                  <TextBlock Classes="hint" Text="留空沿用模型设置" Margin="0,0,0,4" />
+                                <StackPanel Name="PART_PersonaSampling" Spacing="8" Margin="0,10,0,0">
+                                  <TextBlock Classes="hint" Text="留空则不发送该参数，由模型使用默认值。" Margin="0,0,0,4" />
                                   <Grid ColumnDefinitions="*,14,*">
                                     <StackPanel>
                                       <TextBlock Classes="label" Text="Temperature" Margin="0,0,0,6" />
@@ -1937,80 +2080,392 @@
               </StackPanel>
 
               <StackPanel Name="PAGE_Skills" IsVisible="False">
-                <TextBlock Classes="pagetitle" Text="技能" />
-                <TextBlock Classes="pagesubtitle" Text="管理内置与自定义技能，对话中按需使用。" />
+                <Grid ColumnDefinitions="*,Auto">
+                  <StackPanel Grid.Column="0">
+                    <TextBlock Classes="pagetitle" Text="技能" />
+                    <TextBlock Classes="pagesubtitle"
+                               Text="管理模型可调用的技能。" />
+                  </StackPanel>
+                  <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"
+                              VerticalAlignment="Top">
+                    <Button Classes="inlineaction" Click="OnRefreshSkills" Height="36"
+                            ToolTip.Tip="刷新技能列表">
+                      <TextBlock Classes="icon" Text="&#xE72C;" FontSize="14" />
+                    </Button>
+                    <Button Classes="outline" Content="打开技能目录" Padding="14,8"
+                            Click="OnOpenSkillsDirectory" />
+                    <Button Name="PART_ImportSkill" Classes="pillprimary" Content="导入技能"
+                            Padding="14,8" Click="OnImportSkill" />
+                  </StackPanel>
+                </Grid>
 
-                <Grid Name="PART_SkillsRoot" Height="530" ColumnDefinitions="300,*">
-                  <Border Grid.Column="0" Classes="settingscard" Padding="0" Margin="0,0,12,0">
-                    <Grid RowDefinitions="Auto,*,Auto">
-                      <TextBlock Grid.Row="0" Classes="hint" Margin="14,14,14,8" TextWrapping="Wrap"
-                                 Text="技能让模型用本地 Python 完成结构化任务（需开启 Python 工具）。" />
-                      <ListBox Grid.Row="1" Name="PART_SkillsList"
-                               Background="Transparent" BorderThickness="0" Padding="8"
-                               SelectionChanged="OnSkillSelectionChanged">
-                        <ListBox.ItemTemplate>
-                          <DataTemplate x:DataType="vm:SkillItemViewModel">
-                            <Grid ColumnDefinitions="Auto,*" Margin="4,6">
-                              <CheckBox Grid.Column="0" IsChecked="{Binding Enabled, Mode=TwoWay}"
-                                        VerticalAlignment="Center" Margin="0,0,10,0" />
-                              <StackPanel Grid.Column="1">
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                  <TextBlock Classes="rowtitle" Text="{Binding Name}" />
-                                  <Border Classes="countpill" VerticalAlignment="Center">
-                                    <TextBlock Classes="hint" Margin="0" Text="{Binding SourceLabel}" />
-                                  </Border>
-                                </StackPanel>
-                                <TextBlock Classes="hint" Text="{Binding Description}"
-                                           TextWrapping="Wrap" MaxHeight="44" />
+                <TextBlock Name="PART_SkillStatus" Classes="hint" Margin="2,0,2,14"
+                           IsVisible="False" TextWrapping="Wrap" />
+
+                <TextBlock Classes="section" Text="内置技能" Margin="2,4,2,8" />
+                <ItemsControl Name="PART_BuiltinSkills"
+                              ItemTemplate="{StaticResource SkillCardTemplate}" />
+                <Border Name="PART_NoBuiltinSkills" Classes="emptystate">
+                  <TextBlock Classes="hint" Text="暂无内置技能。"
+                             HorizontalAlignment="Center" />
+                </Border>
+
+                <TextBlock Classes="section" Text="自定义技能" />
+                <ItemsControl Name="PART_UserSkills"
+                              ItemTemplate="{StaticResource SkillCardTemplate}" />
+                <Border Name="PART_NoUserSkills" Classes="emptystate">
+                  <TextBlock Classes="hint" HorizontalAlignment="Center" TextAlignment="Center"
+                             Text="暂无自定义技能。&#x000A;导入包含 SKILL.md 的 .zip，或从技能目录加载。" />
+                </Border>
+              </StackPanel>
+
+              <!-- 记忆。DataContext is the window's SettingsViewModel for the
+                   switches; the entry list binds to PART_MemoryBody's own
+                   MemoryPageViewModel, set in code-behind. -->
+              <StackPanel Name="PAGE_Memory" IsVisible="False">
+                <StackPanel Name="PART_MemoryBody" x:DataType="vm:MemoryPageViewModel">
+                  <StackPanel Name="PART_MemoryOverview" IsVisible="{Binding IsOverview}">
+                    <!-- 页面标题 + 右上角操作，抄 PAGE_Providers 的骨架。两个按钮原先
+                         吊在「记忆主题」下面自成一行，于是标题、按钮、分组名三层挤在
+                         一起互相打架。 -->
+                    <Grid ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0">
+                        <TextBlock Classes="pagetitle" Text="记忆" />
+                        <TextBlock Classes="pagesubtitle"
+                                   Text="记忆将从对话中学习用户偏好，让后续回复更贴合用户。MolaGPT Chat 对话不参与本地记忆。" />
+                      </StackPanel>
+                      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Top">
+                        <Button Classes="outline" Content="立即整理" Padding="14,8"
+                                Click="OnMemoryConsolidate" IsEnabled="{Binding !IsWriteLocked}" />
+                        <Button Name="PART_MemoryNewTopic" Classes="pillprimary" Content="+ 主题" Padding="14,8"
+                                Click="OnMemoryNewTopic" IsEnabled="{Binding !IsWriteLocked}" />
+                      </StackPanel>
+                    </Grid>
+                    <Border Name="PART_MemoryMasterSwitch" Classes="settingscard" Margin="0,0,0,20">
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                          <TextBlock Classes="rowtitle" Text="启用本地记忆" />
+                          <TextBlock Classes="hint" Text="关闭后后续将不会记录记忆数据。" />
+                        </StackPanel>
+                        <ToggleButton Name="PART_MemoryMasterToggle" Grid.Column="1" Classes="settingtoggle"
+                                      IsChecked="{Binding #PAGE_Memory.DataContext.MemoryEnabled, Mode=TwoWay}"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+                    </Border>
+                    <!-- 个人资料。The one part of memory the user declares rather
+                         than the model learns, so it sits above the learned
+                         topics and is never in the 待确认 flow. 称呼 is also what
+                         氛围模式 的「沿用个人资料」reads. -->
+                    <Border Name="PART_MemoryConsolidating" Classes="settingscard" Margin="0,0,0,18"
+                            IsVisible="{Binding IsConsolidating}">
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto" ColumnSpacing="22">
+                        <StackPanel Spacing="4">
+                          <TextBlock Classes="rowtitle" Text="正在整理记忆" />
+                          <TextBlock Classes="hint" Text="整理完成后将通过通知提示您。" />
+                        </StackPanel>
+                        <ProgressBar Grid.Column="1" IsIndeterminate="True" Width="120" MinWidth="0" Height="4"
+                                     ClipToBounds="True" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                      </Grid>
+                    </Border>
+
+                    <TextBlock Classes="section" Text="个人资料" Margin="12,22,0,10" />
+                    <Border Classes="settingscard">
+                      <StackPanel>
+                        <Grid Classes="settingrow" ColumnDefinitions="220,*">
+                          <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" Spacing="7">
+                              <TextBlock Classes="rowtitle" Text="称呼" />
+                              <!-- 同 整理模型 那一颗：这一格空着，「沿用个人资料」就没东西可用。 -->
+                              <Ellipse Width="7" Height="7" Fill="{DynamicResource Brush.Error}"
+                                       VerticalAlignment="Center" IsVisible="{Binding ProfileNeedsName}" />
+                            </StackPanel>
+                            <TextBlock Classes="hint" Text="模型如何称呼你；可在氛围模式中使用该称呼。" />
+                          </StackPanel>
+                          <TextBox Grid.Column="1" Name="PART_MemoryProfileName" Classes="field" MaxLength="40"
+                                   VerticalAlignment="Center" PlaceholderText="未填写"
+                                   Text="{Binding ProfileName, Mode=TwoWay}" LostFocus="OnMemoryProfileCommit" />
+                        </Grid>
+                        <Border Classes="divider" />
+                        <Grid Classes="settingrow" ColumnDefinitions="220,*">
+                          <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                            <TextBlock Classes="rowtitle" Text="职业" />
+                            <TextBlock Classes="hint" Text="用于对话模式中。" />
+                          </StackPanel>
+                          <TextBox Grid.Column="1" Classes="field" MaxLength="60" VerticalAlignment="Center"
+                                   PlaceholderText="未填写"
+                                   Text="{Binding ProfileOccupation, Mode=TwoWay}" LostFocus="OnMemoryProfileCommit" />
+                        </Grid>
+                        <Border Classes="divider" />
+                        <Grid Classes="settingrow" ColumnDefinitions="220,*">
+                          <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                            <TextBlock Classes="rowtitle" Text="所在地" />
+                            <TextBlock Classes="hint" Text="留空则可能由模型自主判断。" />
+                          </StackPanel>
+                          <TextBox Grid.Column="1" Classes="field" MaxLength="60" VerticalAlignment="Center"
+                                   PlaceholderText="未填写"
+                                   Text="{Binding ProfileLocation, Mode=TwoWay}" LostFocus="OnMemoryProfileCommit" />
+                        </Grid>
+                        <Border Classes="divider" />
+                        <Grid Classes="settingrow" ColumnDefinitions="220,*">
+                          <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                            <TextBlock Classes="rowtitle" Text="回复语言" />
+                            <TextBlock Classes="hint" Text="留空则跟随系统。" />
+                          </StackPanel>
+                          <TextBox Grid.Column="1" Classes="field" MaxLength="40" VerticalAlignment="Center"
+                                   PlaceholderText="跟随系统"
+                                   Text="{Binding ProfileLanguage, Mode=TwoWay}" LostFocus="OnMemoryProfileCommit" />
+                        </Grid>
+                      </StackPanel>
+                    </Border>
+
+                    <!-- 分组名就是这一段唯一的标题层。原先「记忆主题」和「关于你」用的是
+                         同一个 section 样式、相隔十来个像素，读起来是两个平级标题在打架;
+                         页面标题已经写着「记忆」，中间那一层是多余的。 -->
+                    <ItemsControl Name="PART_MemoryGroups" ItemsSource="{Binding Groups}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:LocalMemoryGroupRow">
+                          <StackPanel>
+                            <TextBlock Classes="section" Text="{Binding Name}" Margin="12,22,0,10" />
+                            <ItemsControl ItemsSource="{Binding Topics}">
+                              <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:LocalMemoryTopicRow">
+                                  <StackPanel>
+                                    <!-- 分隔线在行的上面而不是下面：最后一行下面不再拖一条
+                                         悬空的线，分组之间也就不会出现双线。 -->
+                                    <Border Classes="divider" />
+                                    <Button Classes="textlink" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                                            Padding="12,15" Click="OnMemoryTopicOpen">
+                                      <Grid ColumnDefinitions="1.2*,2*,110" ColumnSpacing="18">
+                                        <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Classes="hint" Text="{Binding Summary}" TextWrapping="NoWrap"
+                                                   TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="2" Classes="hint" Text="{Binding UpdatedLabel}" VerticalAlignment="Center" />
+                                      </Grid>
+                                    </Button>
+                                  </StackPanel>
+                                </DataTemplate>
+                              </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                          </StackPanel>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Border Classes="emptystate" IsVisible="{Binding IsEmpty}">
+                      <TextBlock Classes="hint" Text="暂未产生记忆" HorizontalAlignment="Center" />
+                    </Border>
+                                      <StackPanel IsVisible="{Binding HasCandidates}">
+                    <TextBlock Classes="section" Text="待确认" Margin="12,22,0,10" />
+                    <ItemsControl ItemsSource="{Binding Candidates}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="repo:LocalMemoryCandidateRow">
+                          <Border Classes="settingscard" Margin="0,0,0,8">
+                            <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                              <StackPanel Grid.Column="0" Margin="0,0,14,0" Spacing="4">
+                                <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                                <TextBlock Classes="hint" Text="{Binding Quote}" TextWrapping="Wrap" />
+                              </StackPanel>
+                              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12"
+                                          VerticalAlignment="Center">
+                                <Button Classes="textlink" Content="确认" Click="OnMemoryCandidateAccept"
+                                        IsEnabled="{Binding !#PART_MemoryBody.DataContext.IsWriteLocked}" />
+                                <Button Classes="textlink" Content="忽略" Click="OnMemoryCandidateIgnore"
+                                        IsEnabled="{Binding !#PART_MemoryBody.DataContext.IsWriteLocked}" />
+                              </StackPanel>
+                            </Grid>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </StackPanel>
+
+
+                    <Expander Header="文件与索引" HorizontalAlignment="Stretch" Margin="0,16,0,0">
+                                        <Border Classes="settingscard">
+                    <StackPanel>
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                          <TextBlock Classes="rowtitle" Text="记忆文件夹" />
+                          <TextBlock Classes="hint" Text="{Binding MemoryFolder}" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Classes="outline" Content="打开" Padding="12,6"
+                                Click="OnMemoryOpenFolder" VerticalAlignment="Center" />
+                      </Grid>
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                          <TextBlock Classes="rowtitle" Text="历史对话索引" />
+                          <TextBlock Classes="hint" Text="用于检索历史对话，删除后可重新建立，不影响记忆内容。" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Classes="outline" Content="重建" Padding="12,6"
+                                Click="OnMemoryRebuildIndex" IsEnabled="{Binding !IsWriteLocked}"
+                                VerticalAlignment="Center" />
+                      </Grid>
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                          <TextBlock Classes="rowtitle" Text="清除全部记忆" />
+                          <TextBlock Classes="hint" Text="删除记忆文件和待确认内容，历史消息不会再次用于整理。" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Classes="outline" Content="清除" Padding="12,6"
+                                Foreground="{DynamicResource Brush.Error}"
+                                Click="OnMemoryClearAll" IsEnabled="{Binding !IsWriteLocked}" VerticalAlignment="Center" />
+                      </Grid>
+                    </StackPanel>
+                  </Border>
+
+                    </Expander>
+                  </StackPanel>
+
+                  <StackPanel Name="PART_MemoryDetail" IsVisible="{Binding IsDetailVisible}">
+                    <Button Name="PART_MemoryBack" Classes="textlink" Content="‹ 记忆" Click="OnMemoryTopicBack"
+                            HorizontalAlignment="Left" Margin="0,0,0,24" />
+                    <StackPanel IsVisible="{Binding !IsEditingTopic}">
+                      <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,24">
+                        <TextBlock Classes="pagetitle" Text="{Binding SelectedTopic.Title}" Margin="0" />
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                          <Button Name="PART_MemoryEditTopic" Classes="textlink" Content="编辑" Click="OnMemoryTopicEdit"
+                                  IsEnabled="{Binding !IsWriteLocked}" />
+                          <Button Classes="outline" Content="删除主题" Click="OnMemoryTopicDelete"
+                                  IsEnabled="{Binding !IsWriteLocked}" />
+                        </StackPanel>
+                      </Grid>
+                      <TextBlock Classes="hint" Text="最近更新" />
+                      <TextBlock Text="{Binding SelectedTopic.UpdatedLabel}" Margin="0,6,0,22" />
+                      <TextBlock Classes="hint" Text="摘要" />
+                      <TextBlock Text="{Binding SelectedTopic.Summary}" TextWrapping="Wrap" Margin="0,6,0,22" />
+                      <TextBlock Classes="hint" Text="详细记录" Margin="0,0,0,10" />
+                      <ItemsControl Name="PART_MemoryEntries" ItemsSource="{Binding SelectedTopic.Entries}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="vm:LocalMemoryEntryRow">
+                            <Grid ColumnDefinitions="16,*,Auto" Margin="0,0,0,12">
+                              <TextBlock Text="•" Margin="0,2,0,0" />
+                              <TextBlock Grid.Column="1" Text="{Binding Text}" TextWrapping="Wrap" Margin="0,0,12,0"
+                                         IsVisible="{Binding !IsEditing}" />
+                              <TextBox Grid.Column="1" Classes="field" Text="{Binding Text, Mode=TwoWay}" TextWrapping="Wrap"
+                                       AcceptsReturn="False" MaxLength="300" Margin="0,0,12,0" IsVisible="{Binding IsEditing}" />
+                              <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="10" VerticalAlignment="Top">
+                                <Button Classes="textlink" Content="编辑" Click="OnMemoryEntryEdit" IsVisible="{Binding !IsEditing}"
+                                        IsEnabled="{Binding !#PART_MemoryBody.DataContext.IsWriteLocked}" />
+                                <Button Classes="textlink" Content="保存" Click="OnMemoryEntryCommit" IsVisible="{Binding IsEditing}"
+                                        IsEnabled="{Binding !#PART_MemoryBody.DataContext.IsWriteLocked}" />
+                                <Button Classes="textlink" Content="删除" Click="OnMemoryEntryDelete"
+                                        IsEnabled="{Binding !#PART_MemoryBody.DataContext.IsWriteLocked}" />
                               </StackPanel>
                             </Grid>
                           </DataTemplate>
-                        </ListBox.ItemTemplate>
-                      </ListBox>
-                      <StackPanel Grid.Row="2" Margin="12,8,12,12" Spacing="6">
-                        <Button Name="PART_ImportSkill" Classes="outline" Content="导入技能..."
-                                Padding="12,7" HorizontalAlignment="Stretch" Click="OnImportSkill" />
-                        <Grid ColumnDefinitions="*,6,*">
-                          <Button Grid.Column="0" Classes="outline" Content="打开技能目录"
-                                  Padding="8,6" Click="OnOpenSkillsDirectory" />
-                          <Button Grid.Column="2" Classes="outline" Content="刷新"
-                                  Padding="8,6" Click="OnRefreshSkills" />
-                        </Grid>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12" Margin="0,18,0,0">
+                        <TextBox Classes="field" Text="{Binding NewEntryText, Mode=TwoWay}" Watermark="补充一条记录" MaxLength="300" />
+                        <Button Grid.Column="1" Classes="outline" Content="添加" Click="OnMemoryAdd"
+                                IsEnabled="{Binding !IsWriteLocked}" />
+                      </Grid>
+                    </StackPanel>
+                    <StackPanel Name="PART_MemoryTopicEditor" IsVisible="{Binding IsEditingTopic}" Spacing="14">
+                      <TextBlock Classes="section" Text="编辑主题" Margin="0" />
+                      <ComboBox ItemsSource="{Binding GroupChoices}" SelectedItem="{Binding TopicGroup, Mode=TwoWay}" HorizontalAlignment="Stretch" />
+                      <TextBox Name="PART_MemoryTopicTitle" Classes="field" Text="{Binding TopicTitle, Mode=TwoWay}" Watermark="主题名称" MaxLength="60" />
+                      <TextBox Classes="field" Text="{Binding TopicSummary, Mode=TwoWay}" Watermark="摘要" MaxLength="240" />
+                      <TextBox Classes="field" Text="{Binding NewEntryText, Mode=TwoWay}" Watermark="详细记录" MaxLength="300"
+                               IsVisible="{Binding SelectedTopic, Converter={x:Static ObjectConverters.IsNull}}" />
+                      <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button Name="PART_MemoryTopicSave" Classes="outline" Content="保存" Click="OnMemoryTopicSave" />
+                        <Button Classes="textlink" Content="取消" Click="OnMemoryTopicCancel" />
                       </StackPanel>
-                    </Grid>
-                  </Border>
+                    </StackPanel>
+                  </StackPanel>
+                  <TextBlock Classes="hint" Text="{Binding Status}" Margin="0,14,0,0" TextWrapping="Wrap"
+                             IsVisible="{Binding Status, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+                </StackPanel>
 
-                  <Border Grid.Column="1" Classes="settingscard" Padding="18" Margin="0">
-                    <Grid>
-                      <TextBlock Name="PART_SkillEmpty" Classes="hint"
-                                 Text="从左侧选择一个技能查看详情。" />
-                      <StackPanel Name="PART_SkillDetail" IsVisible="False"
-                                  x:DataType="vm:SkillItemViewModel">
-                        <StackPanel Orientation="Horizontal" Spacing="10">
-                          <TextBlock Text="{Binding Name}" FontSize="20" FontWeight="SemiBold" />
-                          <Border Classes="countpill" VerticalAlignment="Center">
-                            <TextBlock Classes="hint" Margin="0" Text="{Binding SourceLabel}" />
-                          </Border>
-                        </StackPanel>
-                        <CheckBox Content="在对话中启用此技能"
-                                  IsChecked="{Binding Enabled, Mode=TwoWay}" Margin="0,14,0,0" />
-                        <TextBlock Classes="label" Text="描述" Margin="0,18,0,5" />
-                        <TextBlock Text="{Binding Description}" TextWrapping="Wrap" />
-                        <TextBlock Classes="label" Text="技能目录" Margin="0,18,0,5" />
-                        <TextBox Classes="settingsinput" Text="{Binding DirectoryPath}"
-                                 IsReadOnly="True" TextWrapping="Wrap" />
-                        <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,18,0,0">
-                          <Button Classes="outline" Content="查看 SKILL.md" Padding="12,7"
-                                  Click="OnViewSkillMd" />
-                          <Button Name="PART_DeleteSkill" Classes="outline" Content="删除"
-                                  Padding="12,7" IsVisible="False" Click="OnDeleteSkill" />
-                        </StackPanel>
-                        <TextBlock Name="PART_SkillStatus" Classes="hint" Margin="0,12,0,0"
-                                   TextWrapping="Wrap" />
+                <Expander Name="PART_MemorySettings" Header="记忆设置" HorizontalAlignment="Stretch" Margin="0,20,0,0">
+                  <StackPanel>
+                <TextBlock Classes="section" Text="功能" />
+                <Border Classes="settingscard" IsEnabled="{Binding MemoryEnabled}">
+                  <StackPanel>
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="使用记忆" />
+                        <TextBlock Classes="hint" Text="将记忆用于对话，并允许模型更新记忆。" />
                       </StackPanel>
+                      <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                    IsChecked="{Binding MemoryUseEnabled, Mode=TwoWay}"
+                                    VerticalAlignment="Center" />
                     </Grid>
-                  </Border>
-                </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="检索历史对话" />
+                        <TextBlock Classes="hint" Text="允许模型检索本机的 MolaGPT Work 历史对话。" />
+                      </StackPanel>
+                      <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                    IsChecked="{Binding MemoryRecallEnabled, Mode=TwoWay}"
+                                    VerticalAlignment="Center" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="自动整理" />
+                        <TextBlock Classes="hint" Text="从新对话中提取值得长期保留的信息，可能产生额外用量。" />
+                      </StackPanel>
+                      <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                    IsChecked="{Binding MemoryAutoLearnEnabled, Mode=TwoWay}"
+                                    VerticalAlignment="Center" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="220,*"
+                          IsEnabled="{Binding MemoryAutoLearnEnabled}">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" Spacing="7">
+                          <TextBlock Classes="rowtitle" Text="整理模型" />
+                          <!-- 未选模型 = 自动整理压根不会运行。这个点就是那句话的全部提示。 -->
+                          <Ellipse Width="7" Height="7" Fill="{DynamicResource Brush.Error}"
+                                   VerticalAlignment="Center" IsVisible="{Binding MemoryNeedsModel}" />
+                        </StackPanel>
+                        <TextBlock Classes="hint" Text="需单独选择，不随当前对话切换。未选择时不会自动整理。" />
+                      </StackPanel>
+                      <ComboBox Grid.Column="1" Classes="settingsinput"
+                                HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                PlaceholderText="选择模型"
+                                ItemsSource="{Binding MemoryProviderModels}"
+                                SelectedItem="{Binding SelectedMemoryProviderModel, Mode=TwoWay}">
+                        <ComboBox.ItemTemplate>
+                          <DataTemplate x:DataType="vm:MemoryProviderModelOption">
+                            <TextBlock Text="{Binding Label}" />
+                          </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                      </ComboBox>
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="220,*">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                        <TextBlock Classes="rowtitle" Text="记忆上限" />
+                        <TextBlock Classes="hint" Text="对话中最多使用的记忆量，数量过多会造成用量上升。" />
+                      </StackPanel>
+                      <ComboBox Grid.Column="1" Name="PART_MemoryBudget" Classes="settingsinput"
+                                HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                SelectionChanged="OnMemoryBudgetChanged">
+                        <ComboBoxItem Content="少" Tag="1000" />
+                        <ComboBoxItem Content="标准" Tag="2000" />
+                        <ComboBoxItem Content="多" Tag="4000" />
+                        <ComboBoxItem Content="最多" Tag="8000" />
+                      </ComboBox>
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="允许写入敏感信息" />
+                        <TextBlock Classes="hint" Text="关闭后，密钥、证件号等敏感信息将不会写入记忆。" />
+                      </StackPanel>
+                      <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                    IsChecked="{Binding MemoryAllowSensitive, Mode=TwoWay}"
+                                    VerticalAlignment="Center" />
+                    </Grid>
+                  </StackPanel>
+                </Border>
+
+                  </StackPanel>
+                </Expander>
               </StackPanel>
             </Panel>
           </ScrollViewer>
@@ -2105,6 +2560,40 @@
     <Style Selector="ListBoxItem:not(.navgroup):selected">
       <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
       <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+
+    <!--
+      侧栏层级。分组标题和条目原来差 12 对 14 两级字号、左边缘还完全对齐，
+      在中文字面上几乎读成同一种行；十八行又放不进默认窗口高度，最后两项
+      (Agent Bridge、技能) 被滚到视野外——想找技能的人第一眼看不到它。
+
+      标题降到 11 并加字距，条目行高压到 33，两件事一起做：层级拉开，整份
+      导航一屏放得下（默认 704 高下约 617 < 652，字号放大档位仍会滚动）。
+      这几条写在通用规则之后，只命中 PART_Nav，技能/模型等列表不受影响。
+    -->
+    <Style Selector="ListBox#PART_Nav ListBoxItem.navgroup">
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="LetterSpacing" Value="1.2" />
+      <Setter Property="Margin" Value="0,16,0,5" />
+      <Setter Property="Padding" Value="12,0" />
+      <!-- Text.Muted 和 Text.Secondary 在这套 token 里几乎是同一个灰
+           (#707A86 / #6C757D)，靠颜色分不出主次，只能再压一档不透明度。 -->
+      <Setter Property="Opacity" Value="0.72" />
+    </Style>
+    <Style Selector="ListBox#PART_Nav ListBoxItem:not(.navgroup)">
+      <Setter Property="Padding" Value="12,6" />
+      <!-- 条目是这一栏的主体，原来和分组标题同为灰色，两级只差 2px 字号。 -->
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+    <!-- 选中态原本是「浅粉底 + 1px 粉框 + 粉字」三重信号，边框还会把文字
+         整体挤 1px，切页时看得出抖动。底色加字色已经够认。 -->
+    <Style Selector="ListBox#PART_Nav ListBoxItem:selected /template/ Border#PART_Root">
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <!-- 重申一遍粉色：上面那条把未选中条目改成了 Text.Primary，而同优先级的
+         setter 谁后生效谁赢；不写这条就得指望 :selected 总是后激活。 -->
+    <Style Selector="ListBox#PART_Nav ListBoxItem:selected">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
     </Style>
     <Style Selector="Slider /template/ RepeatButton#PART_DecreaseButton">
       <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />

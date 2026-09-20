@@ -240,6 +240,17 @@
       </Button>
 
       <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+        <!-- State, not an event: what this conversation has cost so far. Derived
+             from the stored turns and recomputed per conversation, so it can never
+             be left behind by a missing "clear" the way a pushed status would. -->
+        <Border Classes="statuschip" Margin="0,0,6,0" Padding="10,5"
+                IsVisible="{Binding IsSpendChipVisible}"
+                ToolTip.Tip="{Binding SpendChipTooltip}">
+          <TextBlock Text="{Binding SpendChipText}" FontSize="12"
+                     FontFamily="{DynamicResource Font.Mono}"
+                     Foreground="{DynamicResource Brush.Text.Muted}" />
+        </Border>
+
         <Button Name="PART_Update" Classes="statuschip" Margin="0,0,6,0"
                 IsVisible="{Binding UpdateAvailable}" ToolTip.Tip="{Binding UpdateTooltip}"
                 Command="{Binding OpenUpdateDownloadCommand}">
@@ -340,6 +351,20 @@
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
       <Setter Property="BorderThickness" Value="1" />
       <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    </Style>
+    <!-- Same shape as the button form, for chips that only report and have
+         nothing to click. The Border.statuschip rules in TranscriptView.axaml are
+         scoped to that control and are not visible from here. -->
+    <Style Selector="Border.statuschip">
+      <Setter Property="MinHeight" Value="28" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    </Style>
+    <Style Selector="Border.statuschip > TextBlock">
+      <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
     <!-- Border.searchbox moved to Theme/Controls.axaml — the composer's persona
          picker needs the same shape and cannot see a rule defined here. -->

@@ -42,9 +42,14 @@ public static class PiModelCatalog
                 ["api"] = api,
                 ["reasoning"] = model.SupportsThinking || model.SupportsReasoningEffort,
                 ["input"] = model.SupportsVision ? new[] { "text", "image" } : new[] { "text" },
-                // Billing is MolaGPT's, upstream of Pi. Zeroes keep Pi's own cost
-                // display from inventing numbers we would then have to explain.
-                ["cost"] = new { input = 0, output = 0, cacheRead = 0, cacheWrite = 0 },
+                // Pi's calculateCost divides these by 1,000,000, which is the unit
+                // ModelPricing already stores. Handing it the real rates is what
+                // makes the turn's cost come back computed — including the cache
+                // read/write split and Anthropic's 2x long-cache-write rule, none
+                // of which is worth reimplementing on this side. A model with no
+                // price keeps the zeroes; the caller tells "free" from "unknown"
+                // by looking at Pricing, never at a cost of 0.
+                ["cost"] = BuildCost(model.Pricing),
                 // Pi budgets auto-compaction off this number (it compacts once the
                 // context passes contextWindow − 16,384), so a flat placeholder here
                 // was compacting 1M-token models at about an eighth of their window.
@@ -58,6 +63,19 @@ public static class PiModelCatalog
 
         return JsonSerializer.Serialize(entries, JsonOptions);
     }
+
+    /// <summary>Pi reads all four rates unconditionally, so a missing cache price
+    /// falls back to the matching base rate rather than to zero — charging nothing
+    /// for cache traffic would understate every cached turn.</summary>
+    private static object BuildCost(ModelPricing? pricing) => pricing is null
+        ? new { input = 0d, output = 0d, cacheRead = 0d, cacheWrite = 0d }
+        : new
+        {
+            input = pricing.Input,
+            output = pricing.Output,
+            cacheRead = pricing.CacheRead ?? pricing.Input,
+            cacheWrite = pricing.CacheWrite ?? pricing.Input
+        };
 
     private static JsonElement? ParseCompat(string? json)
     {

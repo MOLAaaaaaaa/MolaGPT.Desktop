@@ -108,11 +108,13 @@ public sealed partial class ChatViewModel : ObservableObject
     [ObservableProperty] private string _systemPromptMode = "override";
 
     /// <summary>
-    /// System prompt configured at the model level (from ProviderModelEntry.SystemPrompt).
-    /// Set externally by MainViewModel when the active model changes.
-    /// Retained for backward compatibility; used only when no persona is bound.
+    /// The built-in 通用助手 prompt, i.e. what a persona's own prompt replaces.
+    /// This is what <c>{{original}}</c> expands to inside a role prompt — the
+    /// SillyTavern meaning of "the default prompt this override is replacing".
     /// </summary>
-    public string? ActiveModelSystemPrompt { get; set; }
+    public string? DefaultPersonaSystemPrompt =>
+        _personas?.Find(PersonaListViewModel.BuiltinDefaultId)?.SystemPrompt is { } prompt
+        && !string.IsNullOrWhiteSpace(prompt) ? prompt : null;
 
     /// <summary>The persona view-model bound to the current conversation, or null.</summary>
     public PersonaItemViewModel? ActivePersona => _personas?.Find(ActivePersonaId);
@@ -189,6 +191,30 @@ public sealed partial class ChatViewModel : ObservableObject
     /// over another's messages.
     /// </summary>
     public ContextGaugeViewModel ContextGauge { get; } = new();
+
+    /// <summary>
+    /// What this conversation has cost so far, summed from the per-turn snapshots.
+    /// Zero — and so hidden — until a priced BYOK turn lands.
+    /// </summary>
+    [ObservableProperty] private ConversationSpend _spend = ConversationSpend.Empty;
+
+    /// <summary>
+    /// Recomputes from storage rather than accumulating in memory: retries replace
+    /// a row's stats in place and regenerating forks a new branch, so a running
+    /// total kept on this side would drift from what was actually written down.
+    /// </summary>
+    private async void RefreshSpend(string? conversationId)
+    {
+        if (_messageRepo is null || string.IsNullOrWhiteSpace(conversationId))
+        {
+            Spend = ConversationSpend.Empty;
+            return;
+        }
+        var repo = _messageRepo;
+        var id = conversationId;
+        var spend = await Task.Run(() => ConversationSpendCalculator.From(repo.ListAll(id))).ConfigureAwait(true);
+        if (ConversationId == id) Spend = spend;
+    }
 
     private readonly ProviderRegistry _providers;
     private readonly MessageRepository? _messageRepo;
@@ -485,6 +511,7 @@ public sealed partial class ChatViewModel : ObservableObject
         SetActiveLoreEntries([]);
         ActivePersonaId = ResolveDefaultPersonaId();
         SystemPromptMode = "override";
+        Spend = ConversationSpend.Empty;
         RoleOptionsRequested?.Invoke(false);
         RefreshInteractionMode();
         ContextGauge.Reset();
@@ -549,7 +576,11 @@ public sealed partial class ChatViewModel : ObservableObject
                     var messages = PrepareMessageSnapshot(activeRows);
                     ApplyBranchMetadata(messages, allRows);
                     var conversation = _conversationRepo?.Get(conversationId);
-                    return (messages, conversation);
+                    // allRows is already in hand for the branch metadata, and it is
+                    // exactly the set the bill is owed on — abandoned branches
+                    // included — so the total rides along instead of re-querying.
+                    var spend = ConversationSpendCalculator.From(allRows);
+                    return (messages, conversation, spend);
                 }).ConfigureAwait(true);
                 PerfTrace?.Invoke("load.read+meta",
                     $"{readSw.Elapsed.TotalMilliseconds:N0} ms  msgs={snapshot.messages.Count}");
@@ -559,6 +590,7 @@ public sealed partial class ChatViewModel : ObservableObject
 
                 conversationRow = snapshot.conversation;
                 var prepared = snapshot.messages;
+                Spend = snapshot.spend;
 
                 // From the whole snapshot, not just the materialized tail: the
                 // reading belongs to the conversation, and only the newest turns are
@@ -920,6 +952,7 @@ public sealed partial class ChatViewModel : ObservableObject
         vm.VersionSelected += OnMessageVersionSelected;
         PersistMessage(vm);
         TouchConversation();
+        RefreshSpend(ConversationId);
     }
 
     public MessageViewModel BeginAssistantMessage()
@@ -950,6 +983,7 @@ public sealed partial class ChatViewModel : ObservableObject
         vm.StopThinking();
         PersistMessage(vm);
         TouchConversation();
+        RefreshSpend(ConversationId);
     }
 
     public void FinalizeAssistantMessage(string conversationId, MessageViewModel vm)
@@ -966,6 +1000,7 @@ public sealed partial class ChatViewModel : ObservableObject
         vm.StopThinking();
         PersistMessage(vm, conversationId);
         TouchConversation(conversationId);
+        RefreshSpend(conversationId);
 
         if (ConversationId == conversationId && !Messages.Contains(vm))
         {
@@ -1246,6 +1281,10 @@ public sealed partial class ChatViewModel : ObservableObject
         if (usage.TotalTokens is { } total) obj["totalTokens"] = total;
         if (usage.CacheReadTokens is { } cacheRead) obj["cacheReadTokens"] = cacheRead;
         if (usage.TokensPerSecond is { } tps) obj["tokensPerSecond"] = tps;
+        // A snapshot, not a reference: prices change, models get deleted, providers
+        // get swapped. What this turn actually cost has to survive all three, so it
+        // is written once here and never recomputed from the current price table.
+        if (usage.CostUsd is { } cost) obj["costUsd"] = cost;
         return obj;
     }
 
@@ -1676,9 +1715,11 @@ public sealed partial class ChatViewModel : ObservableObject
         var total = ReadInt(node, "totalTokens") ?? ReadInt(node, "total_tokens");
         var cacheRead = ReadInt(node, "cacheReadTokens") ?? ReadInt(node, "cache_read_tokens");
         var tokensPerSecond = ReadDouble(node, "tokensPerSecond") ?? ReadDouble(node, "tokens_per_second");
-        return prompt is null && completion is null && total is null && cacheRead is null && tokensPerSecond is null
+        var costUsd = ReadDouble(node, "costUsd") ?? ReadDouble(node, "cost_usd");
+        return prompt is null && completion is null && total is null && cacheRead is null
+               && tokensPerSecond is null && costUsd is null
             ? null
-            : new Usage(prompt, completion, total, cacheRead, tokensPerSecond);
+            : new Usage(prompt, completion, total, cacheRead, tokensPerSecond, costUsd);
     }
 
     /// <summary>读取 <c>turn_timing</c> 里的毫秒打点，换算回秒；缺失时为 null。</summary>

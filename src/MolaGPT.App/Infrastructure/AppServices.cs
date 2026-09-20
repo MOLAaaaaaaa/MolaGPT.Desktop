@@ -14,6 +14,7 @@ using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Tools.Vision;
+using MolaGPT.Core.Memory;
 using MolaGPT.Core.Personalization;
 using MolaGPT.Desktop.Services;
 using MolaGPT.Storage;
@@ -44,6 +45,7 @@ internal static class AppServices
         services.AddSingleton<SettingsRepository>();
         services.AddSingleton<ProviderRepository>();
         services.AddSingleton<PersonaRepository>();
+        services.AddSingleton<MemoryIndexRepository>();
         services.AddSingleton(_ => new AttachmentStore());
 
         services.AddSingleton(_ => new CredentialStore(Path.Combine(
@@ -168,7 +170,10 @@ internal static class AppServices
             sp.GetRequiredService<AgentBridgeService>(),
             sp.GetRequiredService<IRelayProducer>(),
             sp.GetRequiredService<IAgentConfigProvider>(),
-            line => DiagnosticLog.Write("AgentRelay", line)));
+            line => DiagnosticLog.Write("AgentRelay", line),
+            new RelayCommandJournal(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "MolaGPT", "agent-command-journal"))));
         services.AddSingleton<AgentBridgeStatusViewModel>();
 
         // ---- tools ---------------------------------------------------------
@@ -221,11 +226,43 @@ internal static class AppServices
                 load: () => settings.Get(BrowserActivityStorageKey),
                 save: json => settings.Set(BrowserActivityStorageKey, json));
         });
+        // Local memory. The files are the source of truth and the index beside
+        // them is rebuildable, so the store is constructed without touching the
+        // database and the repository never becomes something the user can lose.
+        services.AddSingleton(_ => new MemoryFileStore());
+        services.AddSingleton(sp => new MemoryService(
+            sp.GetRequiredService<MemoryFileStore>(),
+            sp.GetRequiredService<MemoryIndexRepository>(),
+            sp.GetRequiredService<SettingsViewModel>()));
+        services.AddSingleton<IMemoryToolBackend>(sp => sp.GetRequiredService<MemoryService>());
+        services.AddSingleton(sp => new MemoryConsolidator(
+            sp.GetRequiredService<MemoryService>(),
+            sp.GetRequiredService<MemoryIndexRepository>(),
+            sp.GetRequiredService<MessageRepository>(),
+            sp.GetRequiredService<SettingsViewModel>(),
+            sp.GetRequiredService<ProviderRegistry>(),
+            () => new OneShotCompletionClient(
+                sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok)),
+            sp.GetRequiredService<PersonaListViewModel>()));
         services.AddSingleton<IChatToolHost, ChatToolHost>();
 
         // ---- view models ---------------------------------------------------
-        services.AddSingleton(sp => new RoleLibraryViewModel(sp.GetRequiredService<SettingsRepository>(),
-            sp.GetRequiredService<PersonaRepository>(), sp.GetRequiredService<ConversationRepository>()));
+        services.AddSingleton(sp =>
+        {
+            var library = new RoleLibraryViewModel(sp.GetRequiredService<SettingsRepository>(),
+                sp.GetRequiredService<PersonaRepository>(), sp.GetRequiredService<ConversationRepository>());
+            // 「沿用个人资料」. Resolved lazily — the file is the truth and the user
+            // may have edited it since the app started — and deliberately only the
+            // name: see UserPersona.ProfileId.
+            library.ProfileSource = () =>
+            {
+                var name = sp.GetRequiredService<MemoryService>().Profile().Get(MemoryProfile.PreferredName);
+                return string.IsNullOrWhiteSpace(name)
+                    ? null
+                    : new Core.Models.UserPersona { Id = Core.Models.UserPersona.ProfileId, Name = name };
+            };
+            return library;
+        });
         services.AddSingleton(sp => new PersonaListViewModel(sp.GetRequiredService<PersonaRepository>(),
             library: sp.GetRequiredService<RoleLibraryViewModel>()));
         services.AddSingleton(sp => new ConversationListViewModel(
@@ -242,6 +279,15 @@ internal static class AppServices
             sp.GetRequiredService<ProviderRepository>(),
             sp.GetRequiredService<CredentialStore>(),
             sp.GetRequiredService<SettingsRepository>()));
+        services.AddSingleton(sp => new MemoryPageViewModel(
+            sp.GetRequiredService<MemoryService>(),
+            sp.GetRequiredService<MemoryConsolidator>(),
+            sp.GetRequiredService<SettingsViewModel>(),
+            action =>
+            {
+                if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess()) action();
+                else Avalonia.Threading.Dispatcher.UIThread.Post(action);
+            }));
         services.AddSingleton(sp => new PersonalizationViewModel(
             sp.GetRequiredService<MolaPersonalizationService>(),
             sp.GetRequiredService<SettingsViewModel>(),
@@ -257,7 +303,9 @@ internal static class AppServices
             sp.GetRequiredService<SettingsViewModel>(),
             sp.GetRequiredService<PersonaListViewModel>(),
             sp.GetRequiredService<AttachmentStore>(),
-            sp.GetRequiredService<SkillsViewModel>()));
+            sp.GetRequiredService<SkillsViewModel>(),
+            sp.GetRequiredService<MemoryService>(),
+            sp.GetRequiredService<MemoryConsolidator>()));
         services.AddSingleton(sp => new MainViewModel(
             sp.GetRequiredService<ConversationListViewModel>(),
             sp.GetRequiredService<ChatViewModel>(),

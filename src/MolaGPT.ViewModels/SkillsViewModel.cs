@@ -359,6 +359,4 @@ public sealed partial class SkillItemViewModel : ObservableObject
     public bool IsBuiltin { get; }
 
     [ObservableProperty] private bool _enabled;
-
-    public string SourceLabel => IsBuiltin ? "内置" : "自定义";
 }

@@ -54,7 +54,9 @@ public sealed class WebBridgeClient
         var root = new JsonObject
         {
             ["action"] = action,
-            ["args"] = args ?? new JsonObject(),
+            // JsonNode can only belong to one parent. Keep this pure so callers
+            // can safely reuse the same payload for a transport-level retry.
+            ["args"] = args?.DeepClone() ?? new JsonObject(),
             ["session"] = session
         };
         return root.ToJsonString(RequestJsonOptions);

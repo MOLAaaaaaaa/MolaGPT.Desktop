@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;          // ResourceNodeExtensions.TryFindResource
 using Avalonia.Controls.Documents;
+using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
@@ -28,9 +29,31 @@ namespace MolaGPT.App.Rendering;
 /// </summary>
 public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
 {
+    // Autolinks are on because a bare URL in an answer is a link the user will
+    // try to click, and CommonMark only treats "<https://…>" as one.
     private static readonly MarkdownPipeline s_pipeline = new MarkdownPipelineBuilder()
         .DisableHtml()
+        .UseAutoLinks()
         .Build();
+
+    private static readonly Cursor s_hand = new(StandardCursorType.Hand);
+
+    /// <summary>How far the pointer may travel between press and release and
+    /// still count as a click rather than a selection. Four pixels is Windows'
+    /// own drag threshold (SM_CXDRAG), which is the number a hand that meant to
+    /// click stays inside.</summary>
+    private const double ClickSlop = 4;
+
+    /// <summary>
+    /// What a <see cref="LineBreak"/> costs in the text source — two, not one:
+    /// Avalonia emits it as a TextEndOfLine sized for a CRLF. Counting it as a
+    /// single character slides every link after a soft break one position along,
+    /// which puts the clickable rectangle one glyph off the words it belongs to.
+    /// Measured against Avalonia 12.1.1 with a probe that located links by their
+    /// underline and compared that against this bookkeeping; redo that if the
+    /// hit region ever starts looking offset by a character.
+    /// </summary>
+    private const int LineBreakLength = 2;
 
     public static readonly StyledProperty<string?> MarkdownProperty =
         AvaloniaProperty.Register<MarkdownTextBlock, string?>(nameof(Markdown));
@@ -93,6 +116,36 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
     private Color _dimSource;
 
     /// <summary>
+    /// Where each link sits in the text the layout was built from.
+    ///
+    /// Offsets rather than references to the runs a link was drawn as: the
+    /// trailing fade rewrites the last run after the fact, and a map keyed on
+    /// run identity would come apart on exactly the row that is still being
+    /// written. Offsets survive it, because the text does not change — only how
+    /// many runs it is split across.
+    /// </summary>
+    private readonly record struct LinkSpan(int Start, int Length, string Url);
+
+    private readonly List<LinkSpan> _links = new();
+
+    /// <summary>The same links as drawn rectangles, in this control's
+    /// coordinates. Filled after every layout pass; the only thing a pointer
+    /// ever consults. See <see cref="UpdateLinkRects"/> for why the hit test
+    /// may not go near the text layout itself.</summary>
+    private readonly List<(Rect Bounds, string Url)> _linkRects = new();
+
+    /// <summary>Running index into the text source while inlines are being
+    /// built. This is the index space <c>TextLayout</c> hit tests report in: a
+    /// Run counts its characters, an InlineUIContainer counts one, a LineBreak
+    /// counts <see cref="LineBreakLength"/>. Everything is appended through
+    /// <see cref="Add"/> so the count cannot drift away from what the layout
+    /// sees.</summary>
+    private int _cursor;
+
+    private string? _pressedUrl;
+    private Point _pressedPoint;
+
+    /// <summary>
     /// Building is deferred until the control is in the tree, because the Latin
     /// and CJK faces are theme resources and a detached control resolves neither.
     /// Building eagerly and again on attach would parse every row twice, which is
@@ -111,6 +164,149 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
     {
         base.OnDetachedFromVisualTree(e);
         _attached = false;
+    }
+
+    /// <summary>
+    /// The URL under a point in this control's coordinates, or null.
+    ///
+    /// A plain walk of the rectangles cached by the last layout pass — see
+    /// <see cref="UpdateLinkRects"/> for why it must not consult the text
+    /// layout itself. Public because every caller that wants to know "is the
+    /// pointer on a link" — this control, and anything that later wants a
+    /// context menu on one — has to ask the same question.
+    /// </summary>
+    public string? LinkAt(Point point)
+    {
+        foreach (var (bounds, url) in _linkRects)
+        {
+            if (bounds.Contains(point)) return url;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Turns the link offsets into the rectangles they were drawn in, once per
+    /// layout pass.
+    ///
+    /// This has to happen here and not on the pointer event, because by the
+    /// time a press is handled the layout may be gone: SelectableTextBlock
+    /// invalidates it whenever the selection moves — selection colouring
+    /// re-splits the runs — and the base class sets a selection on every press.
+    /// Touching <c>TextLayout</c> after that rebuilds it outside a measure, with
+    /// no width constraint, and it comes back empty: no lines, no rectangles,
+    /// no link. That is what made the first click on a link do nothing and a
+    /// second one work if a layout pass happened to land in between.
+    ///
+    /// Cached rectangles also go stale in the harmless direction. A selection
+    /// change does not move a glyph, so yesterday's rectangles are still
+    /// today's; and anything that does move text invalidates measure, which
+    /// brings us straight back here.
+    /// </summary>
+    private void UpdateLinkRects()
+    {
+        _linkRects.Clear();
+        if (_links.Count == 0) return;
+
+        var layout = TextLayout;
+        if (layout.TextLines.Count == 0) return;
+
+        var offset = new Vector(Padding.Left, Padding.Top);
+        foreach (var span in _links)
+        {
+            foreach (var rect in layout.HitTestTextRange(span.Start, span.Length))
+            {
+                _linkRects.Add((rect.Translate(offset), span.Url));
+            }
+        }
+    }
+
+    protected override Size ArrangeOverride(Size finalSize)
+    {
+        var size = base.ArrangeOverride(finalSize);
+        UpdateLinkRects();
+        return size;
+    }
+
+    protected override void OnPointerMoved(PointerEventArgs e)
+    {
+        base.OnPointerMoved(e);
+        ShowLinkCursor(LinkAt(e.GetPosition(this)) is not null);
+    }
+
+    protected override void OnPointerExited(PointerEventArgs e)
+    {
+        base.OnPointerExited(e);
+        ShowLinkCursor(false);
+    }
+
+    protected override void OnPointerPressed(PointerPressedEventArgs e)
+    {
+        // Base first: it takes the pointer capture and starts the selection,
+        // and a link must not cost the user the ability to select the sentence
+        // it sits in.
+        base.OnPointerPressed(e);
+
+        _pressedUrl = null;
+        if (e.GetCurrentPoint(this).Properties.PointerUpdateKind != PointerUpdateKind.LeftButtonPressed) return;
+
+        // The second click of a double click is a word select, the third a line
+        // select. Only the first one is ever a link click — and it has already
+        // opened the link by then, which is what a browser does too.
+        if (e.ClickCount > 1) return;
+
+        _pressedPoint = e.GetPosition(this);
+        _pressedUrl = LinkAt(_pressedPoint);
+    }
+
+    /// <summary>
+    /// A link opens on release, not on press. Opening on press would fire on
+    /// every drag that happens to start on a link, and dragging across a
+    /// sentence that contains one is the more common gesture by far.
+    /// </summary>
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
+    {
+        var url = _pressedUrl;
+        _pressedUrl = null;
+
+        base.OnPointerReleased(e);
+
+        if (url is null || e.InitialPressMouseButton != MouseButton.Left) return;
+
+        // Distance is the only thing separating a click from a drag-select.
+        //
+        // Emphatically *not* "the selection is still empty": the base class
+        // extends the selection on every pointer move while pressed, and a
+        // move of one or two pixels is enough to cross a glyph's midpoint and
+        // land on the next index. Requiring an empty selection therefore threw
+        // away most real clicks and kept the ones made with a perfectly steady
+        // hand, which reads as "links work maybe one time in five".
+        var point = e.GetPosition(this);
+        if (Math.Abs(point.X - _pressedPoint.X) > ClickSlop
+            || Math.Abs(point.Y - _pressedPoint.Y) > ClickSlop) return;
+
+        if (LinkAt(point) != url) return;
+
+        // The press left a character or two selected on its way here. Opening a
+        // link is not a selection gesture, so it should not leave one behind.
+        ClearSelection();
+
+        LinkLauncher.Open(url);
+        e.Handled = true;
+    }
+
+    /// <summary>Local value while over a link, cleared back to the styled one
+    /// after — the theme's I-beam is what prose is supposed to show.</summary>
+    private void ShowLinkCursor(bool over)
+    {
+        if (over)
+        {
+            if (!ReferenceEquals(Cursor, s_hand)) Cursor = s_hand;
+        }
+        else if (ReferenceEquals(Cursor, s_hand))
+        {
+            ClearValue(CursorProperty);
+        }
     }
 
     /// <summary>
@@ -141,6 +337,8 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
         var start = StreamTailFade.TailStart(text);
         if (start >= text.Length) return;
 
+        // Straight to the collection, not through Add: this splits one run into
+        // two without changing a character, so the link map still holds.
         target.RemoveAt(target.Count - 1);
         if (start > 0) target.Add(CopyRun(tail, text[..start], tail.Foreground));
         target.Add(CopyRun(tail, text[start..], Dim(solid.Color)));
@@ -179,12 +377,20 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
         }
         _dirty = false;
 
+        // The rectangles go too: the text is about to change under them, and
+        // until the layout pass that follows refills them a link is better
+        // inert than pointing at where it used to be.
+        _links.Clear();
+        _linkRects.Clear();
+        _cursor = 0;
+
         var source = Markdown;
         if (string.IsNullOrEmpty(source))
         {
             Inlines?.Clear();
             Text = string.Empty;
             _containsInlineMath = false;
+            ShowLinkCursor(false);
             UpdateLineMetrics();
             return;
         }
@@ -211,13 +417,15 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
 
             // A block Markdig folds away entirely (a lone reference definition,
             // stray syntax) must still show something rather than vanish.
-            if (!wrote) target.Add(new Run(source));
+            if (!wrote) Add(target, new Run(source), source.Length);
         }
         catch
         {
             // Never let a malformed fragment blank a row mid-stream.
             target.Clear();
-            target.Add(new Run(source));
+            _links.Clear();
+            _cursor = 0;
+            Add(target, new Run(source), source.Length);
             _containsInlineMath = false;
         }
         finally
@@ -225,6 +433,10 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
             _protectedMath = null;
             ApplyTailFade(target);
             UpdateLineMetrics();
+
+            // A streaming row can lose its last link between deltas. Nothing
+            // else would take the hand cursor back until the pointer moved.
+            if (_links.Count == 0) ShowLinkCursor(false);
         }
     }
 
@@ -245,17 +457,17 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
             switch (block)
             {
                 case LeafBlock { Inline: { } inlines }:
-                    if (!first || wrote) target.Add(new LineBreak());
+                    if (!first || wrote) Add(target, new LineBreak(), LineBreakLength);
                     Append(target, inlines, FontStyle.Normal, FontWeight, strike: false);
                     wrote = true;
                     break;
 
                 case Markdig.Syntax.ListItemBlock item:
                 {
-                    if (!first || wrote) target.Add(new LineBreak());
+                    if (!first || wrote) Add(target, new LineBreak(), LineBreakLength);
                     // A nested list inside a quote still has to read as a list;
                     // the structural MarkdownListView only handles top-level ones.
-                    target.Add(new Run("• "));
+                    Add(target, new Run("• "), 2);
                     wrote |= AppendBlocks(target, item, first: true);
                     break;
                 }
@@ -265,7 +477,7 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
                     break;
 
                 case LeafBlock leaf when leaf.Lines.Count > 0:
-                    if (!first || wrote) target.Add(new LineBreak());
+                    if (!first || wrote) Add(target, new LineBreak(), LineBreakLength);
                     AppendText(
                         target, leaf.Lines.ToString(),
                         FontStyle.Normal, FontWeight, strike: false, null, null);
@@ -312,7 +524,7 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
                     // marks code with the tinted background alone.
                     var run = new Run(code.Content) { FontFamily = MonoFamily() };
                     if (CodeBackground is { } background) run.Background = background;
-                    target.Add(Style(run, style, weight, strike));
+                    Add(target, Style(run, style, weight, strike), code.Content.Length);
                     break;
                 }
 
@@ -324,20 +536,28 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
                     break;
 
                 case LinkInline link:
+                {
+                    var start = _cursor;
                     AppendText(
                         target, LinkText(link), style, weight, strike,
                         AccentBrush, Avalonia.Media.TextDecorations.Underline);
+                    Track(link.Url, start);
                     break;
+                }
 
                 case LineBreakInline:
-                    target.Add(new LineBreak());
+                    Add(target, new LineBreak(), LineBreakLength);
                     break;
 
                 case AutolinkInline autolink:
+                {
+                    var start = _cursor;
                     AppendText(
                         target, autolink.Url, style, weight, strike,
                         AccentBrush, Avalonia.Media.TextDecorations.Underline);
+                    Track(autolink.Url, start);
                     break;
+                }
 
                 case HtmlEntityInline entity:
                     AppendText(
@@ -385,7 +605,7 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
                 else
                 {
                     _containsInlineMath = true;
-                    target.Add(new InlineUIContainer(new MathView
+                    Add(target, new InlineUIContainer(new MathView
                     {
                         Latex = formula,
                         FormulaSize = FontSize,
@@ -394,7 +614,7 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
                     })
                     {
                         BaselineAlignment = BaselineAlignment.Center
-                    });
+                    }, 1);
                 }
 
                 last = match.Index + match.Length;
@@ -447,7 +667,7 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
             if (formulas.TryGetValue(placeholder, out var formula))
             {
                 _containsInlineMath = true;
-                target.Add(new InlineUIContainer(new MathView
+                Add(target, new InlineUIContainer(new MathView
                 {
                     Latex = formula,
                     FormulaSize = FontSize,
@@ -456,7 +676,7 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
                 })
                 {
                     BaselineAlignment = BaselineAlignment.Center
-                });
+                }, 1);
             }
             else
             {
@@ -513,15 +733,42 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
         var cjk = _cjk;
         if (latin is null || cjk is null)
         {
-            target.Add(Decorate(Style(new Run(text), style, weight, strike), foreground, decorations));
+            Add(
+                target,
+                Decorate(Style(new Run(text), style, weight, strike), foreground, decorations),
+                text.Length);
             return;
         }
 
         foreach (var (piece, isCjk) in CjkTypography.SplitByScript(text))
         {
             var run = new Run(piece) { FontFamily = isCjk ? cjk : latin };
-            target.Add(Decorate(Style(run, style, weight, strike), foreground, decorations));
+            Add(
+                target,
+                Decorate(Style(run, style, weight, strike), foreground, decorations),
+                piece.Length);
         }
+    }
+
+    /// <summary>
+    /// The one way an inline reaches the collection, so the running index stays
+    /// in step with what the layout will report. Getting a length wrong here
+    /// does not misdraw anything — it silently shifts every link after it, and
+    /// the pointer starts resolving to the wrong URL.
+    /// </summary>
+    private void Add(InlineCollection target, Avalonia.Controls.Documents.Inline inline, int length)
+    {
+        target.Add(inline);
+        _cursor += length;
+    }
+
+    /// <summary>Records the text just appended as a link. Unopenable schemes are
+    /// dropped here rather than at click time, so the cursor and the click agree
+    /// on what is live.</summary>
+    private void Track(string? url, int start)
+    {
+        if (_cursor <= start || !LinkLauncher.CanOpen(url)) return;
+        _links.Add(new LinkSpan(start, _cursor - start, url!));
     }
 
     /// <summary>
@@ -548,7 +795,7 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
         RenderOptions.SetBitmapInterpolationMode(control, BitmapInterpolationMode.HighQuality);
         ToolTip.SetTip(control, url);
 
-        target.Add(new InlineUIContainer(control));
+        Add(target, new InlineUIContainer(control), 1);
         LoadInline(control, url);
     }
 

@@ -161,7 +161,8 @@ public partial class App : Application
                  _services.GetRequiredService<IHttpClientFactory>(),
                  _services.GetRequiredService<IChatToolHost>(),
                  _services.GetRequiredService<PiByokProviderFactory>(),
-                 _services.GetRequiredService<PersonalizationViewModel>());
+                 _services.GetRequiredService<PersonalizationViewModel>(),
+                 _services.GetRequiredService<MemoryPageViewModel>());
             desktop.MainWindow = window;
 
             // One router owns "banner, Windows toast, or wait" for every source.
@@ -234,6 +235,8 @@ public partial class App : Application
             _ = RunStartupCloudSyncAsync(cloudSync, main.ConversationList);
             _ = Task.Run(SweepOrphanedPiSessions);
             _ = Task.Run(SweepOrphanedAttachments);
+            _ = Task.Run(CatchUpMemoryIndex);
+            WireMemoryNotifications(notifications);
             Dispatcher.UIThread.Post(
                 () => _ = RunStartupAccountRefreshAsync(
                     auth, providers, proxy, localTools, accountSession, window),
@@ -397,8 +400,8 @@ public partial class App : Application
                 Key = "browser-bridge",
                 Kind = NotifyKind.Warning,
                 Title = "浏览器未连接",
-                Body = "模型想操作浏览器，但本机服务或 Kimi 扩展没接上。",
-                ActionText = "去检测",
+                Body = "模型使用浏览器时遇到问题，本机服务或 Kimi 扩展异常。",
+                ActionText = "问题排除",
                 Action = () => OpenBrowserSettings()
             }));
         };
@@ -519,6 +522,39 @@ public partial class App : Application
         {
             DiagnosticLog.Write("pi-work", "清理 Pi 会话文件失败：" + ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Fold whatever accumulated while memory was off (or while the app was
+    /// closed) into the search index, once, off the UI thread. Only messages
+    /// newer than the last watermark are touched, so the steady-state cost is a
+    /// single empty query.
+    /// </summary>
+    private void CatchUpMemoryIndex()
+    {
+        if (_services is null) return;
+        try
+        {
+            var settings = _services.GetRequiredService<SettingsViewModel>();
+            if (!settings.MemoryEnabled || !settings.MemoryRecallEnabled) return;
+            _services.GetRequiredService<MemoryService>().EnsureIndexCurrent();
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write("memory", "建立记忆检索索引失败：" + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Automatic consolidation reports through the one notification system.
+    /// A short banner, and only when something was actually written — a pass
+    /// that found nothing is not an event.
+    /// </summary>
+    private void WireMemoryNotifications(NotificationCenter notifications)
+    {
+        if (_services is null) return;
+        _services.GetRequiredService<MemoryConsolidator>().Completed += (_, report) =>
+            notifications.Success("记忆整理完成", report.Describe(), key: "memory-consolidation");
     }
 
     private void SweepOrphanedAttachments()

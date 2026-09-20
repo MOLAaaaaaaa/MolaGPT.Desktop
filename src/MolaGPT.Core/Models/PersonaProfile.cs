@@ -191,6 +191,18 @@ public sealed record LoreActivationState(int ActivatedAt, string SourceMessageId
 
 public sealed class UserPersona
 {
+    /// <summary>
+    /// 「沿用个人资料」: not a stored identity but the 称呼 from the memory page's
+    /// profile.md, wrapped so the existing cascade can carry it. The leading '@'
+    /// keeps it out of the Guid("N") space real identities are minted in.
+    ///
+    /// Only the name travels. 职业 and 所在地 stay in profile.md, where the
+    /// assistant reads them — 「用户是地球物理研究生」 has no business turning up in
+    /// a bookshop in 雾港, and a user who wants more than a name in a story has
+    /// 管理身份 for exactly that.
+    /// </summary>
+    public const string ProfileId = "@profile";
+
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "";
     public string Description { get; set; } = "";

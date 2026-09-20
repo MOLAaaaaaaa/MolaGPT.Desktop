@@ -30,7 +30,12 @@ public sealed record LocalToolOptions(
     string? WorkspaceRoot = null,
     string? ReadableRootPrefixes = null,
     BrowserControlOptions? Browser = null,
-    ToolPermissionMode BrowserPermissionMode = ToolPermissionMode.Approval)
+    ToolPermissionMode BrowserPermissionMode = ToolPermissionMode.Approval,
+    // Rebuilt every turn from the global switches and the conversation's own
+    // override, so turning memory off really means the tool is not on the wire —
+    // not merely that the model was not told about it.
+    bool Memory = false,
+    bool MemoryRecall = false)
 {
     public bool HasAny =>
         Network
@@ -99,7 +104,9 @@ public sealed record LocalToolOptions(
             WorkspaceRoot: null,
             ReadableRootPrefixes: ReadString(raw, "fileToolsReadableRoots"),
             Browser: ReadBrowser(raw),
-            BrowserPermissionMode: ReadEnum(raw, "browserPermissionMode", ToolPermissionMode.Approval));
+            BrowserPermissionMode: ReadEnum(raw, "browserPermissionMode", ToolPermissionMode.Approval),
+            Memory: ReadBool(raw, "memory"),
+            MemoryRecall: ReadBool(raw, "memoryRecall"));
     }
 
     private static BrowserControlOptions? ReadBrowser(object raw)

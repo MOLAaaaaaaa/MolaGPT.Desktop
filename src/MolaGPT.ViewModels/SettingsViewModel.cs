@@ -24,6 +24,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string EnterToSendKey = "enter_to_send";
     public const string AutoCollapseThinkingKey = "auto_collapse_thinking";
     private const string StreamFadeKey = "stream_tail_fade";
+    private const string StatusDotsKey = "status_dots";
     private const string AutoCompactionKey = "auto_compaction";
     private const string TracksEnabledKey = "molagpt_tracks_enabled";
     private const string CompletionNotificationKey = "completion_notification";
@@ -100,6 +101,16 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// looking for a way to make the app feel worse.
     /// </summary>
     [ObservableProperty] private bool _streamFadeEnabled = true;
+
+    /// <summary>
+    /// The dots that mark a settings entry as unfinished. On by default — an
+    /// unconfigured feature that says nothing is worse than one that admits it —
+    /// but they are a nudge, and a nudge the user has decided to live with should
+    /// be dismissable. Every dot in the window reads this.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(MemoryNeedsModel))]
+    private bool _showStatusDots = true;
 
     /// <summary>
     /// Whether the agent may summarize a conversation's history on its own once the
@@ -232,6 +243,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             Providers.Add(new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat, customHeaders));
         }
         RefreshTitleProviderModels();
+        RefreshMemoryProviderModels();
         RefreshVisionProviderModels();
         RefreshImageGenerationProviderModels();
     }
@@ -250,9 +262,12 @@ public sealed partial class SettingsViewModel : ObservableObject
                 AutoCollapseThinking = autoCollapseThinking;
             if (bool.TryParse(_settingsRepo.Get(StreamFadeKey), out var streamFade))
                 StreamFadeEnabled = streamFade;
+            if (bool.TryParse(_settingsRepo.Get(StatusDotsKey), out var statusDots))
+                ShowStatusDots = statusDots;
             if (bool.TryParse(_settingsRepo.Get(AutoCompactionKey), out var autoCompaction))
                 AutoCompactionEnabled = autoCompaction;
             LoadResponsePostProcessing();
+            LoadMemorySettings();
             if (bool.TryParse(_settingsRepo.Get(TracksEnabledKey), out var tracksEnabled))
                 TracksEnabled = tracksEnabled;
             if (bool.TryParse(_settingsRepo.Get(CompletionNotificationKey), out var completionNotification))
@@ -388,6 +403,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(StreamFadeKey, value.ToString());
+    }
+
+    partial void OnShowStatusDotsChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(StatusDotsKey, value.ToString());
     }
 
     partial void OnAutoCompactionEnabledChanged(bool value)
@@ -792,6 +813,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 : null));
         RefreshVisionProviderModels();
         RefreshTitleProviderModels();
+        RefreshMemoryProviderModels();
         RefreshImageGenerationProviderModels();
 
         if (string.Equals(entry.Purpose, "image", StringComparison.OrdinalIgnoreCase))
@@ -1107,6 +1129,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         var existing = Providers.FirstOrDefault(p => p.Id == id);
         if (existing is not null) Providers.Remove(existing);
         RefreshTitleProviderModels();
+        RefreshMemoryProviderModels();
         RefreshImageGenerationProviderModels();
 
         if (string.Equals(ImageGenerationProviderId, id, StringComparison.Ordinal))
@@ -1137,15 +1160,6 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public static bool IsImagePurpose(string? purpose) =>
         string.Equals(purpose, "image", StringComparison.OrdinalIgnoreCase);
-
-    public string? GetModelSystemPrompt(string? providerId, string? modelId)
-    {
-        if (string.IsNullOrEmpty(providerId) || string.IsNullOrEmpty(modelId)) return null;
-        var provider = Providers.FirstOrDefault(p =>
-            string.Equals(p.Id, providerId, StringComparison.Ordinal));
-        return provider?.Models.FirstOrDefault(m =>
-            string.Equals(m.Id, modelId, StringComparison.Ordinal))?.SystemPrompt;
-    }
 
     // ---- Standing tool grants ("始终允许") --------------------------------
 
@@ -1221,12 +1235,12 @@ public sealed record ProviderModelEntry(
     int? ThinkingBudgetMax = null,
     int? ThinkingBudgetDefault = null,
     string? DefaultEffort = null,
-    string? SystemPrompt = null,
     bool ImageEdit = false,
     List<CustomBodyEntry>? CustomBody = null,
     List<string>? EffortLevels = null,
     bool SupportsTemperature = true,
-    bool SupportsTopP = true);
+    bool SupportsTopP = true,
+    ModelPricing? Pricing = null);
 
 /// <summary>A user-defined HTTP header appended to a BYOK provider's requests.</summary>
 public sealed record CustomHeaderEntry(string Name = "", string Value = "");
