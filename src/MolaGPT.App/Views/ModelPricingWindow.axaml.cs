@@ -35,7 +35,7 @@ public sealed partial class PricingConflictRow : ObservableObject
         ProviderLabel = providerLabel;
         ModelId = modelId;
         Candidates = candidates;
-        Selected = preferred ?? candidates[0];
+        Selected = preferred ?? candidates.FirstOrDefault();
     }
 
     /// <summary>The BYOK provider this row belongs to, so the pick is written back to
@@ -87,7 +87,7 @@ public sealed partial class PricingConflictRow : ObservableObject
         if (input is null || output is null) return null;
         return new ModelPricing(
             input.Value, output.Value, Parse(CacheReadText), Parse(CacheWriteText),
-            Selected is null ? ModelPricing.SourceManual : ModelPricing.SourceModelsDev);
+            Selected is null ? ModelPricing.SourceManual : ModelPricing.ModelsDevSource(Selected.ProviderKey));
     }
 
     private static string Format(double? value) =>
@@ -127,14 +127,16 @@ public partial class ModelPricingWindow : MolaContentWindow
         foreach (var row in rows) _rows.Add(row);
         PART_Conflicts.ItemsSource = _rows;
 
-        var sources = rows.SelectMany(row => row.Candidates)
-            .Select(candidate => candidate.ProviderKey)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Count();
+        var missing = rows.Count(row => row.Candidates.Count == 0);
+        var conflicts = rows.Count - missing;
         // 按行计数而不是按模型：同一个模型挂在两个服务下就是两个待定项，各自可以
         // 有不同结论，说成「N 个模型」会和列表长度对不上。
-        PART_Summary.Text = $"{rows.Count} 项在 {sources} 个来源之间价格不一致。"
-                            + "请在列表中选择一个候选价格或自定义一个。";
+        PART_Summary.Text = (missing, conflicts) switch
+        {
+            (> 0, > 0) => $"{missing} 项没有公开价格，{conflicts} 项存在多个报价。请逐项选择来源或填写价格。",
+            (> 0, _) => $"{missing} 项没有公开价格，请填写输入和输出价格。",
+            _ => $"{conflicts} 项存在多个报价，请选择来源或自定义价格。"
+        };
 
         PART_Cancel.Click += (_, _) => Close();
         PART_Save.Click += (_, _) => Save();

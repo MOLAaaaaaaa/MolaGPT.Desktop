@@ -10,6 +10,7 @@ using System.Text.RegularExpressions;
 using Markdig;
 using Markdig.Syntax;
 using Markdig.Syntax.Inlines;
+using MolaGPT.Core.Models;
 
 namespace MolaGPT.App.Rendering;
 
@@ -108,6 +109,13 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
     private FontFamily? _cjk;
     private IReadOnlyDictionary<string, string>? _protectedMath;
     private bool _containsInlineMath;
+
+    /// <summary>Whether a source pill was drawn into this paragraph. Kept apart
+    /// from <see cref="_containsInlineMath"/> because they want the same escape
+    /// from a fixed line height for different reasons — a formula is too tall,
+    /// a pill is only a little taller than the text but overlaps the next line
+    /// all the same.</summary>
+    private bool _containsInlineBox;
     private bool _usingAdaptiveLineHeight;
     private double _configuredLineHeight;
     private double _configuredLineSpacing;
@@ -390,12 +398,14 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
             Inlines?.Clear();
             Text = string.Empty;
             _containsInlineMath = false;
+            _containsInlineBox = false;
             ShowLinkCursor(false);
             UpdateLineMetrics();
             return;
         }
 
         _containsInlineMath = false;
+        _containsInlineBox = false;
 
         InlineCollection target;
         if (Inlines is null)
@@ -427,6 +437,7 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
             _cursor = 0;
             Add(target, new Run(source), source.Length);
             _containsInlineMath = false;
+            _containsInlineBox = false;
         }
         finally
         {
@@ -493,8 +504,20 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
         InlineCollection target, ContainerInline container,
         FontStyle style, FontWeight weight, bool strike)
     {
+        // One <ref> naming three sources arrives here as three adjacent citation
+        // links, and it has to leave as one pill. Folding them means looking past
+        // the current inline, so the ones already folded in are counted off here
+        // rather than visited again.
+        var folded = 0;
+
         foreach (var inline in container)
         {
+            if (folded > 0)
+            {
+                folded--;
+                continue;
+            }
+
             switch (inline)
             {
                 case LiteralInline literal:
@@ -534,6 +557,21 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
                 case LinkInline { IsImage: true } image:
                     AppendInlineImage(target, image);
                     break;
+
+                case LinkInline citation when IsCitation(citation):
+                {
+                    var group = new List<Citation> { ToCitation(citation) };
+                    for (var probe = citation.NextSibling;
+                         probe is LinkInline more && IsCitation(more);
+                         probe = probe.NextSibling)
+                    {
+                        group.Add(ToCitation(more));
+                        folded++;
+                    }
+
+                    AppendCitation(target, group);
+                    break;
+                }
 
                 case LinkInline link:
                 {
@@ -697,7 +735,7 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
     /// </summary>
     private void UpdateLineMetrics()
     {
-        if (_containsInlineMath)
+        if (_containsInlineMath || _containsInlineBox)
         {
             if (!_usingAdaptiveLineHeight)
             {
@@ -811,6 +849,62 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
         {
             // Row went away while the fetch was in flight.
         }
+    }
+
+    /// <summary>Whether this link is a citation marker rather than prose the
+    /// model wrote. See <see cref="SourceReference.CitationTitlePrefix"/> for why
+    /// the flag rides in the title.</summary>
+    private static bool IsCitation(LinkInline link) =>
+        link.Title is { } title
+        && title.StartsWith(SourceReference.CitationTitlePrefix, StringComparison.Ordinal);
+
+    /// <summary>
+    /// A citation drawn as the source pill from the web client: favicon, site,
+    /// and "+n" when the one <c>&lt;ref&gt;</c> named more than one source.
+    ///
+    /// The pill is an <see cref="InlineUIContainer"/>, which this control has to
+    /// be careful with. Two rules, both learned on screen:
+    ///
+    /// <list type="bullet">
+    /// <item>The paragraph must drop its fixed LineHeight — see
+    /// <see cref="UpdateLineMetrics"/>. A pill is taller than a line of prose,
+    /// and against a fixed line height the lines it sits on overlap the ones
+    /// after them.</item>
+    /// <item>The pill handles its own clicks. The rectangle bookkeeping in
+    /// <see cref="UpdateLinkRects"/> that every prose link rides on is no use
+    /// here: a hit test over an InlineUIContainer does not fall through to the
+    /// text block, it falls past it to the window, so a pointer over a
+    /// non-hit-testable pill reaches nothing at all.</item>
+    /// </list>
+    /// </summary>
+    private void AppendCitation(InlineCollection target, IReadOnlyList<Citation> citations)
+    {
+        if (citations.Count == 0) return;
+
+        _containsInlineBox = true;
+
+        Add(
+            target,
+            new InlineUIContainer(CitationPill.Build(citations, FontSize, this))
+            {
+                // Centre is the closest of the three positions Avalonia actually
+                // distinguishes here — Top/Baseline/TextTop/Superscript all land
+                // on the line's top edge, Bottom/TextBottom/Subscript on its
+                // bottom. The residue is taken out by the pill's own render
+                // transform; see CitationPill.Build.
+                BaselineAlignment = BaselineAlignment.Center
+            },
+            1);
+    }
+
+    /// <summary>Unpacks one citation link into what the pill and its card need.
+    /// The site is derived here rather than carried, because the backend does not
+    /// send one — see <see cref="SourceReference.SiteOf"/>.</summary>
+    private static Citation ToCitation(LinkInline link)
+    {
+        SourceReference.TryUnpack(link.Title, out var date, out var title);
+        var url = link.Url ?? string.Empty;
+        return new Citation(SourceReference.SiteOf(url), title, url, date);
     }
 
     private static Run Decorate(Run run, IBrush? foreground, TextDecorationCollection? decorations)

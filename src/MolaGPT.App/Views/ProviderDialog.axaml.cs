@@ -163,6 +163,7 @@ public partial class ProviderDialog : MolaContentWindow
 /// <summary>Mutable edit buffer for one model row.</summary>
 public sealed partial class ModelRow : ObservableObject
 {
+    private bool _loadingPrice;
     private static readonly string[] ThinkingKinds =
     [
         "OpenAiReasoningEffort",
@@ -191,13 +192,17 @@ public sealed partial class ModelRow : ObservableObject
     [ObservableProperty] private string _effortLevelsText = string.Empty;
     [ObservableProperty] private bool _imageEdit;
     [ObservableProperty] private bool _isImageProvider;
+    [ObservableProperty] private bool _isExpanded;
 
     [ObservableProperty] private string _priceInputText = string.Empty;
     [ObservableProperty] private string _priceOutputText = string.Empty;
     [ObservableProperty] private string _priceCacheReadText = string.Empty;
     [ObservableProperty] private string _priceCacheWriteText = string.Empty;
+    [ObservableProperty] private PricingCandidate? _selectedPricingCandidate;
+    [ObservableProperty] private bool _hasPricingCandidates;
 
     public ObservableCollection<BodyRow> CustomBodyRows { get; } = [];
+    public ObservableCollection<PricingCandidate> PricingCandidates { get; } = [];
 
     /// <summary>The record this row was loaded from, so fields the dialog does
     /// not show survive a round trip.</summary>
@@ -208,13 +213,17 @@ public sealed partial class ModelRow : ObservableObject
     /// a catalogue refresh writes new numbers into the boxes.</summary>
     public ModelPricing? LoadedPricing { get; set; }
 
-    public string PriceSourceLabel => (LoadedPricing?.Source, Pricing()) switch
+    public string PriceSourceLabel
     {
-        (_, null) => "未设置价格，本模型不统计费用",
-        (ModelPricing.SourceEndpoint, _) => "价格来自接口返回",
-        (ModelPricing.SourceModelsDev, _) => "价格来自 models.dev",
-        _ => "价格为手动填写，不会被自动获取覆盖"
-    };
+        get
+        {
+            if (Pricing() is null) return "未设置价格，本模型不统计费用";
+            if (SelectedPricingCandidate is { } selected) return $"价格来自 models.dev · {selected.ProviderName}";
+            if (LoadedPricing?.Source == ModelPricing.SourceEndpoint) return "价格来自接口返回";
+            if (LoadedPricing?.IsModelsDev == true) return "价格来自 models.dev";
+            return "价格为手动填写，不会被自动获取覆盖";
+        }
+    }
 
     /// <summary>Reads the four boxes back into a price, or null when input and
     /// output are not both present — a price missing either half cannot bill.</summary>
@@ -235,11 +244,29 @@ public sealed partial class ModelRow : ObservableObject
 
     public void LoadPricing(ModelPricing? pricing)
     {
-        PriceInputText = FormatPrice(pricing?.Input);
-        PriceOutputText = FormatPrice(pricing?.Output);
-        PriceCacheReadText = FormatPrice(pricing?.CacheRead);
-        PriceCacheWriteText = FormatPrice(pricing?.CacheWrite);
-        OnPropertyChanged(nameof(PriceSourceLabel));
+        _loadingPrice = true;
+        try
+        {
+            LoadedPricing = pricing;
+            PriceInputText = FormatPrice(pricing?.Input);
+            PriceOutputText = FormatPrice(pricing?.Output);
+            PriceCacheReadText = FormatPrice(pricing?.CacheRead);
+            PriceCacheWriteText = FormatPrice(pricing?.CacheWrite);
+        }
+        finally
+        {
+            _loadingPrice = false;
+            OnPropertyChanged(nameof(PriceSourceLabel));
+        }
+    }
+
+    public void SetPricingCandidates(IReadOnlyList<PricingCandidate> candidates, PricingCandidate? preferred)
+    {
+        SelectedPricingCandidate = null;
+        PricingCandidates.Clear();
+        foreach (var candidate in candidates) PricingCandidates.Add(candidate);
+        HasPricingCandidates = PricingCandidates.Count > 0;
+        SelectedPricingCandidate = preferred;
     }
 
     private static double? ParsePrice(string? text) =>
@@ -251,8 +278,31 @@ public sealed partial class ModelRow : ObservableObject
     private static string FormatPrice(double? value) =>
         value is { } price ? price.ToString("0.######", CultureInfo.InvariantCulture) : string.Empty;
 
-    partial void OnPriceInputTextChanged(string value) => OnPropertyChanged(nameof(PriceSourceLabel));
-    partial void OnPriceOutputTextChanged(string value) => OnPropertyChanged(nameof(PriceSourceLabel));
+    partial void OnSelectedPricingCandidateChanged(PricingCandidate? value)
+    {
+        if (value is null) return;
+        LoadPricing(value.Pricing with { Source = ModelPricing.ModelsDevSource(value.ProviderKey) });
+    }
+
+    partial void OnIdChanged(string value)
+    {
+        if (PricingCandidates.Count == 0) return;
+        SelectedPricingCandidate = null;
+        PricingCandidates.Clear();
+        HasPricingCandidates = false;
+        LoadPricing(null);
+    }
+
+    private void PriceTextChanged()
+    {
+        if (!_loadingPrice) SelectedPricingCandidate = null;
+        OnPropertyChanged(nameof(PriceSourceLabel));
+    }
+
+    partial void OnPriceInputTextChanged(string value) => PriceTextChanged();
+    partial void OnPriceOutputTextChanged(string value) => PriceTextChanged();
+    partial void OnPriceCacheReadTextChanged(string value) => PriceTextChanged();
+    partial void OnPriceCacheWriteTextChanged(string value) => PriceTextChanged();
 
     public static int ThinkingKindIndexFor(string? value)
     {

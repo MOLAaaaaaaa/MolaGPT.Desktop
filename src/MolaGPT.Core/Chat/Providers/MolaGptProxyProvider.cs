@@ -1040,7 +1040,11 @@ public sealed class MolaGptProxyProvider : IChatProvider
             var url = item.TryGetProperty("url", out var urlNode) && urlNode.ValueKind == JsonValueKind.String
                 ? urlNode.GetString() ?? string.Empty
                 : string.Empty;
-            list.Add(new SourceReference(id, title, url));
+            var date = item.TryGetProperty("published_date", out var dateNode)
+                       && dateNode.ValueKind == JsonValueKind.String
+                ? dateNode.GetString()?.Trim() is { Length: > 0 } d ? d : null
+                : null;
+            list.Add(new SourceReference(id, title, url, date));
             fallbackId++;
         }
 

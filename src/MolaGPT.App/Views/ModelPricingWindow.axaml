@@ -1,7 +1,7 @@
 <views:MolaContentWindow xmlns="https://github.com/avaloniaui"
   xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
   xmlns:views="clr-namespace:MolaGPT.App.Views"
-  x:Class="MolaGPT.App.Views.ModelPricingWindow" Title="确认模型价格"
+  x:Class="MolaGPT.App.Views.ModelPricingWindow" Title="完善模型价格"
   Width="900" Height="600" MinWidth="780" MinHeight="440" WindowStartupLocation="CenterOwner">
   <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="24,16,24,20">
 
@@ -33,9 +33,9 @@
                   </StackPanel>
 
                   <!-- 选中即把四个框填成该来源的报价；手改任意一个框，这里会退回
-                       空选中态并显示「自定义」。 -->
+                       空选中态并显示手动填写提示。 -->
                   <ComboBox Grid.Column="1" Classes="field" HorizontalAlignment="Stretch"
-                            PlaceholderText="自定义"
+                            PlaceholderText="选择来源或手动填写"
                             ItemsSource="{Binding Candidates}"
                             SelectedItem="{Binding Selected, Mode=TwoWay}" />
 

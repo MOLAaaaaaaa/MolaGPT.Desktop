@@ -509,7 +509,9 @@ public static partial class LocalToolRegistry
             {
                 title = ReadString(result, "title") ?? ReadString(result, "url") ?? "Untitled",
                 url = ReadString(result, "url") ?? string.Empty,
-                snippet = TrimSnippet(ReadString(result, "content"), options)
+                snippet = TrimSnippet(ReadString(result, "content"), options),
+                // Only the news topic carries one; null is normal, not a parse failure.
+                published_date = ReadString(result, "published_date")
             })
             .Where(item => !string.IsNullOrWhiteSpace(item.url))
             .Cast<object>()
@@ -546,7 +548,8 @@ public static partial class LocalToolRegistry
             {
                 title = ReadString(result, "title") ?? ReadString(result, "url") ?? "Untitled",
                 url = ReadString(result, "url") ?? string.Empty,
-                snippet = TrimSnippet(ReadString(result, "text"), options)
+                snippet = TrimSnippet(ReadString(result, "text"), options),
+                published_date = ReadString(result, "publishedDate")
             })
             .Where(item => !string.IsNullOrWhiteSpace(item.url))
             .Cast<object>()
@@ -645,6 +648,13 @@ public static partial class LocalToolRegistry
 
     private static string NormalizeDuckDuckGoUrl(string href)
     {
+        // Protocol-relative first. DDG hands back "//duckduckgo.com/l/?uddg=<target>",
+        // which is not an absolute URI, so the redirect unwrapping below never ran and
+        // every hit came back carrying a duckduckgo.com link. That was survivable while
+        // the results were only prose for the model to read; it is not survivable as a
+        // citation, where it would give every source the same site name and favicon.
+        if (href.StartsWith("//", StringComparison.Ordinal)) href = "https:" + href;
+
         if (Uri.TryCreate(href, UriKind.Absolute, out var absolute)
             && absolute.Host.Contains("duckduckgo.com", StringComparison.OrdinalIgnoreCase))
         {
@@ -657,8 +667,6 @@ public static partial class LocalToolRegistry
             }
         }
 
-        if (href.StartsWith("//", StringComparison.Ordinal))
-            return "https:" + href;
         return href;
     }
 

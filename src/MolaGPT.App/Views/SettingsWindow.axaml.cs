@@ -238,6 +238,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_SaveProvider.Click += (_, _) => SaveProvider();
         PART_DeleteEditingProvider.Click += OnDeleteEditingProvider;
         PART_DetectProviderModels.Click += OnDetectProviderModels;
+        PART_FetchEditingProviderPricing.Click += OnFetchEditingProviderPricing;
         PART_FetchAllPricing.Click += OnFetchAllPricing;
         PART_ResolvePricingConflicts.Click += OnResolvePricingConflicts;
         PART_ClosePricingResult.Click += (_, _) => PART_PricingResult.IsVisible = false;
@@ -298,6 +299,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_TestImageGeneration.IsEnabled = _imageGenerationTool is not null;
         PART_TestSearch.IsEnabled = _byokHttpFactory is not null;
         PART_DetectProviderModels.IsEnabled = _byokHttpFactory is not null;
+        PART_FetchEditingProviderPricing.IsEnabled = _byokHttpFactory is not null;
         PART_FetchAllPricing.IsEnabled = _byokHttpFactory is not null;
         PART_TestProvider.IsEnabled = _byokHttpFactory is not null;
         PART_ConfigureSandbox.IsEnabled = _pythonRuntime is not null && _piSidecar is not null;
@@ -890,7 +892,9 @@ public partial class SettingsWindow : MolaContentWindow
         while (_providerModels.Any(model => string.Equals(model.Id, id, StringComparison.OrdinalIgnoreCase)))
             id = "new-model-" + ++suffix;
 
-        _providerModels.Add(CreateModelRow(new ProviderModelEntry(id, "新模型")));
+        var row = CreateModelRow(new ProviderModelEntry(id, "新模型"));
+        row.IsExpanded = true;
+        _providerModels.Add(row);
     }
 
     private void OnAddProviderBody(object? sender, RoutedEventArgs e)
@@ -1300,6 +1304,8 @@ public partial class SettingsWindow : MolaContentWindow
 
         var chatImage = image && PART_ProviderImageFormat.SelectedIndex == 1;
         PART_ProviderImageEditPathField.IsVisible = image && !chatImage;
+        PART_FetchEditingProviderPricing.IsVisible = !image;
+        PART_AddDetectedModels.Content = image ? "添加选中模型" : "添加并获取价格";
         foreach (var model in _providerModels) model.IsImageProvider = image;
     }
 
@@ -1413,6 +1419,114 @@ public partial class SettingsWindow : MolaContentWindow
         }
     }
 
+    private async void OnFetchEditingProviderPricing(object? sender, RoutedEventArgs e)
+    {
+        var rows = _providerModels.Where(row => !string.IsNullOrWhiteSpace(row.Id)).ToList();
+        if (rows.Count == 0)
+        {
+            ShowProviderStatus("请先添加模型。");
+            return;
+        }
+
+        PART_FetchEditingProviderPricing.IsEnabled = false;
+        PART_FetchEditingProviderPricing.Content = "获取中...";
+        try
+        {
+            var found = await FetchPricingForRowsAsync(rows);
+            ShowProviderStatus(found == 0
+                ? "未找到这些模型的公开价格。"
+                : $"已获取 {found} 个模型的价格，可在模型中选择报价来源。");
+        }
+        catch (Exception ex)
+        {
+            FailProviderEdit("获取价格失败：" + ex.Message);
+        }
+        finally
+        {
+            PART_FetchEditingProviderPricing.Content = "获取价格";
+            PART_FetchEditingProviderPricing.IsEnabled = true;
+        }
+    }
+
+    private async void OnFetchModelPricing(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: ModelRow row } button) return;
+        if (string.IsNullOrWhiteSpace(row.Id))
+        {
+            ShowProviderStatus("请先填写模型 ID。");
+            return;
+        }
+
+        button.IsEnabled = false;
+        button.Content = "获取中...";
+        try
+        {
+            var found = await FetchPricingForRowsAsync([row]);
+            ShowProviderStatus(found == 0 ? "未找到该模型的公开价格。" : "已获取模型价格。");
+        }
+        catch (Exception ex)
+        {
+            FailProviderEdit("获取价格失败：" + ex.Message);
+        }
+        finally
+        {
+            button.Content = "获取价格";
+            button.IsEnabled = true;
+        }
+    }
+
+    private async Task<int> FetchPricingForRowsAsync(IReadOnlyCollection<ModelRow> rows)
+    {
+        if (_byokHttpFactory is null) return 0;
+        var catalog = _modelsDevCatalog ??= new ModelsDevCatalog(_byokHttpFactory);
+        var providers = await catalog.LoadAsync(forceRefresh: false);
+        var guessedProvider = ModelsDevCatalog.GuessProviderKey(PART_ProviderBaseUrl.Text);
+        var found = 0;
+
+        foreach (var row in rows)
+        {
+            var modelId = row.Id.Trim();
+            var candidates = providers
+                .Where(provider => provider.Models.TryGetValue(modelId, out _))
+                .Select(provider => new PricingCandidate(
+                    provider.Key,
+                    provider.Name,
+                    provider.Models[modelId]))
+                .ToList();
+
+            if (candidates.Count == 0)
+            {
+                row.SetPricingCandidates([], null);
+                continue;
+            }
+
+            var current = row.Pricing();
+            PricingCandidate? preferred = null;
+            if (current is not { IsManual: true }
+                && !string.Equals(current?.Source, ModelPricing.SourceEndpoint, StringComparison.OrdinalIgnoreCase))
+            {
+                preferred = candidates.FirstOrDefault(candidate =>
+                                candidate.ProviderKey.Equals(row.LoadedPricing?.ModelsDevProviderKey, StringComparison.OrdinalIgnoreCase))
+                            ?? candidates.FirstOrDefault(candidate => SameRates(candidate.Pricing, current))
+                            ?? candidates.FirstOrDefault(candidate =>
+                                candidate.ProviderKey.Equals(guessedProvider, StringComparison.OrdinalIgnoreCase))
+                            ?? candidates[0];
+            }
+
+            row.SetPricingCandidates(candidates, preferred);
+            found++;
+        }
+
+        return found;
+    }
+
+    private static bool SameRates(ModelPricing left, ModelPricing? right) =>
+        right is not null
+        && left.Input == right.Input
+        && left.Output == right.Output
+        && left.CacheRead == right.CacheRead
+        && left.CacheWrite == right.CacheWrite;
+
     /// <summary>
     /// Prices every model of every chat provider in one pass.
     ///
@@ -1447,16 +1561,18 @@ public partial class SettingsWindow : MolaContentWindow
             var outcome = ApplyPricing(targets, _ => match.Agreed);
             _pricingMatch = match;
             _pricingTargets = targets;
+            var pendingRows = BuildPricingRows(match, targets);
+            var missing = pendingRows.Count(row => row.Candidates.Count == 0);
+            var conflicts = pendingRows.Count - missing;
 
             var parts = new List<string>();
             if (outcome.Written > 0) parts.Add($"已自动保存 {outcome.Written} 个模型的价格");
             if (outcome.Kept > 0) parts.Add($"{outcome.Kept} 项保留手动价格");
-            if (match.Unmatched.Count > 0) parts.Add($"{match.Unmatched.Count} 项价格需手动填写");
-            if (match.Conflicts.Count > 0)
-                parts.Add($"还有 {match.Conflicts.Count} 个模型在 {match.Sources.Count} 个来源之间的价格不一致");
-            if (parts.Count == 0) parts.Add("没有可填入的价格");
+            if (missing > 0) parts.Add($"{missing} 项价格需手动填写");
+            if (conflicts > 0) parts.Add($"还有 {conflicts} 项在多个来源之间的价格不一致");
+            if (parts.Count == 0) parts.Add("模型价格已是最新");
 
-            ShowPricingResult(string.Join("，", parts) + "。", match.Conflicts.Count);
+            ShowPricingResult(string.Join("，", parts) + "。", pendingRows.Count);
         }
         catch (Exception ex)
         {
@@ -1495,6 +1611,11 @@ public partial class SettingsWindow : MolaContentWindow
             {
                 if (!prices.TryGetValue(model.Id.Trim(), out var pricing)) { models.Add(model); continue; }
                 if (model.Pricing is { IsManual: true }) { models.Add(model); kept++; continue; }
+                if (model.Pricing is { IsModelsDev: true } current && SameRates(current, pricing))
+                {
+                    models.Add(model);
+                    continue;
+                }
                 models.Add(model with { Pricing = pricing });
                 written++;
                 touched = true;
@@ -1546,24 +1667,9 @@ public partial class SettingsWindow : MolaContentWindow
     /// </summary>
     private async void OnResolvePricingConflicts(object? sender, RoutedEventArgs e)
     {
-        if (_pricingMatch is not { } match || match.Conflicts.Count == 0) return;
+        if (_pricingMatch is not { } match) return;
 
-        var rows = new List<PricingConflictRow>();
-        foreach (var provider in _pricingTargets)
-        {
-            var guess = ModelsDevCatalog.GuessProviderKey(provider.BaseUrl);
-            foreach (var model in provider.Models)
-            {
-                if (model.Pricing is { IsManual: true }) continue;
-                if (!match.Conflicts.TryGetValue(model.Id.Trim(), out var prices)) continue;
-                var candidates = prices
-                    .Select(price => new PricingCandidate(price.ProviderKey, price.ProviderName, price.Pricing))
-                    .ToList();
-                var preferred = candidates.FirstOrDefault(candidate =>
-                    candidate.ProviderKey.Equals(guess, StringComparison.OrdinalIgnoreCase));
-                rows.Add(new PricingConflictRow(provider.Id, provider.Name, model.Id, candidates, preferred));
-            }
-        }
+        var rows = BuildPricingRows(match, _pricingTargets);
         if (rows.Count == 0) return;
 
         var window = new ModelPricingWindow(rows);
@@ -1576,6 +1682,53 @@ public partial class SettingsWindow : MolaContentWindow
                 : new Dictionary<string, ModelPricing>());
         _pricingMatch = null;
         ShowPricingResult($"已按所选来源写入 {outcome.Written} 个模型的价格。", conflicts: 0);
+    }
+
+    private static List<PricingConflictRow> BuildPricingRows(
+        PricingMatch match,
+        IReadOnlyList<ProviderEntry> providers)
+    {
+        var rows = new List<PricingConflictRow>();
+        var unmatched = match.Unmatched.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var provider in providers)
+        {
+            var guess = ModelsDevCatalog.GuessProviderKey(provider.BaseUrl);
+            foreach (var model in provider.Models)
+            {
+                if (model.Pricing is { IsManual: true }) continue;
+                var modelId = model.Id.Trim();
+                IReadOnlyList<ModelsDevPrice> prices;
+                if (match.Conflicts.TryGetValue(modelId, out var conflictPrices))
+                {
+                    prices = conflictPrices;
+
+                    if (model.Pricing is { IsModelsDev: true } saved)
+                    {
+                        var resolved = saved.ModelsDevProviderKey is { } source
+                            ? prices.Any(price => price.ProviderKey.Equals(source, StringComparison.OrdinalIgnoreCase)
+                                                  && SameRates(price.Pricing, saved))
+                            : prices.Any(price => SameRates(price.Pricing, saved));
+                        if (resolved) continue;
+                    }
+                }
+                else
+                {
+                    // models.dev has no quote for this id. An endpoint-supplied price
+                    // is already usable, so only models without any stored price need
+                    // a manual row here.
+                    if (!unmatched.Contains(modelId) || model.Pricing is not null) continue;
+                    prices = [];
+                }
+
+                var candidates = prices
+                    .Select(price => new PricingCandidate(price.ProviderKey, price.ProviderName, price.Pricing))
+                    .ToList();
+                var preferred = candidates.FirstOrDefault(candidate =>
+                    candidate.ProviderKey.Equals(guess, StringComparison.OrdinalIgnoreCase));
+                rows.Add(new PricingConflictRow(provider.Id, provider.Name, modelId, candidates, preferred));
+            }
+        }
+        return rows;
     }
 
     private void RefreshDetectedModelFilter()
@@ -1598,12 +1751,43 @@ public partial class SettingsWindow : MolaContentWindow
             if (item.IsEnabled) item.IsSelected = selected;
     }
 
-    private void OnAddDetectedModels(object? sender, RoutedEventArgs e)
+    private async void OnAddDetectedModels(object? sender, RoutedEventArgs e)
     {
         var selected = _detectedModels.Where(item => item.IsEnabled && item.IsSelected).ToList();
-        foreach (var item in selected) _providerModels.Add(CreateModelRow(item.Entry));
+        var added = selected.Select(item => CreateModelRow(item.Entry)).ToList();
+        if (added.Count == 1) added[0].IsExpanded = true;
+        foreach (var row in added) _providerModels.Add(row);
+
+        var priced = 0;
+        if (_editingProviderPurpose != "image" && added.Count > 0)
+        {
+            PART_AddDetectedModels.IsEnabled = false;
+            PART_AddDetectedModels.Content = "获取价格中...";
+            try
+            {
+                priced = await FetchPricingForRowsAsync(added);
+            }
+            catch (Exception ex)
+            {
+                CloseDetectedModels();
+                FailProviderEdit("模型已添加，获取价格失败：" + ex.Message);
+                return;
+            }
+            finally
+            {
+                PART_AddDetectedModels.IsEnabled = true;
+                PART_AddDetectedModels.Content = "添加并获取价格";
+            }
+        }
+
         CloseDetectedModels();
-        ShowProviderStatus(selected.Count == 0 ? "未选择模型。" : $"已添加 {selected.Count} 个模型，保存后生效。");
+        ShowProviderStatus(selected.Count == 0
+            ? "未选择模型。"
+            : _editingProviderPurpose == "image"
+                ? $"已添加 {selected.Count} 个模型，保存后生效。"
+            : priced > 0
+                ? $"已添加 {selected.Count} 个模型，并获取 {priced} 个模型的价格，保存后生效。"
+                : $"已添加 {selected.Count} 个模型，未找到公开价格，保存后生效。");
     }
 
     private void CloseDetectedModels()

@@ -12,6 +12,7 @@ using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MolaGPT.App.Rendering;
+using MolaGPT.Core.Models;
 using MolaGPT.Storage;
 using MolaGPT.ViewModels;
 
@@ -901,13 +902,27 @@ public partial class TranscriptView : UserControl
     }
 
     /// <summary>
-    /// Opens a citation in the system browser. Links in a transcript come from
-    /// the model, so they are opened rather than navigated in-app: nothing here
-    /// should render remote content inside the window.
+    /// Drops the turn's whole source list out of the chip it hides behind.
+    /// Rows open in the system browser, not in-app: these URLs come from a
+    /// search the model ran, so nothing here should render remote content
+    /// inside the window.
     /// </summary>
-    private void OnOpenSource(object? sender, RoutedEventArgs e)
+    private void OnShowAllSources(object? sender, RoutedEventArgs e)
     {
-        if (sender is Control { Tag: string url }) LinkLauncher.Open(url);
+        if (sender is not Control { DataContext: TranscriptRow row } anchor) return;
+        if (row.Message.Sources is not { Count: > 0 } sources) return;
+
+        var citations = new List<Citation>(sources.Count);
+        foreach (var source in sources)
+        {
+            citations.Add(new Citation(
+                SourceReference.SiteOf(source.Url),
+                source.Title,
+                source.Url,
+                source.PublishedDate));
+        }
+
+        CitationPill.ShowList(anchor, citations);
     }
 
     /// <summary>The one-tap fix on a recoverable failure. The only action the

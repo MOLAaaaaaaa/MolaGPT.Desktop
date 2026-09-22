@@ -144,8 +144,22 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // catalogue fetch rather than a respawn.
         string? promptError = null;
         RolePromptTrace? promptTrace = null;
+
+        // Search hits become citable here rather than inside the tool: numbering
+        // has to run across every search in the turn, and the tool only ever sees
+        // one call. The model gets the numbers and the rule; the transcript gets
+        // the same list as a ChatChunk below.
+        var citations = new SearchCitations();
         var binding = new PiWorkToolBridge.TurnBinding(
-            (name, argsJson, toolCt) => _toolHost.ExecuteAsync(name, argsJson, toolContext, options, toolCt),
+            async (name, argsJson, toolCt) =>
+            {
+                var result = await _toolHost
+                    .ExecuteAsync(name, argsJson, toolContext, options, toolCt)
+                    .ConfigureAwait(false);
+                return string.Equals(name, "search_web", StringComparison.Ordinal)
+                    ? citations.Number(result)
+                    : result;
+            },
             () => toolCatalogJson,
             () => systemPrompt,
             request.RolePrompt,
@@ -214,7 +228,14 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                 priced,
                 ref errorMessage);
             if (chunk is not null) yield return chunk;
+            // Tool results come back on the bridge thread, so the sources show up
+            // between lines rather than on one; polling here is what puts them on
+            // the message while the answer is still being written.
+            if (citations.TryTakeUpdate(out var found)) yield return new ChatChunk(Sources: found);
         }
+
+        // A search that finished after the last line would otherwise be dropped.
+        if (citations.TryTakeUpdate(out var trailing)) yield return new ChatChunk(Sources: trailing);
 
         if (errorMessage is not null)
             throw new InvalidOperationException(HumanizeAgentError(errorMessage));

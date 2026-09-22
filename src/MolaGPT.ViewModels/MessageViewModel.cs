@@ -276,6 +276,11 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
 
     public bool HasResponseStats => Usage is not null || !string.IsNullOrWhiteSpace(ModelLabel);
     public bool HasAttachments => Attachments is { Count: > 0 };
+    public bool HasSources => Sources is { Count: > 0 };
+    /// <summary>The chip that stands in for the whole source list. The list is
+    /// "everything this turn searched", not "what the answer cited" — the inline
+    /// pills carry that — so it is worth one line, not twenty numbered chips.</summary>
+    public string SourcesLabel => $"{Sources?.Count ?? 0} 个来源";
     public bool HasToolCalls => ToolCalls.Count > 0;
     public string VisibleContent => ProcessCitationRefs(StripSystemHints(Content));
     public IReadOnlyList<string> BranchSiblingIds { get; private set; } = [];
@@ -1146,6 +1151,8 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     partial void OnSourcesChanged(IReadOnlyList<SourceReference>? value)
     {
         OnPropertyChanged(nameof(VisibleContent));
+        OnPropertyChanged(nameof(HasSources));
+        OnPropertyChanged(nameof(SourcesLabel));
         RebuildDisplayBlocks();
     }
     partial void OnUsageChanged(Usage? value)
@@ -1393,14 +1400,20 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
                 var url = string.IsNullOrWhiteSpace(sourceRef.Url)
                     ? "#"
                     : sourceRef.Url.Replace(")", "%29", StringComparison.Ordinal);
-                var title = sourceRef.Title.Replace("\\", "\\\\", StringComparison.Ordinal)
+                var packed = sourceRef.Pack()
+                    .Replace("\\", "\\\\", StringComparison.Ordinal)
                     .Replace("\"", "\\\"", StringComparison.Ordinal);
-                links.Add(title.Length == 0
-                    ? $"[[来源 {id}]]({url})"
-                    : $"[[来源 {id}]]({url} \"{title}\")");
+                // Link text is the bare number, which is what a reader looking at
+                // the raw markdown sees; the renderer replaces it with the source
+                // pill and reads the rest out of the link title.
+                links.Add($"[{id}]({url} \"{packed}\")");
             }
 
-            return links.Count == 0 ? inner : string.Join(" ", links) + inner;
+            // Concatenated, with nothing between them: one <ref> naming three
+            // sources is one citation, and the renderer folds this run of links
+            // back into a single pill with a "+2" on it. A separator here — even
+            // a space — would be a place the fold could break.
+            return links.Count == 0 ? inner : string.Concat(links) + inner;
         });
     }
 

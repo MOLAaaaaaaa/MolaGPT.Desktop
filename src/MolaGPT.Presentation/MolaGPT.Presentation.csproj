@@ -12,8 +12,4 @@
     <PackageReference Include="Markdig" Version="0.22.0" />
   </ItemGroup>
 
-  <ItemGroup>
-    <InternalsVisibleTo Include="MolaGPT.Presentation.Tests" />
-  </ItemGroup>
-
 </Project>

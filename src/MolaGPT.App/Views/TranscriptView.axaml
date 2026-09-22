@@ -4,7 +4,6 @@
              xmlns:p="clr-namespace:MolaGPT.Presentation;assembly=MolaGPT.Presentation"
              xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
              xmlns:cc="clr-namespace:MolaGPT.Core.Chat;assembly=MolaGPT.Core"
-             xmlns:m="clr-namespace:MolaGPT.Core.Models;assembly=MolaGPT.Core"
              xmlns:views="clr-namespace:MolaGPT.App.Views"
              x:Class="MolaGPT.App.Views.TranscriptView">
 
@@ -461,29 +460,22 @@
     <DataTemplate DataType="r:ActionRow">
       <StackPanel Margin="0,8,0,10" Spacing="8">
 
-        <!-- Citations from a web-search turn. Numbered so the [n] markers in the
-             answer body point somewhere. -->
-        <ItemsControl ItemsSource="{Binding Message.Sources}"
-                      IsVisible="{Binding Message.Sources, Converter={x:Static ObjectConverters.IsNotNull}}">
-          <ItemsControl.ItemsPanel>
-            <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
-          </ItemsControl.ItemsPanel>
-          <ItemsControl.ItemTemplate>
-            <DataTemplate x:DataType="m:SourceReference">
-              <Button Classes="sourcechip" Tag="{Binding Url}" Click="OnOpenSource"
-                      ToolTip.Tip="{Binding Url}">
-                <StackPanel Classes="inlinerow compact" Orientation="Horizontal" Spacing="6">
-                  <Border Classes="sourceindex">
-                    <TextBlock Text="{Binding Id}" FontSize="11" FontWeight="SemiBold" />
-                  </Border>
-                  <TextBlock Text="{Binding Title}" FontSize="12" VerticalAlignment="Center"
-                             TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
-                             MaxWidth="240" />
-                </StackPanel>
-              </Button>
-            </DataTemplate>
-          </ItemsControl.ItemTemplate>
-        </ItemsControl>
+        <!-- Sources from a web-search turn, behind one chip. The numbered list
+             used to be here because the answer body printed bare [n] markers;
+             now the inline pills name their own sources, so this is only
+             "everything the turn looked at" — twenty-odd chips of it was more
+             of the message than the message. -->
+        <Button Classes="sourcechip" Click="OnShowAllSources"
+                HorizontalAlignment="Left" IsVisible="{Binding Message.HasSources}"
+                ToolTip.Tip="查看全部来源">
+          <StackPanel Classes="inlinerow compact" Orientation="Horizontal" Spacing="6">
+            <TextBlock Classes="icon" Text="&#xE774;" FontSize="12" VerticalAlignment="Center"
+                       Foreground="{DynamicResource Brush.Text.Secondary}" />
+            <TextBlock Text="{Binding Message.SourcesLabel}" FontSize="12" VerticalAlignment="Center" />
+            <TextBlock Classes="icon" Text="&#xE70D;" FontSize="9" VerticalAlignment="Center"
+                       Foreground="{DynamicResource Brush.Text.Muted}" />
+          </StackPanel>
+        </Button>
 
         <!-- Recoverable-error banner: turns a dead-end failure (no working
              directory / balance-402) into a one-tap fix. -->
@@ -1004,18 +996,6 @@
       <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
     </Style>
-    <Style Selector="Border.sourceindex">
-      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
-      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
-      <Setter Property="MinWidth" Value="16" />
-      <Setter Property="Padding" Value="4,1" />
-      <Setter Property="VerticalAlignment" Value="Center" />
-    </Style>
-    <Style Selector="Border.sourceindex TextBlock">
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
-      <Setter Property="TextAlignment" Value="Center" />
-    </Style>
-
     <Style Selector="Border.errorbanner">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />

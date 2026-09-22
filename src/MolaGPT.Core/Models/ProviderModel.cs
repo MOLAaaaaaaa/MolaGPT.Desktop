@@ -105,9 +105,17 @@ public sealed record ModelPricing(
 {
     public const string SourceEndpoint = "endpoint";
     public const string SourceModelsDev = "models.dev";
+    public const string SourceModelsDevPrefix = SourceModelsDev + ":";
     public const string SourceManual = "manual";
 
     public bool IsManual => string.Equals(Source, SourceManual, StringComparison.OrdinalIgnoreCase);
+    public bool IsModelsDev => string.Equals(Source, SourceModelsDev, StringComparison.OrdinalIgnoreCase)
+                               || Source?.StartsWith(SourceModelsDevPrefix, StringComparison.OrdinalIgnoreCase) == true;
+    public string? ModelsDevProviderKey => Source?.StartsWith(SourceModelsDevPrefix, StringComparison.OrdinalIgnoreCase) == true
+        ? Source[SourceModelsDevPrefix.Length..]
+        : null;
+
+    public static string ModelsDevSource(string providerKey) => SourceModelsDevPrefix + providerKey;
 }
 
 /// <summary>
