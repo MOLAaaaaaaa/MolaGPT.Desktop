@@ -55,9 +55,6 @@ public sealed partial class MainViewModel : ObservableObject
     /// <summary>Opens the AboutWindow. Set by App.xaml.cs.</summary>
     public Action? AboutRequested { get; set; }
 
-    /// <summary>Fired when switching to Work mode; App.xaml.cs checks if Python needs setup and shows the wizard.</summary>
-    public Action? WorkSetupRequested { get; set; }
-
     private bool _openSettingsToPersonas;
     private bool _openSettingsWithNewPersona;
 
@@ -94,6 +91,7 @@ public sealed partial class MainViewModel : ObservableObject
         _backgroundStreams = backgroundStreams;
         _molaGptProxy = molaGptProxy;
         _chat.AutoCollapseThinking = _settings.AutoCollapseThinking;
+        _chat.CodeFenceKinds = _settings.CodeFenceKinds;
 
         _conversationList.ConversationSelected += async (_, id) =>
         {
@@ -164,20 +162,7 @@ public sealed partial class MainViewModel : ObservableObject
         };
         _settings.Providers.CollectionChanged += (_, _) => RefreshActivePromptState();
 
-        // Auto-open/close the artifact panel per conversation: opening when the
-        // conversation has local artifacts (BYOK only — MolaGPT-account artifacts
-        // live server-side), closing otherwise. Runs on conversation load and
-        // after each python run / upload.
-        _chat.ArtifactsRefreshed += (_, hasArtifacts) =>
-        {
-            ArtifactPanelVisible = hasArtifacts && IsArtifactPanelAvailable;
-            OnPropertyChanged(nameof(IsArtifactPanelAvailable));
-        };
-        _chat.PropertyChanged += (_, e) =>
-        {
-            if (e.PropertyName is nameof(ChatViewModel.ActiveProvider))
-                OnPropertyChanged(nameof(IsArtifactPanelAvailable));
-        };
+        WireArtifacts();
 
         // Quota chip visibility follows the active mode (Chat/Work = MolaGPT
         // account, BYOK never) and the account login state. Refresh whenever
@@ -205,6 +190,8 @@ public sealed partial class MainViewModel : ObservableObject
         {
             if (e.PropertyName is nameof(SettingsViewModel.AutoCollapseThinking))
                 _chat.AutoCollapseThinking = _settings.AutoCollapseThinking;
+            if (e.PropertyName is nameof(SettingsViewModel.CodeFenceKinds))
+                _chat.CodeFenceKinds = _settings.CodeFenceKinds;
             if (e.PropertyName is nameof(SettingsViewModel.IsLoggedIn))
             {
                 OnPropertyChanged(nameof(IsQuotaChipVisible));
@@ -368,17 +355,262 @@ public sealed partial class MainViewModel : ObservableObject
         return Math.Min(declaredLimit.Value, remaining.Value + used);
     }
 
-    /// <summary>True when the artifact drawer button should be offered: BYOK
-    /// provider (artifacts are local) and the conversation has at least one.
-    /// MolaGPT-account mode hides it entirely.</summary>
-    public bool IsArtifactPanelAvailable =>
-        Chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy && Chat.HasArtifacts;
+    /// <summary>The drawer is offered whenever the conversation has anything in
+    /// it. Fences exist in every mode; working-directory files only in BYOK,
+    /// which <see cref="ChatViewModel.RefreshArtifacts"/> already accounts for.</summary>
+    public bool IsArtifactPanelAvailable => Chat.HasArtifacts;
+
+    /// <summary>Entry the canvas is showing.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasSelectedArtifact))]
+    [NotifyPropertyChangedFor(nameof(CanRevealSelectedArtifact))]
+    [NotifyPropertyChangedFor(nameof(CanCopySelectedArtifact))]
+    [NotifyPropertyChangedFor(nameof(CanShowSelectedArtifactSource))]
+    [NotifyPropertyChangedFor(nameof(CanReviseSelectedArtifact))]
+    private ArtifactItemViewModel? _selectedArtifact;
+
+    public bool HasSelectedArtifact => SelectedArtifact is not null;
+    public bool CanRevealSelectedArtifact => SelectedArtifact?.CanReveal == true;
+    public bool CanCopySelectedArtifact => SelectedArtifact?.CanCopy == true;
+    public bool CanShowSelectedArtifactSource => SelectedArtifact?.CanShowSource == true;
+    public bool CanReviseSelectedArtifact => SelectedArtifact?.CanRevise == true;
+
+    /// <summary>Canvas vs list on the shared right rail.</summary>
+    [ObservableProperty] private bool _artifactCanvasVisible;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsArtifactHandleVisible))]
+    private bool _artifactCanvasMaximized;
+
+    public bool IsArtifactHandleVisible => IsArtifactPanelAvailable && !ArtifactCanvasMaximized;
+
+    /// <summary>Peek source instead of the live render.</summary>
+    [ObservableProperty] private bool _artifactSourceMode;
+
+    /// <summary>
+    /// Where the selection came from, so it can be found again when its entry
+    /// is regrouped — a fence that starts untitled and then reveals its file
+    /// name on the first line moves into that file's entry mid-stream.
+    /// </summary>
+    private (MessageViewModel Message, int Ordinal)? _selectionAnchor;
+
+    /// <summary>The user closed the drawer during this turn: stop opening it for
+    /// the rest of the turn. Cleared when the next message is sent.</summary>
+    private bool _autoOpenDismissed;
+
+    partial void OnSelectedArtifactChanged(ArtifactItemViewModel? value)
+    {
+        _selectionAnchor = value?.CurrentVersion is { } version ? (version.Message, version.Ordinal) : null;
+    }
+
+    partial void OnArtifactCanvasVisibleChanged(bool value)
+    {
+        if (!value) ArtifactCanvasMaximized = false;
+    }
+
+    partial void OnArtifactPanelVisibleChanged(bool value)
+    {
+        if (!value) ArtifactCanvasMaximized = false;
+    }
+
+    private void WireArtifacts()
+    {
+        // Working-directory files open the drawer, as they did before fences
+        // joined it: on conversation load and after a python run or upload.
+        Chat.ArtifactsRefreshed += (_, hasFiles) =>
+        {
+            if (hasFiles) ArtifactPanelVisible = true;
+            EnsureSelectionAlive();
+        };
+        Chat.ArtifactWorkspace.Changed += (_, _) =>
+        {
+            OnPropertyChanged(nameof(IsArtifactPanelAvailable));
+            OnPropertyChanged(nameof(IsArtifactHandleVisible));
+            EnsureSelectionAlive();
+        };
+        Chat.ArtifactWorkspace.LiveArtifactChanged += OnLiveArtifactChanged;
+        Chat.ArtifactActionRequested += (_, e) =>
+        {
+            switch (e.Action)
+            {
+                case ArtifactAction.Open:
+                    OpenArtifact(e.Item, e.VersionIndex);
+                    break;
+                case ArtifactAction.Revise:
+                    Composer.AddArtifactReference(e.Item, e.VersionIndex);
+                    break;
+            }
+        };
+        Chat.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName != nameof(ChatViewModel.ConversationId)) return;
+            // Another conversation's artifacts are not this one's.
+            SelectedArtifact = null;
+            ArtifactCanvasVisible = false;
+            ArtifactPanelVisible = false;
+            _autoOpenDismissed = false;
+        };
+        Composer.MessageSubmitted += () => _autoOpenDismissed = false;
+    }
+
+    /// <summary>
+    /// Follows the answer being written: a new HTML / SVG / Mermaid fence opens
+    /// on the canvas as it starts, unless the user has closed the drawer during
+    /// this turn or turned the behaviour off — or reads that format as code in
+    /// the answer, where a canvas opening by itself would be the old chip
+    /// behaviour coming back through the side door.
+    /// </summary>
+    private void OnLiveArtifactChanged(object? sender, LiveArtifactEventArgs e)
+    {
+        if (!e.IsNewFence || _autoOpenDismissed || !Settings.CanvasAutoOpen) return;
+        if (e.Item.RenderKind is not (Presentation.Artifacts.ArtifactRenderKind.Html
+            or Presentation.Artifacts.ArtifactRenderKind.Svg
+            or Presentation.Artifacts.ArtifactRenderKind.Mermaid)) return;
+        if (Chat.CodeFenceKinds.Contains(e.Item.RenderKind)) return;
+        OpenArtifact(e.Item, e.Item.Versions.Count - 1);
+    }
+
+    private void EnsureSelectionAlive()
+    {
+        if (SelectedArtifact is null) return;
+        if (Chat.Artifacts.Contains(SelectedArtifact)) return;
+
+        if (_selectionAnchor is { } anchor
+            && Chat.ArtifactWorkspace.FindItem(anchor.Message, anchor.Ordinal) is { } replacement)
+        {
+            replacement.SelectVersion(replacement.IndexOfVersion(anchor.Message, anchor.Ordinal));
+            SelectedArtifact = replacement;
+            return;
+        }
+
+        SelectedArtifact = null;
+        ArtifactCanvasVisible = false;
+        if (!Chat.HasArtifacts) ArtifactPanelVisible = false;
+    }
+
+    public void OpenArtifact(ArtifactItemViewModel artifact, int versionIndex = -1)
+    {
+        if (versionIndex >= 0) artifact.SelectVersion(versionIndex);
+        SelectedArtifact = artifact;
+        _selectionAnchor = artifact.CurrentVersion is { } version ? (version.Message, version.Ordinal) : null;
+        ArtifactSourceMode = false;
+        ArtifactCanvasVisible = true;
+        ArtifactPanelVisible = true;
+    }
+
+    [RelayCommand]
+    private void OpenArtifactInCanvas(ArtifactItemViewModel? artifact)
+    {
+        if (artifact is not null) OpenArtifact(artifact);
+    }
+
+    [RelayCommand]
+    private void ToggleArtifactSourceMode() => ArtifactSourceMode = !ArtifactSourceMode;
+
+    [RelayCommand]
+    private void ShowArtifactList()
+    {
+        ArtifactCanvasMaximized = false;
+        ArtifactCanvasVisible = false;
+        ArtifactPanelVisible = true;
+    }
+
+    [RelayCommand]
+    private void ShowArtifactCanvas()
+    {
+        var target = SelectedArtifact ?? Chat.Artifacts.FirstOrDefault();
+        if (target is not null) OpenArtifact(target);
+    }
+
+    [RelayCommand]
+    private void ToggleArtifactCanvasMaximized() =>
+        ArtifactCanvasMaximized = !ArtifactCanvasMaximized;
+
+    [RelayCommand]
+    private void SelectPreviousArtifact() => SelectArtifactAtOffset(-1);
+
+    [RelayCommand]
+    private void SelectNextArtifact() => SelectArtifactAtOffset(1);
+
+    private void SelectArtifactAtOffset(int offset)
+    {
+        if (Chat.Artifacts.Count == 0) return;
+        var index = SelectedArtifact is null ? -1 : Chat.Artifacts.IndexOf(SelectedArtifact);
+        if (index < 0) index = 0;
+        index = (index + offset + Chat.Artifacts.Count) % Chat.Artifacts.Count;
+        OpenArtifact(Chat.Artifacts[index]);
+    }
+
+    [RelayCommand]
+    private void SelectPreviousVersion() => StepVersion(-1);
+
+    [RelayCommand]
+    private void SelectNextVersion() => StepVersion(1);
+
+    private void StepVersion(int offset)
+    {
+        if (SelectedArtifact is not { } artifact) return;
+        artifact.SelectVersion(artifact.CurrentVersionIndex + offset);
+        _selectionAnchor = artifact.CurrentVersion is { } version ? (version.Message, version.Ordinal) : null;
+        ArtifactSourceMode = false;
+    }
+
+    /// <summary>Puts a reference to the artifact in the composer. The next turn
+    /// carries it to the model; the source itself only travels when the model
+    /// cannot already see it.</summary>
+    [RelayCommand]
+    private void ReviseArtifact(ArtifactItemViewModel? artifact)
+    {
+        artifact ??= SelectedArtifact;
+        if (artifact is null) return;
+        Composer.AddArtifactReference(artifact, artifact.CurrentVersionIndex);
+    }
+
+    /// <summary>The page on the canvas threw. Hand the error and the page to the
+    /// model in one step.</summary>
+    public void ReportArtifactError(string message)
+    {
+        if (SelectedArtifact is not { } artifact) return;
+        var trimmed = message.Length > 600 ? message[..600] + "…" : message;
+        Composer.AddArtifactReference(artifact, artifact.CurrentVersionIndex,
+            $"页面运行时报错：\n{trimmed}\n请找出原因并修复。");
+    }
+
+    /// <summary>Raised with the text to place on the OS clipboard (view-layer handles it).</summary>
+    public event EventHandler<string>? CopyTextRequested;
+
+    [RelayCommand]
+    private void CopyArtifact(ArtifactItemViewModel? artifact)
+    {
+        artifact ??= SelectedArtifact;
+        if (artifact is null) return;
+        var text = artifact.Content;
+        if (text is null && !string.IsNullOrEmpty(artifact.FullPath) && System.IO.File.Exists(artifact.FullPath))
+        {
+            try
+            {
+                var info = new System.IO.FileInfo(artifact.FullPath);
+                if (info.Length <= 2 * 1024 * 1024) text = System.IO.File.ReadAllText(artifact.FullPath);
+            }
+            catch
+            {
+                return;
+            }
+        }
+
+        if (text is null) return;
+        CopyTextRequested?.Invoke(this, text);
+    }
 
     [RelayCommand]
     private void ToggleSidebar() => SidebarCollapsed = !SidebarCollapsed;
 
     [RelayCommand]
-    private void ToggleArtifactPanel() => ArtifactPanelVisible = !ArtifactPanelVisible;
+    private void ToggleArtifactPanel()
+    {
+        ArtifactPanelVisible = !ArtifactPanelVisible;
+        if (!ArtifactPanelVisible) _autoOpenDismissed = true;
+    }
 
     /// <summary>Opens the OS file explorer with the artifact selected (Windows
     /// <c>explorer /select,</c>). Falls back to opening the containing folder
@@ -462,8 +694,6 @@ public sealed partial class MainViewModel : ObservableObject
                 ConversationList.ClearSelection();
                 Chat.StartDraftConversation();
             }
-            if (target == AppMode.Work)
-                WorkSetupRequested?.Invoke();
             return;
         }
 

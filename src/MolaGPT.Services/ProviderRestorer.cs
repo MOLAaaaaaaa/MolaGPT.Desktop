@@ -201,6 +201,11 @@ public static class ProviderRestorer
         if (entry.Thinking && string.IsNullOrWhiteSpace(kindStr))
         {
             var inferred = ThinkingParamKindInference.InferFromModelId(entry.Id);
+            // A model the name table does not recognise but whose provider says it takes
+            // an effort is still an effort model. Without this it lands on None, and None
+            // has no disable expression at all — the reasoning toggle would go quiet.
+            if (inferred == ThinkingParamKind.None && entry.ReasoningEffort)
+                inferred = ThinkingParamKind.OpenAiReasoningEffort;
             if (inferred != ThinkingParamKind.None) kindStr = inferred.ToString();
         }
 
@@ -214,7 +219,8 @@ public static class ProviderRestorer
                 MinBudget: entry.ThinkingBudgetMin,
                 MaxBudget: entry.ThinkingBudgetMax,
                 DefaultBudget: entry.ThinkingBudgetDefault,
-                DefaultEffort: entry.DefaultEffort);
+                DefaultEffort: entry.DefaultEffort,
+                Mandatory: entry.ReasoningMandatory);
         }
 
         return new ProviderModel(

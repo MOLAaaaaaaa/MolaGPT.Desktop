@@ -39,6 +39,38 @@ public sealed partial class ComposerViewModel : ObservableObject
     private string _text = string.Empty;
     [ObservableProperty] private bool _isSending;
 
+    /// <summary>「可视化回答」 in settings: whether the system prompt tells the
+    /// model about inline components and the canvas. Account mode builds its
+    /// prompt server-side and never reads it.</summary>
+    private bool VisualAnswersEnabled => _settings?.VisualAnswersEnabled ?? true;
+
+    /// <summary>The artifact the next message is about (「基于此修改」). At most one:
+    /// choosing another replaces it.</summary>
+    public ObservableCollection<ArtifactReferenceViewModel> ArtifactReferences { get; } = new();
+
+    public bool HasArtifactReferences => ArtifactReferences.Count > 0;
+
+    /// <summary>Asks the view to put the caret in the input box.</summary>
+    public event Action? FocusRequested;
+
+    public void AddArtifactReference(ArtifactItemViewModel item, int versionIndex, string? prefill = null)
+    {
+        if (versionIndex < 0 || versionIndex >= item.Versions.Count)
+            versionIndex = item.Versions.Count - 1;
+        ArtifactReferences.Clear();
+        ArtifactReferences.Add(new ArtifactReferenceViewModel(item, versionIndex));
+
+        if (!string.IsNullOrWhiteSpace(prefill))
+            Text = string.IsNullOrWhiteSpace(Text) ? prefill : Text.TrimEnd() + "\n\n" + prefill;
+        FocusRequested?.Invoke();
+    }
+
+    [RelayCommand]
+    private void RemoveArtifactReference(ArtifactReferenceViewModel? reference)
+    {
+        if (reference is not null) ArtifactReferences.Remove(reference);
+    }
+
     /// <summary>Reads straight through to the settings toggle rather than keeping
     /// a local copy: a second field here silently drifted from the settings page,
     /// so flipping "按 Enter 直接发送消息" never reached the input box. Defaults to
@@ -178,6 +210,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             if (e.PropertyName is nameof(ChatViewModel.ConversationId))
             {
                 PruneOrphanedArtifactContexts();
+                ArtifactReferences.Clear();
                 _pendingMemoryOverride = null;
                 OnPropertyChanged(nameof(IsMemoryChipVisible));
                 OnPropertyChanged(nameof(MemoryOnForConversation));
@@ -190,6 +223,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 WireContextGauge();
                 SendCommand.NotifyCanExecuteChanged();
                 RetryCommand.NotifyCanExecuteChanged();
+                OnPropertyChanged(nameof(IsThinkingMandatory));
                 OnPropertyChanged(nameof(IsThinkingVisible));
                 OnPropertyChanged(nameof(IsReasoningEffortVisible));
                 OnPropertyChanged(nameof(IsAttachVisible));
@@ -286,6 +320,11 @@ public sealed partial class ComposerViewModel : ObservableObject
             OnPropertyChanged(nameof(HasAttachments));
             SendCommand.NotifyCanExecuteChanged();
         };
+        ArtifactReferences.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasArtifactReferences));
+            SendCommand.NotifyCanExecuteChanged();
+        };
     }
 
     /// <summary>Show "推理" toggle iff the active model explicitly reports
@@ -357,7 +396,15 @@ public sealed partial class ComposerViewModel : ObservableObject
         _chat.ContextGauge.CompactionRecorded = _chat.NoteManualCompaction;
     }
 
-    public bool IsThinkingVisible => _chat.ActiveModel?.SupportsThinking == true;
+    /// <summary>The provider says this model always reasons, so there is nothing to toggle.</summary>
+    public bool IsThinkingMandatory => _chat.ActiveModel?.ThinkingConfig?.Mandatory == true;
+
+    /// <summary>
+    /// The on/off toggle. Hidden on a model that cannot be switched off — offering a
+    /// control that the provider will refuse is worse than not offering one, and the
+    /// effort selector below stays either way.
+    /// </summary>
+    public bool IsThinkingVisible => _chat.ActiveModel?.SupportsThinking == true && !IsThinkingMandatory;
 
     /// <summary>
     /// The 记忆 chip, which exists only before the conversation's first message.
@@ -414,9 +461,8 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// </summary>
     private bool? _pendingMemoryOverride;
 
-    private bool IsThinkingEnabled => IsThinkingVisible
-        ? EnableThinking
-        : _chat.ActiveModel?.SupportsReasoningEffort == true;
+    private bool IsThinkingEnabled => IsThinkingMandatory
+        || (IsThinkingVisible ? EnableThinking : _chat.ActiveModel?.SupportsReasoningEffort == true);
 
     /// <summary>Effort-only models expose controls without a thinking toggle.</summary>
     public bool IsReasoningEffortVisible => IsThinkingEnabled
@@ -447,7 +493,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// 浏览器操作是本地 agent（Work/BYOK）的工具，云端 Chat 代理没有 WebBridge
     /// 客户端，所以那边恒为 false。
     ///
-    /// 没有对应的 composer chip：这个能力的开关在设置 → 浏览器，和 browser-use
+    /// 没有对应的 composer chip：这个能力的开关在设置 → 浏览器使用，和 browser-use
     /// 技能是同一个开关（见 <see cref="SkillsViewModel"/>）。装了本地服务、开了
     /// 开关，就是想让模型能用；再在输入框里逐对话打开一次，只是把同一个决定问了
     /// 两遍，而第二遍那次没人记得。
@@ -626,7 +672,8 @@ public sealed partial class ComposerViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanSend))]
     public async Task SendAsync()
     {
-        if (string.IsNullOrWhiteSpace(Text) && Attachments.Count == 0) return;
+        if (string.IsNullOrWhiteSpace(Text) && Attachments.Count == 0 && ArtifactReferences.Count == 0) return;
+        var artifactReferences = ArtifactReferences.ToList();
         if (_chat.ActiveProvider is null || _chat.ActiveModel is null)
         {
             if (EnsureAgentRuntimeAsync is null || !await EnsureAgentRuntimeAsync()) return;
@@ -648,9 +695,15 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         _chat.EnsureRoleGreeting();
         var userText = Text;
+        if (string.IsNullOrWhiteSpace(userText) && artifactReferences.Count > 0)
+            userText = "请在这一版的基础上继续完善。";
         var queuedAttachments = Attachments.ToList();
         Text = string.Empty;
-        _chat.AppendUserMessage(userText, BuildAttachmentChips(queuedAttachments));
+        ArtifactReferences.Clear();
+        _chat.AppendUserMessage(
+            userText,
+            BuildAttachmentChips(queuedAttachments),
+            artifactRefs: artifactReferences.Count > 0 ? artifactReferences.Select(r => r.ToChip()).ToList() : null);
         if (memoryOverride is { } memoryEnabled)
             _memory?.SetConversationOverride(_chat.ConversationId!, memoryEnabled);
         var userMsg = _chat.Messages.LastOrDefault(m => m.Role == ChatMessage.RoleUser);
@@ -811,6 +864,16 @@ public sealed partial class ComposerViewModel : ObservableObject
         // images in ContentPartsJson (durable RemoteUrl), so we don't backfill
         // raw bytes there.
         var backfillHistory = provider.Kind != ProviderKind.MolaGptProxy;
+
+        // Model-only: what the referenced artifact is, and its source when the
+        // model cannot already see it. Never persisted — the bubble shows a chip.
+        if (artifactReferences.Count > 0)
+        {
+            var referencePrompt = ArtifactReferencePrompt.Build(artifactReferences, _chat.Messages, userMsg);
+            outgoingUserText = provider.Kind == ProviderKind.MolaGptProxy
+                ? AppendHiddenSystemHint(outgoingUserText, BuildHiddenSystemHint(referencePrompt))
+                : AppendHiddenSystemHint(outgoingUserText, referencePrompt);
+        }
 
         var msgs = _chat.Messages
             .Where(m => !m.IsStreaming || m == assistantMsg)
@@ -1223,6 +1286,12 @@ public sealed partial class ComposerViewModel : ObservableObject
             catch (JsonException) { }
         }
 
+        // A turn about an artifact keeps saying which one in later requests, but
+        // only by name: the source it carried was a one-off, and re-sending it
+        // on every turn is what the reference chip exists to avoid.
+        if (message.Role == ChatMessage.RoleUser && message.ArtifactRefs is { Count: > 0 } refs)
+            return message.FullContent + "\n\n" + ArtifactReferencePrompt.HistoryNote(refs);
+
         // FullContent: a follow-up sent while the previous answer is still being
         // revealed must carry the whole answer, not the part already on screen.
         return message.FullContent;
@@ -1589,7 +1658,8 @@ public sealed partial class ComposerViewModel : ObservableObject
         // machine can do, this one describes who is asking.
         var appendices = new[]
             {
-                BuildMemoryHint(), BuildPythonEnvironmentHint(), BuildBrowserProtocolHint(), BuildSkillCatalogHint()
+                BuildMemoryHint(), BuildPythonEnvironmentHint(), BuildBrowserProtocolHint(), BuildSkillCatalogHint(),
+                VisualAnswersEnabled ? VisualAnswerPrompt.Text : null
             }
             .Where(hint => !string.IsNullOrWhiteSpace(hint))
             .Select(hint => hint!)
@@ -1980,7 +2050,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     {
         var providerReady = _chat.ActiveProvider is not null && _chat.ActiveModel is not null;
         return !IsSending
-               && (!string.IsNullOrWhiteSpace(Text) || Attachments.Count > 0)
+               && (!string.IsNullOrWhiteSpace(Text) || Attachments.Count > 0 || ArtifactReferences.Count > 0)
                && (!(IsImageGenerationAvailable && IsImageGenerationMode) || !string.IsNullOrWhiteSpace(Text))
                && (providerReady || EnsureAgentRuntimeAsync is not null)
                && (!providerReady || !HasUnsupportedImages(Attachments, _chat.ActiveProvider, _chat.ActiveModel));

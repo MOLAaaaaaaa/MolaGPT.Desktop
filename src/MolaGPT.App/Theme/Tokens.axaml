@@ -66,6 +66,16 @@
       <Color x:Key="Color.Warning.Border">#FFE8CE9A</Color>
       <Color x:Key="Color.Warning.Foreground">#FF7A510C</Color>
 
+      <!-- Series colours for inline charts, function plots and canvas pages
+           (the canvas mola-chart-N variables). Rose first, then hues far enough apart to read as
+           distinct lines on white. -->
+      <Color x:Key="Color.Chart.1">#FFBE727F</Color>
+      <Color x:Key="Color.Chart.2">#FF3B82A0</Color>
+      <Color x:Key="Color.Chart.3">#FFC9832F</Color>
+      <Color x:Key="Color.Chart.4">#FF4E9A6B</Color>
+      <Color x:Key="Color.Chart.5">#FF7A6AB8</Color>
+      <Color x:Key="Color.Chart.6">#FF5B6B7A</Color>
+
       <!-- Carried over unused, as in the original: "shadow color tokens kept
            for future non-effect treatments". -->
       <Color x:Key="Color.Shadow.Soft">#0A000000</Color>
@@ -146,6 +156,13 @@
       <Color x:Key="Color.Warning.Surface">#FF3A2E16</Color>
       <Color x:Key="Color.Warning.Border">#FF8A7040</Color>
       <Color x:Key="Color.Warning.Foreground">#FFFFE0A8</Color>
+
+      <Color x:Key="Color.Chart.1">#FFE09AA6</Color>
+      <Color x:Key="Color.Chart.2">#FF6BB3D1</Color>
+      <Color x:Key="Color.Chart.3">#FFE7AE6A</Color>
+      <Color x:Key="Color.Chart.4">#FF7CC49A</Color>
+      <Color x:Key="Color.Chart.5">#FFA596E0</Color>
+      <Color x:Key="Color.Chart.6">#FF9AA8B6</Color>
 
       <Color x:Key="Color.Shadow.Soft">#33000000</Color>
       <Color x:Key="Color.Shadow.Medium">#7F000000</Color>

@@ -39,7 +39,7 @@
     <views:TitleBar DockPanel.Dock="Top" Name="PART_TitleBar" />
 
     <!-- ============================== body =============================== -->
-    <Grid Margin="16,6,16,16" ColumnDefinitions="Auto,Auto,*,Auto,Auto">
+    <Grid Name="PART_BodyGrid" Margin="16,6,16,16" ColumnDefinitions="Auto,Auto,*,Auto,Auto">
 
       <Border Grid.Column="0"
               Name="PART_SidebarCard"
@@ -84,9 +84,9 @@
               Width="22" Height="64" Margin="0,0,14,0"
               HorizontalAlignment="Right" VerticalAlignment="Center" Padding="0"
               Classes="artifacthandle"
-              IsVisible="{Binding IsArtifactPanelAvailable}"
+              IsVisible="{Binding IsArtifactHandleVisible}"
               Command="{Binding ToggleArtifactPanelCommand}"
-              ToolTip.Tip="产物面板">
+              ToolTip.Tip="交付物" AutomationProperties.Name="交付物面板">
         <Panel>
           <!-- Closed → points left, "pull it out". Open → points right, "push
                it back". These were the wrong way round, so the arrow described
@@ -98,8 +98,16 @@
         </Panel>
       </Button>
 
-      <!-- Gap collapses with the panel, same as the sidebar's. -->
-      <Border Grid.Column="3" Name="PART_ArtifactGap" Width="0" />
+      <Border Grid.Column="3" Name="PART_ArtifactGap" Width="0"
+              Background="Transparent" Cursor="SizeWestEast"
+              PointerPressed="OnArtifactResizePressed"
+              PointerMoved="OnArtifactResizeMoved"
+              PointerReleased="OnArtifactResizeReleased">
+        <Border Width="2" Height="44" CornerRadius="1"
+                Background="{DynamicResource Brush.Border.Strong}"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                IsVisible="{Binding ArtifactCanvasVisible}" />
+      </Border>
 
       <Border Grid.Column="4" Name="PART_ArtifactCard"
               Width="0"
@@ -108,72 +116,150 @@
               BorderThickness="1" CornerRadius="{DynamicResource Radius.Xxl}"
               ClipToBounds="True">
         <Grid Margin="16,14,14,14" RowDefinitions="Auto,*">
-          <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="2,0,0,12">
+          <!-- Header: what this is, how many, and the list / canvas switch. -->
+          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto" Margin="2,0,0,12">
             <StackPanel VerticalAlignment="Center" Spacing="2">
-              <TextBlock Text="产物和工作区" FontWeight="SemiBold"
+              <TextBlock Text="交付物" FontWeight="SemiBold"
                          FontSize="{DynamicResource Font.Size.Heading}"
                          TextWrapping="NoWrap" />
-              <TextBlock Text="{Binding Chat.ArtifactCount, StringFormat='{}{0} 个文件'}"
+              <TextBlock Text="{Binding Chat.ArtifactCount, StringFormat='{}{0} 项'}"
                          Classes="muted"
                          FontSize="{DynamicResource Font.Size.XSmall}"
                          TextWrapping="NoWrap"
                          IsVisible="{Binding Chat.HasArtifacts}" />
             </StackPanel>
-            <Button Grid.Column="1" Classes="headericon"
-                    VerticalAlignment="Top"
+            <Border Grid.Column="1" Classes="artifacttabs" VerticalAlignment="Center" Margin="8,0,6,0"
+                    IsVisible="{Binding Chat.HasArtifacts}">
+              <StackPanel Orientation="Horizontal">
+                <ToggleButton Classes="artifacttab" Content="列表"
+                              Command="{Binding ShowArtifactListCommand}"
+                              IsChecked="{Binding !ArtifactCanvasVisible, Mode=OneWay}" />
+                <ToggleButton Classes="artifacttab" Content="画布"
+                              Command="{Binding ShowArtifactCanvasCommand}"
+                              IsChecked="{Binding ArtifactCanvasVisible, Mode=OneWay}" />
+              </StackPanel>
+            </Border>
+            <Button Grid.Column="2" Classes="headericon" VerticalAlignment="Center"
                     Command="{Binding ToggleArtifactPanelCommand}"
-                    ToolTip.Tip="关闭产物面板">
+                    ToolTip.Tip="收起">
               <TextBlock Classes="icon" Text="&#xE8BB;" />
             </Button>
           </Grid>
 
-          <TextBlock Grid.Row="1" Text="暂无产物" Classes="muted"
-                     Margin="2,8,2,0" IsVisible="{Binding !Chat.HasArtifacts}" />
-          <ScrollViewer Grid.Row="1" IsVisible="{Binding Chat.HasArtifacts}"
-                        VerticalScrollBarVisibility="Auto"
-                        HorizontalScrollBarVisibility="Disabled">
-            <ItemsControl ItemsSource="{Binding Chat.Artifacts}">
-              <ItemsControl.ItemTemplate>
-                <DataTemplate x:DataType="vm:ArtifactItemViewModel">
-                  <!-- No "liftable" here: that class drives RenderTransform as a
-                       TransformOperations value, and the entry animation below
-                       drives the same property as a TranslateTransform. One
-                       control cannot have both. The entry wins — hover already
-                       reads through the background and border. -->
-                  <Button Classes="artifactrow" Tag="{Binding}" Click="OnArtifactClick"
-                          ToolTip.Tip="{Binding ToolTip}">
-                    <Grid ColumnDefinitions="40,*">
-                      <Border Grid.Column="0" Width="36" Height="36"
-                              CornerRadius="{DynamicResource Radius.Sm}"
-                              VerticalAlignment="Center"
-                              ClipToBounds="True">
-                        <Panel>
-                          <r:MarkdownImageView Url="{Binding ImagePreviewPath}" Alt="{Binding FileName}"
-                                               IsVisible="{Binding IsImage}" />
-                          <Border Background="{DynamicResource Brush.Primary.Tint}"
-                                  IsVisible="{Binding !IsImage}">
-                            <TextBlock Text="{Binding Extension}" FontSize="10" FontWeight="SemiBold"
-                                       Foreground="{DynamicResource Brush.Primary}"
-                                       TextWrapping="NoWrap"
-                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
-                          </Border>
-                        </Panel>
-                      </Border>
-                      <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
-                        <!-- NoWrap is load-bearing: the app-wide TextBlock style
-                             sets TextWrapping=Wrap, so TextTrimming never got a
-                             chance and long names broke across two lines. -->
-                        <TextBlock Text="{Binding FileName}" FontSize="12"
-                                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
-                        <TextBlock Text="{Binding SizeLabel}" Classes="muted" FontSize="11"
-                                   TextWrapping="NoWrap" Margin="0,2,0,0" />
-                      </StackPanel>
-                    </Grid>
-                  </Button>
-                </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
-          </ScrollViewer>
+          <!-- list -->
+          <Grid Grid.Row="1" IsVisible="{Binding !ArtifactCanvasVisible}">
+            <TextBlock Text="暂无交付物" Classes="muted"
+                       Margin="2,8,2,0" IsVisible="{Binding !Chat.HasArtifacts}" />
+            <ScrollViewer IsVisible="{Binding Chat.HasArtifacts}"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+              <ItemsControl ItemsSource="{Binding Chat.Artifacts}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:ArtifactItemViewModel">
+                    <Button Classes="artifactrow" Tag="{Binding}" Click="OnArtifactClick"
+                            ToolTip.Tip="{Binding ToolTip}">
+                      <Grid ColumnDefinitions="40,*">
+                        <Border Grid.Column="0" Width="36" Height="36"
+                                CornerRadius="{DynamicResource Radius.Sm}"
+                                VerticalAlignment="Center"
+                                ClipToBounds="True">
+                          <Panel>
+                            <r:MarkdownImageView Url="{Binding ImagePreviewPath}" Alt="{Binding FileName}"
+                                                 IsVisible="{Binding IsImage}" />
+                            <Border Classes="artifactbadge" IsVisible="{Binding !IsImage}">
+                              <TextBlock Text="{Binding Extension}" FontSize="10" FontWeight="SemiBold"
+                                         Foreground="{DynamicResource Brush.Text.Secondary}"
+                                         TextWrapping="NoWrap"
+                                         HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                          </Panel>
+                        </Border>
+                        <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
+                          <!-- NoWrap is load-bearing: the app-wide TextBlock style
+                               sets TextWrapping=Wrap, so TextTrimming never got a
+                               chance and long names broke across two lines. -->
+                          <TextBlock Text="{Binding FileName}" FontSize="12"
+                                     TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                          <TextBlock Text="{Binding ListSubtitle}" Classes="muted" FontSize="11"
+                                     TextWrapping="NoWrap" Margin="0,2,0,0" />
+                        </StackPanel>
+                      </Grid>
+                    </Button>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </Grid>
+
+          <!-- canvas -->
+          <Grid Grid.Row="1" IsVisible="{Binding ArtifactCanvasVisible}" RowDefinitions="Auto,*">
+            <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,10">
+              <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                <Button Classes="headericon" Command="{Binding SelectPreviousArtifactCommand}" ToolTip.Tip="上一项">
+                  <TextBlock Classes="icon" Text="&#xE76B;" />
+                </Button>
+                <Button Classes="headericon" Command="{Binding SelectNextArtifactCommand}" ToolTip.Tip="下一项">
+                  <TextBlock Classes="icon" Text="&#xE76C;" />
+                </Button>
+              </StackPanel>
+              <StackPanel Grid.Column="1" Spacing="2" Margin="8,0" VerticalAlignment="Center">
+                <TextBlock Text="{Binding SelectedArtifact.FileName}" FontSize="13" FontWeight="SemiBold"
+                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <TextBlock Text="{Binding SelectedArtifact.Extension}" Classes="artifactkind" VerticalAlignment="Center" />
+                  <TextBlock Text="{Binding SelectedArtifact.SizeLabel}" Classes="muted" FontSize="11" VerticalAlignment="Center" />
+                  <!-- Versions: every revision that kept the same file name. -->
+                  <StackPanel Orientation="Horizontal" Spacing="0" VerticalAlignment="Center"
+                              IsVisible="{Binding SelectedArtifact.HasVersions}">
+                    <Button Classes="versionstep" Command="{Binding SelectPreviousVersionCommand}"
+                            IsEnabled="{Binding SelectedArtifact.CanSelectPreviousVersion}" ToolTip.Tip="上一版">
+                      <TextBlock Classes="icon" Text="&#xE76B;" FontSize="9" />
+                    </Button>
+                    <TextBlock Text="{Binding SelectedArtifact.VersionLabel}" FontSize="11"
+                               VerticalAlignment="Center" Margin="2,0" />
+                    <Button Classes="versionstep" Command="{Binding SelectNextVersionCommand}"
+                            IsEnabled="{Binding SelectedArtifact.CanSelectNextVersion}" ToolTip.Tip="下一版">
+                      <TextBlock Classes="icon" Text="&#xE76C;" FontSize="9" />
+                    </Button>
+                  </StackPanel>
+                </StackPanel>
+              </StackPanel>
+              <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                <Button Classes="headericon" Command="{Binding ReviseArtifactCommand}"
+                        CommandParameter="{Binding SelectedArtifact}"
+                        IsVisible="{Binding CanReviseSelectedArtifact}" ToolTip.Tip="基于此修改">
+                  <TextBlock Classes="icon" Text="&#xE70F;" />
+                </Button>
+                <Button Classes="headericon" Command="{Binding ToggleArtifactSourceModeCommand}" AutomationProperties.Name="源码 / 预览"
+                        IsVisible="{Binding CanShowSelectedArtifactSource}" ToolTip.Tip="源码 / 预览">
+                  <Panel>
+                    <TextBlock Classes="icon" Text="&#xE943;" IsVisible="{Binding !ArtifactSourceMode}" />
+                    <TextBlock Classes="icon" Text="&#xE7B3;" IsVisible="{Binding ArtifactSourceMode}" />
+                  </Panel>
+                </Button>
+                <Button Classes="headericon" Command="{Binding CopyArtifactCommand}"
+                        CommandParameter="{Binding SelectedArtifact}"
+                        IsVisible="{Binding CanCopySelectedArtifact}" ToolTip.Tip="复制源码">
+                  <TextBlock Classes="icon" Text="&#xE8C8;" />
+                </Button>
+                <Button Classes="headericon" Command="{Binding RevealArtifactCommand}"
+                        CommandParameter="{Binding SelectedArtifact}"
+                        IsVisible="{Binding CanRevealSelectedArtifact}" ToolTip.Tip="在资源管理器中显示">
+                  <TextBlock Classes="icon" Text="&#xE838;" />
+                </Button>
+                <Button Classes="headericon" Command="{Binding ToggleArtifactCanvasMaximizedCommand}"
+                        ToolTip.Tip="放大或还原">
+                  <Panel>
+                    <TextBlock Classes="icon" Text="&#xE740;" IsVisible="{Binding !ArtifactCanvasMaximized}" />
+                    <TextBlock Classes="icon" Text="&#xE73F;" IsVisible="{Binding ArtifactCanvasMaximized}" />
+                  </Panel>
+                </Button>
+              </StackPanel>
+            </Grid>
+            <Border Grid.Row="1" Classes="artifactcanvasbody">
+              <views:ArtifactCanvasBodyHost Name="PART_ArtifactCanvas" Main="{Binding}" />
+            </Border>
+          </Grid>
         </Grid>
       </Border>
     </Grid>
@@ -193,35 +279,14 @@
       <Setter Property="Foreground" Value="{DynamicResource Brush.Text.OnPrimary}" />
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
-      <Setter Property="Opacity" Value="0.92" />
       <Setter Property="Cursor" Value="Hand" />
     </Style>
     <!-- BoxShadow lives on Border, not Button, so it has to reach the template. -->
     <Style Selector="Button.artifacthandle /template/ Border#PART_Root">
       <Setter Property="BoxShadow" Value="0 0 8 0 #40000000" />
     </Style>
-    <Style Selector="Button.artifacthandle">
-      <Setter Property="RenderTransform" Value="translateX(0px)" />
-      <Setter Property="Transitions">
-        <Transitions>
-          <DoubleTransition Property="Opacity" Duration="0:0:0.14" Easing="CubicEaseOut" />
-          <TransformOperationsTransition Property="RenderTransform"
-                                         Duration="0:0:0.14" Easing="CubicEaseOut" />
-        </Transitions>
-      </Setter>
-    </Style>
-    <!-- Nudges outward under the pointer rather than changing colour. It rides
-         over scrolling text, where a colour change reads as a state change —
-         but a tab that leans towards you is unambiguously "pull me". -->
-    <Style Selector="Button.artifacthandle:pointerover">
-      <Setter Property="Opacity" Value="1" />
-      <Setter Property="RenderTransform" Value="translateX(3px)" />
-    </Style>
-    <!-- The template's own hover brush would lighten the tab on the way past;
-         WPF varied only opacity, and the tab sits over scrolling text where a
-         colour change reads as a state change. -->
     <Style Selector="Button.artifacthandle:pointerover /template/ Border#PART_Root">
-      <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Hover}" />
     </Style>
 
     <Style Selector="Button.artifactrow">
@@ -237,22 +302,85 @@
       <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
     </Style>
-    <!-- A produced file is a result the user did not ask for by name, so it
-         announces itself. The list is a plain ItemsControl, not virtualized, so
-         this runs once per artifact and never on scroll. -->
-    <Style Selector="Button.artifactrow">
-      <Style.Animations>
-        <Animation Duration="0:0:0.24" Easing="CubicEaseOut" FillMode="Forward">
-          <KeyFrame Cue="0%">
-            <Setter Property="Opacity" Value="0" />
-            <Setter Property="TranslateTransform.X" Value="16" />
-          </KeyFrame>
-          <KeyFrame Cue="100%">
-            <Setter Property="Opacity" Value="1" />
-            <Setter Property="TranslateTransform.X" Value="0" />
-          </KeyFrame>
-        </Animation>
-      </Style.Animations>
+    <Style Selector="Border.artifactbadge">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    </Style>
+    <Style Selector="Border.artifacttabs">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="3" />
+    </Style>
+    <Style Selector="ToggleButton.artifacttab">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Padding" Value="10,0" />
+      <Setter Property="MinWidth" Value="44" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Xs}" />
+      <Setter Property="Height" Value="26" />
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="ToggleButton.artifacttab:checked /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Primary}" />
+      <Setter Property="BoxShadow" Value="0 1 3 0 #16000000" />
+    </Style>
+    <Style Selector="Border.artifactcanvasbody">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+    <Style Selector="TextBlock.artifactkind">
+      <Setter Property="FontSize" Value="10" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <!-- Under the canvas, outside the web view (nothing can sit on top of
+         it): what the page loaded, and a page error with its one action. -->
+    <Style Selector="Border.canvasfooter">
+      <Setter Property="Padding" Value="10,5" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="0,1,0,0" />
+    </Style>
+    <Style Selector="Border.canvaserror">
+      <Setter Property="Padding" Value="10,4,6,4" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Danger.Surface}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Danger.Border}" />
+      <Setter Property="BorderThickness" Value="0,1,0,0" />
+    </Style>
+    <Style Selector="Button.versionstep">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="3,1" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Xs}" />
+    </Style>
+    <Style Selector="Button.versionstep:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Border.artifacttableheader">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="0,0,1,1" />
+      <Setter Property="Padding" Value="10,8" />
+    </Style>
+    <Style Selector="Border.artifacttablecell">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Primary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="0,0,1,1" />
+      <Setter Property="Padding" Value="10,8" />
+    </Style>
+    <Style Selector="Border.artifactquote">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="3,0,0,0" />
+      <Setter Property="Padding" Value="12,4" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Blockquote}" />
+    </Style>
+    <Style Selector="Border.artifactdivider">
+      <Setter Property="Background" Value="{DynamicResource Brush.Divider}" />
     </Style>
   </Window.Styles>
 </views:MolaWindow>

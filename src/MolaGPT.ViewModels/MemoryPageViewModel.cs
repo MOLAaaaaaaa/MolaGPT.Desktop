@@ -141,7 +141,7 @@ public sealed partial class MemoryPageViewModel : ObservableObject
     /// <summary>
     /// The 称呼 row's red dot, same device and the same two gates as 整理模型's:
     /// nothing is unfinished while the feature is switched off, and the user can
-    /// turn the dots off altogether in 界面与偏好.
+    /// turn the dots off altogether in 外观.
     ///
     /// Not an error — memory works without a 称呼 — but it is the one field with
     /// a second consumer: blank, 氛围模式's 「沿用个人资料」 has nothing to offer.

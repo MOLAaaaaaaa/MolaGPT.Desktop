@@ -105,43 +105,102 @@
                   Background="{DynamicResource Brush.Bg.Secondary}"
                   BorderBrush="{DynamicResource Brush.Divider}"
                   BorderThickness="0,0,1,0">
-            <ScrollViewer VerticalScrollBarVisibility="Auto"
+            <DockPanel>
+            <!-- 搜索设置。索引从各页现有的行标题、字段名、分组名里读出来，见
+                 SettingsWindow.Search.cs；Ctrl+F 聚焦。 -->
+            <Border DockPanel.Dock="Top" Classes="searchbox" Height="34" Padding="10,0" Margin="10,12,10,10">
+              <Grid ColumnDefinitions="Auto,*,Auto">
+                <TextBlock Classes="icon" Text="&#xE721;" FontSize="12" Margin="0,0,8,0"
+                           VerticalAlignment="Center" Foreground="{DynamicResource Brush.Text.Muted}" />
+                <TextBox Grid.Column="1" Name="PART_SettingsSearch" PlaceholderText="搜索设置"
+                         VerticalAlignment="Center" AutomationProperties.Name="搜索设置" />
+                <Button Grid.Column="2" Name="PART_ClearSettingsSearch" Classes="toolchip"
+                        Width="22" Height="22" MinHeight="22" Padding="0" IsVisible="False"
+                        ToolTip.Tip="清空搜索" AutomationProperties.Name="清空搜索">
+                  <TextBlock Classes="icon" Text="&#xE711;" FontSize="9" />
+                </Button>
+              </Grid>
+            </Border>
+            <ScrollViewer Name="PART_NavScroll" VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled">
+              <Panel>
+              <StackPanel Name="PART_SearchPanel" IsVisible="False" Margin="10,0,10,14">
+                <ListBox Name="PART_SearchResults" Background="Transparent" BorderThickness="0" Padding="0"
+                         AutomationProperties.Name="搜索结果">
+                  <ListBox.ItemsPanel><ItemsPanelTemplate><StackPanel /></ItemsPanelTemplate></ListBox.ItemsPanel>
+                  <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="v:SettingsSearchResult">
+                      <StackPanel Spacing="2">
+                        <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{Binding Path}" FontSize="{DynamicResource Font.Size.XSmall}"
+                                   FontWeight="Normal" Foreground="{DynamicResource Brush.Text.Muted}"
+                                   TextTrimming="CharacterEllipsis" />
+                      </StackPanel>
+                    </DataTemplate>
+                  </ListBox.ItemTemplate>
+                </ListBox>
+                <TextBlock Name="PART_SearchEmpty" Classes="hint" IsVisible="False"
+                           Margin="12,6" TextWrapping="Wrap" />
+              </StackPanel>
               <ListBox Name="PART_Nav"
                        Background="Transparent"
                        BorderThickness="0"
                        Margin="10,0,10,14"
                        Padding="0"
-                       SelectedIndex="1">
-                <ListBoxItem Classes="navgroup" IsEnabled="False" Content="通用" />
-                <ListBoxItem Content="账号与同步" />
-                <ListBoxItem Content="界面与偏好" />
-                <ListBoxItem Name="PART_MemoryNav">
+                       SelectedIndex="0">
+                <!-- 不虚拟化：导航会比视口高，虚拟面板只实现视口里的项，选中一个
+                     还没实现的项（「去设置」、搜索跳转）时它不在树上，也就滚不过去。 -->
+                <ListBox.ItemsPanel><ItemsPanelTemplate><StackPanel /></ItemsPanelTemplate></ListBox.ItemsPanel>
+                <!-- 账号单独放在最上面：它是云端的身份，下面各组都是这台电脑上的设置。 -->
+                <ListBoxItem Name="PART_AccountNav" Classes="navaccount" Tag="PAGE_Account"
+                             AutomationProperties.Name="MolaGPT 账号">
+                  <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                    <Border Width="30" Height="30" CornerRadius="15"
+                            Background="{DynamicResource Brush.Primary}" VerticalAlignment="Center">
+                      <TextBlock Classes="icon" Text="&#xE77B;" FontSize="13" Foreground="White"
+                                 HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                      <TextBlock Name="PART_AccountNavName" Text="登录 MolaGPT" FontWeight="SemiBold"
+                                 TextTrimming="CharacterEllipsis" />
+                      <TextBlock Text="MolaGPT 账号" FontSize="{DynamicResource Font.Size.XSmall}"
+                                 FontWeight="Normal" Foreground="{DynamicResource Brush.Text.Muted}" />
+                    </StackPanel>
+                  </Grid>
+                </ListBoxItem>
+                <ListBoxItem Classes="navgroup" IsEnabled="False" Content="常规" />
+                <ListBoxItem Content="外观" Tag="PAGE_Appearance" />
+                <ListBoxItem Content="对话" Tag="PAGE_Chat" />
+                <ListBoxItem Content="通知与托盘" Tag="PAGE_System" />
+                <ListBoxItem Classes="navgroup" IsEnabled="False" Content="个性化" />
+                <ListBoxItem Name="PART_PersonasNav" Content="角色" Tag="PAGE_Personas" />
+                <ListBoxItem Name="PART_MemoryNav" Tag="PAGE_Memory" AutomationProperties.Name="记忆">
                   <StackPanel Orientation="Horizontal" Spacing="7">
-                    <TextBlock Text="本地记忆" VerticalAlignment="Center" />
+                    <TextBlock Text="记忆" VerticalAlignment="Center" />
                     <!-- 自动整理开着但没选模型：它不会运行，这个点是唯一的提示。
                          持续状态属于设置页行内，不发通知横幅。 -->
                     <Ellipse Width="7" Height="7" Fill="{DynamicResource Brush.Error}"
                              VerticalAlignment="Center" IsVisible="{Binding MemoryNeedsModel}" />
                   </StackPanel>
                 </ListBoxItem>
+                <ListBoxItem Name="PART_PostProcessingNav" Content="文本替换" Tag="PAGE_PostProcessing" />
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="模型" />
-                <ListBoxItem Name="PART_ProvidersNav" Content="模型服务" />
-                <ListBoxItem Name="PART_PersonasNav" Content="角色" />
-                <ListBoxItem Content="联网搜索" />
-                <ListBoxItem Content="会话标题" />
-                <ListBoxItem Content="图像生成" />
-                <ListBoxItem Content="视觉理解" />
-                <ListBoxItem Name="PART_PostProcessingNav" Content="后处理" />
-                <ListBoxItem Classes="navgroup" IsEnabled="False" Content="工具与环境" />
-                <ListBoxItem Name="PART_SandboxNav" Content="沙箱与文件" />
-                <ListBoxItem Name="PART_BrowserNav" Content="浏览器使用" />
-                <ListBoxItem Content="审批与安全" />
-                <ListBoxItem Content="MCP 服务器" />
-                <ListBoxItem Name="PART_AgentNav" Content="Agent Bridge" />
-                <ListBoxItem Name="PART_SkillsNav" Content="技能" />
+                <ListBoxItem Name="PART_ProvidersNav" Content="模型服务" Tag="PAGE_Providers" />
+                <ListBoxItem Content="联网搜索" Tag="PAGE_Search" />
+                <ListBoxItem Content="图像生成" Tag="PAGE_ImageGeneration" />
+                <ListBoxItem Content="视觉理解" Tag="PAGE_Vision" />
+                <ListBoxItem Classes="navgroup" IsEnabled="False" Content="工具" />
+                <ListBoxItem Name="PART_SandboxNav" Content="代码与文件" Tag="PAGE_Sandbox" />
+                <ListBoxItem Name="PART_BrowserNav" Content="浏览器使用" Tag="PAGE_Browser" />
+                <ListBoxItem Content="MCP 服务器" Tag="PAGE_Mcp" />
+                <ListBoxItem Name="PART_SkillsNav" Content="技能" Tag="PAGE_Skills" />
+                <ListBoxItem Classes="navgroup" IsEnabled="False" Content="安全与远程" />
+                <ListBoxItem Content="权限与审批" Tag="PAGE_Approval" />
+                <ListBoxItem Name="PART_AgentNav" Content="远程控制" Tag="PAGE_Agent" />
               </ListBox>
+              </Panel>
             </ScrollViewer>
+            </DockPanel>
           </Border>
 
           <ScrollViewer Grid.Column="1"
@@ -153,27 +212,133 @@
                    MaxWidth="760"
                    HorizontalAlignment="Stretch">
 
+              <!-- MolaGPT 账号。账号相关的一切都在这一页：身份、用量、对话同步、
+                   Tracks 记忆、退出。原来用量在标题栏另弹的小窗里，同步和 Tracks
+                   在设置里，同一个账号的事要去两处找。 -->
               <StackPanel Name="PAGE_Account">
-                <TextBlock Classes="pagetitle" Text="账号与同步" />
-                <TextBlock Classes="pagesubtitle"
-                           Text="登录后可在桌面端使用 MolaGPT 网页端的模型、对话同步与个性化能力。" />
-
-                <Border Classes="settingscard">
-                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
-                    <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
-                      <TextBlock Name="PART_AccountStatus" Classes="rowtitle" Text="未登录" />
-                      <TextBlock Name="PART_AccountDetail" Classes="hint" Margin="0,3,0,0" />
+                <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,18">
+                  <Border Width="48" Height="48" CornerRadius="24"
+                          Background="{DynamicResource Brush.Primary}" VerticalAlignment="Center">
+                    <TextBlock Classes="icon" Text="&#xE77B;" FontSize="20" Foreground="White"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </Border>
+                  <StackPanel Grid.Column="1" Margin="14,0,20,0" VerticalAlignment="Center">
+                    <TextBlock Name="PART_AccountStatus" Classes="pagetitle" Text="MolaGPT 账号"
+                               TextTrimming="CharacterEllipsis" />
+                    <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,4,0,0">
+                      <Ellipse Name="PART_AccountBadgeDot" Width="6" Height="6" IsVisible="False"
+                               Fill="{DynamicResource Brush.Success}" VerticalAlignment="Center" />
+                      <TextBlock Name="PART_AccountDetail" Classes="hint" Margin="0" TextWrapping="Wrap"
+                                 Text="登录后可在桌面端使用 MolaGPT 的模型、对话同步与个性化记忆。" />
                     </StackPanel>
-                    <Button Grid.Column="1"
-                            Name="PART_AccountAction"
-                            Classes="outline"
-                            Content="登录"
-                            Padding="14,7"
-                            VerticalAlignment="Center" />
-                  </Grid>
-                </Border>
+                  </StackPanel>
+                  <Button Grid.Column="2" Name="PART_AccountAction" Classes="pillprimary"
+                          Content="登录" Padding="18,8" VerticalAlignment="Center" />
+                </Grid>
 
-                <TextBlock Classes="section" Text="数据同步" />
+                <StackPanel Name="PART_UsageSection" IsVisible="False">
+                  <Grid ColumnDefinitions="*,Auto" Margin="2,4,2,8">
+                    <TextBlock Name="PART_UsageTitle" Classes="section" Text="用量" Margin="0"
+                               VerticalAlignment="Center" />
+                    <Button Grid.Column="1" Name="PART_RefreshUsage" Classes="inlineaction"
+                            ToolTip.Tip="刷新用量" VerticalAlignment="Center">
+                      <TextBlock Classes="icon" Text="&#xE72C;" FontSize="12" />
+                    </Button>
+                  </Grid>
+                  <Border Classes="settingscard">
+                    <StackPanel>
+                      <Grid Classes="settingrow" ColumnDefinitions="*,*">
+                        <StackPanel Grid.Column="0">
+                          <TextBlock Name="PART_TotalRequestsLabel" Classes="hint" Margin="0" Text="额度剩余" />
+                          <TextBlock Name="PART_TotalRequests" Classes="usagefigure" Text="—" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1">
+                          <TextBlock Name="PART_TotalTokensLabel" Classes="hint" Margin="0" Text="今日 Tokens 用量" />
+                          <TextBlock Name="PART_TotalTokens" Classes="usagefigure" Text="—" />
+                        </StackPanel>
+                      </Grid>
+                      <StackPanel Name="PART_CreditsPanel" IsVisible="False">
+                        <Border Classes="divider" />
+                        <StackPanel Classes="fieldrow">
+                          <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,6">
+                            <TextBlock Name="PART_CreditsTier" Classes="hint" Margin="0" />
+                            <TextBlock Grid.Column="1" Name="PART_CreditsWindow" Classes="hint" Margin="0"
+                                       FontFamily="{DynamicResource Font.Mono}" />
+                          </Grid>
+                          <ProgressBar Name="PART_CreditsProgress" Minimum="0" Maximum="1" Height="6"
+                                       MinWidth="0" Foreground="{DynamicResource Brush.Primary}" />
+                          <TextBlock Name="PART_CreditsHint" Classes="hint" IsVisible="False"
+                                     TextWrapping="Wrap" Margin="0,6,0,0" />
+                        </StackPanel>
+                      </StackPanel>
+                      <TextBlock Name="PART_UsageStatus" Classes="hint" IsVisible="False"
+                                 TextWrapping="Wrap" Margin="16,0,16,14" />
+                    </StackPanel>
+                  </Border>
+
+                  <Expander Name="PART_UsageModelsExpander" Header="各模型用量"
+                            HorizontalAlignment="Stretch" Margin="0,12,0,0">
+                    <StackPanel Margin="0,10,0,0">
+                      <ItemsControl Name="PART_UsageModels">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="v:AccountModelRow">
+                            <Border Classes="providercard" Padding="14,10" Opacity="{Binding Opacity}">
+                              <StackPanel>
+                                <Grid ColumnDefinitions="*,Auto,Auto">
+                                  <TextBlock Grid.Column="0" Text="{Binding Name}" FontWeight="SemiBold"
+                                             TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                  <TextBlock Grid.Column="1" Text="{Binding PriceSymbol}"
+                                             IsVisible="{Binding HasPriceSymbol}"
+                                             Classes.success="{Binding PriceIsSuccess}"
+                                             Classes.warning="{Binding PriceIsWarning}"
+                                             Classes.error="{Binding PriceIsError}"
+                                             FontFamily="{DynamicResource Font.Mono}"
+                                             FontSize="12" FontWeight="Bold" Margin="6,0,0,0"
+                                             VerticalAlignment="Center" ToolTip.Tip="消耗档位，$ 越多越贵" />
+                                  <TextBlock Grid.Column="2" Text="{Binding RightText}"
+                                             IsVisible="{Binding HasRightText}"
+                                             Classes.success="{Binding RightIsSuccess}"
+                                             Classes.warning="{Binding RightIsWarning}"
+                                             Classes.error="{Binding RightIsError}"
+                                             FontSize="13" Margin="10,0,0,0" VerticalAlignment="Center" />
+                                </Grid>
+                                <TextBlock Text="{Binding Detail}" IsVisible="{Binding HasDetail}"
+                                           Classes="hint" Margin="0,3,0,0" />
+                                <StackPanel IsVisible="{Binding HasLegacyUsage}" Margin="0,8,0,0" Spacing="7">
+                                  <StackPanel>
+                                    <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,4">
+                                      <TextBlock Text="请求次数" Classes="hint" Margin="0" />
+                                      <TextBlock Grid.Column="1" Text="{Binding RequestsText}" Classes="hint"
+                                                 Margin="0" FontFamily="{DynamicResource Font.Mono}" />
+                                    </Grid>
+                                    <ProgressBar Minimum="0" Maximum="1" Value="{Binding RequestsRatio}"
+                                                 IsVisible="{Binding ShowRequestsBar}" Height="6" MinWidth="0"
+                                                 Foreground="{DynamicResource Brush.Primary}" />
+                                  </StackPanel>
+                                  <StackPanel>
+                                    <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,4">
+                                      <TextBlock Text="Tokens 用量" Classes="hint" Margin="0" />
+                                      <TextBlock Grid.Column="1" Text="{Binding TokensText}" Classes="hint"
+                                                 Margin="0" FontFamily="{DynamicResource Font.Mono}" />
+                                    </Grid>
+                                    <ProgressBar Minimum="0" Maximum="1" Value="{Binding TokensRatio}"
+                                                 IsVisible="{Binding ShowTokensBar}" Height="6" MinWidth="0"
+                                                 Foreground="{DynamicResource Brush.Success}" />
+                                  </StackPanel>
+                                </StackPanel>
+                              </StackPanel>
+                            </Border>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                      <TextBlock Name="PART_UsageEmpty" Classes="hint" IsVisible="False" Margin="2,0,2,8" />
+                      <TextBlock Name="PART_EstimateHint" Classes="hint" IsVisible="False" Margin="2,0,2,0"
+                                 Text="次数按平均对话长度估算，实际随对话长短浮动。" />
+                    </StackPanel>
+                  </Expander>
+                </StackPanel>
+
+                <TextBlock Classes="section" Text="对话同步" />
                 <Border Classes="settingscard">
                   <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
@@ -206,7 +371,7 @@
                   </StackPanel>
                 </Border>
 
-                <TextBlock Classes="section" Text="个性化 · MolaGPT Tracks" />
+                <TextBlock Classes="section" Text="个性化记忆 · MolaGPT Tracks" />
                 <Border Classes="settingscard">
                   <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
@@ -246,13 +411,29 @@
                     </Grid>
                   </StackPanel>
                 </Border>
+
+                <StackPanel Name="PART_LogoutSection" IsVisible="False">
+                  <TextBlock Classes="section" Text="登录状态" />
+                  <Border Classes="settingscard">
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                        <TextBlock Classes="rowtitle" Text="退出登录" />
+                        <TextBlock Classes="hint"
+                                   Text="退出后将无法继续使用 MolaGPT 模型，未下载到本地的云端对话占位会被清除，已下载的本地对话会保留。" />
+                      </StackPanel>
+                      <Button Grid.Column="1" Name="PART_Logout" Classes="outline" Content="退出登录"
+                              Padding="14,7" VerticalAlignment="Center"
+                              Foreground="{DynamicResource Brush.Error}" />
+                    </Grid>
+                  </Border>
+                </StackPanel>
               </StackPanel>
 
               <StackPanel Name="PAGE_Appearance" IsVisible="False">
-                <TextBlock Classes="pagetitle" Text="界面与偏好" />
-                <TextBlock Classes="pagesubtitle" Text="调整外观、输入习惯与系统集成方式。" />
+                <TextBlock Classes="pagetitle" Text="外观" />
+                <TextBlock Classes="pagesubtitle" Text="调整主题、文字大小和界面动效。" />
 
-                <TextBlock Classes="section" Text="外观" Margin="2,4,2,8" />
+                <TextBlock Classes="section" Text="主题与文字" Margin="2,4,2,8" />
                 <Border Classes="settingscard">
                   <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
@@ -271,8 +452,8 @@
                     <Border Classes="divider" />
                     <Grid Classes="settingrow" ColumnDefinitions="*,240">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                        <TextBlock Classes="rowtitle" Text="字号缩放" />
-                        <TextBlock Classes="hint" Text="调整正文和界面文字大小。" />
+                        <TextBlock Classes="rowtitle" Text="文字大小" />
+                        <TextBlock Classes="hint" Text="调整正文和界面文字的大小。" />
                       </StackPanel>
                       <ComboBox Grid.Column="1" Name="PART_FontScale"
                                 Classes="settingsinput" MinWidth="150"
@@ -283,22 +464,16 @@
                         <ComboBoxItem Content="140%" />
                       </ComboBox>
                     </Grid>
-                    <Border Classes="divider" />
-                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
-                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                        <TextBlock Classes="rowtitle" Text="思考结束后自动收起" />
-                        <TextBlock Classes="hint" Text="控制已完成的思考内容是否保持展开。" />
-                      </StackPanel>
-                      <ToggleButton Grid.Column="1" Name="PART_AutoCollapseThinking"
-                                    Classes="settingtoggle"
-                                    IsChecked="{Binding AutoCollapseThinking, Mode=TwoWay}"
-                                    VerticalAlignment="Center" />
-                    </Grid>
-                    <Border Classes="divider" />
+                  </StackPanel>
+                </Border>
+
+                <TextBlock Classes="section" Text="动效与提示" />
+                <Border Classes="settingscard">
+                  <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
                         <TextBlock Classes="rowtitle" Text="流式输出动画" />
-                        <TextBlock Classes="hint" Text="流式输出过程中启用动画效果，可能会影响可读性。" />
+                        <TextBlock Classes="hint" Text="回答逐字出现时启用渐显效果，可能会影响可读性。" />
                       </StackPanel>
                       <ToggleButton Grid.Column="1" Name="PART_StreamFade"
                                     Classes="settingtoggle"
@@ -309,7 +484,7 @@
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
                         <TextBlock Classes="rowtitle" Text="状态提示点" />
-                        <TextBlock Classes="hint" Text="在部分尚未配置完成的设置项旁显示提示点。" />
+                        <TextBlock Classes="hint" Text="在尚未配置完成的设置项旁显示红点。" />
                       </StackPanel>
                       <ToggleButton Grid.Column="1" Name="PART_StatusDots"
                                     Classes="settingtoggle"
@@ -318,8 +493,13 @@
                     </Grid>
                   </StackPanel>
                 </Border>
+              </StackPanel>
 
-                <TextBlock Classes="section" Text="输入" />
+              <StackPanel Name="PAGE_Chat" IsVisible="False">
+                <TextBlock Classes="pagetitle" Text="对话" />
+                <TextBlock Classes="pagesubtitle" Text="输入习惯、回答的显示方式、会话标题与画布。" />
+
+                <TextBlock Classes="section" Text="输入" Margin="2,4,2,8" />
                 <Border Classes="settingscard">
                   <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                     <StackPanel Grid.Column="0" Margin="0,0,20,0">
@@ -332,19 +512,116 @@
                   </Grid>
                 </Border>
 
-                <TextBlock Classes="section" Text="通知与系统集成" />
+                <TextBlock Classes="section" Text="回答" />
+                <Border Classes="settingscard">
+                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                    <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                      <TextBlock Classes="rowtitle" Text="思考结束后自动收起" />
+                      <TextBlock Classes="hint" Text="模型思考完成后，把思考过程折叠起来，只留正式回答。" />
+                    </StackPanel>
+                    <ToggleButton Grid.Column="1" Name="PART_AutoCollapseThinking"
+                                  Classes="settingtoggle"
+                                  IsChecked="{Binding AutoCollapseThinking, Mode=TwoWay}"
+                                  VerticalAlignment="Center" />
+                  </Grid>
+                </Border>
+
+                <TextBlock Classes="section" Text="会话标题" />
                 <Border Classes="settingscard">
                   <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                        <TextBlock Classes="rowtitle" Text="后台回答完成时通知" />
-                        <TextBlock Classes="hint" Text="回答生成结束时将会发出系统通知。" />
+                        <TextBlock Classes="rowtitle" Text="自动为新对话生成标题" />
+                        <TextBlock Classes="hint" Text="发送首条消息后自动生成简短标题，适用于 Work 与 BYOK 对话。" />
                       </StackPanel>
                       <ToggleButton Grid.Column="1" Classes="settingtoggle"
-                                    IsChecked="{Binding EnableCompletionNotification, Mode=TwoWay}"
+                                    IsChecked="{Binding AutoTitleEnabled, Mode=TwoWay}"
                                     VerticalAlignment="Center" />
                     </Grid>
                     <Border Classes="divider" />
+                    <Grid Name="PART_TitleModelPanel" Classes="settingrow"
+                          ColumnDefinitions="220,*" IsEnabled="{Binding AutoTitleEnabled}">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                        <TextBlock Classes="rowtitle" Text="生成标题使用的模型" />
+                        <TextBlock Classes="hint" Text="默认使用当前对话的模型，每个新对话最多额外请求一次。" />
+                      </StackPanel>
+                      <Grid Grid.Column="1" ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+                        <ComboBox Grid.Column="0" Name="PART_TitleModel"
+                                  Classes="settingsinput"
+                                  HorizontalAlignment="Stretch"
+                                  ItemsSource="{Binding TitleProviderModels}"
+                                  SelectedItem="{Binding SelectedTitleProviderModel, Mode=TwoWay}">
+                          <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="vm:TitleProviderModelOption">
+                              <TextBlock Text="{Binding Label}" />
+                            </DataTemplate>
+                          </ComboBox.ItemTemplate>
+                        </ComboBox>
+                        <Button Grid.Column="1" Classes="outline" Content="模型管理..."
+                                Padding="12,7" Margin="10,0,0,0" Click="OnManageProviders" />
+                      </Grid>
+                    </Grid>
+                  </StackPanel>
+                </Border>
+
+                <TextBlock Classes="section" Text="可视化与画布" />
+                <Border Classes="settingscard">
+                  <StackPanel>
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="可视化回答" />
+                        <TextBlock Classes="hint" Text="支持生成函数图像、数据图表，并在画布中展示交互页面。" />
+                      </StackPanel>
+                      <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                    IsChecked="{Binding VisualAnswersEnabled, Mode=TwoWay}"
+                                    VerticalAlignment="Center" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="自动打开画布" />
+                        <TextBlock Classes="hint" Text="网页、SVG 或流程图开始生成时，自动打开右侧画布。仅对卡片格式生效；手动收起后，本轮不再自动打开。" />
+                      </StackPanel>
+                      <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                    IsChecked="{Binding CanvasAutoOpen, Mode=TwoWay}"
+                                    VerticalAlignment="Center" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <StackPanel Classes="fieldrow">
+                      <TextBlock Classes="rowtitle" Text="卡片格式" />
+                      <TextBlock Classes="hint" Margin="0,2,0,8"
+                                 Text="勾选的格式默认以卡片显示，可在画布中预览；未勾选的格式默认显示为代码块。" />
+                      <WrapPanel>
+                        <CheckBox Content="HTML 网页" IsChecked="{Binding HtmlFenceAsCard, Mode=TwoWay}" Margin="0,0,18,4" />
+                        <CheckBox Content="SVG 图形" IsChecked="{Binding SvgFenceAsCard, Mode=TwoWay}" Margin="0,0,18,4" />
+                        <CheckBox Content="Mermaid 图" IsChecked="{Binding MermaidFenceAsCard, Mode=TwoWay}" Margin="0,0,18,4" />
+                        <CheckBox Content="CSV 表格" IsChecked="{Binding CsvFenceAsCard, Mode=TwoWay}" Margin="0,0,18,4" />
+                      </WrapPanel>
+                    </StackPanel>
+                  </StackPanel>
+                </Border>
+              </StackPanel>
+
+              <StackPanel Name="PAGE_System" IsVisible="False">
+                <TextBlock Classes="pagetitle" Text="通知与托盘" />
+                <TextBlock Classes="pagesubtitle" Text="回答完成时的提醒，以及关闭窗口后软件的去向。" />
+
+                <TextBlock Classes="section" Text="通知" Margin="2,4,2,8" />
+                <Border Classes="settingscard">
+                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                    <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                      <TextBlock Classes="rowtitle" Text="后台回答完成时通知" />
+                      <TextBlock Classes="hint" Text="窗口不在前台时，回答生成结束会发出系统通知。" />
+                    </StackPanel>
+                    <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                  IsChecked="{Binding EnableCompletionNotification, Mode=TwoWay}"
+                                  VerticalAlignment="Center" />
+                  </Grid>
+                </Border>
+
+                <TextBlock Classes="section" Text="系统托盘" />
+                <Border Classes="settingscard">
+                  <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
                         <TextBlock Classes="rowtitle" Text="启用系统托盘" />
@@ -1237,7 +1514,7 @@
                   </StackPanel>
                 </Border>
 
-                <TextBlock Classes="section" Text="结果" />
+                <TextBlock Classes="section" Text="搜索结果" />
                 <Border Classes="settingscard">
                   <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,160">
@@ -1259,50 +1536,6 @@
                                  Margin="0,0,16,0" VerticalAlignment="Center" />
                       <Button Grid.Column="1" Name="PART_TestSearch" Classes="outline"
                               Content="测试连接" Padding="14,7" />
-                    </Grid>
-                  </StackPanel>
-                </Border>
-              </StackPanel>
-
-              <StackPanel Name="PAGE_Titles" IsVisible="False">
-                <TextBlock Classes="pagetitle" Text="会话标题" />
-                <TextBlock Classes="pagesubtitle"
-                           Text="为本地 BYOK 与 Work 对话自动生成简短标题。" />
-
-                <TextBlock Classes="section" Text="自动生成" Margin="2,4,2,8" />
-                <Border Classes="settingscard">
-                  <StackPanel>
-                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
-                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                        <TextBlock Classes="rowtitle" Text="自动为新对话生成标题" />
-                        <TextBlock Classes="hint" Text="发送首条消息后自动生成简短标题。" />
-                      </StackPanel>
-                      <ToggleButton Grid.Column="1" Classes="settingtoggle"
-                                    IsChecked="{Binding AutoTitleEnabled, Mode=TwoWay}"
-                                    VerticalAlignment="Center" />
-                    </Grid>
-                    <Border Classes="divider" />
-                    <Grid Name="PART_TitleModelPanel" Classes="settingrow"
-                          ColumnDefinitions="220,*" IsEnabled="{Binding AutoTitleEnabled}">
-                      <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
-                        <TextBlock Classes="rowtitle" Text="标题生成使用模型" />
-                        <TextBlock Classes="hint" Text="默认使用当前对话所使用的模型，每个新对话最多额外请求一次。" />
-                      </StackPanel>
-                      <Grid Grid.Column="1" ColumnDefinitions="*,Auto" VerticalAlignment="Center">
-                        <ComboBox Grid.Column="0" Name="PART_TitleModel"
-                                  Classes="settingsinput"
-                                  HorizontalAlignment="Stretch"
-                                  ItemsSource="{Binding TitleProviderModels}"
-                                  SelectedItem="{Binding SelectedTitleProviderModel, Mode=TwoWay}">
-                          <ComboBox.ItemTemplate>
-                            <DataTemplate x:DataType="vm:TitleProviderModelOption">
-                              <TextBlock Text="{Binding Label}" />
-                            </DataTemplate>
-                          </ComboBox.ItemTemplate>
-                        </ComboBox>
-                        <Button Grid.Column="1" Classes="outline" Content="模型管理..."
-                                Padding="12,7" Margin="10,0,0,0" Click="OnManageProviders" />
-                      </Grid>
                     </Grid>
                   </StackPanel>
                 </Border>
@@ -1370,14 +1603,14 @@
               <StackPanel Name="PAGE_Vision" IsVisible="False">
                 <TextBlock Classes="pagetitle" Text="视觉理解" />
                 <TextBlock Classes="pagesubtitle"
-                           Text="为不支持多模态的模型提供图像理解能力。" />
+                           Text="让不支持图片输入的模型也能看懂图片。" />
 
                 <Border Classes="settingscard">
                   <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                     <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                      <TextBlock Classes="rowtitle" Text="启用外挂视觉" />
+                      <TextBlock Classes="rowtitle" Text="借助视觉模型看图" />
                       <TextBlock Classes="hint"
-                                 Text="启用后，不支持多模态的模型将自动调用下方视觉模型解析图片。" />
+                                 Text="开启后，不支持图片输入的模型会调用下方视觉模型来解析图片。" />
                     </StackPanel>
                     <ToggleButton Grid.Column="1" Classes="settingtoggle"
                                   IsChecked="{Binding VisionProxyEnabled, Mode=TwoWay}"
@@ -1410,17 +1643,17 @@
               </StackPanel>
 
               <StackPanel Name="PAGE_PostProcessing" IsVisible="False">
-                <TextBlock Classes="pagetitle" Text="后处理" />
-                <TextBlock Classes="pagesubtitle" Text="按需启用和配置后处理功能。" />
+                <TextBlock Classes="pagetitle" Text="文本替换" />
+                <TextBlock Classes="pagesubtitle" Text="回答完成后，按规则自动替换其中的文字。" />
                 <Border Classes="settingscard">
                   <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                     <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                      <TextBlock Classes="rowtitle" Text="自动替换" />
+                      <TextBlock Classes="rowtitle" Text="启用文本替换" />
                       <TextBlock Classes="hint" Text="回答完成后，自动应用已启用的替换规则。" />
                     </StackPanel>
                     <ToggleButton Grid.Column="1" Classes="settingtoggle"
                                   IsChecked="{Binding ResponsePostProcessingEnabled, Mode=TwoWay}"
-                                  VerticalAlignment="Center" AutomationProperties.Name="自动替换" />
+                                  VerticalAlignment="Center" AutomationProperties.Name="启用文本替换" />
                   </Grid>
                 </Border>
 
@@ -1483,11 +1716,11 @@
               </StackPanel>
 
               <StackPanel Name="PAGE_Sandbox" IsVisible="False">
-                <TextBlock Classes="pagetitle" Text="沙箱与文件" />
+                <TextBlock Classes="pagetitle" Text="代码与文件" />
                 <TextBlock Classes="pagesubtitle"
                            Text="让 BYOK 模型在对话中按需运行 Python 代码、读取本地文件。" />
 
-                <TextBlock Classes="section" Text="沙箱环境" Margin="2,4,2,8" />
+                <TextBlock Classes="section" Text="Python 执行" Margin="2,4,2,8" />
                 <Border Name="PART_PythonToggleCard" Classes="settingscard">
                   <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                     <StackPanel Grid.Column="0" Margin="0,0,20,0">
@@ -1575,11 +1808,43 @@
                   </StackPanel>
                 </Border>
 
-                <TextBlock Classes="section" Text="文件工具（只读）" />
+                <TextBlock Classes="section" Text="放行与拦截规则" />
+                <Border Classes="settingscard" IsEnabled="{Binding PythonToolEnabled}">
+                  <StackPanel Classes="fieldrow" Spacing="12">
+                    <TextBlock Classes="hint" TextWrapping="Wrap"
+                               Text="这些规则叠加在审批之上：仅用「额外允许导入」内的模块且无风险时自动放行；命中「禁止导入」或「禁止路径前缀」时直接拦截（完全权限模式下也拦截）。每行或逗号分隔一项。" />
+                    <Grid ColumnDefinitions="*,16,*">
+                      <StackPanel Grid.Column="0">
+                        <TextBlock Classes="label" Text="额外允许导入" />
+                        <TextBox Classes="settingsinput" MinHeight="70" AcceptsReturn="True" TextWrapping="Wrap"
+                                 Text="{Binding PythonToolAllowedImports, Mode=TwoWay}" />
+                      </StackPanel>
+                      <StackPanel Grid.Column="2">
+                        <TextBlock Classes="label" Text="禁止导入" />
+                        <TextBox Classes="settingsinput" MinHeight="70" AcceptsReturn="True" TextWrapping="Wrap"
+                                 Text="{Binding PythonToolDeniedImports, Mode=TwoWay}" />
+                      </StackPanel>
+                    </Grid>
+                    <Grid ColumnDefinitions="*,16,*">
+                      <StackPanel Grid.Column="0">
+                        <TextBlock Classes="label" Text="允许路径前缀" />
+                        <TextBox Classes="settingsinput" MinHeight="70" AcceptsReturn="True" TextWrapping="Wrap"
+                                 Text="{Binding PythonToolAllowedPathPrefixes, Mode=TwoWay}" />
+                      </StackPanel>
+                      <StackPanel Grid.Column="2">
+                        <TextBlock Classes="label" Text="禁止路径前缀" />
+                        <TextBox Classes="settingsinput" MinHeight="70" AcceptsReturn="True" TextWrapping="Wrap"
+                                 Text="{Binding PythonToolDeniedPathPrefixes, Mode=TwoWay}" />
+                      </StackPanel>
+                    </Grid>
+                  </StackPanel>
+                </Border>
+
+                <TextBlock Classes="section" Text="文件读取" />
                 <Border Classes="settingscard">
                   <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                     <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                      <TextBlock Classes="rowtitle" Text="启用只读文件工具" />
+                      <TextBlock Classes="rowtitle" Text="允许读取本地文件" />
                       <TextBlock Classes="hint"
                                  Text="允许模型用 Read / Glob / Grep 读取、查找、搜索本地文件（只读，受 Python 的拒绝路径限制）。" />
                     </StackPanel>
@@ -1737,21 +2002,48 @@
               </StackPanel>
 
               <StackPanel Name="PAGE_Approval" IsVisible="False">
-                <TextBlock Classes="pagetitle" Text="审批与安全" />
+                <TextBlock Classes="pagetitle" Text="权限与审批" />
                 <TextBlock Classes="pagesubtitle"
-                           Text="控制工具调用的审批策略，以及 Python 执行的自动放行与拦截规则。" />
+                           Text="决定工具调用什么时候需要你确认。Python 的放行与拦截规则在「代码与文件」中，浏览器操作的审批在「浏览器使用」中。" />
 
-                <TextBlock Classes="section" Text="所有本地工具" Margin="2,4,2,8" />
+                <TextBlock Classes="section" Text="默认权限" Margin="2,4,2,8" />
                 <Border Classes="settingscard">
                   <StackPanel Classes="fieldrow">
-                    <TextBlock Classes="label" Text="统一权限模式" />
+                    <TextBlock Classes="label" Text="所有本地工具" />
                     <ComboBox Name="PART_ToolPermission" Classes="settingsinput" />
                     <TextBlock Classes="hint" Margin="0,8,0,0" TextWrapping="Wrap"
                                Text="写入工具限制在本次对话的工作目录内；只读工具在工作目录内自动放行，读取目录以外的文件时逐次询问，可按文件夹或磁盘记住。完全权限可跳过普通写入审批，但破坏性操作和 Python 包安装仍需确认。" />
                   </StackPanel>
                 </Border>
 
-                <TextBlock Classes="section" Text="已授权的工具" />
+                <TextBlock Classes="section" Text="按工具单独设置" />
+                <Border Name="PART_PerToolPermissions" Classes="settingscard">
+                  <StackPanel>
+                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
+                      <TextBlock Classes="rowtitle" Text="图像生成" VerticalAlignment="Center" />
+                      <ComboBox Grid.Column="1" Name="PART_ImagePermission" Classes="settingsinput" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
+                      <TextBlock Classes="rowtitle" Text="视觉理解" VerticalAlignment="Center" />
+                      <ComboBox Grid.Column="1" Name="PART_VisionPermission" Classes="settingsinput" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
+                      <TextBlock Classes="rowtitle" Text="MCP 工具" VerticalAlignment="Center" />
+                      <ComboBox Grid.Column="1" Name="PART_McpPermission" Classes="settingsinput" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
+                      <TextBlock Classes="rowtitle" Text="Python 执行" VerticalAlignment="Center" />
+                      <ComboBox Grid.Column="1" Name="PART_PythonPermission" Classes="settingsinput" />
+                    </Grid>
+                    <TextBlock Classes="hint" Margin="16,0,16,14" TextWrapping="Wrap"
+                               Text="完全权限跳过普通审批；破坏性操作除外；全局设为完全权限时此处设置不生效。" />
+                  </StackPanel>
+                </Border>
+
+                <TextBlock Classes="section" Text="已记住的授权" />
                 <Border Classes="settingscard">
                   <StackPanel Classes="fieldrow">
                     <Grid ColumnDefinitions="*,Auto">
@@ -1782,65 +2074,6 @@
                     <TextBlock Name="PART_NoGrants" Classes="hint" Text="暂无始终允许的工具。" />
                   </StackPanel>
                 </Border>
-
-                <TextBlock Classes="section" Text="按工具类型" />
-                <Border Name="PART_PerToolPermissions" Classes="settingscard">
-                  <StackPanel>
-                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
-                      <TextBlock Classes="rowtitle" Text="图像生成" VerticalAlignment="Center" />
-                      <ComboBox Grid.Column="1" Name="PART_ImagePermission" Classes="settingsinput" />
-                    </Grid>
-                    <Border Classes="divider" />
-                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
-                      <TextBlock Classes="rowtitle" Text="视觉理解" VerticalAlignment="Center" />
-                      <ComboBox Grid.Column="1" Name="PART_VisionPermission" Classes="settingsinput" />
-                    </Grid>
-                    <Border Classes="divider" />
-                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
-                      <TextBlock Classes="rowtitle" Text="MCP 工具" VerticalAlignment="Center" />
-                      <ComboBox Grid.Column="1" Name="PART_McpPermission" Classes="settingsinput" />
-                    </Grid>
-                    <Border Classes="divider" />
-                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
-                      <TextBlock Classes="rowtitle" Text="Python 执行" VerticalAlignment="Center" />
-                      <ComboBox Grid.Column="1" Name="PART_PythonPermission" Classes="settingsinput" />
-                    </Grid>
-                    <TextBlock Classes="hint" Margin="16,0,16,14" TextWrapping="Wrap"
-                               Text="完全权限跳过普通审批；破坏性操作除外；全局设为完全权限时此处设置不生效。" />
-                  </StackPanel>
-                </Border>
-
-                <TextBlock Classes="section" Text="Python 执行 — 放行与拦截规则" />
-                <Border Classes="settingscard" IsEnabled="{Binding PythonToolEnabled}">
-                  <StackPanel Classes="fieldrow" Spacing="12">
-                    <TextBlock Classes="hint" TextWrapping="Wrap"
-                               Text="这些规则叠加在审批之上：仅用「额外允许导入」内的模块且无风险时自动放行；命中「禁止导入」或「禁止路径前缀」时直接拦截（完全权限模式下也拦截）。每行或逗号分隔一项。" />
-                    <Grid ColumnDefinitions="*,16,*">
-                      <StackPanel Grid.Column="0">
-                        <TextBlock Classes="label" Text="额外允许导入" />
-                        <TextBox Classes="settingsinput" MinHeight="70" AcceptsReturn="True" TextWrapping="Wrap"
-                                 Text="{Binding PythonToolAllowedImports, Mode=TwoWay}" />
-                      </StackPanel>
-                      <StackPanel Grid.Column="2">
-                        <TextBlock Classes="label" Text="禁止导入" />
-                        <TextBox Classes="settingsinput" MinHeight="70" AcceptsReturn="True" TextWrapping="Wrap"
-                                 Text="{Binding PythonToolDeniedImports, Mode=TwoWay}" />
-                      </StackPanel>
-                    </Grid>
-                    <Grid ColumnDefinitions="*,16,*">
-                      <StackPanel Grid.Column="0">
-                        <TextBlock Classes="label" Text="允许路径前缀" />
-                        <TextBox Classes="settingsinput" MinHeight="70" AcceptsReturn="True" TextWrapping="Wrap"
-                                 Text="{Binding PythonToolAllowedPathPrefixes, Mode=TwoWay}" />
-                      </StackPanel>
-                      <StackPanel Grid.Column="2">
-                        <TextBlock Classes="label" Text="禁止路径前缀" />
-                        <TextBox Classes="settingsinput" MinHeight="70" AcceptsReturn="True" TextWrapping="Wrap"
-                                 Text="{Binding PythonToolDeniedPathPrefixes, Mode=TwoWay}" />
-                      </StackPanel>
-                    </Grid>
-                  </StackPanel>
-                </Border>
               </StackPanel>
 
               <StackPanel Name="PAGE_Mcp" IsVisible="False">
@@ -1855,7 +2088,7 @@
                             Content="添加服务器" Padding="16,8" VerticalAlignment="Top" />
                   </Grid>
 
-                  <TextBlock Classes="section" Text="HTTP 服务器" Margin="2,4,2,8" />
+                  <TextBlock Classes="section" Text="已添加的服务器" Margin="2,4,2,8" />
                   <ItemsControl Name="PART_McpServers">
                     <ItemsControl.ItemTemplate>
                       <DataTemplate x:DataType="vm:McpServerEntry">
@@ -1979,8 +2212,8 @@
                           x:DataType="agents:AgentBridgeStatusViewModel">
                 <Grid ColumnDefinitions="*,Auto">
                   <StackPanel Grid.Column="0">
-                    <TextBlock Classes="pagetitle" Text="Agent Bridge" />
-                    <TextBlock Classes="pagesubtitle" Text="Bridge 与移动端连接。" />
+                    <TextBlock Classes="pagetitle" Text="远程控制" />
+                    <TextBlock Classes="pagesubtitle" Text="把本机的 Agent 会话经云端中转同步到手机，在手机上查看和控制。" />
                   </StackPanel>
                   <Button Grid.Column="1"
                           Classes="outline"
@@ -1991,11 +2224,11 @@
                           Content="刷新" />
                 </Grid>
 
-                <TextBlock Classes="section" Text="Bridge" Margin="2,4,2,8" />
+                <TextBlock Classes="section" Text="连接" Margin="2,4,2,8" />
                 <Border Classes="settingscard" Margin="0,0,0,10">
                   <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                     <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                      <TextBlock Classes="rowtitle" Text="远程桥接" />
+                      <TextBlock Classes="rowtitle" Text="允许手机远程连接" />
                       <TextBlock Classes="hint"
                                  Text="开启后，本机 Agent 会话经云端中转同步到你的手机以供远程查看与控制。默认关闭。" />
                     </StackPanel>
@@ -2015,15 +2248,15 @@
                       <TextBlock Classes="rowtitle" Margin="0,4,0,0" Text="{Binding BridgeStatusText}" />
                     </StackPanel>
                     <StackPanel Grid.Column="1">
-                      <TextBlock Classes="hint" Margin="0" Text="会话" />
+                      <TextBlock Classes="hint" Margin="0" Text="本机会话" />
                       <TextBlock Classes="rowtitle" Margin="0,4,0,0" Text="{Binding SessionCount}" />
                     </StackPanel>
                     <StackPanel Grid.Column="2">
-                      <TextBlock Classes="hint" Margin="0" Text="投影" />
+                      <TextBlock Classes="hint" Margin="0" Text="已同步" />
                       <TextBlock Classes="rowtitle" Margin="0,4,0,0" Text="{Binding ProjectedSessionCount}" />
                     </StackPanel>
                     <StackPanel Grid.Column="3">
-                      <TextBlock Classes="hint" Margin="0" Text="队列" />
+                      <TextBlock Classes="hint" Margin="0" Text="同步中" />
                       <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                         <TextBlock Classes="rowtitle" Text="{Binding ActiveProjectionCount}" />
                         <TextBlock Classes="rowtitle" Text="+" />
@@ -2113,6 +2346,21 @@
                   </StackPanel>
                 </Grid>
 
+                <!-- 技能是模型按需打开的 SKILL.md，读不了文件就用不了。以前这时整个导航项
+                     被藏起来，用户只会以为软件没有技能；现在留着入口，把原因和去处说出来。 -->
+                <Border Name="PART_SkillsUnreachable" IsVisible="False"
+                        Background="{DynamicResource Brush.Primary.Soft}"
+                        BorderBrush="{DynamicResource Brush.Primary.Border}"
+                        BorderThickness="1" CornerRadius="{DynamicResource Radius.Md}"
+                        Padding="12,10" Margin="0,0,0,14">
+                  <Grid ColumnDefinitions="*,Auto">
+                    <TextBlock Classes="hint" Margin="0" TextWrapping="Wrap" VerticalAlignment="Center"
+                               Text="技能需要模型能读取本地文件。开启 Python 执行或文件读取后才会生效。" />
+                    <Button Grid.Column="1" Classes="textlink" Content="前往代码与文件"
+                            Margin="12,0,0,0" VerticalAlignment="Center" Click="OnOpenSandboxFromSkills" />
+                  </Grid>
+                </Border>
+
                 <TextBlock Name="PART_SkillStatus" Classes="hint" Margin="2,0,2,14"
                            IsVisible="False" TextWrapping="Wrap" />
 
@@ -2146,7 +2394,7 @@
                       <StackPanel Grid.Column="0">
                         <TextBlock Classes="pagetitle" Text="记忆" />
                         <TextBlock Classes="pagesubtitle"
-                                   Text="记忆将从对话中学习用户偏好，让后续回复更贴合用户。MolaGPT Chat 对话不参与本地记忆。" />
+                                   Text="从 Work 与 BYOK 对话中学习你的偏好，让后续回复更贴合你。MolaGPT Chat 的记忆请前往「MolaGPT 账号」设置中管理。" />
                       </StackPanel>
                       <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Top">
                         <Button Classes="outline" Content="立即整理" Padding="14,8"
@@ -2492,16 +2740,16 @@
     <!-- Pages are stacked in one Panel and swapped by IsVisible, so switching
          nav items used to be a hard cut between two dense pages of controls —
          at that density the eye cannot tell a page change from a redraw. One
-         selector covers all thirteen. -->
+         selector covers every page. Only the offset animates: an idle frame
+         can leave an animation short of its last keyframe, and a page stuck
+         at Opacity 0.94 lets whatever is under it show through. -->
     <Style Selector="Panel#PART_Pages > StackPanel[IsVisible=True]">
       <Style.Animations>
         <Animation Duration="0:0:0.19" Easing="CubicEaseOut" FillMode="Forward">
           <KeyFrame Cue="0%">
-            <Setter Property="Opacity" Value="0" />
             <Setter Property="TranslateTransform.Y" Value="10" />
           </KeyFrame>
           <KeyFrame Cue="100%">
-            <Setter Property="Opacity" Value="1" />
             <Setter Property="TranslateTransform.Y" Value="0" />
           </KeyFrame>
         </Animation>
@@ -2608,6 +2856,26 @@
          setter 谁后生效谁赢；不写这条就得指望 :selected 总是后激活。 -->
     <Style Selector="ListBox#PART_Nav ListBoxItem:selected">
       <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+    <Style Selector="ListBox#PART_Nav ListBoxItem.navaccount">
+      <Setter Property="Padding" Value="10,7" />
+      <Setter Property="Margin" Value="0,0,0,2" />
+    </Style>
+
+    <!-- 账号页：用量数字，以及各模型行的档位 / 余量配色。 -->
+    <Style Selector="TextBlock.usagefigure">
+      <Setter Property="FontSize" Value="20" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Margin" Value="0,4,0,0" />
+    </Style>
+    <Style Selector="StackPanel#PAGE_Account TextBlock.success">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Success}" />
+    </Style>
+    <Style Selector="StackPanel#PAGE_Account TextBlock.warning">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Warning}" />
+    </Style>
+    <Style Selector="StackPanel#PAGE_Account TextBlock.error">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
     </Style>
     <Style Selector="Slider /template/ RepeatButton#PART_DecreaseButton">
       <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
@@ -2814,6 +3082,37 @@
           </StackPanel>
         </DataTemplate>
       </Setter>
+    </Style>
+
+    <!-- 搜索结果行：两行字，比导航项略高。 -->
+    <Style Selector="ListBox#PART_SearchResults ListBoxItem">
+      <Setter Property="Padding" Value="12,7" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+    <Style Selector="ListBox#PART_SearchResults ListBoxItem:selected /template/ Border#PART_Root">
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+
+    <!-- 从搜索结果跳过来的那一行：所在卡片描主色边，行名变主色。类名由计时器
+         移除，不挂动画（见 CLAUDE.md）。写在最后，盖过 section / label 的字色。 -->
+    <Style Selector="Border.settingscard.searchhit">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+    <Style Selector="TextBlock.searchhit">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+    <Style Selector="CheckBox.searchhit">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+    <Style Selector="RadioButton.searchhit">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+    <Style Selector="Expander.searchhit">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+    <Style Selector="Button.searchhit">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
     </Style>
   </Window.Styles>
 </v:MolaContentWindow>

@@ -113,7 +113,7 @@ public sealed class FormulaCanvas : Control
         try
         {
             var scale = FormulaSize;
-            var renderer = new AvaloniaTexRenderer(context, scale);
+            var renderer = new AvaloniaTexRenderer(context, scale, Foreground);
 
             // RenderTo receives the logical top-left. It adds box.Height itself
             // before handing the baseline to the renderer.

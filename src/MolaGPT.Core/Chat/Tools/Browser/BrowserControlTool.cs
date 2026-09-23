@@ -392,7 +392,7 @@ public sealed partial class BrowserControlTool
     {
         options ??= new BrowserControlOptions();
         if (!options.Enabled)
-            return Error("浏览器工具未开启。请在设置 → 浏览器中开启「启用浏览器使用」，并确认本机已安装 Kimi 浏览器扩展。");
+            return Error("浏览器工具未开启。请在设置 → 浏览器使用中开启「启用浏览器使用」，并确认本机已安装 Kimi 浏览器扩展。");
 
         var args = ParseArgs(argumentsJson);
         var action = NormalizeAction(args.Action);
@@ -516,9 +516,9 @@ public sealed partial class BrowserControlTool
         {
             return WebBridgeAddress.IsInstalled
                 ? $"本机服务未运行（{status.DaemonUrl}），已尝试启动但没有起来。"
-                  + "请让用户在设置 → 浏览器中点「启动服务」，或在终端运行 kimi-webbridge start。"
+                  + "请让用户在设置 → 浏览器使用中点「启动服务」，或在终端运行 kimi-webbridge start。"
                 : "本机未安装 Kimi 浏览器扩展服务，浏览器工具不可用。"
-                  + "请让用户在设置 → 浏览器 → 配置指引中完成配置。";
+                  + "请让用户在设置 → 浏览器使用 → 配置指引中完成配置。";
         }
 
         return status.ExtensionConnected ? null : TranslateDaemonError("no extension connected");
@@ -547,9 +547,9 @@ public sealed partial class BrowserControlTool
         result["note"] = status switch
         {
             { Running: false } when WebBridgeAddress.IsInstalled =>
-                "本机服务未运行。请让用户在设置 → 浏览器中启动，或在终端运行 kimi-webbridge start。",
+                "本机服务未运行。请让用户在设置 → 浏览器使用中启动，或在终端运行 kimi-webbridge start。",
             { Running: false } =>
-                "本机未安装 Kimi 浏览器扩展服务，浏览器工具不可用。请让用户在设置 → 浏览器 → 配置指引中完成配置。",
+                "本机未安装 Kimi 浏览器扩展服务，浏览器工具不可用。请让用户在设置 → 浏览器使用 → 配置指引中完成配置。",
             { ExtensionConnected: false } =>
                 "服务已运行但浏览器扩展未连接。请让用户打开 Chrome/Edge 并确认扩展已启用。",
             _ => "服务与浏览器扩展均已就绪，可以 navigate。"

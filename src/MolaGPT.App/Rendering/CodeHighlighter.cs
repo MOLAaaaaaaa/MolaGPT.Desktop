@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Threading.Channels;
 using Avalonia.Media;
+using Avalonia.Media.Immutable;
 using TextMateSharp.Grammars;
 using TextMateSharp.Registry;
 // FontStyle is declared in both Avalonia.Media and TextMateSharp.Themes;
@@ -9,6 +11,17 @@ using TmTheme = TextMateSharp.Themes.Theme;
 
 namespace MolaGPT.App.Rendering;
 
+/// <summary>One coloured span within a line.</summary>
+internal readonly record struct CodeToken(int Start, int Length, IBrush? Brush, FontStyle Style, FontWeight Weight);
+
+/// <summary>A tokenized fence: its lines, and each line's coloured spans.</summary>
+internal sealed class HighlightedCode(string code, string[] lines, CodeToken[][] tokens)
+{
+    public string Code { get; } = code;
+    public string[] Lines { get; } = lines;
+    public CodeToken[][] Tokens { get; } = tokens;
+}
+
 /// <summary>
 /// Syntax highlighting for fenced code blocks, backed by TextMateSharp — the
 /// same grammar and theme files VS Code uses.
@@ -16,110 +29,274 @@ namespace MolaGPT.App.Rendering;
 /// Deliberately *not* AvaloniaEdit. The obvious route is to drop a read-only
 /// TextEditor into each code block, but a transcript can hold hundreds of
 /// fences, and a TextEditor is a full editing surface: caret, folding manager,
-/// undo stack, its own virtualizing layer. Putting one in every row would make
-/// rows heavy again, which is precisely the property this migration exists to
-/// fix. Tokenizing here and emitting coloured <see cref="Run"/>s into the
-/// existing text block keeps a code row about as cheap as a paragraph row.
+/// undo stack, its own virtualizing layer. Tokenizing here and emitting
+/// coloured runs into the existing text block keeps a code row about as cheap
+/// as a paragraph row.
 ///
-/// Everything expensive is cached: the registry and theme are per-variant
-/// singletons, grammars are cached per language, and highlighted output is
-/// memoized per (language, code, variant) because a row is re-realized every
-/// time it scrolls back into view.
+/// All tokenizing happens on one worker thread, never the UI thread. Measured
+/// on a real 297-line HTML page: loading the HTML grammar (which pulls in CSS
+/// and JavaScript) took 397 ms the first time, and tokenizing the page 90–100
+/// ms every time it changed — which, for a page streaming into the canvas, was
+/// every 250 ms, and left the transcript unable to scroll. TextMate's registry
+/// and grammars are not thread-safe, so the worker owns them outright.
+///
+/// Tokenizing is incremental. The worker remembers the last few documents per
+/// language with the grammar state at the end of every line; a new version
+/// that shares leading lines with one of them resumes from the first line that
+/// differs. A fence streaming in costs its new lines, not the whole fence again.
 /// </summary>
 internal static class CodeHighlighter
 {
+    /// <summary>Longer fences stay plain in the transcript: colouring them costs
+    /// more in layout than it is worth.</summary>
+    public const int MaxTranscriptLength = 60_000;
+
+    /// <summary>The canvas lays out only visible lines, so it can colour far more.</summary>
+    public const int MaxViewLength = 400_000;
+
     private sealed record Palette(Registry Registry, TmTheme Theme);
 
-    private static readonly ConcurrentDictionary<bool, Palette> Palettes = new();
-    private static readonly ConcurrentDictionary<(bool Dark, string Language), IGrammar?> Grammars = new();
-    private static readonly ConcurrentDictionary<(bool Dark, string Language, string Code), IReadOnlyList<(string Text, IBrush? Brush, FontStyle Style, FontWeight Weight)>> Cache = new();
+    private sealed record Job(string Code, string Language, bool Dark, bool Remember, TaskCompletionSource<HighlightedCode?> Result);
 
-    /// <summary>
-    /// 退到后台时丢掉按 (语言, 代码) 记忆的高亮结果。行上的 <see cref="Run"/>
-    /// 不受影响，切回来滚动到代码块时按需重新 tokenize。
-    /// Palettes/Grammars/BrushCache 保留：重建它们要读语法文件，反而贵。
-    /// </summary>
-    internal static void TrimForBackground() => Cache.Clear();
-
-    /// <summary>
-    /// A single fence's worth of tokens. Returns null when the language is
-    /// unknown or tokenizing fails, which the caller renders as plain text —
-    /// unhighlighted code is fine, missing code is not.
-    /// </summary>
-    public static IReadOnlyList<(string Text, IBrush? Brush, FontStyle Style, FontWeight Weight)>? Highlight(
-        string? code, string? language, bool dark)
+    /// <summary>Tokenized lines and the grammar state after each, for resuming.</summary>
+    private sealed class Memo(string[] lines, CodeToken[][] tokens, IStateStack?[] states)
     {
-        if (string.IsNullOrEmpty(code)) return null;
+        public string[] Lines = lines;
+        public CodeToken[][] Tokens = tokens;
+        public IStateStack?[] States = states;
+    }
 
-        var lang = NormalizeLanguage(language);
-        if (lang is null) return null;
+    private static readonly Channel<Job?> Jobs = Channel.CreateUnbounded<Job?>(new UnboundedChannelOptions { SingleReader = true });
+    private static readonly ConcurrentDictionary<(bool Dark, string Language, string Code), HighlightedCode> Cache = new();
 
-        // Very large fences are left plain: tokenizing them costs more than the
-        // colour is worth, and it would happen on the UI thread during scroll.
-        if (code.Length > 60_000) return null;
+    // Worker-owned: touched only by the worker thread.
+    private static readonly Dictionary<bool, Palette> Palettes = new();
+    private static readonly Dictionary<(bool Dark, string Language), IGrammar?> Grammars = new();
+    private static readonly Dictionary<(bool Dark, string Language), List<Memo>> Memos = new();
+    private static readonly Dictionary<string, IBrush> BrushCache = new(StringComparer.Ordinal);
+    private const int MemosPerLanguage = 6;
 
-        var key = (dark, lang, code);
-        if (Cache.TryGetValue(key, out var cached)) return cached;
+    static CodeHighlighter()
+    {
+        var worker = new Thread(Work) { IsBackground = true, Name = "Code highlighter", Priority = ThreadPriority.BelowNormal };
+        worker.Start();
+    }
 
-        try
+    /// <summary>
+    /// 退到后台时丢掉记忆的高亮结果。行上的 run 不受影响，切回来滚动到代码块时
+    /// 按需重新 tokenize。Palettes/Grammars 保留：重建它们要读语法文件，反而贵。
+    /// </summary>
+    internal static void TrimForBackground()
+    {
+        Cache.Clear();
+        Jobs.Writer.TryWrite(null);
+    }
+
+    /// <summary>Whether this language is one we colour at all.</summary>
+    public static bool Supports(string? language) => NormalizeLanguage(language) is not null;
+
+    /// <summary>A finished result for exactly this code, if there is one.</summary>
+    public static HighlightedCode? TryGetCached(string? code, string? language, bool dark)
+    {
+        if (string.IsNullOrEmpty(code) || NormalizeLanguage(language) is not { } lang) return null;
+        return Cache.TryGetValue((dark, lang, code), out var cached) ? cached : null;
+    }
+
+    /// <summary>
+    /// Tokenizes on the worker. Completes with null when the language is
+    /// unknown, the code is over <paramref name="maxLength"/>, or tokenizing
+    /// fails — the caller shows plain text: unhighlighted code is fine, missing
+    /// code is not. Continuations run wherever the caller awaits.
+    ///
+    /// <paramref name="remember"/> false keeps the result out of the cache: a
+    /// page streaming into the canvas asks for every snapshot, and caching each
+    /// one would fill the cache with versions nobody will ask for again.
+    /// </summary>
+    public static Task<HighlightedCode?> HighlightAsync(string? code, string? language, bool dark, int maxLength = MaxTranscriptLength, bool remember = true)
+    {
+        if (string.IsNullOrEmpty(code) || code.Length > maxLength || NormalizeLanguage(language) is not { } lang)
+            return Task.FromResult<HighlightedCode?>(null);
+        if (Cache.TryGetValue((dark, lang, code), out var cached))
+            return Task.FromResult<HighlightedCode?>(cached);
+
+        var job = new Job(code, lang, dark, remember, new TaskCompletionSource<HighlightedCode?>(TaskCreationOptions.RunContinuationsAsynchronously));
+        Jobs.Writer.TryWrite(job);
+        return job.Result.Task;
+    }
+
+    private static void Work()
+    {
+        var reader = Jobs.Reader;
+        while (true)
         {
-            var result = Tokenize(code, lang, dark);
-            if (result is null) return null;
+            Job? job;
+            try
+            {
+                if (!reader.WaitToReadAsync().AsTask().GetAwaiter().GetResult()) return;
+                if (!reader.TryRead(out job)) continue;
+            }
+            catch
+            {
+                return;
+            }
 
-            // Bounded so a long session cannot grow this without limit.
-            if (Cache.Count > 400) Cache.Clear();
-            Cache[key] = result;
-            return result;
-        }
-        catch
-        {
-            return null;
+            if (job is null)
+            {
+                Memos.Clear();
+                continue;
+            }
+
+            HighlightedCode? result = null;
+            try
+            {
+                var key = (job.Dark, job.Language, job.Code);
+                if (!Cache.TryGetValue(key, out result))
+                {
+                    result = Tokenize(job.Code, job.Language, job.Dark);
+                    if (result is not null && job.Remember)
+                    {
+                        // Bounded so a long session cannot grow this without limit.
+                        if (Cache.Count > 400) Cache.Clear();
+                        Cache[key] = result;
+                    }
+                }
+            }
+            catch
+            {
+                result = null;
+            }
+
+            job.Result.TrySetResult(result);
         }
     }
 
-    private static IReadOnlyList<(string, IBrush?, FontStyle, FontWeight)>? Tokenize(
-        string code, string language, bool dark)
+    private static HighlightedCode? Tokenize(string code, string language, bool dark)
     {
-        var palette = Palettes.GetOrAdd(dark, isDark =>
+        if (!Palettes.TryGetValue(dark, out var palette))
         {
-            var options = new RegistryOptions(isDark ? ThemeName.DarkPlus : ThemeName.LightPlus);
+            var options = new RegistryOptions(dark ? ThemeName.DarkPlus : ThemeName.LightPlus);
             var registry = new Registry(options);
-            return new Palette(registry, registry.GetTheme());
-        });
+            palette = new Palette(registry, registry.GetTheme());
+            Palettes[dark] = palette;
+        }
 
-        var grammar = Grammars.GetOrAdd((dark, language), k =>
+        if (!Grammars.TryGetValue((dark, language), out var grammar))
         {
-            var options = new RegistryOptions(k.Dark ? ThemeName.DarkPlus : ThemeName.LightPlus);
-            var scope = options.GetScopeByLanguageId(k.Language);
-            return string.IsNullOrEmpty(scope) ? null : palette.Registry.LoadGrammar(scope);
-        });
+            var options = new RegistryOptions(dark ? ThemeName.DarkPlus : ThemeName.LightPlus);
+            var scope = options.GetScopeByLanguageId(language);
+            grammar = string.IsNullOrEmpty(scope) ? null : palette.Registry.LoadGrammar(scope);
+            Grammars[(dark, language)] = grammar;
+        }
 
         if (grammar is null) return null;
 
-        var runs = new List<(string, IBrush?, FontStyle, FontWeight)>();
         var lines = code.Replace("\r\n", "\n").Split('\n');
-        IStateStack? state = null;
+        var tokens = new CodeToken[lines.Length][];
+        var states = new IStateStack?[lines.Length];
 
-        for (var i = 0; i < lines.Length; i++)
+        // Resume from the remembered document sharing the most leading lines.
+        if (!Memos.TryGetValue((dark, language), out var memos))
+            Memos[(dark, language)] = memos = new List<Memo>();
+        Memo? best = null;
+        var reused = 0;
+        foreach (var memo in memos)
+        {
+            var shared = 0;
+            var limit = Math.Min(memo.Lines.Length, lines.Length);
+            while (shared < limit && string.Equals(memo.Lines[shared], lines[shared], StringComparison.Ordinal)) shared++;
+            if (shared > reused)
+            {
+                reused = shared;
+                best = memo;
+            }
+        }
+
+        // The last shared line may have been cut mid-token when that version was
+        // taken (a line still being written); redo it rather than trust it.
+        if (best is not null && reused == best.Lines.Length) reused--;
+        reused = Math.Max(0, reused);
+        if (best is not null)
+        {
+            Array.Copy(best.Tokens, tokens, reused);
+            Array.Copy(best.States, states, reused);
+        }
+
+        IStateStack? state = reused > 0 ? states[reused - 1] : null;
+        var spans = new List<CodeToken>();
+        for (var i = reused; i < lines.Length; i++)
         {
             var line = lines[i];
             var tokenized = grammar.TokenizeLine(line, state, TimeSpan.FromMilliseconds(200));
             state = tokenized.RuleStack;
+            states[i] = state;
 
+            spans.Clear();
             foreach (var token in tokenized.Tokens)
             {
                 var start = Math.Min(token.StartIndex, line.Length);
                 var end = Math.Min(token.EndIndex, line.Length);
                 if (end <= start) continue;
-
-                var text = line[start..end];
                 var (brush, style, weight) = Style(palette.Theme, token.Scopes);
-                runs.Add((text, brush, style, weight));
+                spans.Add(new CodeToken(start, end - start, brush, style, weight));
             }
 
-            if (i < lines.Length - 1) runs.Add(("\n", null, FontStyle.Normal, FontWeight.Normal));
+            tokens[i] = spans.ToArray();
         }
 
+        var remembered = new Memo(lines, tokens, states);
+        if (best is not null) memos.Remove(best);
+        memos.Insert(0, remembered);
+        if (memos.Count > MemosPerLanguage) memos.RemoveAt(memos.Count - 1);
+
+        return new HighlightedCode(code, lines, tokens);
+    }
+
+    /// <summary>
+    /// The flat run list a text block takes, with as few runs as the colours
+    /// allow. Layout cost is per run (≈0.05 ms each, measured), so neighbours of
+    /// the same style are merged, and whitespace — line breaks included, which
+    /// show no colour — joins whatever run it follows.
+    /// </summary>
+    public static List<(string Text, IBrush? Brush, FontStyle Style, FontWeight Weight)> Runs(HighlightedCode code)
+    {
+        var runs = new List<(string, IBrush?, FontStyle, FontWeight)>();
+        var text = new System.Text.StringBuilder();
+        IBrush? brush = null;
+        var style = FontStyle.Normal;
+        var weight = FontWeight.Normal;
+        var open = false;
+
+        void Add(string segment, IBrush? segmentBrush, FontStyle segmentStyle, FontWeight segmentWeight)
+        {
+            if (segment.Length == 0) return;
+            if (open && (string.IsNullOrWhiteSpace(segment)
+                         || (ReferenceEquals(segmentBrush, brush) && segmentStyle == style && segmentWeight == weight)))
+            {
+                text.Append(segment);
+                return;
+            }
+
+            if (open) runs.Add((text.ToString(), brush, style, weight));
+            text.Clear().Append(segment);
+            (brush, style, weight, open) = (segmentBrush, segmentStyle, segmentWeight, true);
+        }
+
+        for (var i = 0; i < code.Lines.Length; i++)
+        {
+            var line = code.Lines[i];
+            var cursor = 0;
+            foreach (var token in code.Tokens[i])
+            {
+                if (token.Start > cursor) Add(line[cursor..token.Start], null, FontStyle.Normal, FontWeight.Normal);
+                Add(line.Substring(token.Start, token.Length), token.Brush, token.Style, token.Weight);
+                cursor = token.Start + token.Length;
+            }
+
+            if (cursor < line.Length) Add(line[cursor..], null, FontStyle.Normal, FontWeight.Normal);
+            if (i < code.Lines.Length - 1) Add("\n", null, FontStyle.Normal, FontWeight.Normal);
+        }
+
+        if (open) runs.Add((text.ToString(), brush, style, weight));
         return runs;
     }
 
@@ -150,22 +327,23 @@ internal static class CodeHighlighter
         return (null, FontStyle.Normal, FontWeight.Normal);
     }
 
-    private static readonly ConcurrentDictionary<string, IBrush> BrushCache = new();
-
-    private static IBrush? Parse(string hex) =>
-        BrushCache.GetOrAdd(hex, h =>
+    // Immutable: built on the worker, drawn on the UI thread. A mutable
+    // SolidColorBrush is an AvaloniaObject and would refuse the cross-thread use.
+    private static IBrush Parse(string hex)
+    {
+        if (BrushCache.TryGetValue(hex, out var brush)) return brush;
+        try
         {
-            try
-            {
-                var brush = new SolidColorBrush(Color.Parse(h));
-                brush.ToImmutable();
-                return brush;
-            }
-            catch
-            {
-                return Brushes.Transparent;
-            }
-        });
+            brush = new ImmutableSolidColorBrush(Color.Parse(hex));
+        }
+        catch
+        {
+            brush = Brushes.Transparent;
+        }
+
+        BrushCache[hex] = brush;
+        return brush;
+    }
 
     /// <summary>
     /// Maps the fence's info string to a TextMate language id. Markdown fences
@@ -190,6 +368,8 @@ internal static class CodeHighlighter
             "rs" => "rust",
             "golang" => "go",
             "md" => "markdown",
+            "htm" => "html",
+            "mmd" => "mermaid",
             "text" or "plain" or "plaintext" or "txt" or "output" => null,
             _ => lang
         };

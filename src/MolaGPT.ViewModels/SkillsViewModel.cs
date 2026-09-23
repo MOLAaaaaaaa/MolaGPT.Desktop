@@ -23,7 +23,7 @@ public sealed partial class SkillsViewModel : ObservableObject
     private const string DisabledNamesKey = "skills_disabled";
 
     /// <summary>
-    /// 与「设置 → 浏览器 → 启用浏览器使用」共用一个状态的技能。
+    /// 与「设置 → 浏览器使用 → 启用浏览器使用」共用一个状态的技能。
     ///
     /// 对用户来说这是一个功能：工具没有技能，模型是在凭空发明点击顺序；技能没有
     /// 工具，那是一份指向不存在的东西的说明书。所以两个开关联动，任一处改动另一

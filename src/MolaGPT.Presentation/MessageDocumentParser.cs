@@ -497,6 +497,7 @@ public static partial class MessageDocumentParser
                 {
                     Language = language,
                     Code = code,
+                    IsClosed = !fenced.IsOpen,
                     LineCount = CountLines(code),
                     SourceStart = start,
                     SourceLength = length,
@@ -511,6 +512,7 @@ public static partial class MessageDocumentParser
                 {
                     Language = string.Empty,
                     Code = code,
+                    IsClosed = true,
                     LineCount = CountLines(code),
                     SourceStart = start,
                     SourceLength = length,

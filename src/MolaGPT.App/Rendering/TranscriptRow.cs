@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using MolaGPT.Presentation;
+using MolaGPT.Presentation.Artifacts;
 using MolaGPT.ViewModels;
 
 namespace MolaGPT.App.Rendering;
@@ -89,16 +90,47 @@ public sealed class HeaderRow : TranscriptRow, INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 }
 
-/// <summary>A parsed markdown block: paragraph, heading, code fence, table…</summary>
+/// <summary>
+/// A parsed markdown block: paragraph, heading, code fence, table…
+///
+/// Keyed by content, except tables and code fences, which are keyed by where
+/// they start. Both stream in piece by piece; keyed by content, every delta
+/// replaced the row and built its view from scratch — a new grid of cells for
+/// a table, a new code view for a fence, which then never saw its code grow.
+/// Keyed by position the row is carried across deltas, its block is swapped in
+/// place, and the view updates only what changed.
+/// </summary>
 public sealed class ProseRow : TranscriptRow, INotifyPropertyChanged
 {
     private bool _isFadingTail;
+    private RenderBlock _block;
 
     public ProseRow(MessageViewModel message, RenderBlock block, int segment)
-        : base(message, $"{message.RowKey()}:{segment}:{block.Key}")
-        => Block = block;
+        : base(message, block is TableBlock or CodeBlock
+            ? $"{message.RowKey()}:{segment}:{(block is TableBlock ? "table" : "code")}:{block.SourceStart}"
+            : $"{message.RowKey()}:{segment}:{block.Key}")
+        => _block = block;
 
-    public RenderBlock Block { get; }
+    public RenderBlock Block
+    {
+        get => _block;
+        private set
+        {
+            if (ReferenceEquals(_block, value)) return;
+            _block = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Block)));
+        }
+    }
+
+    /// <summary>A carried table or fence row takes the grown block. Other blocks
+    /// are keyed by content, so a carried one already shows what it should.
+    /// Returns whether the row now shows something different.</summary>
+    public bool Refresh(RenderBlock block)
+    {
+        if (block is not (TableBlock or CodeBlock) || ReferenceEquals(block, _block)) return false;
+        Block = block;
+        return true;
+    }
 
     /// <summary>
     /// This is the last block of a message whose text is still being revealed,
@@ -149,6 +181,117 @@ public sealed class MarkupRow : TranscriptRow, INotifyPropertyChanged
     }
 
     public void Refresh(MarkupUnitBlock block) => Block = block;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+}
+
+/// <summary>
+/// A fence that belongs on the canvas (a page, an SVG, a diagram, a table),
+/// shown in the answer as a chip — or, by the user's choice, as the ordinary
+/// code block with a way onto the canvas.
+///
+/// Keyed by position like <see cref="MarkupRow"/>: while the page is being
+/// written its content changes on every delta, and a content-keyed row would
+/// rebuild the chip under the pointer — a click on 「在画布打开」 mid-stream would
+/// land on a control that no longer exists.
+/// </summary>
+public sealed class ArtifactFenceRow : TranscriptRow, INotifyPropertyChanged
+{
+    private readonly Action<ArtifactFenceRow, bool>? _remember;
+    private CodeBlock _block;
+    private bool _messageDone;
+    private bool _showCode;
+
+    public ArtifactFenceRow(MessageViewModel message, CodeBlock block, ArtifactRenderKind kind, int ordinal, int segment,
+        bool messageDone, bool showCode, Action<ArtifactFenceRow, bool>? remember)
+        : base(message, $"{message.RowKey()}:{segment}:artifact:{block.SourceStart}")
+    {
+        _block = block;
+        Kind = kind;
+        Ordinal = ordinal;
+        _messageDone = messageDone;
+        _showCode = showCode;
+        _remember = remember;
+    }
+
+    /// <summary>Shown as its source rather than as a chip.</summary>
+    public bool ShowCode
+    {
+        get => _showCode;
+        private set
+        {
+            if (_showCode == value) return;
+            _showCode = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowCode)));
+        }
+    }
+
+    /// <summary>The user switched this fence. Remembered past the row: the
+    /// message's rows are rebuilt when it is saved and gets its id.</summary>
+    public void Choose(bool showCode)
+    {
+        ShowCode = showCode;
+        _remember?.Invoke(this, showCode);
+    }
+
+    /// <summary>The default changed in settings, or a rebuilt row resolved
+    /// differently; not a choice of the user's.</summary>
+    internal void Apply(bool showCode) => ShowCode = showCode;
+
+    public ArtifactRenderKind Kind { get; }
+
+    /// <summary>Index among this message's canvas fences — what the workspace
+    /// knows the version by.</summary>
+    public int Ordinal { get; private set; }
+
+    public CodeBlock Block => _block;
+
+    /// <summary>Still being written: open fence in a message that is streaming.</summary>
+    public bool IsGenerating => !_block.IsClosed && !_messageDone;
+
+    public void Refresh(ArtifactFenceRow next)
+    {
+        ShowCode = next.ShowCode;
+        if (ReferenceEquals(_block, next._block) && _messageDone == next._messageDone && Ordinal == next.Ordinal) return;
+        _block = next._block;
+        _messageDone = next._messageDone;
+        Ordinal = next.Ordinal;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Block)));
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+}
+
+/// <summary>
+/// A <c>mola-ui</c> fence: an inline component (plot, chart, table, cards) drawn in
+/// place. Position-keyed for the same reason as <see cref="ArtifactFenceRow"/>:
+/// the placeholder must turn into the component without its row being replaced.
+/// </summary>
+public sealed class UiBlockRow : TranscriptRow, INotifyPropertyChanged
+{
+    private CodeBlock _block;
+    private bool _messageDone;
+
+    public UiBlockRow(MessageViewModel message, CodeBlock block, int segment, bool messageDone)
+        : base(message, $"{message.RowKey()}:{segment}:ui:{block.SourceStart}")
+    {
+        _block = block;
+        _messageDone = messageDone;
+    }
+
+    public CodeBlock Block => _block;
+
+    /// <summary>No more text is coming for this fence: its closing marker has
+    /// arrived, or the answer ended without one.</summary>
+    public bool IsFinal => _block.IsClosed || _messageDone;
+
+    public void Refresh(UiBlockRow next)
+    {
+        if (ReferenceEquals(_block, next._block) && _messageDone == next._messageDone) return;
+        _block = next._block;
+        _messageDone = next._messageDone;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Block)));
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 }

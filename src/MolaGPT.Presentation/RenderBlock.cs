@@ -43,6 +43,7 @@ public sealed record CodeBlock : RenderBlock
 {
     public required string Language { get; init; }
     public required string Code { get; init; }
+    public required bool IsClosed { get; init; }
 
     /// <summary>Line count, precomputed so the view can decide whether to show a
     /// truncated preview without touching the string again on the UI thread.</summary>

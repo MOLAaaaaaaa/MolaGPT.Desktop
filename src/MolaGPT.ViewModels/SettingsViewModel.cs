@@ -8,6 +8,7 @@ using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Models;
+using MolaGPT.Presentation.Artifacts;
 using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels.Services;
 
@@ -22,6 +23,9 @@ public sealed partial class SettingsViewModel : ObservableObject
 {
     private const string SyncConversationsKey = "sync_conversations";
     private const string EnterToSendKey = "enter_to_send";
+    private const string VisualAnswersKey = "visual_answers_enabled";
+    private const string CanvasAutoOpenKey = "canvas_auto_open";
+    private const string FenceAsCardKeyPrefix = "fence_as_card_";
     public const string AutoCollapseThinkingKey = "auto_collapse_thinking";
     private const string StreamFadeKey = "stream_tail_fade";
     private const string StatusDotsKey = "status_dots";
@@ -90,6 +94,33 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private bool _isLoggedIn;
     [ObservableProperty] private ThemeMode _themeMode = ThemeMode.System;
     [ObservableProperty] private bool _enterToSend = true;
+
+    /// <summary>「可视化」: tell the model about inline components and the canvas.</summary>
+    [ObservableProperty] private bool _visualAnswersEnabled = true;
+
+    /// <summary>Open the canvas when an answer starts writing a page, SVG or diagram.</summary>
+    [ObservableProperty] private bool _canvasAutoOpen = true;
+
+    // How each canvas format appears in an answer: a chip that opens on the
+    // canvas, or (off) the fence as the ordinary code block it used to be.
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(CodeFenceKinds))] private bool _htmlFenceAsCard = true;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(CodeFenceKinds))] private bool _svgFenceAsCard = true;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(CodeFenceKinds))] private bool _mermaidFenceAsCard = true;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(CodeFenceKinds))] private bool _csvFenceAsCard = true;
+
+    /// <summary>The formats switched to code blocks, as the transcript reads them.</summary>
+    public IReadOnlySet<ArtifactRenderKind> CodeFenceKinds
+    {
+        get
+        {
+            var kinds = new HashSet<ArtifactRenderKind>();
+            if (!HtmlFenceAsCard) kinds.Add(ArtifactRenderKind.Html);
+            if (!SvgFenceAsCard) kinds.Add(ArtifactRenderKind.Svg);
+            if (!MermaidFenceAsCard) kinds.Add(ArtifactRenderKind.Mermaid);
+            if (!CsvFenceAsCard) kinds.Add(ArtifactRenderKind.Table);
+            return kinds;
+        }
+    }
     [ObservableProperty] private bool _autoCollapseThinking = true;
 
     /// <summary>
@@ -258,6 +289,14 @@ public sealed partial class SettingsViewModel : ObservableObject
                 SyncConversations = syncConversations;
             if (bool.TryParse(_settingsRepo.Get(EnterToSendKey), out var enterToSend))
                 EnterToSend = enterToSend;
+            if (bool.TryParse(_settingsRepo.Get(VisualAnswersKey), out var visualAnswers))
+                VisualAnswersEnabled = visualAnswers;
+            if (bool.TryParse(_settingsRepo.Get(CanvasAutoOpenKey), out var canvasAutoOpen))
+                CanvasAutoOpen = canvasAutoOpen;
+            HtmlFenceAsCard = LoadFenceAsCard("html");
+            SvgFenceAsCard = LoadFenceAsCard("svg");
+            MermaidFenceAsCard = LoadFenceAsCard("mermaid");
+            CsvFenceAsCard = LoadFenceAsCard("csv");
             if (bool.TryParse(_settingsRepo.Get(AutoCollapseThinkingKey), out var autoCollapseThinking))
                 AutoCollapseThinking = autoCollapseThinking;
             if (bool.TryParse(_settingsRepo.Get(StreamFadeKey), out var streamFade))
@@ -392,6 +431,32 @@ public sealed partial class SettingsViewModel : ObservableObject
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(EnterToSendKey, value.ToString());
     }
+
+    partial void OnVisualAnswersEnabledChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(VisualAnswersKey, value.ToString());
+    }
+
+    partial void OnCanvasAutoOpenChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(CanvasAutoOpenKey, value.ToString());
+    }
+
+    private bool LoadFenceAsCard(string format) =>
+        !bool.TryParse(_settingsRepo?.Get(FenceAsCardKeyPrefix + format), out var asCard) || asCard;
+
+    private void SaveFenceAsCard(string format, bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(FenceAsCardKeyPrefix + format, value.ToString());
+    }
+
+    partial void OnHtmlFenceAsCardChanged(bool value) => SaveFenceAsCard("html", value);
+    partial void OnSvgFenceAsCardChanged(bool value) => SaveFenceAsCard("svg", value);
+    partial void OnMermaidFenceAsCardChanged(bool value) => SaveFenceAsCard("mermaid", value);
+    partial void OnCsvFenceAsCardChanged(bool value) => SaveFenceAsCard("csv", value);
 
     partial void OnAutoCollapseThinkingChanged(bool value)
     {
@@ -1238,6 +1303,9 @@ public sealed record ProviderModelEntry(
     bool ImageEdit = false,
     List<CustomBodyEntry>? CustomBody = null,
     List<string>? EffortLevels = null,
+    /// <summary>The provider declares this model always reasons (OpenRouter's
+    /// <c>reasoning.mandatory</c>). No disable parameter may be sent.</summary>
+    bool ReasoningMandatory = false,
     bool SupportsTemperature = true,
     bool SupportsTopP = true,
     ModelPricing? Pricing = null);

@@ -1,9 +1,11 @@
 using System.ComponentModel;
 using System.Net.Http;
 using Avalonia;
+using Avalonia.Input.Platform;      // ClipboardExtensions.SetTextAsync
 using Avalonia.Animation;
 using Avalonia.Animation.Easings;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Styling;
 using Avalonia.Threading;
@@ -65,6 +67,11 @@ public partial class MainWindow : MolaWindow
     private bool _agentRuntimeActivated;
     private bool _hasOpened;
     private int _compactionTokensBeforeAtStart;
+    private readonly Transitions _artifactPanelTransitions = new();
+    private bool _artifactResizeActive;
+    private Point _artifactResizeStart;
+    private double _artifactResizeStartWidth;
+    private double _artifactCanvasWidth = 480;
 
     private const string AgentRuntimeNotificationKey = "pi-sidecar";
 
@@ -78,6 +85,10 @@ public partial class MainWindow : MolaWindow
 
     /// <summary>The in-app banner stack. <see cref="NotificationRouter"/> drives it.</summary>
     public NotificationHost Notifications => PART_Notifications;
+
+    /// <summary>For controls built in code inside the transcript, which have no
+    /// injection path of their own; they reach it through their TopLevel.</summary>
+    internal NotificationCenter NotificationCenter => _notifications;
 
     public MainWindow(
         MainViewModel main,
@@ -110,6 +121,7 @@ public partial class MainWindow : MolaWindow
         MemoryPageViewModel memoryPage)
     {
         _main = main;
+        _main.CopyTextRequested += OnCopyTextRequested;
         _chat = chat;
         _conversations = conversations;
         _composer = composer;
@@ -175,14 +187,6 @@ public partial class MainWindow : MolaWindow
         };
         _main.SystemPromptRequested = () => _ = OpenSystemPromptAsync();
         _main.ImageWorkbenchRequested = conversationId => OpenImageWorkbench(conversationId);
-        _main.WorkSetupRequested = () =>
-        {
-            if (!_settings.PythonToolEnabled
-                || string.IsNullOrWhiteSpace(_settings.PythonToolExecutablePath))
-            {
-                OpenSandboxSettings();
-            }
-        };
 
         // Width is animated on the compositor, so collapsing the sidebar stays
         // smooth even while a conversation is still materializing behind it.
@@ -204,10 +208,21 @@ public partial class MainWindow : MolaWindow
         // Same treatment for the artifact drawer. It used to appear and vanish
         // by IsVisible, which is the one thing a drawer must not do — the panel
         // it is standing in for slides.
-        PART_ArtifactCard.Transitions = slide;
-        PART_ArtifactGap.Transitions = slide;
+        _artifactPanelTransitions.Add(new DoubleTransition
+        {
+            Property = WidthProperty,
+            Duration = TimeSpan.FromMilliseconds(200),
+            Easing = new CubicEaseOut()
+        });
+        PART_ArtifactCard.Transitions = _artifactPanelTransitions;
+        PART_ArtifactGap.Transitions = _artifactPanelTransitions;
         _main.PropertyChanged += OnMainPropertyChanged;
         SyncArtifactPanel();
+        // A narrower window must not leave the canvas wider than its share.
+        PART_BodyGrid.SizeChanged += (_, _) =>
+        {
+            if (_main.ArtifactPanelVisible && _main.ArtifactCanvasVisible) SyncArtifactPanel();
+        };
 
         PART_Sidebar.CollapseRequested += (_, _) => SetSidebarCollapsed(true);
         PART_Header.ExpandSidebarRequested += (_, _) => SetSidebarCollapsed(false);
@@ -306,6 +321,8 @@ public partial class MainWindow : MolaWindow
             _auth.LoggedOut -= OnLoggedOut;
             _settings.PropertyChanged -= OnSettingsPropertyChanged;
             _chat.ContextGauge.PropertyChanged -= OnContextGaugePropertyChanged;
+            _main.PropertyChanged -= OnMainPropertyChanged;
+            _main.CopyTextRequested -= OnCopyTextRequested;
         };
     }
 
@@ -433,14 +450,16 @@ public partial class MainWindow : MolaWindow
         PART_Header.SetSidebarCollapsed(collapsed);
     }
 
-    /// <summary>Panel width, matching the WPF build's ArtifactPanelWidth.</summary>
+    /// <summary>Compact list width. Canvas width is user-resizable.</summary>
     private const double ArtifactPanelWidth = 300;
     private const double ArtifactPanelGap = 16;
 
     private void OnMainPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName is nameof(MainViewModel.ArtifactPanelVisible)
-            or nameof(MainViewModel.IsArtifactPanelAvailable))
+            or nameof(MainViewModel.IsArtifactPanelAvailable)
+            or nameof(MainViewModel.ArtifactCanvasVisible)
+            or nameof(MainViewModel.ArtifactCanvasMaximized))
         {
             SyncArtifactPanel();
         }
@@ -463,8 +482,93 @@ public partial class MainWindow : MolaWindow
     private void SyncArtifactPanel()
     {
         var open = _main.ArtifactPanelVisible && _main.IsArtifactPanelAvailable;
-        PART_ArtifactCard.Width = open ? ArtifactPanelWidth : 0;
-        PART_ArtifactGap.Width = open ? ArtifactPanelGap : 0;
+        var canvas = open && _main.ArtifactCanvasVisible;
+        var maximized = canvas && _main.ArtifactCanvasMaximized;
+
+        PART_MainCard.IsVisible = !maximized;
+        Grid.SetColumn(PART_ArtifactCard, maximized ? 2 : 4);
+        Grid.SetColumnSpan(PART_ArtifactCard, maximized ? 3 : 1);
+        PART_ArtifactCard.HorizontalAlignment = maximized
+            ? Avalonia.Layout.HorizontalAlignment.Stretch
+            : Avalonia.Layout.HorizontalAlignment.Left;
+
+        double width;
+        if (maximized)
+        {
+            PART_ArtifactCard.Transitions = null;
+            PART_ArtifactCard.Width = double.NaN;
+            PART_ArtifactGap.Width = 0;
+            width = PART_BodyGrid.Bounds.Width;
+        }
+        else
+        {
+            PART_ArtifactCard.Transitions = _artifactResizeActive ? null : _artifactPanelTransitions;
+            width = open ? canvas ? ClampArtifactCanvasWidth(_artifactCanvasWidth) : ArtifactPanelWidth : 0;
+            PART_ArtifactCard.Width = width;
+            PART_ArtifactGap.Width = open ? ArtifactPanelGap : 0;
+        }
+
+        // The canvas hosts a native web view, and a native window paints over
+        // everything Avalonia draws in its rectangle — banners included. Keep
+        // them to the left of it while it is open.
+        PART_Notifications.Margin = canvas && !maximized
+            ? new Thickness(0, 58, 16 + width + ArtifactPanelGap + 14, 0)
+            : NotificationsMargin;
+    }
+
+    private static readonly Thickness NotificationsMargin = new(0, 58, 30, 0);
+
+    private double ClampArtifactCanvasWidth(double width)
+    {
+        var available = Math.Max(MinCanvasWidth, PART_BodyGrid.Bounds.Width * 0.62);
+        return Math.Clamp(width, MinCanvasWidth, available);
+    }
+
+    private const double MinCanvasWidth = 360;
+
+    private void OnArtifactResizePressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (!_main.ArtifactCanvasVisible || _main.ArtifactCanvasMaximized) return;
+        _artifactResizeActive = true;
+        _artifactResizeStart = e.GetPosition(PART_BodyGrid);
+        _artifactResizeStartWidth = PART_ArtifactCard.Bounds.Width;
+        // The width transition would chase the pointer 200 ms behind it.
+        PART_ArtifactCard.Transitions = null;
+        PART_ArtifactGap.Transitions = null;
+        e.Pointer.Capture(PART_ArtifactGap);
+        e.Handled = true;
+    }
+
+    private void OnArtifactResizeMoved(object? sender, PointerEventArgs e)
+    {
+        if (!_artifactResizeActive) return;
+        var position = e.GetPosition(PART_BodyGrid);
+        _artifactCanvasWidth = ClampArtifactCanvasWidth(_artifactResizeStartWidth + _artifactResizeStart.X - position.X);
+        SyncArtifactPanel();
+        e.Handled = true;
+    }
+
+    private void OnArtifactResizeReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (!_artifactResizeActive) return;
+        _artifactResizeActive = false;
+        e.Pointer.Capture(null);
+        PART_ArtifactCard.Transitions = _artifactPanelTransitions;
+        PART_ArtifactGap.Transitions = _artifactPanelTransitions;
+        e.Handled = true;
+    }
+
+    private async void OnCopyTextRequested(object? sender, string text)
+    {
+        try
+        {
+            var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+            if (clipboard is not null) await clipboard.SetTextAsync(text);
+        }
+        catch
+        {
+            // Clipboard held by another process; nothing useful to report.
+        }
     }
 
     private async void SwitchMode(string mode)
@@ -511,7 +615,6 @@ public partial class MainWindow : MolaWindow
         _imageWorkbench?.NotifyHiddenWhileGenerating();
         _main.IsImageWorkbenchVisible = false;
         SyncChrome();
-        if (target == AppMode.Work) _main.WorkSetupRequested?.Invoke();
     }
 
     private bool HasCompatibleAgentRuntime() => _piSidecarLocator.TryResolve() is not null;
@@ -701,6 +804,9 @@ public partial class MainWindow : MolaWindow
             ProviderRestorer.RemoveEntry(entry.Id, _providers, _piByokProviderFactory);
     }
 
+    /// <summary>The title bar's account button: sign in, or — once signed in —
+    /// the MolaGPT 账号 page, which holds usage alongside the account's
+    /// settings.</summary>
     private async Task OpenAccountAsync()
     {
         if (string.IsNullOrEmpty(_auth.CurrentJwt))
@@ -709,9 +815,8 @@ public partial class MainWindow : MolaWindow
             return;
         }
 
-        var account = new AccountWindow(_auth, _proxy);
-        await account.ShowDialog<bool>(this);
-        RefreshAccountState();
+        OpenSettings();
+        _settingsWindow?.OpenAccountPage();
     }
 
     private async Task<bool> OpenLoginAsync(Window owner)
@@ -784,12 +889,6 @@ public partial class MainWindow : MolaWindow
     {
         OpenSettings();
         _settingsWindow?.OpenPersonaPage(startNew, _chat.ActivePersonaId);
-    }
-
-    private void OpenSandboxSettings()
-    {
-        OpenSettings();
-        _settingsWindow?.OpenSandboxPage();
     }
 
     private void OpenProviderSettings()
@@ -880,7 +979,7 @@ public partial class MainWindow : MolaWindow
             _settings, _auth, _cloudSync, _conversations, _agentStatus, _main.Personas, _mcpHttpClient,
             _imageGenerationTool, _pythonRuntime, _piSidecar, _notifications, _skills, _browserActivity,
             () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory,
-            ActivateAgentRuntimeAsync, DeactivateAgentRuntime, _personalization, _memoryPage);
+            ActivateAgentRuntimeAsync, DeactivateAgentRuntime, _personalization, _memoryPage, _proxy);
         window.AccountRequested += async (_, _) =>
         {
             if (await OpenLoginAsync(window)) window.RefreshAccountUi();
@@ -913,9 +1012,9 @@ public partial class MainWindow : MolaWindow
     private void OnArtifactClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (sender is Control { Tag: ArtifactItemViewModel artifact }
-            && _main.RevealArtifactCommand.CanExecute(artifact))
+            && _main.OpenArtifactInCanvasCommand.CanExecute(artifact))
         {
-            _main.RevealArtifactCommand.Execute(artifact);
+            _main.OpenArtifactInCanvasCommand.Execute(artifact);
         }
     }
 }

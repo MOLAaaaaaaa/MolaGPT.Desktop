@@ -127,8 +127,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         //    plain reasoning_effort and a model configured for Qwen's
         //    enable_thinking + budget would quietly stop honouring the setting.
         var thinkingLevel = ResolveThinkingLevel(request, creds.Api);
-        if (TakesOpenAiThinkingDialect(creds.Api))
-            creds = creds with { ExtraBody = MergeThinking(creds.ExtraBody, request) };
+        if (ThinkingParams.Owns(creds.Api))
+            creds = creds with { ExtraBody = MergeThinking(creds.ExtraBody, request, creds) };
 
         if (request.HistorySeed is { } history)
             await WriteHistoryAsync(request.ConversationId, history, creds, ct).ConfigureAwait(false);
@@ -713,29 +713,22 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     }
 
     /// <summary>
-    /// Whether this wire shape understands the top-level thinking keys
-    /// <see cref="ThinkingParams"/> produces (<c>reasoning_effort</c>,
-    /// <c>enable_thinking</c>, <c>thinking</c>).
-    ///
-    /// Google's native API does not, and does not ignore them either: it validates
-    /// the payload and rejects the whole request over one unknown field. There the
-    /// thinking level is the only correct expression, and reaching for both is a
-    /// 400 rather than a belt-and-braces.
-    /// </summary>
-    internal static bool TakesOpenAiThinkingDialect(string api) =>
-        api is not ("google-generative-ai" or "openai-responses");
-
-    /// <summary>
     /// Fold the turn's thinking parameters into the model's custom parameters, so
     /// the shim sends both. Custom parameters win on a clash: they are the user's
     /// explicit override.
+    ///
+    /// The model's own <see cref="ThinkingConfig"/> comes along because switching
+    /// reasoning off is decided per model, not per dialect: whether the provider
+    /// allows it at all, and which vocabulary its refusal is spelled in.
     /// </summary>
-    private static IReadOnlyDictionary<string, JsonElement>? MergeThinking(
+    private IReadOnlyDictionary<string, JsonElement>? MergeThinking(
         IReadOnlyDictionary<string, JsonElement>? custom,
-        ChatRequest request)
+        ChatRequest request,
+        PiProviderCreds creds)
     {
         var thinking = new Dictionary<string, object?>(StringComparer.Ordinal);
-        ThinkingParams.Apply(thinking, request);
+        var config = Models.FirstOrDefault(m => m.Id == request.ModelId)?.ThinkingConfig;
+        ThinkingParams.Apply(thinking, request, creds.Endpoint, config, creds.Api);
         if (thinking.Count == 0) return custom;
 
         var merged = new Dictionary<string, JsonElement>(StringComparer.Ordinal);

@@ -1,33 +1,84 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
 using Avalonia.Controls;
+using Avalonia.Interactivity;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat.Providers;
 
 namespace MolaGPT.App.Views;
 
-public partial class AccountWindow : MolaContentWindow
+/// <summary>
+/// The MolaGPT 账号 page: who is signed in, what the account has left, and the
+/// account-only switches (对话云同步, Tracks). Usage used to live in a separate
+/// window off the title bar, so the same account was managed in two places.
+/// </summary>
+public partial class SettingsWindow
 {
-    private readonly MolaGptAuthService _auth;
-    private readonly MolaGptProxyProvider _proxy;
-    private readonly ObservableCollection<AccountModelRow> _models = [];
+    /// <summary>Usage is read from the server; re-opening the page within this
+    /// window shows what was fetched rather than asking again.</summary>
+    private static readonly TimeSpan UsageFreshFor = TimeSpan.FromSeconds(30);
 
-    public AccountWindow(MolaGptAuthService auth, MolaGptProxyProvider proxy)
+    private readonly ObservableCollection<AccountModelRow> _accountModels = [];
+    private MolaGptProxyProvider? _proxy;
+    private DateTime? _usageFetchedAt;
+    private int _usageRequest;
+
+    private void InitializeAccountPage(MolaGptProxyProvider? proxy)
     {
-        _auth = auth;
         _proxy = proxy;
-
-        InitializeComponent();
-        PART_ModelList.ItemsSource = _models;
-        PART_Close.Click += (_, _) => Close(false);
+        PART_UsageModels.ItemsSource = _accountModels;
+        PART_AccountAction.Click += (_, _) => AccountRequested?.Invoke(this, EventArgs.Empty);
         PART_Logout.Click += OnLogoutClick;
-        Opened += async (_, _) => await RefreshAsync();
+        PART_RefreshUsage.Click += (_, _) => _ = RefreshUsageAsync(force: true);
     }
 
-    private async Task RefreshAsync()
+    internal void OpenAccountPage()
     {
-        PART_Username.Text = _auth.CurrentUsername ?? "用户";
-        PART_Status.Text = "加载用量中...";
+        PART_Nav.SelectedItem = PART_AccountNav;
+        ShowSelectedPage();
+    }
+
+    internal void RefreshAccountUi()
+    {
+        var loggedIn = _auth is null ? _settings.IsLoggedIn : !string.IsNullOrEmpty(_auth.CurrentJwt);
+        var username = _auth?.CurrentUsername ?? _settings.MolaGptUsername;
+
+        _settings.IsLoggedIn = loggedIn;
+        _settings.MolaGptUsername = loggedIn ? username : null;
+
+        var name = string.IsNullOrWhiteSpace(username) ? "MolaGPT 用户" : username;
+        PART_AccountNavName.Text = loggedIn ? name : "登录 MolaGPT";
+        PART_AccountStatus.Text = loggedIn ? name : "MolaGPT 账号";
+        PART_AccountAction.IsVisible = !loggedIn;
+        PART_AccountBadgeDot.IsVisible = loggedIn;
+        PART_UsageSection.IsVisible = loggedIn && _proxy is not null;
+        PART_LogoutSection.IsVisible = loggedIn && _auth is not null;
+
+        if (loggedIn)
+        {
+            // The badge is filled in by the usage fetch; until then it only says
+            // the session is live.
+            if (_usageFetchedAt is null) PART_AccountDetail.Text = "已登录";
+            if (PART_AccountNav.IsSelected) _ = RefreshUsageAsync(force: false);
+            return;
+        }
+
+        PART_AccountDetail.Text = "登录后可在桌面端使用 MolaGPT 的模型、对话同步与个性化记忆。";
+        PART_CloudSyncStatus.Text = string.Empty;
+        _usageFetchedAt = null;
+        _usageRequest++;
+        _accountModels.Clear();
+    }
+
+    private async Task RefreshUsageAsync(bool force)
+    {
+        if (_proxy is null || !_settings.IsLoggedIn) return;
+        if (!force && _usageFetchedAt is { } at && DateTime.UtcNow - at < UsageFreshFor) return;
+
+        var request = ++_usageRequest;
+        _usageFetchedAt = DateTime.UtcNow;
+        PART_RefreshUsage.IsEnabled = false;
+        if (_accountModels.Count == 0) ShowUsageStatus("正在加载用量…");
 
         MolaGptStatus? status;
         try
@@ -36,26 +87,38 @@ public partial class AccountWindow : MolaContentWindow
         }
         catch (MolaGptAuthExpiredException)
         {
-            PART_Status.Text = "登录已过期，请重新登录";
-            ShowEmpty("尚未登录或登录已过期");
+            if (request != _usageRequest) return;
+            ShowUsageEmpty("登录已过期，请重新登录。");
             return;
         }
         catch (Exception ex)
         {
-            PART_Status.Text = $"无法连接服务器：{ex.Message}";
-            ShowEmpty("用量信息暂不可用，请稍后重试");
+            if (request != _usageRequest) return;
+            // Let the next visit try again instead of holding a failure for 30s.
+            _usageFetchedAt = null;
+            ShowUsageEmpty($"无法获取用量：{ex.Message}");
             return;
         }
+        finally
+        {
+            if (request == _usageRequest) PART_RefreshUsage.IsEnabled = true;
+        }
 
+        if (request != _usageRequest) return;
         if (status is null)
         {
-            ShowEmpty("尚未登录");
+            ShowUsageEmpty("尚未登录。");
             return;
         }
 
-        PART_Username.Text = string.IsNullOrEmpty(status.Username) ? "用户" : status.Username;
-        PART_UserBadge.Text = status.Unlimited ? "无限制账户" : status.IsDonor ? "捐赠用户" : "已注册用户";
-        PART_Status.Text = string.Empty;
+        if (!string.IsNullOrEmpty(status.Username))
+        {
+            PART_AccountStatus.Text = status.Username;
+            PART_AccountNavName.Text = status.Username;
+        }
+
+        PART_AccountDetail.Text = status.Unlimited ? "无限制账户" : status.IsDonor ? "捐赠用户" : "已注册用户";
+        ShowUsageStatus(null);
 
         if (status.Credits is { } credits && !status.Unlimited)
             BuildCreditRows(status, credits);
@@ -65,9 +128,10 @@ public partial class AccountWindow : MolaContentWindow
 
     private void BuildCreditRows(MolaGptStatus status, MolaGptCredits credits)
     {
-        _models.Clear();
-        PART_Empty.IsVisible = false;
-        PART_SectionTitle.Text = "额度用量";
+        _accountModels.Clear();
+        PART_UsageEmpty.IsVisible = false;
+        PART_UsageTitle.Text = "额度用量";
+        PART_UsageModelsExpander.Header = "各模型可用次数";
         PART_TotalRequests.Text = $"{credits.RemainingPercent}%";
         PART_TotalRequestsLabel.Text = "额度剩余";
         PART_TotalTokens.Text = FormatTokens(credits.TotalTokens(status.TokensUsage));
@@ -99,7 +163,7 @@ public partial class AccountWindow : MolaContentWindow
                     : uses <= 0 ? "额度不足" : $"约 {uses} 次";
 
             var symbol = row.Status?.CreditSymbol;
-            _models.Add(new AccountModelRow
+            _accountModels.Add(new AccountModelRow
             {
                 Name = row.Limit.DisplayName,
                 RightText = rightText,
@@ -118,16 +182,17 @@ public partial class AccountWindow : MolaContentWindow
             });
         }
 
-        if (_models.Count == 0) ShowEmpty("当前账户没有可用模型");
+        if (_accountModels.Count == 0) ShowModelsEmpty("当前账户没有可用模型");
     }
 
     private void BuildLegacyRows(MolaGptStatus status)
     {
-        _models.Clear();
-        PART_Empty.IsVisible = false;
+        _accountModels.Clear();
+        PART_UsageEmpty.IsVisible = false;
         PART_CreditsPanel.IsVisible = false;
         PART_EstimateHint.IsVisible = false;
-        PART_SectionTitle.Text = "今日使用情况";
+        PART_UsageTitle.Text = "今日使用情况";
+        PART_UsageModelsExpander.Header = "各模型用量";
         PART_TotalRequestsLabel.Text = "总请求次数";
         PART_TotalTokensLabel.Text = "总 Tokens 用量";
 
@@ -148,7 +213,7 @@ public partial class AccountWindow : MolaContentWindow
             var requestsUnlimited = status.Unlimited || limit.DailyRequests == -1 || modelStatus?.Remaining == -1;
             var tokensUnlimited = status.Unlimited || limit.DailyTokens is -1 or null || modelStatus?.RemainingTokens == -1;
 
-            _models.Add(new AccountModelRow
+            _accountModels.Add(new AccountModelRow
             {
                 Name = limit.DisplayName,
                 HasLegacyUsage = true,
@@ -163,7 +228,7 @@ public partial class AccountWindow : MolaContentWindow
 
         PART_TotalRequests.Text = totalRequests.ToString(CultureInfo.InvariantCulture);
         PART_TotalTokens.Text = FormatTokens(totalTokens);
-        if (_models.Count == 0) ShowEmpty("当前账户没有可用模型配额");
+        if (_accountModels.Count == 0) ShowModelsEmpty("当前账户没有可用模型配额");
     }
 
     private static int EffectiveLimit(int? declaredLimit, int? remaining, int used)
@@ -180,17 +245,36 @@ public partial class AccountWindow : MolaContentWindow
         return (value / 1_000_000.0).ToString("0.#", CultureInfo.InvariantCulture) + "M";
     }
 
-    private void ShowEmpty(string message)
+    private void ShowUsageStatus(string? message)
     {
-        _models.Clear();
-        PART_CreditsPanel.IsVisible = false;
-        PART_EstimateHint.IsVisible = false;
-        PART_Empty.Text = message;
-        PART_Empty.IsVisible = true;
+        PART_UsageStatus.Text = message ?? string.Empty;
+        PART_UsageStatus.IsVisible = message is not null;
     }
 
-    private async void OnLogoutClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    /// <summary>The whole fetch failed: nothing on the card is current.</summary>
+    private void ShowUsageEmpty(string message)
     {
+        _accountModels.Clear();
+        PART_TotalRequests.Text = "—";
+        PART_TotalTokens.Text = "—";
+        PART_CreditsPanel.IsVisible = false;
+        PART_EstimateHint.IsVisible = false;
+        PART_UsageEmpty.IsVisible = false;
+        ShowUsageStatus(message);
+    }
+
+    /// <summary>The fetch worked but lists no models.</summary>
+    private void ShowModelsEmpty(string message)
+    {
+        _accountModels.Clear();
+        PART_EstimateHint.IsVisible = false;
+        PART_UsageEmpty.Text = message;
+        PART_UsageEmpty.IsVisible = true;
+    }
+
+    private async void OnLogoutClick(object? sender, RoutedEventArgs e)
+    {
+        if (_auth is null) return;
         var confirmed = await Confirm.AskAsync(
             this,
             "退出登录",
@@ -198,8 +282,11 @@ public partial class AccountWindow : MolaContentWindow
             "退出登录");
         if (!confirmed) return;
 
+        // LoggedOut reaches MainWindow, which refreshes the title bar and calls
+        // back into RefreshAccountUi; calling it here too keeps this page right
+        // even when nothing is listening.
         _auth.Logout();
-        Close(true);
+        RefreshAccountUi();
     }
 }
 

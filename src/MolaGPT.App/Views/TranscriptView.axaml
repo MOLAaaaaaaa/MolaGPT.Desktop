@@ -56,8 +56,7 @@
                capped (see the MolaGptMarkupBlockView selector below). -->
           <ScrollViewer Grid.Row="1" Classes="codescroll"
                         HorizontalScrollBarVisibility="Auto">
-            <r:CodeTextBlock Language="{Binding Language}" Code="{Binding Code}"
-                             Classes="code" Margin="12,6,12,10" />
+            <r:CodeBody Language="{Binding Language}" Code="{Binding Code}" IsLive="{Binding !IsClosed}" />
           </ScrollViewer>
         </Grid>
       </Border>
@@ -152,6 +151,28 @@
               </ItemsControl.ItemTemplate>
             </ItemsControl>
 
+            <!-- The artifact this turn was about. Stands in for the source the
+                 model received, which is not part of what the user wrote. -->
+            <ItemsControl ItemsSource="{Binding Message.ArtifactRefs}"
+                          IsVisible="{Binding Message.HasArtifactRefs}"
+                          Margin="0,0,0,6">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:ArtifactRefChip">
+                  <Border Classes="sentrefchip" ToolTip.Tip="这条消息针对的交付物">
+                    <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="6">
+                      <TextBlock Classes="icon" Text="&#xE70F;" FontSize="11" VerticalAlignment="Center"
+                                 Foreground="{DynamicResource Brush.Text.Secondary}" />
+                      <TextBlock Text="{Binding Label}" FontSize="12" VerticalAlignment="Center"
+                                 TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="220" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
             <ItemsControl ItemsSource="{Binding Blocks}" />
             <StackPanel Orientation="Horizontal" Spacing="2"
                         HorizontalAlignment="Right" Margin="0,6,-4,-4">
@@ -221,6 +242,18 @@
     <DataTemplate DataType="r:MarkupRow">
       <Border Classes="assistantcol">
         <r:MolaGptMarkupBlockView Block="{Binding Block}" />
+      </Border>
+    </DataTemplate>
+
+    <DataTemplate DataType="r:ArtifactFenceRow">
+      <Border Classes="assistantcol">
+        <r:ArtifactFenceView Row="{Binding}" />
+      </Border>
+    </DataTemplate>
+
+    <DataTemplate DataType="r:UiBlockRow">
+      <Border Classes="assistantcol">
+        <r:MolaUiBlockView Row="{Binding}" />
       </Border>
     </DataTemplate>
 
@@ -982,6 +1015,158 @@
     </Style>
     <Style Selector="Button.sentchip:pointerover /template/ Border#PART_Root">
       <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+    </Style>
+
+    <Style Selector="Border.sentrefchip">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="7,4" />
+      <Setter Property="Margin" Value="0,0,6,4" />
+    </Style>
+
+    <!-- ===== canvas artifact chip (ArtifactFenceView) ===== -->
+    <!-- Neutral surface: what the model produced is evidence, not branding.
+         The one rose element is the action that opens it. -->
+    <Style Selector="Border.artifactchip">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="10" />
+      <Setter Property="Margin" Value="0,6" />
+      <Setter Property="MaxWidth" Value="560" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+    </Style>
+    <Style Selector="Border.artifactchipicon">
+      <Setter Property="Width" Value="36" />
+      <Setter Property="Height" Value="36" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    </Style>
+    <Style Selector="Button.artifactprimaryaction">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.OnPrimary}" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Height" Value="30" />
+      <Setter Property="Padding" Value="10,0" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.artifactprimaryaction:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+
+    <!-- ===== inline components (MolaUiBlockView) ===== -->
+    <Style Selector="Border.uiblockframe">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Primary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Margin" Value="0,8" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+    <Style Selector="Border.uiblockplaceholder">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Margin" Value="0,8" />
+    </Style>
+    <Style Selector=":is(Button).uilegend">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="6,2" />
+      <Setter Property="Margin" Value="0,0,4,0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Xs}" />
+    </Style>
+    <Style Selector=":is(Button).uilegend:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+
+    <!-- data-table: header and footer rules, sortable column heads, cells -->
+    <Style Selector="Border.uitablehead">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="0,0,0,1" />
+    </Style>
+    <Style Selector="Border.uitablefoot">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="0,1,0,0" />
+    </Style>
+    <Style Selector="Button.uisort">
+      <Setter Property="Padding" Value="12,8" />
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="VerticalAlignment" Value="Stretch" />
+      <Setter Property="VerticalContentAlignment" Value="Bottom" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <Style Selector="Button.uisort:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Border.uitablecell">
+      <Setter Property="Padding" Value="12,7" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="0,1,0,0" />
+    </Style>
+    <Style Selector="TextBox.uisearch">
+      <Setter Property="Width" Value="150" />
+      <Setter Property="Height" Value="28" />
+      <Setter Property="Padding" Value="9,5" />
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+
+    <!-- stat-grid / card-grid -->
+    <Style Selector=":is(Border).uistatcard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,10" />
+    </Style>
+    <Style Selector="Border.uicard">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,10" />
+    </Style>
+    <!-- Same box as Border.uicard; a card with a link is a button to it. -->
+    <Style Selector="Button.uicard">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,10" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="VerticalAlignment" Value="Stretch" />
+    </Style>
+    <Style Selector="Button.uicard:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Border.uitag">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Xs}" />
+      <Setter Property="Padding" Value="6,1,6,2" />
+    </Style>
+    <Style Selector="Border.uitag TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <Style Selector="Button.uifilter">
+      <Setter Property="Padding" Value="11,3,11,4" />
+      <Setter Property="Margin" Value="0,0,6,6" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    <Style Selector="Button.uifilter:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Button.uifilter.active">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+    <Style Selector="Button.uifilter.active /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
     </Style>
 
     <Style Selector="Button.sourcechip">

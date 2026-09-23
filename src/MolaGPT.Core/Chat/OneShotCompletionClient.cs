@@ -108,7 +108,7 @@ public sealed class OneShotCompletionClient
             OneShotWireApi.GoogleGenerativeAi => BuildGoogleBody(messages, temperature, maxTokens),
             _ => BuildCompletionsBody(modelId, messages, temperature, maxTokens),
         };
-        ApplyThinking(body, target.Api, modelId, useThinking, thinkingKind);
+        ApplyThinking(body, target.Api, modelId, useThinking, thinkingKind, target.Endpoint);
         CustomRequestParams.ApplyBody(body, target.ExtraBody);
 
         using var req = new HttpRequestMessage(HttpMethod.Post, target.Endpoint)
@@ -165,7 +165,8 @@ public sealed class OneShotCompletionClient
         OneShotWireApi api,
         string modelId,
         bool? useThinking,
-        ThinkingParamKind? thinkingKind)
+        ThinkingParamKind? thinkingKind,
+        string? endpoint = null)
     {
         if (useThinking is null) return;
 
@@ -204,11 +205,14 @@ public sealed class OneShotCompletionClient
             return;
         }
 
-        ThinkingParams.Apply(body, new ChatRequest(
-            modelId,
-            Array.Empty<ChatMessage>(),
-            UseThinking: useThinking,
-            ThinkingParamKind: thinkingKind));
+        ThinkingParams.Apply(
+            body,
+            new ChatRequest(
+                modelId,
+                Array.Empty<ChatMessage>(),
+                UseThinking: useThinking,
+                ThinkingParamKind: thinkingKind),
+            endpoint);
     }
 
     // ── request bodies ──────────────────────────────────────────────────────

@@ -11,8 +11,35 @@
   <Border Name="PART_Shell" Classes="composer" DragDrop.AllowDrop="True">
     <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto">
 
-      <!-- Row 0: attachment strip. Collapses entirely when nothing is queued. -->
-      <Border Grid.Row="0" Classes="attachstrip" IsVisible="{Binding HasAttachments}">
+      <!-- Row 0: what the next message is about — the artifact being revised,
+           then the queued files. Both collapse when empty. -->
+      <StackPanel Grid.Row="0">
+      <ItemsControl ItemsSource="{Binding ArtifactReferences}"
+                    IsVisible="{Binding HasArtifactReferences}"
+                    Margin="2,0,2,6">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="vm:ArtifactReferenceViewModel">
+            <Border Classes="refchip" ToolTip.Tip="{Binding ToolTip}" HorizontalAlignment="Left">
+              <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="6">
+                <TextBlock Classes="icon" Text="&#xE70F;" FontSize="11" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Brush.Primary}" />
+                <TextBlock Text="修改" FontSize="12" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Brush.Text.Secondary}" />
+                <TextBlock Text="{Binding Label}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
+                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="280" />
+                <Button Width="18" Height="18" Padding="0" Classes="refchipclose"
+                        VerticalAlignment="Center" ToolTip.Tip="取消"
+                        Command="{Binding $parent[ItemsControl].((vm:ComposerViewModel)DataContext).RemoveArtifactReferenceCommand}"
+                        CommandParameter="{Binding}">
+                  <TextBlock Classes="icon" Text="&#xE711;" FontSize="9"
+                             Foreground="{DynamicResource Brush.Text.Muted}" />
+                </Button>
+              </StackPanel>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+      <Border Classes="attachstrip" IsVisible="{Binding HasAttachments}">
         <StackPanel>
           <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,5">
             <StackPanel Grid.Column="0" Classes="inlinerow compact" Orientation="Horizontal" VerticalAlignment="Center">
@@ -77,6 +104,7 @@
           </ItemsControl>
         </StackPanel>
       </Border>
+      </StackPanel>
 
       <!-- Row 1: toolbar. ToolPlainButton / ToolToggleButton, 30 high, radius 10. -->
       <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
@@ -501,6 +529,25 @@
       <Setter Property="Margin" Value="0,0,6,4" />
       <Setter Property="MaxWidth" Value="180" />
       <Setter Property="MinWidth" Value="96" />
+    </Style>
+    <!-- The artifact being revised. Stands in for its source, which goes to
+         the model but not into the input box. -->
+    <Style Selector="Border.refchip">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="8,4,4,4" />
+    </Style>
+    <Style Selector="Button.refchipclose">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Xs}" />
+    </Style>
+    <Style Selector="Button.refchipclose:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
     </Style>
     <!-- Chips arrive one at a time as files finish reading, so each one is its
          own event and gets its own entry. The WrapPanel is not virtualized, so

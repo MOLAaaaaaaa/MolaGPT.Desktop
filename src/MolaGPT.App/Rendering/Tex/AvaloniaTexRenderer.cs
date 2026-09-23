@@ -33,11 +33,16 @@ internal sealed class AvaloniaTexRenderer : IElementRenderer
 {
     private readonly DrawingContext _context;
     private readonly double _scale;
+    private readonly AvBrush _default;
 
-    public AvaloniaTexRenderer(DrawingContext context, double scale = 1.0)
+    /// <param name="defaultBrush">Ink for boxes that carry no colour of their
+    /// own, which is nearly all of them. Without it everything drew black,
+    /// invisible on the dark theme.</param>
+    public AvaloniaTexRenderer(DrawingContext context, double scale = 1.0, AvBrush? defaultBrush = null)
     {
         _context = context;
         _scale = scale;
+        _default = defaultBrush ?? Brushes.Black;
     }
 
     public void RenderElement(Box box, double x, double y) => box.RenderTo(this, x, y);
@@ -123,8 +128,8 @@ internal sealed class AvaloniaTexRenderer : IElementRenderer
     public void FinishRendering() { }
 
     /// <summary>Black is the documented default when a box carries no brush.</summary>
-    private static AvBrush Convert(TexBrush? brush) =>
-        brush?.ToAvalonia() ?? Brushes.Black;
+    private AvBrush Convert(TexBrush? brush) =>
+        brush?.ToAvalonia() ?? _default;
 
     // ---- typeface access ---------------------------------------------------
 

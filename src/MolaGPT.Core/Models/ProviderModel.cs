@@ -14,13 +14,17 @@ public enum ThinkingParamKind
     QwenThinkingBudget,
 }
 
+/// <param name="Mandatory">The provider says this model always reasons. Nothing may be
+/// sent to switch it off — OpenRouter's own guidance is to hide the disable control and
+/// never send <c>effort: "none"</c>, which such a model rejects.</param>
 public sealed record ThinkingConfig(
     ThinkingParamKind Kind,
     string[]? EffortLevels = null,
     int? MinBudget = null,
     int? MaxBudget = null,
     int? DefaultBudget = null,
-    string? DefaultEffort = null);
+    string? DefaultEffort = null,
+    bool Mandatory = false);
 
 public static class ThinkingEffortLevels
 {
@@ -63,6 +67,13 @@ public static class ThinkingParamKindInference
         if (string.IsNullOrWhiteSpace(modelId)) return ThinkingParamKind.None;
 
         var lower = modelId.ToLowerInvariant();
+        // Gateways prefix the vendor ("openai/gpt-5.6-luna"), so the family checks below
+        // have to run on the leaf. Matching the whole id sent every OpenRouter-hosted
+        // OpenAI model down the None path, where turning reasoning off wrote nothing at
+        // all and the model quietly kept thinking.
+        var leaf = lower.Contains('/', StringComparison.Ordinal)
+            ? lower[(lower.LastIndexOf('/') + 1)..]
+            : lower;
         if (lower.Contains("deepseek-v4", StringComparison.Ordinal)
             || lower.Contains("deepseek-reasoner", StringComparison.Ordinal)
             || lower.Contains("deepseek-r1", StringComparison.Ordinal))
@@ -78,10 +89,11 @@ public static class ThinkingParamKindInference
         if (lower.Contains("gemini-2.5", StringComparison.Ordinal))
             return ThinkingParamKind.GeminiBudget;
 
-        if (lower.StartsWith("o1", StringComparison.Ordinal)
-            || lower.StartsWith("o3", StringComparison.Ordinal)
-            || lower.StartsWith("o4", StringComparison.Ordinal)
-            || lower.StartsWith("gpt-5", StringComparison.Ordinal)
+        if (leaf.StartsWith("o1", StringComparison.Ordinal)
+            || leaf.StartsWith("o3", StringComparison.Ordinal)
+            || leaf.StartsWith("o4", StringComparison.Ordinal)
+            || leaf.StartsWith("gpt-5", StringComparison.Ordinal)
+            || leaf.StartsWith("gpt-6", StringComparison.Ordinal)
             || lower.Contains("reasoning", StringComparison.Ordinal))
             return ThinkingParamKind.OpenAiReasoningEffort;
 

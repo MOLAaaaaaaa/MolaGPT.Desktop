@@ -3,6 +3,7 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using Avalonia.Threading;
 using MolaGPT.Presentation;
+using MolaGPT.Presentation.Artifacts;
 using MolaGPT.ViewModels;
 
 namespace MolaGPT.App.Rendering;
@@ -40,6 +41,11 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
     private readonly Dictionary<MessageViewModel, Segment> _segments = new();
     private readonly List<MessageViewModel> _order = new();
     private readonly HashSet<MessageViewModel> _dirty = new();
+
+    // Fences the user switched between chip and code, by message and ordinal.
+    // Outside the rows because a message's rows are all rebuilt when it is
+    // saved (its key changes from the instance hash to the id).
+    private readonly Dictionary<MessageViewModel, Dictionary<int, bool>> _fenceChoices = new();
     private bool _flushQueued;
     private bool _disposed;
 
@@ -47,6 +53,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
     {
         _chat = chat;
         _chat.Messages.CollectionChanged += OnMessagesChanged;
+        _chat.PropertyChanged += OnChatPropertyChanged;
         Reset();
     }
 
@@ -55,6 +62,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         if (_disposed) return;
         _disposed = true;
         _chat.Messages.CollectionChanged -= OnMessagesChanged;
+        _chat.PropertyChanged -= OnChatPropertyChanged;
         foreach (var message in _order) Unsubscribe(message);
         _order.Clear();
         _segments.Clear();
@@ -106,6 +114,10 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         _order.Clear();
         _segments.Clear();
         _dirty.Clear();
+        _chat.ArtifactWorkspace.ClearFences();
+        // A retry resets too, and the turns before it keep their choices.
+        foreach (var gone in _fenceChoices.Keys.Where(m => !_chat.Messages.Contains(m)).ToList())
+            _fenceChoices.Remove(gone);
 
         CheckReentrancy();
         Items.Clear();
@@ -155,7 +167,9 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         _order.RemoveAt(index);
         _segments.Remove(message);
         _dirty.Remove(message);
+        _fenceChoices.Remove(message);
         Unsubscribe(message);
+        _chat.ArtifactWorkspace.RemoveMessage(message);
         ShiftFrom(index, -segment.Rows.Count);
     }
 
@@ -220,6 +234,40 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         }
     }
 
+    // ---- chip or code --------------------------------------------------------
+
+    private void OnChatPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(ChatViewModel.CodeFenceKinds)) return;
+        // In place: a settings change should not scroll or rebuild anything
+        // but the fences it is about. A fence switched by hand stays switched.
+        foreach (var row in this)
+        {
+            if (row is ArtifactFenceRow fence)
+                fence.Apply(ResolveShowCode(fence.Message, fence.Ordinal, fence.Kind));
+        }
+    }
+
+    private bool ResolveShowCode(MessageViewModel message, int ordinal, ArtifactRenderKind kind) =>
+        _fenceChoices.TryGetValue(message, out var choices) && choices.TryGetValue(ordinal, out var chosen)
+            ? chosen
+            : _chat.CodeFenceKinds.Contains(kind);
+
+    private void RememberFenceChoice(ArtifactFenceRow row, bool showCode)
+    {
+        // Switching back to what settings say is not a choice to keep: that
+        // fence should go on following the setting.
+        if (showCode == _chat.CodeFenceKinds.Contains(row.Kind))
+        {
+            if (_fenceChoices.TryGetValue(row.Message, out var existing)) existing.Remove(row.Ordinal);
+            return;
+        }
+
+        if (!_fenceChoices.TryGetValue(row.Message, out var choices))
+            _fenceChoices[row.Message] = choices = new Dictionary<int, bool>();
+        choices[row.Ordinal] = showCode;
+    }
+
     private void MarkDirty(MessageViewModel message)
     {
         if (_disposed || !_segments.ContainsKey(message)) return;
@@ -267,6 +315,12 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         if (message.IsPending)
             rows.Add(new PendingRow(message));
 
+        // Canvas fences are found here, where the answer is already being
+        // parsed for display, and handed to the workspace — so the chip, the
+        // list and the canvas are always looking at the same fences.
+        var messageDone = !message.IsStreaming && !message.IsRevealing;
+        var fences = new List<FenceSnapshot>();
+
         for (var i = 0; i < message.DisplayBlocks.Count; i++)
         {
             var block = message.DisplayBlocks[i];
@@ -279,9 +333,25 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
 
                 foreach (var renderBlock in document.Blocks)
                 {
-                    rows.Add(renderBlock is MarkupUnitBlock markup
-                        ? new MarkupRow(message, markup, i)
-                        : new ProseRow(message, renderBlock, i));
+                    switch (renderBlock)
+                    {
+                        case MarkupUnitBlock markup:
+                            rows.Add(new MarkupRow(message, markup, i));
+                            break;
+                        case CodeBlock code when FenceArtifactCapture.IsUiFence(code):
+                            rows.Add(new UiBlockRow(message, code, i, messageDone));
+                            break;
+                        case CodeBlock code when FenceArtifactCapture.IsCanvasArtifact(code, out var kind):
+                            rows.Add(new ArtifactFenceRow(message, code, kind, fences.Count, i, messageDone,
+                                ResolveShowCode(message, fences.Count, kind), RememberFenceChoice));
+                            fences.Add(new FenceSnapshot(
+                                fences.Count, code.Key, code.Language, kind, code.Code, code.LineCount,
+                                code.IsClosed || messageDone));
+                            break;
+                        default:
+                            rows.Add(new ProseRow(message, renderBlock, i));
+                            break;
+                    }
                 }
             }
             else if (block.Tool is { } tool)
@@ -314,6 +384,8 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
 
         if (message.HasActions)
             rows.Add(new ActionRow(message));
+
+        _chat.ArtifactWorkspace.PublishFences(message, fences, live: !messageDone);
 
         MarkFadingTail(message, rows);
         return rows;
@@ -365,6 +437,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         var next = Build(message, segment);
         var previous = segment.Rows;
 
+        List<int>? grown = null;
         var shared = 0;
         var max = Math.Min(previous.Count, next.Count);
         while (shared < max
@@ -383,6 +456,12 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
             if (carried is HeaderRow header) header.Refresh();
             if (carried is MarkupRow markup && next[i] is MarkupRow replacement)
                 markup.Refresh(replacement.Block);
+            if (carried is ArtifactFenceRow artifact && next[i] is ArtifactFenceRow nextArtifact)
+                artifact.Refresh(nextArtifact);
+            if (carried is UiBlockRow ui && next[i] is UiBlockRow nextUi)
+                ui.Refresh(nextUi);
+            if (carried is ProseRow prose && next[i] is ProseRow nextProse && prose.Refresh(nextProse.Block))
+                (grown ??= new List<int>()).Add(i);
             next[i] = carried;
         }
 
@@ -395,6 +474,17 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
 
         for (var i = shared; i < next.Count; i++)
             Insert(segment.Start + i, next[i]);
+
+        // A carried row that grew in place tells the list so, as a replace of
+        // itself. When its container is on screen the panel would notice the new
+        // height anyway; when it is not — dropped by the panel mid-growth — it
+        // has no container to report anything, and the panel would go on
+        // believing its old height with rows missing from view. A replaced tail
+        // used to make this signal implicitly on every delta.
+        if (grown is not null)
+        {
+            foreach (var i in grown) this[segment.Start + i] = next[i];
+        }
 
         var delta = next.Count - previous.Count;
         segment.Rows = next;

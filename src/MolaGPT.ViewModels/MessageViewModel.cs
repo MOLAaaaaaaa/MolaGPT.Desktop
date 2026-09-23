@@ -63,7 +63,15 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [GeneratedRegex("<ref\\b(?<attrs>[^>]*)>(?<inner>[\\s\\S]*?)</ref>|<ref\\b(?<attrs2>[^>]*)/?>", RegexOptions.IgnoreCase)]
     private static partial Regex RefTagRegex();
 
-    [GeneratedRegex("\\bsource\\s*=\\s*(?:\"(?<value>[^\"]*)\"|'(?<value>[^']*)'|(?<value>[^\\s/>]+))", RegexOptions.IgnoreCase)]
+    // Everything after "source=" to the end of the attribute list, quotes and all;
+    // ParseSourceIds treats quotes as separators. Matching a quoted value properly
+    // meant a mismatched quote fell through to a bare-word alternative that stopped
+    // at the first space — "20,21,24<curly quote>" then parsed as the single id 21,
+    // dropping two citations with no sign anything was wrong. Models writing Chinese
+    // produce curly and fullwidth quotes often enough that this has to be tolerated
+    // rather than trusted. Safe because "source" is the only attribute a ref tag
+    // carries; a second attribute here would have its digits read as ids.
+    [GeneratedRegex("\\bsource\\s*=\\s*(?<value>[^>]*)", RegexOptions.IgnoreCase)]
     private static partial Regex RefSourceRegex();
 
     [GeneratedRegex("""<blockquote\b[^>]*\bclass\s*=\s*(?:"[^"]*\btool-status\b[^"]*"|'[^']*\btool-status\b[^']*')[^>]*>|<DSanalysis\b[^>]*>|<steel-step\b[^>]*>""", RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
@@ -84,6 +92,9 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [ObservableProperty] private Usage? _usage;
     [ObservableProperty] private IReadOnlyList<SourceReference>? _sources;
     [ObservableProperty] private IReadOnlyList<AttachmentChip>? _attachments;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasArtifactRefs))]
+    private IReadOnlyList<ArtifactRefChip>? _artifactRefs;
     [ObservableProperty] private string? _contentPartsJson;
     [ObservableProperty] private IReadOnlyList<MessageAttempt>? _retryAttempts;
     [ObservableProperty] private int _retryCurrentIndex;
@@ -276,6 +287,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
 
     public bool HasResponseStats => Usage is not null || !string.IsNullOrWhiteSpace(ModelLabel);
     public bool HasAttachments => Attachments is { Count: > 0 };
+    public bool HasArtifactRefs => ArtifactRefs is { Count: > 0 };
     public bool HasSources => Sources is { Count: > 0 };
     /// <summary>The chip that stands in for the whole source list. The list is
     /// "everything this turn searched", not "what the answer cited" — the inline
@@ -1421,9 +1433,14 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     {
         var result = new List<int>();
         var seen = new HashSet<int>();
-        foreach (var part in value.Split([',', '，', '|', ' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        // Quotes are separators, not delimiters: the value arrives with whatever the
+        // model wrote around it, including unmatched and fullwidth ones. Anything that
+        // still is not a number after splitting is dropped by the TryParse below.
+        foreach (var part in value.Split(
+            [',', '，', '|', ' ', '\t', '\r', '\n', '"', '\'', '“', '”', '＂', '‘', '’', '/'],
+            StringSplitOptions.RemoveEmptyEntries))
         {
-            var range = Regex.Match(part, @"^(\d+)\s*[-~]\s*(\d+)$");
+            var range = Regex.Match(part, @"^(\d+)\s*[-~—]\s*(\d+)$");
             if (range.Success
                 && int.TryParse(range.Groups[1].Value, out var start)
                 && int.TryParse(range.Groups[2].Value, out var end))
@@ -2150,4 +2167,13 @@ public sealed partial class ToolCallViewModel : ObservableObject
 
     [GeneratedRegex(@"\\(?:u(?<short>[0-9a-fA-F]{4})|U(?<long>[0-9a-fA-F]{8}))", RegexOptions.CultureInvariant)]
     private static partial Regex UnicodeEscapeRegex();
+}
+
+/// <summary>
+/// "This turn was about that artifact" — shown on the user bubble in place of
+/// the source the model received, and persisted with the message.
+/// </summary>
+public sealed record ArtifactRefChip(string Title, string Badge, int Version, int VersionCount)
+{
+    public string Label => VersionCount > 1 ? $"{Title} · v{Version}" : Title;
 }

@@ -38,7 +38,7 @@
                      Margin="0,14,0,0"
                      FontSize="12"
                      Classes="muted"
-                     Text="默认关闭。可以随时在「设置 → Agent Bridge」中停用。" />
+                     Text="默认关闭。可以随时在「设置 → 远程控制」中停用。" />
         </StackPanel>
 
         <StackPanel Grid.Row="1"

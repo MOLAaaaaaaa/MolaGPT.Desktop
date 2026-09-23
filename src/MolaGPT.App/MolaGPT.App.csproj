@@ -42,10 +42,14 @@
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.9" />
     <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.9" />
     <PackageReference Include="Microsoft.Toolkit.Uwp.Notifications" Version="7.1.3" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3719.77"
+                      GeneratePathProperty="true"
+                      ExcludeAssets="compile;runtime;build;buildTransitive" />
     <PackageReference Include="System.Drawing.Common" Version="10.0.0" />
     <!-- Skia is already in the box with Avalonia; referenced explicitly because
          SkiaImageNormalizer uses the API directly rather than through Avalonia. -->
     <PackageReference Include="SkiaSharp" Version="3.119.4" />
+    <PackageReference Include="Svg.Skia" Version="3.0.0" />
     <!-- Syntax highlighting for code blocks. TextMateSharp is used standalone
          for tokenizing, not through AvaloniaEdit: one editor control per fenced
          block would make transcript rows heavy again, which is the thing this
@@ -73,7 +77,28 @@
   </ItemGroup>
 
   <ItemGroup>
-    <AvaloniaResource Include="Assets\**" />
+    <AvaloniaResource Include="Assets\**" Exclude="Assets\vendor\**" />
+    <Content Include="Assets\vendor\mermaid.min.js">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Only the Core API: the canvas drives a CoreWebView2Controller on a
+         child HWND that Avalonia hosts, so neither the WinForms nor the WPF
+         wrapper (which the package's targets would add unconditionally) is
+         needed, and neither is the WinForms runtime they would drag into a
+         self-contained publish. -->
+    <Reference Include="Microsoft.Web.WebView2.Core">
+      <HintPath>$(PkgMicrosoft_Web_WebView2)\lib_manual\netcoreapp3.0\Microsoft.Web.WebView2.Core.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <None Include="$(PkgMicrosoft_Web_WebView2)\runtimes\win-x64\native\WebView2Loader.dll"
+          Link="WebView2Loader.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
   </ItemGroup>
 
   <!-- SkiaSharp 3.119.4 and HarfBuzzSharp 8.3.1.3 started shipping native .pdb

@@ -179,8 +179,8 @@ public sealed class WebBridgeClient
     {
         var installed = WebBridgeAddress.IsInstalled;
         var hint = installed
-            ? $"无法连接本机 Kimi 浏览器扩展服务（{target}）。服务可能未启动，可在设置 → 浏览器中检测并启动。"
-            : "本机未安装 Kimi 浏览器扩展服务。请在设置 → 浏览器 → 配置指引中完成安装与配置。";
+            ? $"无法连接本机 Kimi 浏览器扩展服务（{target}）。服务可能未启动，可在设置 → 浏览器使用中检测并启动。"
+            : "本机未安装 Kimi 浏览器扩展服务。请在设置 → 浏览器使用 → 配置指引中完成安装与配置。";
         return string.IsNullOrWhiteSpace(ex.Message) ? hint : $"{hint}\n底层错误：{ex.Message}";
     }
 }

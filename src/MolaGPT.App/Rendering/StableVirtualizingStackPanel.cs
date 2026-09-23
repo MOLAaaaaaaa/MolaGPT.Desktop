@@ -358,6 +358,10 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
         PendingRow => 48,
         ActionRow => 40,
         ProseRow => 72,
+        ArtifactFenceRow => 72,
+        // A plot or chart is a fixed-height component; guessing low makes the
+        // extent jump when a conversation full of them scrolls into view.
+        UiBlockRow => 420,
         _ => 64
     };
 

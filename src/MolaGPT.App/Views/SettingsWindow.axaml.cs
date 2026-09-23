@@ -58,7 +58,9 @@ public partial class SettingsWindow : MolaContentWindow
     private readonly Func<Task>? _agentRuntimeInstalled;
     private readonly Action? _agentRuntimeRemoving;
     private readonly BrowserBridgeStatusViewModel _browserBridge;
-    private readonly StackPanel[] _pages;
+    /// <summary>Nav item → page, read from each item's <c>Tag</c> (the page's
+    /// name). Group headings carry no tag and so never resolve to a page.</summary>
+    private readonly Dictionary<ListBoxItem, StackPanel> _navPages = [];
     private readonly ObservableCollection<ModelRow> _providerModels = [];
     private readonly ObservableCollection<HeaderRow> _providerHeaders = [];
     /// <summary>Built on first use and kept for the window's life, so editing
@@ -129,10 +131,6 @@ public partial class SettingsWindow : MolaContentWindow
     /// instead; see <c>PiByokProviderFactory</c> for why.</summary>
     private const string GeminiCompatBaseUrl = "https://generativelanguage.googleapis.com/v1beta/openai/";
 
-    /// <summary>Nav index → page. The rail has non-selectable group headings in
-    /// it, so the mapping is explicit rather than positional arithmetic.</summary>
-    private static readonly int[] PageForNavIndex = [-1, 0, 1, 15, -1, 2, 3, 4, 5, 6, 7, 13, -1, 8, 14, 9, 10, 11, 12];
-
     public SettingsWindow(
         SettingsViewModel settings,
         MolaGptAuthService? auth = null,
@@ -154,7 +152,8 @@ public partial class SettingsWindow : MolaContentWindow
         Func<Task>? agentRuntimeInstalled = null,
         Action? agentRuntimeRemoving = null,
         PersonalizationViewModel? personalization = null,
-        MemoryPageViewModel? memoryPage = null)
+        MemoryPageViewModel? memoryPage = null,
+        MolaGptProxyProvider? proxy = null)
     {
         _settings = settings;
         _auth = auth;
@@ -178,15 +177,18 @@ public partial class SettingsWindow : MolaContentWindow
         _personalization = personalization;
 
         InitializeComponent();
+        // Before DataContext: the search index reads the text the XAML spells
+        // out, and bound text is still empty at this point.
+        InitializeSearch();
         DataContext = _settings;
 
-        _pages =
-        [
-            PAGE_Account, PAGE_Appearance, PAGE_Providers, PAGE_Personas, PAGE_Search, PAGE_Titles,
-            PAGE_ImageGeneration, PAGE_Vision, PAGE_Sandbox, PAGE_Approval, PAGE_Mcp, PAGE_Agent, PAGE_Skills,
-            PAGE_PostProcessing, PAGE_Browser, PAGE_Memory
-        ];
+        foreach (var item in PART_Nav.Items.OfType<ListBoxItem>())
+        {
+            if (item.Tag is string name && this.FindControl<StackPanel>(name) is { } page)
+                _navPages[item] = page;
+        }
         InitializeMemoryPage(memoryPage);
+        InitializeAccountPage(proxy);
         PAGE_Agent.DataContext = _agentStatus;
         PAGE_Personas.DataContext = _personas;
 
@@ -205,7 +207,7 @@ public partial class SettingsWindow : MolaContentWindow
         };
 
         PART_Nav.SelectionChanged += (_, _) => ShowSelectedPage();
-        PART_Nav.SelectedIndex = 1;
+        PART_Nav.SelectedItem = PART_AccountNav;
         BuildThemeChoices();
         BuildSearchProviderChoices();
         BuildPermissionChoices();
@@ -260,7 +262,6 @@ public partial class SettingsWindow : MolaContentWindow
         PART_TestMcp.Click += OnTestMcp;
         PART_RevealMcpToken.Click += (_, _) =>
             PART_McpToken.PasswordChar = PART_McpToken.PasswordChar == '\0' ? '•' : '\0';
-        PART_AccountAction.Click += OnAccountActionClick;
         PART_SyncNow.Click += OnSyncNowClick;
         PART_SyncConversations.Click += OnSyncConversationsClick;
         PART_RevokeAll.Click += (_, _) =>
@@ -304,19 +305,18 @@ public partial class SettingsWindow : MolaContentWindow
         PART_TestProvider.IsEnabled = _byokHttpFactory is not null;
         PART_ConfigureSandbox.IsEnabled = _pythonRuntime is not null && _piSidecar is not null;
         PART_BrowsePython.IsEnabled = _pythonRuntime is not null;
-        // A skill is a SKILL.md the model opens on demand, so the page is useful
-        // as soon as the chat can open one — read_file is enough, Python is not
-        // required. Gating on Python alone used to hide the page (and with it the
-        // browser-use switch, which mirrors 浏览器使用) from a setup that could
-        // read skills perfectly well.
-        PART_SkillsNav.IsVisible = CanReachSkills();
+        // A skill is a SKILL.md the model opens on demand, so skills work as soon
+        // as the chat can open one — read_file is enough, Python is not required.
+        // The page stays in the rail either way: hiding it only taught people the
+        // app had no skills. When nothing can read files, the page says so.
+        PART_SkillsUnreachable.IsVisible = !CanReachSkills();
         RefreshPythonBrowseButton();
 
         PropertyChangedEventHandler settingsChanged = (_, args) =>
         {
             if (args.PropertyName is nameof(SettingsViewModel.PythonToolEnabled)
                 or nameof(SettingsViewModel.FileToolsEnabled))
-                PART_SkillsNav.IsVisible = CanReachSkills();
+                PART_SkillsUnreachable.IsVisible = !CanReachSkills();
             else if (args.PropertyName == nameof(SettingsViewModel.PythonToolExecutablePath))
                 RefreshPythonBrowseButton();
         };
@@ -430,31 +430,6 @@ public partial class SettingsWindow : MolaContentWindow
         }
     }
 
-    internal void RefreshAccountUi()
-    {
-        var loggedIn = _auth is null ? _settings.IsLoggedIn : !string.IsNullOrEmpty(_auth.CurrentJwt);
-        var username = _auth?.CurrentUsername ?? _settings.MolaGptUsername;
-
-        _settings.IsLoggedIn = loggedIn;
-        _settings.MolaGptUsername = loggedIn ? username : null;
-        PART_AccountStatus.Text = loggedIn ? username ?? "MolaGPT 用户" : "未登录";
-        PART_AccountDetail.Text = loggedIn ? "已登录账号" : string.Empty;
-        PART_AccountAction.Content = loggedIn ? "退出" : "登录";
-        if (!loggedIn) PART_CloudSyncStatus.Text = string.Empty;
-    }
-
-    private void OnAccountActionClick(object? sender, RoutedEventArgs e)
-    {
-        if (_auth is not null && !string.IsNullOrEmpty(_auth.CurrentJwt))
-        {
-            _auth.Logout();
-            RefreshAccountUi();
-            return;
-        }
-
-        AccountRequested?.Invoke(this, EventArgs.Empty);
-    }
-
     private async void OnSyncNowClick(object? sender, RoutedEventArgs e)
     {
         if (_cloudSync is null || !_settings.IsLoggedIn) return;
@@ -521,25 +496,53 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void ShowSelectedPage()
     {
-        var index = PART_Nav.SelectedIndex;
-        if (index < 0 || index >= PageForNavIndex.Length) return;
+        // A group heading has no page; leave the current one up.
+        if (PART_Nav.SelectedItem is not ListBoxItem item || !_navPages.TryGetValue(item, out var page)) return;
 
-        var page = PageForNavIndex[index];
-        if (page < 0) return;   // a group heading; leave the current page up
-
-        for (var i = 0; i < _pages.Length; i++) _pages[i].IsVisible = i == page;
+        foreach (var other in _navPages.Values) other.IsVisible = other == page;
+        // The rail scrolls at the default height. A page opened from elsewhere —
+        // a search hit, 「去设置」, the Agent entry — should show where it sits.
+        Avalonia.Threading.Dispatcher.UIThread.Post(
+            () => RevealNavItem(item), Avalonia.Threading.DispatcherPriority.Loaded);
         PART_ContentScroll.Offset = default;
-        if (page != 2) CloseProviderEditor();
-        if (page == 2) RefreshProviders();
-        if (page == 11 && _agentStatus is not null) _ = _agentStatus.LoadAsync();
+        if (page != PAGE_Providers) CloseProviderEditor();
+        if (page == PAGE_Providers) RefreshProviders();
+        if (page == PAGE_Account) _ = RefreshUsageAsync(force: false);
+        if (page == PAGE_Agent && _agentStatus is not null) _ = _agentStatus.LoadAsync();
+        if (page == PAGE_Memory)
+        {
+            _memoryPage?.Refresh();
+            // The rail's red dot means 整理模型 is unset, and that row lives in the
+            // folded 记忆设置 — arriving on the page should put it in sight.
+            if (_settings.MemoryNeedsModel) PART_MemorySettings.IsExpanded = true;
+        }
         // Opening the page is the question "does this work" — answer it without
         // making the user press 检测 first.
-        if (page == 15) _memoryPage?.Refresh();
-        if (page == 14)
+        if (page == PAGE_Browser)
         {
             _ = _browserBridge.CheckAsync();
             RefreshBrowserActivity();
         }
+    }
+
+    /// <summary>Scrolls the rail just far enough to show <paramref name="item"/>.
+    /// Not BringIntoView: the ListBox's own ScrollViewer takes that request,
+    /// and it cannot scroll — it is unbounded inside PART_NavScroll.</summary>
+    private void RevealNavItem(ListBoxItem item)
+    {
+        // The rail may have only just come back from behind the search results.
+        PART_NavScroll.UpdateLayout();
+        if (PART_NavScroll.Content is not Visual content
+            || item.TranslatePoint(default, content) is not { } at) return;
+
+        const double margin = 8;
+        var offset = PART_NavScroll.Offset.Y;
+        var viewport = PART_NavScroll.Viewport.Height;
+        if (at.Y - margin < offset)
+            offset = at.Y - margin;
+        else if (at.Y + item.Bounds.Height + margin > offset + viewport)
+            offset = at.Y + item.Bounds.Height + margin - viewport;
+        PART_NavScroll.Offset = new Vector(0, Math.Max(0, offset));
     }
 
     // ---- choice lists ------------------------------------------------------
@@ -1002,7 +1005,7 @@ public partial class SettingsWindow : MolaContentWindow
             case ProviderApplyOutcome.RuntimeUnavailable:
                 FailProviderEdit(
                     "设置已保存，但 Agent 运行环境需要更新，该服务暂时不会出现在模型选择器中。"
-                    + "请到「沙箱与文件」更新后重试。");
+                    + "请到「代码与文件」更新后重试。");
                 break;
             case ProviderApplyOutcome.Unsupported:
                 FailProviderEdit(
@@ -1986,6 +1989,7 @@ public partial class SettingsWindow : MolaContentWindow
                 : (int?)null;
             var reasoning = parameters.Any(value => IsAny(value, "reasoning", "reasoning_effort", "reasoning_effort_max"))
                             || LooksLikeReasoningModel(id);
+            var capability = ReadReasoningCapability(item);
             models.Add(new ProviderModelEntry(
                 id,
                 string.IsNullOrWhiteSpace(name) ? id : name!,
@@ -1994,6 +1998,9 @@ public partial class SettingsWindow : MolaContentWindow
                 Thinking: reasoning,
                 ReasoningEffort: reasoning && parameters.Any(value => value.Contains("effort", StringComparison.OrdinalIgnoreCase)),
                 Tools: parameters.Any(value => IsAny(value, "tools", "tool_choice")),
+                EffortLevels: capability.Efforts.Count > 0 ? capability.Efforts.ToList() : null,
+                ReasoningMandatory: capability.Mandatory,
+                DefaultEffort: capability.DefaultEffort,
                 SupportsTemperature: SupportsSampling(parameters, "temperature"),
                 SupportsTopP: SupportsSampling(parameters, "top_p", "topP"),
                 Pricing: ReadEndpointPricing(item)));
@@ -2046,6 +2053,29 @@ public partial class SettingsWindow : MolaContentWindow
             models.Add(new ProviderModelEntry(id, BeautifyModelName(id), ImageEdit: LooksLikeImageEditModel(id)));
         }
         return models.OrderBy(model => model.Id, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    /// <summary>
+    /// The per-model <c>reasoning</c> block an OpenRouter-style model list carries:
+    /// <c>{ mandatory, default_enabled, supported_efforts, default_effort }</c>.
+    ///
+    /// Worth reading rather than guessing from the name: it is the only authoritative
+    /// answer to "which efforts does this model actually take" and "can reasoning be
+    /// switched off at all". Non-reasoning and dynamic-router models omit the block,
+    /// which leaves the defaults here and the old name-based inference in charge.
+    /// </summary>
+    private static (bool Mandatory, IReadOnlyList<string> Efforts, string? DefaultEffort) ReadReasoningCapability(
+        JsonElement item)
+    {
+        if (!item.TryGetProperty("reasoning", out var node) || node.ValueKind != JsonValueKind.Object)
+            return (false, [], null);
+
+        var mandatory = node.TryGetProperty("mandatory", out var m) && m.ValueKind == JsonValueKind.True;
+        var efforts = ReadStringArray(node, "supported_efforts");
+        var defaultEffort = node.TryGetProperty("default_effort", out var d) && d.ValueKind == JsonValueKind.String
+            ? d.GetString()
+            : null;
+        return (mandatory, efforts, string.IsNullOrWhiteSpace(defaultEffort) ? null : defaultEffort);
     }
 
     private static IReadOnlyList<string> ReadStringArray(JsonElement element, params string[] path)
@@ -2185,6 +2215,13 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void OnSettingsKeyDown(object? sender, KeyEventArgs e)
     {
+        if (e.Key == Key.F && e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            FocusSearch();
+            e.Handled = true;
+            return;
+        }
+
         if (e.Key != Key.Escape) return;
         if (PART_DetectedModelsPanel.IsVisible)
         {
@@ -2679,10 +2716,12 @@ public partial class SettingsWindow : MolaContentWindow
     private string? NormalizedPythonPath() =>
         _settings.PythonToolExecutablePath?.Trim().Trim('"');
 
-    /// <summary>Whether any enabled tool can open a SKILL.md — the condition for
-    /// the 技能 page to be worth showing.</summary>
+    /// <summary>Whether any enabled tool can open a SKILL.md — without one the
+    /// 技能 page explains why skills will not run.</summary>
     private bool CanReachSkills() =>
         _settings.PythonToolEnabled || _settings.FileToolsEnabled;
+
+    private void OnOpenSandboxFromSkills(object? sender, RoutedEventArgs e) => OpenSandboxPage();
 
     private void RefreshPythonBrowseButton()
     {

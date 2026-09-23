@@ -58,7 +58,23 @@ public partial class ComposerView : UserControl
         // the padding around the input is the same gesture to a user.
         PART_Shell.AddHandler(DragDrop.DragOverEvent, OnDragOver);
         PART_Shell.AddHandler(DragDrop.DropEvent, OnDrop);
+
+        // 「基于此修改」 puts a reference in the composer; the caret should be
+        // waiting there for the instruction that goes with it.
+        ComposerViewModel? observed = null;
+        DataContextChanged += (_, _) =>
+        {
+            if (observed is not null) observed.FocusRequested -= OnFocusRequested;
+            observed = DataContext as ComposerViewModel;
+            if (observed is not null) observed.FocusRequested += OnFocusRequested;
+        };
     }
+
+    private void OnFocusRequested() => Dispatcher.UIThread.Post(() =>
+    {
+        PART_Input.Focus();
+        PART_Input.CaretIndex = PART_Input.Text?.Length ?? 0;
+    });
 
     /// <summary>Left-hand hint text in the action bar.</summary>
     public void SetHint(string? hint) => PART_Hint.Text = hint ?? string.Empty;
