@@ -196,6 +196,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         }
 
         string? errorMessage = null;
+        string? finalStopReason = null;
         var pendingArgs = new Dictionary<string, string>(StringComparer.Ordinal);
         var preview = new ToolPreviewTracker();
         var generationSpeed = new GenerationSpeedTracker();
@@ -226,7 +227,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                 generationSpeed,
                 contextWindow,
                 priced,
-                ref errorMessage);
+                ref errorMessage,
+                ref finalStopReason);
             if (chunk is not null) yield return chunk;
             // Tool results come back on the bridge thread, so the sources show up
             // between lines rather than on one; polling here is what puts them on
@@ -476,7 +478,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         GenerationSpeedTracker generationSpeed,
         int contextWindow,
         bool priced,
-        ref string? errorMessage)
+        ref string? errorMessage,
+        ref string? finalStopReason)
     {
         JsonDocument doc;
         try { doc = JsonDocument.Parse(line); }
@@ -580,6 +583,9 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                             var stopReason = mm.TryGetProperty("stopReason", out var sr) ? sr.GetString() : null;
                             if (stopReason == "error")
                                 errorMessage = mm.TryGetProperty("errorMessage", out var em) ? em.GetString() : "Pi agent error";
+                            // Only assistant messages carry one, and the last of them
+                            // is how the answer ended.
+                            if (stopReason is not null) finalStopReason = stopReason;
 
                             if (!mm.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
                                 continue;
@@ -655,8 +661,14 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                 // upstream error rendered as a blank but perfectly normal-looking
                 // answer. agent_end has already recorded the message by now, so
                 // this can tell the two apart.
+                //
+                // Hitting the output cap is not a failure, but it is not a normal
+                // end either: an answer cut off mid-sentence, or a turn that spent
+                // everything on thinking, looks like one that simply ended unless
+                // the reason travels with it.
                 case "agent_settled":
-                    return errorMessage is null ? new ChatChunk(FinishReason: "stop") : null;
+                    if (errorMessage is not null) return null;
+                    return new ChatChunk(FinishReason: finalStopReason == "length" ? "length" : "stop");
 
                 default:
                     return null;

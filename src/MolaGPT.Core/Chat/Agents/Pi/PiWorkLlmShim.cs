@@ -384,8 +384,13 @@ public sealed class PiWorkLlmShim : IDisposable
     }
 
     /// <summary>
-    /// The two edits the shim is allowed to make to Pi's request body. Everything
+    /// The edits the shim is allowed to make to Pi's request body. Everything
     /// else is relayed untouched.
+    ///
+    /// <b>Uncap</b>: the output cap Pi wrote from its placeholder. See
+    /// <see cref="RemoveOutputCap"/>. Runs first, so a cap the user did ask for —
+    /// through the role's reply limit or the model's custom parameters — is
+    /// written back by the steps after it.
     ///
     /// <b>Merge</b>: the model's custom request parameters. Without this, a model
     /// tuned through BYOK's custom-parameters feature would silently lose that
@@ -405,15 +410,47 @@ public sealed class PiWorkLlmShim : IDisposable
         var hasDrops = dropKeys is { Count: > 0 };
         var hasGeneration = generation is not null
             && (generation.Temperature is not null || generation.TopP is not null || generation.MaxTokens is not null);
-        if (!hasExtra && !hasDrops && !hasGeneration) return body;
+        var uncap = generation is { MaxTokens: null } && generation.Api != "anthropic-messages";
+        if (!hasExtra && !hasDrops && !hasGeneration && !uncap) return body;
         var parsed = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body)
             ?? throw new JsonException("Pi 请求体为空。");
         var merged = parsed.ToDictionary(kv => kv.Key, kv => (object?)kv.Value, StringComparer.Ordinal);
+        if (uncap) RemoveOutputCap(merged, generation!.Api);
         if (hasExtra) CustomRequestParams.ApplyBody(merged, extra);
         if (hasGeneration) ApplyGenerationOptions(merged, generation!);
         if (hasDrops)
             foreach (var key in dropKeys!) merged.Remove(key);
         return JsonSerializer.Serialize(merged, RelaxedJson);
+    }
+
+    /// <summary>
+    /// Pi's model schema requires an output cap and every api path sends it, but
+    /// MolaGPT's model rows have none to give, so what arrives here is
+    /// <see cref="PiModelCatalog"/>'s placeholder. Sent upstream it is a real limit:
+    /// a reasoning model at max effort spent all 8,192 tokens thinking and came back
+    /// with no answer. Without the field the endpoint applies its own ceiling, which
+    /// is what the direct provider has always done.
+    ///
+    /// Anthropic is left alone because its Messages API rejects a request with no
+    /// <c>max_tokens</c>.
+    /// </summary>
+    internal static void RemoveOutputCap(IDictionary<string, object?> body, string api)
+    {
+        if (api == "google-generative-ai")
+        {
+            if (body.TryGetValue("generationConfig", out var existing)
+                && existing is JsonElement { ValueKind: JsonValueKind.Object } element)
+            {
+                var config = element.Deserialize<Dictionary<string, JsonElement>>()!;
+                if (config.Remove("maxOutputTokens"))
+                    body["generationConfig"] = JsonSerializer.SerializeToElement(config);
+            }
+            return;
+        }
+
+        body.Remove("max_tokens");
+        body.Remove("max_completion_tokens");
+        body.Remove("max_output_tokens");
     }
 
     internal static void ApplyGenerationOptions(IDictionary<string, object?> body, GenerationOptions options)

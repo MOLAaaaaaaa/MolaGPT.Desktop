@@ -14,8 +14,11 @@ namespace MolaGPT.Core.Chat.Agents.Pi;
 public static class PiModelCatalog
 {
     /// <summary>
-    /// Pi requires an output cap and MolaGPT's model rows usually lack one; the real
-    /// limit is enforced upstream anyway, so this is a floor rather than a claim.
+    /// Pi requires an output cap and MolaGPT's model rows usually lack one. Pi sends
+    /// whatever is here as the request's cap, so on its own this would be a real
+    /// limit rather than a floor; <see cref="PiWorkLlmShim.RemoveOutputCap"/> strips
+    /// it before the request leaves. Only Anthropic, whose API requires the field,
+    /// still receives it.
     /// </summary>
     private const int DefaultMaxTokens = 8192;
 

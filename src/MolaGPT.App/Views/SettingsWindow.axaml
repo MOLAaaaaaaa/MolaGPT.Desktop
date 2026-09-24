@@ -1392,6 +1392,13 @@
                               <ComboBox Name="PART_RoleModel" Classes="field" SelectionChanged="OnRoleModelChanged" HorizontalAlignment="Stretch">
                                 <ComboBox.ItemTemplate><DataTemplate x:DataType="v:RoleModelChoice"><TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" /></DataTemplate></ComboBox.ItemTemplate>
                               </ComboBox>
+                              <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" Margin="0,16,0,0" IsVisible="{Binding IsAtmosphereMode}">
+                                <TextBlock Classes="label" Text="提示词编排" />
+                                <ComboBox Grid.Row="1" Name="PART_RolePromptTemplate" Classes="field" HorizontalAlignment="Stretch" SelectionChanged="OnRolePromptTemplateChanged">
+                                  <ComboBox.ItemTemplate><DataTemplate x:DataType="v:RoleTemplateChoice"><TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" /></DataTemplate></ComboBox.ItemTemplate>
+                                </ComboBox>
+                                <Button Grid.Row="1" Grid.Column="1" Content="管理编排" Classes="textlink" Click="OnManagePromptTemplates" Margin="12,0,0,0" VerticalAlignment="Center" />
+                              </Grid>
                               <Expander Name="PART_PersonaDefaultsExpander" Classes="settingssection" Header="默认行为" Margin="0,16,0,0" IsExpanded="True">
                                 <StackPanel Name="PART_PersonaDefaults" Margin="0,10,0,0" Spacing="8">
                                   <Grid ColumnDefinitions="*,12,*">

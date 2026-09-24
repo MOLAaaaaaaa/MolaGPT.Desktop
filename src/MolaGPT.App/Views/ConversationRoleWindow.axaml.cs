@@ -281,11 +281,16 @@ public partial class ConversationRoleWindow : MolaContentWindow
         PART_ContextBudget.IsVisible = evaluation is not null;
         var trace = _chat.LastRolePromptTrace;
         PART_RequestCaption.Text = trace is not null ? "最近一次请求 · " + trace.CreatedAt.ToLocalTime().ToString("HH:mm:ss")
-            : evaluation is not null ? "角色上下文预览" : "尚无请求记录";
+            : evaluation is not null ? "角色上下文预览 · " + evaluation.TemplateName : "尚无请求记录";
+        var before = evaluation?.Plan.Before ?? [];
+        var examplesAt = evaluation?.Plan.ExamplesAt ?? 0;
         var messages = trace?.Messages ?? (evaluation is null ? [] : new[] { new RolePromptMessage("system", evaluation.SystemPrompt) }
+            .Concat(before.Take(examplesAt))
             .Concat(evaluation.Plan.Examples.SelectMany(block => block))
+            .Concat(before.Skip(examplesAt))
             .Concat(evaluation.Plan.Insertions.Select(item => new RolePromptMessage(item.Role,
-                item.Source + " · " + (item.Depth == 0 ? "对话末尾" : $"距末尾 {item.Depth} 条消息") + "\n\n" + item.Text))).ToArray());
+                item.Source + " · " + (item.Depth == 0 ? "对话末尾" : $"距末尾 {item.Depth} 条消息") + "\n\n" + item.Text)))
+            .Concat((evaluation.Plan.After ?? []).Select(item => item with { Text = "对话历史之后\n\n" + item.Text })).ToArray());
         var messageIndex = 0;
         foreach (var message in messages)
         {

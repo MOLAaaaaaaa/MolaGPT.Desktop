@@ -82,7 +82,7 @@ public sealed partial class ComposerViewModel
             RoleFields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["persona"] = identity.Description }
         };
         var result = RolePromptBuilder.Build(persona, _chat.DefaultPersonaSystemPrompt, _chat.ConversationSystemPrompt,
-            _chat.SystemPromptMode, _chat.RoleContext, history, _chat.GetRoleLorebooks(), vars,
+            _chat.SystemPromptMode, _chat.RoleContext, history, _chat.GetRoleLorebooks(), _chat.GetRolePromptTemplate(), vars,
             assistant.MessageId ?? "pending:" + generationId,
             maxTokens, continuation);
         _chat.SetRoleEvaluation(result);

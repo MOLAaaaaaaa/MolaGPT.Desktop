@@ -388,6 +388,16 @@ public sealed class StoppedRow : TranscriptRow
     public StoppedRow(MessageViewModel message) : base(message, message.RowKey() + ":stopped") { }
 }
 
+/// <summary>
+/// "已达输出上限". The provider ended the turn because it ran out of output
+/// tokens, which a truncated answer does not say by itself — and a turn whose
+/// budget all went on thinking has no answer at all to say it.
+/// </summary>
+public sealed class OutputLimitRow : TranscriptRow
+{
+    public OutputLimitRow(MessageViewModel message) : base(message, message.RowKey() + ":output-limit") { }
+}
+
 /// <summary>Retry / copy / stats strip under a finished assistant message.</summary>
 public sealed class ActionRow : TranscriptRow
 {

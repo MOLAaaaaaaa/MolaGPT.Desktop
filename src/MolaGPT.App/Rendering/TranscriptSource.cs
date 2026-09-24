@@ -209,7 +209,8 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         nameof(MessageViewModel.IsLatestAssistant),
         nameof(MessageViewModel.ModelLabel),
         nameof(MessageViewModel.PersonaName),
-        nameof(MessageViewModel.WasStopped)
+        nameof(MessageViewModel.WasStopped),
+        nameof(MessageViewModel.FinishReason)
     };
 
     private void OnMessagePropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -382,6 +383,9 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         if (message.ShowStoppedNotice)
             rows.Add(new StoppedRow(message));
 
+        if (message.ShowOutputLimitNotice)
+            rows.Add(new OutputLimitRow(message));
+
         if (message.HasActions)
             rows.Add(new ActionRow(message));
 
@@ -416,7 +420,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         {
             switch (rows[i])
             {
-                case ActionRow or StoppedRow: continue;
+                case ActionRow or StoppedRow or OutputLimitRow: continue;
                 case ProseRow: return i;
                 default: return -1;
             }

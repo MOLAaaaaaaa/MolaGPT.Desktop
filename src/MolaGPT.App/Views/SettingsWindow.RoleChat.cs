@@ -185,6 +185,33 @@ public partial class SettingsWindow
             PART_SharedBooks.Children.Add(toggle);
         }
         PART_SharedBooksEmpty.IsVisible = _personas.Library.Books.Count == 0;
+        var library = _personas.Library;
+        var fallback = library.Templates.FirstOrDefault(template => template.Id == library.DefaultTemplateId)?.Name ?? "内置顺序";
+        var templates = new List<RoleTemplateChoice> { new(null, "默认 · " + fallback) };
+        templates.AddRange(library.Templates.Select(template => new RoleTemplateChoice(template.Id, template.Name)));
+        PART_RolePromptTemplate.ItemsSource = templates;
+        PART_RolePromptTemplate.SelectedItem = templates.FirstOrDefault(choice => choice.Id == persona.Profile.PromptTemplateId)
+            ?? templates[0];
+    }
+
+    private void OnRolePromptTemplateChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (_loadingPersonaForm || _editingPersona is not { IsBuiltin: false } persona
+            || PART_RolePromptTemplate.SelectedItem is not RoleTemplateChoice choice) return;
+        persona.Profile.PromptTemplateId = choice.Id;
+        OnPersonaFormChanged(sender, e);
+    }
+
+    private async void OnManagePromptTemplates(object? sender, RoutedEventArgs e)
+    {
+        await new PromptTemplateWindow
+        {
+            CheckTemplateDeletion = template => _editingPersona?.Profile.PromptTemplateId == template.Id
+                ? "当前角色仍在使用这套编排。" : null
+        }.ShowForAsync(_personas.Library, _notifications, this, _editingPersona?.Profile.PromptTemplateId);
+        _loadingPersonaForm = true;
+        RefreshRoleLibraryOptions();
+        _loadingPersonaForm = false;
     }
 
     private void OnRoleIdentityChanged(object? sender, SelectionChangedEventArgs e)
@@ -418,3 +445,5 @@ public sealed record RoleIdentityChoice(string? Id, string Label)
             : $"沿用个人资料（{name}）");
     }
 }
+
+public sealed record RoleTemplateChoice(string? Id, string Label);

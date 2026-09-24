@@ -62,6 +62,7 @@ public sealed record FunctionPlotSpec(
 
         var title = VisualJson.String(props, "title");
         var parameters = new List<PlotParam>();
+        var defaultSteps = new HashSet<string>(StringComparer.Ordinal);
         if (props.TryGetProperty("params", out var paramsNode) && paramsNode.ValueKind == JsonValueKind.Array)
         {
             foreach (var item in paramsNode.EnumerateArray())
@@ -75,6 +76,7 @@ public sealed record FunctionPlotSpec(
                 }
 
                 parameters.Add(param!);
+                if (VisualJson.Number(item, "step") is not > 0) defaultSteps.Add(param!.Name);
             }
         }
 
@@ -95,14 +97,23 @@ public sealed record FunctionPlotSpec(
 
         var order = FixedVariables.Concat(parameters.Select(p => p.Name)).ToArray();
         var known = order;
+        var counting = new HashSet<string>(StringComparer.Ordinal);
         var curves = new List<PlotCurve>();
         foreach (var item in functions.EnumerateArray())
         {
             if (curves.Count >= MaxCurves) break;
-            curves.Add(ParseCurve(item, order, known));
+            curves.Add(ParseCurve(item, order, known, counting));
         }
 
-        spec = new FunctionPlotSpec(title, curves, parameters, x, y);
+        // A slider that counts terms, given no step, moves in whole numbers: a
+        // 0.1 step only makes the readout disagree with the terms drawn.
+        var sliders = parameters
+            .Select(p => counting.Contains(p.Name) && defaultSteps.Contains(p.Name)
+                && p.Min == Math.Floor(p.Min) && p.Max == Math.Floor(p.Max)
+                    ? p with { Step = 1, Default = Math.Floor(p.Default + 0.5) }
+                    : p)
+            .ToList();
+        spec = new FunctionPlotSpec(title, curves, sliders, x, y);
         return true;
     }
 
@@ -137,7 +148,7 @@ public sealed record FunctionPlotSpec(
         return true;
     }
 
-    private static PlotCurve ParseCurve(JsonElement item, string[] order, string[] known)
+    private static PlotCurve ParseCurve(JsonElement item, string[] order, string[] known, HashSet<string> counting)
     {
         string? label = null;
         string? expr = null;
@@ -163,8 +174,8 @@ public sealed record FunctionPlotSpec(
         {
             if (!string.IsNullOrWhiteSpace(px) && !string.IsNullOrWhiteSpace(py))
             {
-                var ex = MathExpression.Parse(px, known);
-                var ey = MathExpression.Parse(py, known);
+                var ex = Parse(px, known, counting);
+                var ey = Parse(py, known, counting);
                 return new PlotCurve
                 {
                     Kind = CurveKind.Parametric,
@@ -181,7 +192,7 @@ public sealed record FunctionPlotSpec(
             if (string.IsNullOrWhiteSpace(expr))
                 return Broken(expr ?? string.Empty, label, "缺少 expr");
 
-            return ParseEquation(expr.Trim(), label, t, order, known);
+            return ParseEquation(expr.Trim(), label, t, order, known, counting);
         }
         catch (MathSyntaxException ex)
         {
@@ -189,20 +200,21 @@ public sealed record FunctionPlotSpec(
         }
     }
 
-    private static PlotCurve ParseEquation(string text, string? label, (double Min, double Max)? t, string[] order, string[] known)
+    private static PlotCurve ParseEquation(
+        string text, string? label, (double Min, double Max)? t, string[] order, string[] known, HashSet<string> counting)
     {
         var normalized = text.Replace("==", "=", StringComparison.Ordinal);
-        var parts = normalized.Split('=');
+        var parts = SplitTopLevel(normalized);
         if (parts.Length > 2) return Broken(text, label, "只能有一个等号");
 
         if (parts.Length == 1)
         {
-            var e = MathExpression.Parse(normalized, known);
+            var e = Parse(normalized, known, counting);
             var vars = e.Variables;
             var usesY = vars.Contains("y");
             var usesX = vars.Contains("x");
             if (usesY && usesX)
-                return Implicit(text, label, e, MathExpression.Parse("0", known), order);
+                return Implicit(text, label, e, Parse("0", known, counting), order);
             if (usesY)
                 return Broken(text, label, "只含 y 时请写成 x = …");
             return Explicit(CurveKind.ExplicitY, text, label, "y", e, order);
@@ -213,12 +225,12 @@ public sealed record FunctionPlotSpec(
         if (lhs.Length == 0 || rhs.Length == 0) return Broken(text, label, "等式不完整");
 
         if (lhs == "y" || Regex.IsMatch(lhs, @"^[A-Za-z]\s*\(\s*x\s*\)$"))
-            return Explicit(CurveKind.ExplicitY, text, label, lhs == "y" ? "y" : lhs, MathExpression.Parse(rhs, known), order);
+            return Explicit(CurveKind.ExplicitY, text, label, lhs == "y" ? "y" : lhs, Parse(rhs, known, counting), order);
         if (lhs == "x")
-            return Explicit(CurveKind.ExplicitX, text, label, "x", MathExpression.Parse(rhs, known), order);
+            return Explicit(CurveKind.ExplicitX, text, label, "x", Parse(rhs, known, counting), order);
         if (lhs is "r" or "ρ")
         {
-            var polar = MathExpression.Parse(rhs, known);
+            var polar = Parse(rhs, known, counting);
             return new PlotCurve
             {
                 Kind = CurveKind.Polar,
@@ -231,7 +243,40 @@ public sealed record FunctionPlotSpec(
             };
         }
 
-        return Implicit(text, label, MathExpression.Parse(lhs, known), MathExpression.Parse(rhs, known), order);
+        return Implicit(text, label, Parse(lhs, known, counting), Parse(rhs, known, counting), order);
+    }
+
+    /// <summary>Parses one of a curve's expressions, noting which sliders serve
+    /// as sum / product bounds.</summary>
+    private static MathExpression Parse(string text, string[] known, HashSet<string> counting)
+    {
+        var e = MathExpression.Parse(text, known);
+        counting.UnionWith(e.CountingVariables);
+        return e;
+    }
+
+    /// <summary>Splits on equals signs outside brackets only: the one in
+    /// sum(k=1, …) belongs to the sum.</summary>
+    private static string[] SplitTopLevel(string text)
+    {
+        var parts = new List<string>();
+        var depth = 0;
+        var start = 0;
+        for (var i = 0; i < text.Length; i++)
+        {
+            switch (text[i])
+            {
+                case '(' or '[' or '（': depth++; break;
+                case ')' or ']' or '）': depth--; break;
+                case '=' when depth == 0:
+                    parts.Add(text[start..i]);
+                    start = i + 1;
+                    break;
+            }
+        }
+
+        parts.Add(text[start..]);
+        return parts.ToArray();
     }
 
     private static PlotCurve Explicit(CurveKind kind, string text, string? label, string lhs, MathExpression e, string[] order)

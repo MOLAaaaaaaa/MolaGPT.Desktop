@@ -123,6 +123,12 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     /// keeps its action bar instead of collapsing to a blank gap.
     /// </summary>
     [ObservableProperty] private bool _wasStopped;
+
+    /// <summary>
+    /// How the provider said the turn ended. Only a non-"stop" value is worth
+    /// persisting; today the one the transcript reacts to is "length".
+    /// </summary>
+    [ObservableProperty] private string? _finishReason;
     [ObservableProperty] private string _pendingLabel = "回复处理中";
     [ObservableProperty] private string? _pendingDetail;
     public ObservableCollection<ToolCallViewModel> ToolCalls { get; } = new();
@@ -284,6 +290,11 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     /// banner would just be noise.</summary>
     public bool ShowStoppedNotice =>
         WasStopped && !IsStreaming && string.IsNullOrWhiteSpace(Content) && !HasToolCalls;
+
+    /// <summary>Shows the "已达输出上限" marker. Unlike the stopped marker this one
+    /// shows with partial content too: a cut-off answer reads like a finished one,
+    /// and nothing in the text says the model had more to write.</summary>
+    public bool ShowOutputLimitNotice => FinishReason == "length" && !IsStreaming && !IsPending;
 
     public bool HasResponseStats => Usage is not null || !string.IsNullOrWhiteSpace(ModelLabel);
     public bool HasAttachments => Attachments is { Count: > 0 };
@@ -853,6 +864,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         Content = string.Empty;
         Thinking = null;
         WasStopped = false;
+        FinishReason = null;
         ThinkingSegments.Clear();
         ToolCalls.Clear();
         DisplayBlocks.Clear();
@@ -937,7 +949,8 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             FirstTokenSeconds,
             GenerationSeconds,
             PersonaId,
-            PersonaName);
+            PersonaName,
+            FinishReason);
     }
 
     [RelayCommand(CanExecute = nameof(CanPreviousAttempt))]
@@ -981,6 +994,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         Usage = attempt.Usage;
         Sources = attempt.Sources;
         WasStopped = attempt.WasStopped;
+        FinishReason = attempt.FinishReason;
         if (attempt.ToolCalls is { Count: > 0 })
         {
             foreach (var toolCall in attempt.ToolCalls)
@@ -1159,6 +1173,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(ShowStoppedNotice));
         OnActionStateChanged();
     }
+    partial void OnFinishReasonChanged(string? value) => OnPropertyChanged(nameof(ShowOutputLimitNotice));
     partial void OnAttachmentsChanged(IReadOnlyList<AttachmentChip>? value) => OnPropertyChanged(nameof(HasAttachments));
     partial void OnSourcesChanged(IReadOnlyList<SourceReference>? value)
     {
@@ -1195,6 +1210,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     {
         OnPropertyChanged(nameof(HasActions));
         OnPropertyChanged(nameof(ShowStoppedNotice));
+        OnPropertyChanged(nameof(ShowOutputLimitNotice));
     }
 
     private void RebuildDisplayBlocks()
@@ -1476,6 +1492,9 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
 /// <param name="WasStopped">Whether the user cut this version short. Travels with
 /// the attempt so switching back to it still explains why it is empty, instead of
 /// showing a blank bubble.</param>
+/// <param name="FinishReason">How the provider ended this version; see
+/// <see cref="MessageViewModel.FinishReason"/>. Per attempt for the same reason as
+/// <paramref name="WasStopped"/>.</param>
 public sealed record MessageAttempt(
     string Content,
     string? ModelLabel,
@@ -1488,7 +1507,8 @@ public sealed record MessageAttempt(
     double? FirstTokenSeconds = null,
     double? GenerationSeconds = null,
     string? PersonaId = null,
-    string? PersonaName = null);
+    string? PersonaName = null,
+    string? FinishReason = null);
 /// <summary>
 /// Lightweight representation of a sent attachment, kept on the message
 /// view-model after the original <see cref="MolaGPT.Core.Models.Attachment"/>

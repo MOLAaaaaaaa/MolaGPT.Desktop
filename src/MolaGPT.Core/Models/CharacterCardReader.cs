@@ -39,7 +39,7 @@ public static class CharacterCardReader
         {
             profile.CharacterNote = Text(note, "prompt");
             profile.CharacterNoteDepth = Number(note, "depth", 4);
-            profile.CharacterNoteRole = Role(Number(note, "role", 0));
+            profile.CharacterNoteRole = Role(note["role"]);
         }
         if (data["character_book"] is JsonObject book)
         {
@@ -171,6 +171,9 @@ public static class CharacterCardReader
     private static int? NullableNumber(JsonObject value, string key) => value[key]?.GetValue<int>();
     private static bool Flag(JsonObject value, string key, bool otherwise = false) => value[key]?.GetValue<bool>() ?? otherwise;
     private static string Role(int value) => value switch { 1 => "user", 2 => "assistant", _ => "system" };
+    private static string Role(JsonNode? value) => value is JsonValue node && node.TryGetValue<string>(out var role)
+        ? role.ToLowerInvariant() switch { "user" => "user", "assistant" => "assistant", _ => "system" }
+        : Role(value?.GetValue<int>() ?? 0);
     private static List<string> Strings(JsonNode? value) => value is JsonArray items
         ? items.Select(item => item?.GetValue<string>() ?? "").Where(item => item.Length > 0).ToList() : [];
     internal static bool IsZip(byte[] bytes) => bytes.AsSpan().StartsWith(new byte[] { 80, 75, 3, 4 });

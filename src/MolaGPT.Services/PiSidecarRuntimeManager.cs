@@ -24,7 +24,7 @@ public sealed class PiSidecarRuntimeManager
 {
     public const string DefaultManifestUrl =
         "https://chatgpt.wljay.cn/v2/pi-sidecar-win-x64.json";
-    public const int RequiredContractVersion = 5;
+    public const int RequiredContractVersion = 6;
 
     private const string RuntimeDirectoryName = "runtimes";
     private const string StampFileName = ".molagpt-pi-sidecar.json";

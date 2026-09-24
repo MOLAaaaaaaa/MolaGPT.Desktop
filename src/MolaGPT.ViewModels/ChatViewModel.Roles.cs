@@ -44,6 +44,9 @@ public sealed partial class ChatViewModel
         return profile.Lorebooks.Concat(shared).DistinctBy(book => book.Id).ToArray();
     }
 
+    public PromptTemplate GetRolePromptTemplate() =>
+        RoleLibrary?.ResolveTemplate(ActivePersona?.Profile.PromptTemplateId) ?? PromptTemplate.CreateDefault();
+
     public void SetRoleEvaluation(RolePromptBuildResult? result)
     {
         RoleEvaluation = result;

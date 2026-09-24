@@ -16,9 +16,21 @@ public sealed class MathSyntaxException(string message) : Exception(message);
 /// Tolerant where writers of math are loose: implicit multiplication (2x,
 /// 3(x+1), (x+1)(x-1)), <c>**</c> for power, Unicode operators, <c>sin^2(x)</c>,
 /// <c>|x|</c>. Strict where guessing would be wrong: a function needs brackets.
+///
+/// Sum <c>sum(k=1, n, expr)</c> and product <c>prod(…)</c> are the only forms
+/// that bind a variable: a series whose number of terms follows a slider can't
+/// be written any other way. Bounds are floored, at most <see cref="MaxTerms"/>
+/// terms, no nesting — so the work per sample point stays bounded while a slider
+/// is dragged.
 /// </summary>
 public sealed class MathExpression
 {
+    public const int MaxTerms = 1000;
+
+    /// <summary>Tolerance before flooring bounds: a slider snapping on a
+    /// fractional step can land 3 on 2.9999999999999996.</summary>
+    private const double BoundEpsilon = 1e-9;
+
     private MathExpression(Node root, string source)
     {
         Root = root;
@@ -28,13 +40,26 @@ public sealed class MathExpression
     internal Node Root { get; }
     public string Source { get; }
 
-    /// <summary>Free variable names, in first-seen order.</summary>
+    /// <summary>Free variable names, in first-seen order. Summation indices are
+    /// bound, not free.</summary>
     public IReadOnlyList<string> Variables
     {
         get
         {
             var names = new List<string>();
-            Collect(Root, names);
+            Collect(Root, names, new HashSet<string>());
+            return names;
+        }
+    }
+
+    /// <summary>Free variables used in sum / product bounds: sliders that only
+    /// make sense as integers.</summary>
+    public IReadOnlySet<string> CountingVariables
+    {
+        get
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            CollectCounting(Root, names);
             return names;
         }
     }
@@ -70,15 +95,39 @@ public sealed class MathExpression
     internal sealed record Neg(Node Operand) : Node;
     internal sealed record Bin(char Op, Node Left, Node Right, bool Implicit = false) : Node;
     internal sealed record Call(string Name, IReadOnlyList<Node> Args) : Node;
+    /// <summary>Sum (<see cref="Product"/> false) or product: <see cref="Index"/>
+    /// takes each integer from <see cref="From"/> to <see cref="To"/>.</summary>
+    internal sealed record Iter(bool Product, string Index, Node From, Node To, Node Body) : Node;
 
-    private static void Collect(Node node, List<string> names)
+    private static void Collect(Node node, List<string> names, IReadOnlySet<string> bound)
     {
         switch (node)
         {
-            case Var v when !names.Contains(v.Name): names.Add(v.Name); break;
-            case Neg n: Collect(n.Operand, names); break;
-            case Bin b: Collect(b.Left, names); Collect(b.Right, names); break;
-            case Call c: foreach (var a in c.Args) Collect(a, names); break;
+            case Var v when !bound.Contains(v.Name) && !names.Contains(v.Name): names.Add(v.Name); break;
+            case Neg n: Collect(n.Operand, names, bound); break;
+            case Bin b: Collect(b.Left, names, bound); Collect(b.Right, names, bound); break;
+            case Call c: foreach (var a in c.Args) Collect(a, names, bound); break;
+            case Iter it:
+                Collect(it.From, names, bound);
+                Collect(it.To, names, bound);
+                Collect(it.Body, names, new HashSet<string>(bound, StringComparer.Ordinal) { it.Index });
+                break;
+        }
+    }
+
+    private static void CollectCounting(Node node, HashSet<string> names)
+    {
+        switch (node)
+        {
+            case Neg n: CollectCounting(n.Operand, names); break;
+            case Bin b: CollectCounting(b.Left, names); CollectCounting(b.Right, names); break;
+            case Call c: foreach (var a in c.Args) CollectCounting(a, names); break;
+            case Iter it:
+                var bounds = new List<string>();
+                Collect(it.From, bounds, new HashSet<string>());
+                Collect(it.To, bounds, new HashSet<string>());
+                names.UnionWith(bounds);
+                break;
         }
     }
 
@@ -89,6 +138,7 @@ public sealed class MathExpression
         ["arcsin"] = "asin", ["arccos"] = "acos", ["arctan"] = "atan",
         ["log10"] = "lg", ["abs"] = "abs", ["sgn"] = "sign", ["√"] = "sqrt",
         ["ceiling"] = "ceil", ["arsinh"] = "asinh", ["arcosh"] = "acosh", ["artanh"] = "atanh",
+        ["factorial"] = "fact", ["product"] = "prod",
     };
 
     /// <summary>name → (min args, max args).</summary>
@@ -103,7 +153,14 @@ public sealed class MathExpression
         ["ln"] = (1, 1), ["log"] = (1, 2), ["lg"] = (1, 1), ["log2"] = (1, 1),
         ["floor"] = (1, 1), ["ceil"] = (1, 1), ["round"] = (1, 1), ["sign"] = (1, 1),
         ["min"] = (2, 8), ["max"] = (2, 8), ["pow"] = (2, 2), ["mod"] = (2, 2), ["hypot"] = (2, 2),
+        ["fact"] = (1, 1), ["sum"] = (4, 4), ["prod"] = (4, 4),
     };
+
+    private static readonly HashSet<string> Iterators = new(StringComparer.Ordinal) { "sum", "prod" };
+
+    // Sum and product bind a variable; they take no part in "sinx → sin(x)" splitting.
+    private static readonly string[] SplittableFunctions =
+        Functions.Keys.Where(k => !Iterators.Contains(k)).OrderByDescending(k => k.Length).ToArray();
 
     private static string? ResolveFunction(string name)
     {
@@ -156,12 +213,14 @@ public sealed class MathExpression
     private sealed class Parser
     {
         private readonly List<Token> _tokens;
-        private readonly IReadOnlyCollection<string> _known;
+        /// <summary>Names allowed to appear; a summation index joins while its body is parsed.</summary>
+        private readonly HashSet<string> _known;
         private int _index;
+        private bool _inIteration;
 
         public Parser(string text, IReadOnlyCollection<string> known)
         {
-            _known = known;
+            _known = new HashSet<string>(known, StringComparer.Ordinal);
             _tokens = Lex(text);
         }
 
@@ -221,6 +280,13 @@ public sealed class MathExpression
         private Node ParsePower()
         {
             var baseNode = ParsePrimary();
+            // Factorial is postfix and binds tighter than power: (2k+1)!, n!^2.
+            while (IsOp("!"))
+            {
+                Next();
+                baseNode = new Call("fact", [baseNode]);
+            }
+
             if (!IsOp("^")) return baseNode;
             Next();
             return new Bin('^', baseNode, ParseUnary());
@@ -287,6 +353,12 @@ public sealed class MathExpression
             }
             Next();
 
+            if (Iterators.Contains(function))
+            {
+                var iter = ParseIteration(written, function == "prod");
+                return power is null ? iter : new Bin('^', iter, power);
+            }
+
             var args = new List<Node> { ParseAdditive() };
             while (IsOp(","))
             {
@@ -305,9 +377,55 @@ public sealed class MathExpression
             return power is null ? call : new Bin('^', call, power);
         }
 
+        /// <summary>After the opening bracket: <c>k=1, n, expr)</c> or <c>k, 1, n, expr)</c>.</summary>
+        private Node ParseIteration(string written, bool product)
+        {
+            if (_inIteration) throw new MathSyntaxException("求和、连乘不能嵌套");
+            var usage = $"{written} 的写法是 {written}(k=1, n, 表达式)";
+            var head = Next();
+            if (head.Kind != TokenKind.Ident || ResolveFunction(head.Text) is not null || TryConstant(head.Text, out _))
+                throw new MathSyntaxException(usage);
+            if (!IsOp("=") && !IsOp(",")) throw new MathSyntaxException(usage);
+            Next();
+
+            var from = ParseAdditive();
+            Expect(",");
+            var to = ParseAdditive();
+            Expect(",");
+            var added = _known.Add(head.Text);
+            _inIteration = true;
+            Node body;
+            try
+            {
+                body = ParseAdditive();
+            }
+            finally
+            {
+                _inIteration = false;
+                if (added) _known.Remove(head.Text);
+            }
+
+            Expect(")");
+            if (ConstantValue(from) is { } lo && ConstantValue(to) is { } hi
+                && Math.Floor(hi + BoundEpsilon) - Math.Floor(lo + BoundEpsilon) >= MaxTerms)
+            {
+                throw new MathSyntaxException($"{written} 最多 {MaxTerms} 项");
+            }
+
+            return new Iter(product, head.Text, from, to, body);
+        }
+
+        private static double? ConstantValue(Node node) => node switch
+        {
+            Num n => n.Value,
+            Const c => c.Value,
+            Neg n => -ConstantValue(n.Operand),
+            _ => null,
+        };
+
         private Node? SplitRunTogether(string name)
         {
-            foreach (var function in Functions.Keys.OrderByDescending(k => k.Length))
+            foreach (var function in SplittableFunctions)
             {
                 if (name.Length > function.Length
                     && name.StartsWith(function, StringComparison.Ordinal)
@@ -379,7 +497,9 @@ public sealed class MathExpression
                     continue;
                 }
 
-                if ("+-*/^(),|".IndexOf(c) >= 0)
+                // "=" only means something inside sum(k=1, …); an equation's
+                // equals sign is split off before the text gets here.
+                if ("+-*/^(),|!=".IndexOf(c) >= 0)
                 {
                     tokens.Add(new Token(TokenKind.Op, c.ToString()));
                     i++;
@@ -436,16 +556,52 @@ public sealed class MathExpression
                 var args = call.Args.Select(a => Emit(a, values, order)).ToArray();
                 return EmitCall(call.Name, args);
             }
+            case Iter it:
+            {
+                // The body is its own delegate over the values plus one slot for the index.
+                var inner = order.Append(it.Index).ToArray();
+                var scope = Expression.Parameter(typeof(double[]), "s");
+                var body = Expression.Lambda<Func<double[], double>>(Emit(it.Body, scope, inner), scope).Compile();
+                return Expression.Call(
+                    typeof(MathExpression).GetMethod(nameof(Iterate), BindingFlags.NonPublic | BindingFlags.Static)!,
+                    Expression.Constant(it.Product),
+                    Emit(it.From, values, order),
+                    Emit(it.To, values, order),
+                    values,
+                    Expression.Constant(order.Count),
+                    Expression.Constant(body));
+            }
             default:
                 throw new MathSyntaxException("无法编译表达式");
         }
     }
 
+    /// <summary>Last match: the summation index is appended at the end, so an
+    /// index named like a slider wins inside its body.</summary>
     private static int IndexOf(IReadOnlyList<string> order, string name)
     {
-        for (var i = 0; i < order.Count; i++)
+        for (var i = order.Count - 1; i >= 0; i--)
             if (string.Equals(order[i], name, StringComparison.Ordinal)) return i;
         return -1;
+    }
+
+    private static double Iterate(bool product, double from, double to, double[] values, int slot, Func<double[], double> body)
+    {
+        var lo = Math.Floor(from + BoundEpsilon);
+        var hi = Math.Floor(to + BoundEpsilon);
+        // Comparisons with NaN are false, so this rejects NaN bounds too.
+        if (!(hi - lo < MaxTerms)) return double.NaN;
+        var scope = new double[slot + 1];
+        Array.Copy(values, scope, Math.Min(values.Length, slot));
+        var acc = product ? 1d : 0d;
+        for (var k = lo; k <= hi; k += 1)
+        {
+            scope[slot] = k;
+            var term = body(scope);
+            acc = product ? acc * term : acc + term;
+        }
+
+        return acc;
     }
 
     private static Expression EmitCall(string name, Expression[] args)
@@ -477,8 +633,41 @@ public sealed class MathExpression
             "pow" => Expression.Call(typeof(MathExpression).GetMethod(nameof(Power), BindingFlags.NonPublic | BindingFlags.Static)!, args),
             "mod" => H(nameof(Mod), args),
             "hypot" => H(nameof(Hypot), args),
+            "fact" => H(nameof(Factorial), args),
             _ => throw new MathSyntaxException($"未知函数 {name}"),
         };
+    }
+
+    /// <summary>Integers multiply out (undefined for negative integers);
+    /// non-integers take Γ(x+1), so x! also plots as a continuous curve.</summary>
+    private static double Factorial(double x)
+    {
+        if (double.IsNaN(x)) return x;
+        var n = Math.Round(x);
+        if (Math.Abs(x - n) > BoundEpsilon) return Gamma(x + 1);
+        if (n < 0) return double.NaN;
+        if (n > 170) return double.PositiveInfinity;
+        var acc = 1d;
+        for (var i = 2; i <= (int)n; i++) acc *= i;
+        return acc;
+    }
+
+    private static readonly double[] Lanczos =
+    [
+        0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313,
+        -176.61502916214059, 12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6,
+        1.5056327351493116e-7,
+    ];
+
+    /// <summary>Lanczos approximation (g = 7), reflection below 0.5.</summary>
+    private static double Gamma(double x)
+    {
+        if (x < 0.5) return Math.PI / (Math.Sin(Math.PI * x) * Gamma(1 - x));
+        var z = x - 1;
+        var a = Lanczos[0];
+        for (var i = 1; i < Lanczos.Length; i++) a += Lanczos[i] / (z + i);
+        var t = z + 7.5;
+        return Math.Sqrt(2 * Math.PI) * Math.Pow(t, z + 0.5) * Math.Exp(-t) * a;
     }
 
     /// <summary>Math.Pow returns NaN for a negative base with a fractional
@@ -512,6 +701,8 @@ public sealed class MathExpression
     {
         Bin { Op: '+' or '-' } => 1,
         Bin { Op: '*' or '/' } => 2,
+        // ∑ swallows everything to its right; it sits unbracketed only inside a product.
+        Iter => 2,
         Neg => 3,
         Bin { Op: '^' } => 4,
         _ => 5,
@@ -525,12 +716,14 @@ public sealed class MathExpression
             Const c => c.Name is "pi" or "PI" or "π" ? @"\pi" : c.Name is "tau" or "τ" ? @"\tau" : "e",
             Var v => VariableLatex(v.Name),
             Neg n => "-" + Latex(n.Operand, 3),
-            Bin { Op: '+' } b => Latex(b.Left, 1) + " + " + Latex(b.Right, 1),
-            Bin { Op: '-' } b => Latex(b.Left, 1) + " - " + Latex(b.Right, 2),
-            Bin { Op: '*' } b => Latex(b.Left, 2) + ((b.Implicit && !(b.Left is Num && b.Right is Num)) || Juxtapose(b) ? " " : @" \cdot ") + Latex(b.Right, 2),
+            Bin { Op: '+' } b => LeftLatex(b.Left, 1) + " + " + Latex(b.Right, 1),
+            Bin { Op: '-' } b => LeftLatex(b.Left, 1) + " - " + Latex(b.Right, 2),
+            Bin { Op: '*' } b => LeftLatex(b.Left, 2) + ((b.Implicit && !(b.Left is Num && b.Right is Num)) || Juxtapose(b) ? " " : @" \cdot ") + Latex(b.Right, 2),
             Bin { Op: '/' } b => @"\frac{" + Latex(b.Left, 0) + "}{" + Latex(b.Right, 0) + "}",
             Bin { Op: '^' } b => PowerLatex(b),
             Call c => CallLatex(c),
+            Iter it => (it.Product ? @"\prod" : @"\sum") + "_{" + VariableLatex(it.Index) + "=" + Latex(it.From, 0)
+                + "}^{" + Latex(it.To, 0) + "} " + Latex(it.Body, 2),
             _ => "?",
         };
 
@@ -538,6 +731,10 @@ public sealed class MathExpression
             ? @"\left(" + text + @"\right)"
             : text;
     }
+
+    /// <summary>Brackets a ∑ on the left, or a following "+ 1" reads as part of its body.</summary>
+    private static string LeftLatex(Node node, int parent) =>
+        node is Iter ? @"\left(" + Latex(node, 0) + @"\right)" : Latex(node, parent);
 
     private static string PowerLatex(Bin b)
     {
@@ -567,6 +764,7 @@ public sealed class MathExpression
             "floor" => @"\lfloor " + a[0] + @" \rfloor",
             "ceil" => @"\lceil " + a[0] + @" \rceil",
             "exp" => "e^{" + a[0] + "}",
+            "fact" => Latex(c.Args[0], 5) + "!",
             "pow" => Latex(c.Args[0], 5) + "^{" + a[1] + "}",
             "log" when a.Length == 2 => @"\log_{" + a[1] + @"}\left(" + a[0] + @"\right)",
             "lg" => @"\lg\left(" + a[0] + @"\right)",

@@ -9,12 +9,16 @@ public sealed class RoleLibraryViewModel
     private const string BooksPrefix = "role.lorebook.";
     private const string IdentitiesPrefix = "role.user_persona.";
     private const string DefaultIdentityKey = "role.default_user_persona";
+    private const string TemplatesPrefix = "role.prompt_template.";
+    private const string DefaultTemplateKey = "role.default_prompt_template";
     private readonly SettingsRepository? _settings;
     private readonly PersonaRepository? _personas;
     private readonly ConversationRepository? _conversations;
     public ObservableCollection<Lorebook> Books { get; } = [];
     public ObservableCollection<UserPersona> Identities { get; } = [];
     public string? DefaultIdentityId { get; private set; }
+    public ObservableCollection<PromptTemplate> Templates { get; } = [];
+    public string? DefaultTemplateId { get; private set; }
 
     public RoleLibraryViewModel(SettingsRepository? settings = null,
         PersonaRepository? personas = null, ConversationRepository? conversations = null)
@@ -28,6 +32,43 @@ public sealed class RoleLibraryViewModel
         foreach (var row in settings.GetByPrefix(IdentitiesPrefix))
             Identities.Add(RoleJson.Deserialize<UserPersona>(row.Value));
         DefaultIdentityId = settings.Get(DefaultIdentityKey);
+        foreach (var template in settings.GetByPrefix(TemplatesPrefix)
+            .Select(row => RoleJson.Deserialize<PromptTemplate>(row.Value)).OrderBy(template => template.Name))
+            Templates.Add(template);
+        DefaultTemplateId = settings.Get(DefaultTemplateKey);
+    }
+
+    /// <summary>
+    /// A role's own choice, else the library default, else the built-in order —
+    /// which is what every role sent before templates existed.
+    /// </summary>
+    public PromptTemplate ResolveTemplate(string? id)
+    {
+        id ??= DefaultTemplateId;
+        if (id is null) return PromptTemplate.CreateDefault();
+        return Templates.FirstOrDefault(template => template.Id == id)
+            ?? throw new InvalidOperationException("关联的提示词编排不存在，请重新选择。");
+    }
+
+    public string? TemplateDeletionReason(PromptTemplate template) =>
+        (_personas?.CountPromptTemplateReference(template.Id) ?? 0) > 0 ? "仍有角色使用这套编排。" : null;
+
+    public void SaveTemplates(IReadOnlyList<PromptTemplate> templates, string? defaultId)
+    {
+        foreach (var template in templates)
+            if (template.Validate() is { } invalid) throw new InvalidOperationException(invalid);
+        if (defaultId is not null && !templates.Any(template => template.Id == defaultId))
+            throw new InvalidOperationException("默认编排不存在。");
+        var removed = Templates.Where(template => !templates.Any(item => item.Id == template.Id)).ToArray();
+        foreach (var template in removed)
+            if (TemplateDeletionReason(template) is { } reason) throw new InvalidOperationException(reason);
+        foreach (var template in templates) _settings?.Set(TemplatesPrefix + template.Id, RoleJson.Serialize(template));
+        foreach (var template in removed) _settings?.Remove(TemplatesPrefix + template.Id);
+        if (defaultId is null) _settings?.Remove(DefaultTemplateKey);
+        else _settings?.Set(DefaultTemplateKey, defaultId);
+        DefaultTemplateId = defaultId;
+        Templates.Clear();
+        foreach (var template in templates.OrderBy(template => template.Name)) Templates.Add(template);
     }
 
     public IReadOnlyList<Lorebook> ResolveBooks(IEnumerable<string> ids) => ids.Distinct(StringComparer.Ordinal)

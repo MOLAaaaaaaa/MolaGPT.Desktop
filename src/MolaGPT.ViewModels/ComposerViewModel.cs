@@ -2158,6 +2158,8 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         if (chunk.DeltaThinking is { Length: > 0 } th)
             assistantMsg.AppendThinking(th);
+        if (chunk.FinishReason is { } finish)
+            assistantMsg.FinishReason = finish;
     }
 
     /// <summary>

@@ -24,10 +24,11 @@ public sealed record MolaUiParseResult(MolaUiStatus Status, MolaUiEnvelope? Enve
 /// <summary>
 /// Reads a <c>mola-ui</c> fence: one JSON object with component, id and props.
 ///
-/// Models deviate from JSON in three predictable ways — trailing commas,
-/// comments, and ASCII double quotes left unescaped inside Chinese prose. The
-/// first two the reader tolerates natively; the third is repaired by treating
-/// a quote as closing a string only when what follows is structural.
+/// Models deviate from JSON in four predictable ways — trailing commas,
+/// comments, ASCII double quotes left unescaped inside Chinese prose, and LaTeX
+/// backslashes left unescaped. The first two the reader tolerates natively;
+/// backslashes are first read as LaTeX; quotes are repaired by treating a
+/// quote as closing a string only when what follows is structural.
 /// </summary>
 public static partial class MolaUiParser
 {
@@ -48,17 +49,18 @@ public static partial class MolaUiParser
         var text = raw.Trim();
         if (text.Length == 0) return closed ? MolaUiParseResult.Fail("组件内容为空") : MolaUiParseResult.Incomplete;
 
+        var prepared = KeepLatexBackslashes(text);
         JsonDocument? document = null;
         string? error = null;
         try
         {
-            document = JsonDocument.Parse(text, Options);
+            document = JsonDocument.Parse(prepared, Options);
         }
         catch (JsonException first)
         {
             try
             {
-                document = JsonDocument.Parse(RepairQuotes(text), Options);
+                document = JsonDocument.Parse(RepairQuotes(prepared), Options);
             }
             catch (JsonException)
             {
@@ -104,6 +106,59 @@ public static partial class MolaUiParser
         var match = ComponentPeek().Match(raw);
         return match.Success ? match.Groups[1].Value.ToLowerInvariant() : null;
     }
+
+    /// <summary>
+    /// Models writing LaTeX in a component (\sin, \alpha, \frac) don't double
+    /// their backslashes. An invalid escape like \s fails the whole component;
+    /// \f, \b, \r and \t are valid but read back as a control character plus
+    /// half a command.
+    ///
+    /// So an invalid escape keeps its backslash, and so do \b \f \r \t when a
+    /// letter follows directly — models never mean those control characters.
+    /// \n stays a newline: it is too common in prose to second-guess.
+    /// </summary>
+    private static string KeepLatexBackslashes(string text)
+    {
+        if (!text.Contains('\\')) return text;
+        var output = new StringBuilder(text.Length + 8);
+        var inString = false;
+        var i = 0;
+        while (i < text.Length)
+        {
+            var c = text[i];
+            if (!inString || c != '\\' || i + 1 >= text.Length)
+            {
+                if (c == '"') inString = !inString;
+                output.Append(c);
+                i++;
+                continue;
+            }
+
+            var next = text[i + 1];
+            var literal = next switch
+            {
+                '"' or '\\' or '/' or 'n' => false,
+                'u' => !(i + 5 < text.Length && text.AsSpan(i + 2, 4).IndexOfAnyExcept(HexDigits) < 0),
+                'b' or 'f' or 'r' or 't' => i + 2 < text.Length && char.IsAsciiLetter(text[i + 2]),
+                _ => true,
+            };
+            if (literal)
+            {
+                output.Append(@"\\");
+                i++;
+            }
+            else
+            {
+                output.Append(c).Append(next);
+                i += 2;
+            }
+        }
+
+        return output.ToString();
+    }
+
+    private static readonly System.Buffers.SearchValues<char> HexDigits =
+        System.Buffers.SearchValues.Create("0123456789abcdefABCDEF");
 
     private static string RepairQuotes(string text)
     {

@@ -44,6 +44,14 @@ public sealed class PersonaRepository
         return conn.ExecuteScalar<int>($"SELECT COUNT(*) FROM personas WHERE deleted_at IS NULL AND {condition}", new { id });
     }
 
+    public int CountPromptTemplateReference(string id)
+    {
+        using var conn = _db.Open();
+        return conn.ExecuteScalar<int>(
+            "SELECT COUNT(*) FROM personas WHERE deleted_at IS NULL AND json_extract(profile_json, '$.promptTemplateId') = @id",
+            new { id });
+    }
+
     public void Upsert(PersonaRow row)
     {
         using var conn = _db.Open();

@@ -1,0 +1,117 @@
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
+                        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                        xmlns:views="clr-namespace:MolaGPT.App.Views"
+                        xmlns:m="clr-namespace:MolaGPT.Core.Models;assembly=MolaGPT.Core"
+                        x:Class="MolaGPT.App.Views.PromptTemplateWindow"
+                        Title="提示词编排" Width="880" Height="700" MinWidth="720" MinHeight="560"
+                        WindowStartupLocation="CenterOwner">
+
+  <!--
+    Same master-detail shape as LorebookWindow: template above, block below.
+    The block list is the template: its order is the order the model reads.
+  -->
+
+  <Grid RowDefinitions="Auto,*,Auto" Margin="24,16,24,20">
+
+    <Grid ColumnDefinitions="*,Auto,Auto,Auto" Margin="0,0,0,16">
+      <ComboBox Name="PART_Templates" Classes="field" HorizontalAlignment="Stretch" Margin="0,0,12,0"
+                PlaceholderText="暂无编排">
+        <ComboBox.ItemTemplate>
+          <DataTemplate x:DataType="m:PromptTemplate">
+            <TextBlock Text="{Binding Name}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+          </DataTemplate>
+        </ComboBox.ItemTemplate>
+      </ComboBox>
+      <Button Grid.Column="1" Name="PART_Import" Classes="outline" Content="导入" Margin="0,0,8,0"
+              ToolTip.Tip="SillyTavern 对话补全预设或 RisuAI JSON 预设" />
+      <Button Grid.Column="2" Name="PART_Add" Classes="outline" Content="新增编排" Margin="0,0,8,0" />
+      <Button Grid.Column="3" Name="PART_Delete" Classes="outline" Content="删除编排" />
+    </Grid>
+
+    <Panel Grid.Row="1">
+      <TextBlock Name="PART_Empty" Classes="emptystate" Text="新增或导入编排" />
+
+      <Grid Name="PART_Editor" RowDefinitions="Auto,*">
+        <Grid ColumnDefinitions="*,20,Auto" Margin="0,0,0,14">
+          <StackPanel>
+            <TextBlock Classes="label" Text="名称" Margin="0,0,0,6" />
+            <TextBox Name="PART_Name" Classes="field" />
+          </StackPanel>
+          <CheckBox Grid.Column="2" Name="PART_Default" Content="设为默认编排" VerticalAlignment="Bottom"
+                    ToolTip.Tip="未单独选择编排的角色使用此编排" />
+        </Grid>
+
+        <Grid Grid.Row="1" ColumnDefinitions="260,20,*">
+          <Grid RowDefinitions="Auto,*,Auto">
+            <TextBlock Name="PART_BlockCount" Classes="label" Margin="0,0,0,8" />
+            <ListBox Grid.Row="1" Name="PART_Blocks" Classes="plainlist">
+              <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="m:PromptBlock">
+                  <StackPanel Spacing="2">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                      <TextBlock Grid.Column="1" Text="停用" IsVisible="{Binding !Enabled}" Classes="hint" Margin="6,0,0,0" />
+                    </Grid>
+                    <TextBlock Text="{Binding Detail}" IsVisible="{Binding HasRole}" FontSize="12"
+                               Foreground="{DynamicResource Brush.Text.Secondary}"
+                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                  </StackPanel>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+            <Grid Grid.Row="2" ColumnDefinitions="*,8,*" RowDefinitions="Auto,8,Auto" Margin="0,12,0,0">
+              <Button Name="PART_MoveUp" Content="上移" Classes="outline" HorizontalAlignment="Stretch" />
+              <Button Grid.Column="2" Name="PART_MoveDown" Content="下移" Classes="outline" HorizontalAlignment="Stretch" />
+              <Button Grid.Row="2" Name="PART_AddBlock" Content="添加块" Classes="outline" HorizontalAlignment="Stretch" />
+              <Button Grid.Row="2" Grid.Column="2" Name="PART_DeleteBlock" Content="删除块" Classes="outline" HorizontalAlignment="Stretch" />
+            </Grid>
+          </Grid>
+
+          <ScrollViewer Grid.Column="2" Name="PART_BlockScroll" HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+            <StackPanel Name="PART_BlockEditor">
+              <CheckBox Name="PART_BlockEnabled" Content="启用" Margin="0,0,0,12" />
+
+              <StackPanel Name="PART_TextNameRow" Margin="0,0,0,14">
+                <TextBlock Classes="label" Text="名称" Margin="0,0,0,6" />
+                <TextBox Name="PART_BlockName" Classes="field" />
+              </StackPanel>
+
+              <Grid Name="PART_PlacementRow" ColumnDefinitions="*,12,*,12,*" Margin="0,0,0,14">
+                <StackPanel>
+                  <TextBlock Classes="label" Text="消息身份" />
+                  <ComboBox Name="PART_BlockRole" Classes="field" HorizontalAlignment="Stretch">
+                    <ComboBoxItem Content="系统" /><ComboBoxItem Content="用户" /><ComboBoxItem Content="角色" />
+                  </ComboBox>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                  <TextBlock Classes="label" Text="位置" />
+                  <ComboBox Name="PART_BlockPosition" Classes="field" HorizontalAlignment="Stretch">
+                    <ComboBoxItem Content="按顺序" /><ComboBoxItem Content="插入对话" />
+                  </ComboBox>
+                </StackPanel>
+                <StackPanel Grid.Column="4" Name="PART_DepthRow">
+                  <TextBlock Classes="label" Text="距对话末尾" />
+                  <NumericUpDown Name="PART_BlockDepth" Classes="field" Minimum="0" Maximum="10000"
+                                 FormatString="0' 条消息'" ToolTip.Tip="0 表示放在对话末尾" />
+                </StackPanel>
+              </Grid>
+
+              <StackPanel Name="PART_TextRow">
+                <TextBlock Name="PART_TextLabel" Classes="label" Margin="0,0,0,6" />
+                <TextBox Name="PART_BlockText" Classes="field" AcceptsReturn="True" TextWrapping="Wrap"
+                         MinHeight="160" MaxHeight="340" ScrollViewer.VerticalScrollBarVisibility="Auto" />
+              </StackPanel>
+              <TextBlock Name="PART_BlockHint" Classes="hint" TextWrapping="Wrap" />
+            </StackPanel>
+          </ScrollViewer>
+        </Grid>
+      </Grid>
+    </Panel>
+
+    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10" Margin="0,18,0,0">
+      <Button Name="PART_Cancel" Classes="outline" Content="取消" Padding="18,7" IsCancel="True" />
+      <Button Name="PART_Save" Classes="pillprimary" Content="保存" Padding="18,7"
+              HotKey="Ctrl+Enter" ToolTip.Tip="保存 (Ctrl+Enter)" />
+    </StackPanel>
+  </Grid>
+</views:MolaContentWindow>

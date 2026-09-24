@@ -289,6 +289,23 @@
       </Border>
     </DataTemplate>
 
+    <DataTemplate DataType="r:OutputLimitRow">
+      <Border Classes="assistantcol">
+        <Border Background="{DynamicResource Brush.Bg.Tertiary}"
+                CornerRadius="{DynamicResource Radius.Sm}"
+                Padding="10,6"
+                HorizontalAlignment="Left">
+          <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="6">
+            <TextBlock Classes="icon" Text="&#xE7BA;" FontSize="12"
+                       Foreground="{DynamicResource Brush.Text.Muted}" />
+            <TextBlock Text="已达输出上限，回答不完整"
+                       FontSize="12"
+                       Foreground="{DynamicResource Brush.Text.Secondary}" />
+          </StackPanel>
+        </Border>
+      </Border>
+    </DataTemplate>
+
     <DataTemplate DataType="r:ThinkingRow">
       <Border Classes="assistantcol">
         <r:ThinkBlockView Source="{Binding Segment.Source}"

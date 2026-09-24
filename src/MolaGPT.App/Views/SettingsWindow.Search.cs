@@ -29,7 +29,7 @@ public partial class SettingsWindow
         ["PAGE_Appearance"] = "主题 深色 浅色 暗色 夜间 暗黑 外观 字体 字号 文字大小 缩放 动画 红点",
         ["PAGE_Chat"] = "Enter 回车 发送 换行 快捷键 输入 思考 推理 折叠 标题 画布 可视化 图表 HTML SVG Mermaid CSV",
         ["PAGE_System"] = "通知 提醒 托盘 最小化 关闭 后台 系统",
-        ["PAGE_Personas"] = "角色 人设 系统提示词 提示词 prompt 角色卡 世界书 SillyTavern 氛围 默认模型 温度 temperature",
+        ["PAGE_Personas"] = "角色 人设 系统提示词 提示词 prompt 角色卡 世界书 SillyTavern RisuAI 提示词编排 预设 preset 氛围 默认模型 温度 temperature",
         ["PAGE_Memory"] = "记忆 本地记忆 个人资料 称呼 职业 所在地 语言 历史对话 整理",
         ["PAGE_PostProcessing"] = "文本替换 替换 正则 regex 后处理",
         ["PAGE_Providers"] = "模型服务 API Key 密钥 key 接口 地址 BaseURL OpenAI Anthropic Claude Gemini DeepSeek OpenRouter Kimi BYOK 自定义模型 价格",

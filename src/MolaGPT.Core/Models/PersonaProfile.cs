@@ -51,6 +51,7 @@ public sealed class PersonaProfile
     public List<string> SharedLorebookIds { get; set; } = [];
     public int LoreBudget { get; set; } = 2048;
     public string? UserPersonaId { get; set; }
+    public string? PromptTemplateId { get; set; }
     public List<string> ImportNotes { get; set; } = [];
 
     [JsonIgnore]

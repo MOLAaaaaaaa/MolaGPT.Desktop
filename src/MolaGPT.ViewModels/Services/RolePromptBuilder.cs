@@ -6,18 +6,21 @@ using MolaGPT.Storage;
 namespace MolaGPT.ViewModels.Services;
 
 public sealed record RolePromptBuildResult(string SystemPrompt, RolePromptPlan Plan, LorebookEvaluation Lore,
-    int StoryEstimatedTokens, int ContextBudget);
+    int StoryEstimatedTokens, int ContextBudget, string TemplateName);
 
 public static partial class RolePromptBuilder
 {
     /// <param name="defaultPrompt">The built-in 通用助手 prompt this persona's own
     /// prompt replaces. Only reachable through <c>{{original}}</c>; a persona with
     /// an empty prompt stays empty rather than inheriting it.</param>
+    /// <param name="template">Where each part goes. Leading system blocks form the
+    /// system prompt; everything else travels in the plan, in template order.</param>
     public static RolePromptBuildResult Build(PersonaItemViewModel persona, string? defaultPrompt,
         string? conversationPrompt, string? promptMode, ConversationRoleContext context,
-        IReadOnlyList<MessageRow> history, IReadOnlyList<Lorebook> books, PromptVariables variables,
-        string sourceMessageId, int? reserveOutputTokens, bool continuation = false)
+        IReadOnlyList<MessageRow> history, IReadOnlyList<Lorebook> books, PromptTemplate template,
+        PromptVariables variables, string sourceMessageId, int? reserveOutputTokens, bool continuation = false)
     {
+        if (template.Validate() is { } invalid) throw new InvalidDataException(invalid);
         var profile = persona.Profile;
         var character = string.IsNullOrWhiteSpace(profile.Nickname) ? persona.Name : profile.Nickname;
         var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -45,68 +48,66 @@ public static partial class RolePromptBuilder
             .ToDictionary(group => group.Key, group => string.Join("\n", group.Select(hit => hit.Content)), StringComparer.Ordinal);
         vars = vars with { Outlets = outlets };
 
-        var main = Expand(persona.SystemPrompt);
-        main = SystemPromptInterpolator.Combine(main,
-            SystemPromptInterpolator.Interpolate(conversationPrompt, vars with { Original = main }), promptMode) ?? "";
-        var sections = new List<string> { main };
-        sections.AddRange(lore.Hits.Where(hit => (hit.Position ?? hit.Entry.Placement) == LorePosition.BeforeCharacter).Select(hit => hit.Content));
-        sections.Add("角色：\n" + character);
-        foreach (var (label, value) in new[]
-        {
-            ("角色资料", profile.Description), ("性格与表达", profile.Personality),
-            ("场景", context.Scenario ?? profile.Scenario), ("用户身份", fields["persona"])
-        })
-            if (!string.IsNullOrWhiteSpace(value)) sections.Add(label + "：\n" + Expand(value));
-        sections.AddRange(lore.Hits.Where(hit => (hit.Position ?? hit.Entry.Placement) == LorePosition.AfterCharacter).Select(hit => hit.Content));
+        var blocks = template.Blocks.Where(block => block.Enabled || block.Kind == PromptBlockKind.History).ToArray();
+        PromptBlock? Block(PromptBlockKind kind) => blocks.FirstOrDefault(block => block.Kind == kind);
+        // The wrapper around a slot costs tokens too; the story budget has to pay for it.
+        string Heading(PromptBlock block) => block.Text.Replace(PromptBlock.Slot, "", StringComparison.Ordinal);
+        IEnumerable<string> Lore(LorePosition position) =>
+            lore.Hits.Where(hit => (hit.Position ?? hit.Entry.Placement) == position).Select(hit => hit.Content);
+
         var contextBudget = (profile.Compatibility == RoleCompatibility.SillyTavern ? profile.LoreBudget
             : books.Where(book => book.Enabled).Sum(book => book.TokenBudget)) + 2048;
         var storyBudget = Math.Max(0, contextBudget - lore.EstimatedTokens);
         var remaining = storyBudget;
         var memories = new List<string>();
-        const string memoryHeading = "已经发生的事件：\n";
+        var eventsBlock = Block(PromptBlockKind.Events);
         void AddMemory(StoryMemory memory)
         {
-            if (string.IsNullOrWhiteSpace(memory.Text)) return;
+            if (eventsBlock is null || string.IsNullOrWhiteSpace(memory.Text)) return;
             var text = "- " + memory.Text + "\n";
-            var tokens = LorebookMatcher.EstimateTokens((memories.Count == 0 ? memoryHeading : "") + text);
+            var tokens = LorebookMatcher.EstimateTokens((memories.Count == 0 ? Heading(eventsBlock) : "") + text);
             if (tokens > remaining) return;
             memories.Add(text);
             remaining -= tokens;
         }
         foreach (var memory in context.Memories.Where(memory => memory.Pinned)) AddMemory(memory);
-        const string summaryHeading = "剧情摘要：\n";
-        var summaryRoom = remaining - LorebookMatcher.EstimateTokens(summaryHeading + "\n");
-        if (summaryRoom > 0 && !string.IsNullOrWhiteSpace(context.Summary))
+        var summary = "";
+        if (Block(PromptBlockKind.Summary) is { } summaryBlock)
         {
-            var length = 0;
-            var cost = 0d;
-            while (length < context.Summary.Length)
+            var summaryRoom = remaining - LorebookMatcher.EstimateTokens(Heading(summaryBlock) + "\n");
+            if (summaryRoom > 0 && !string.IsNullOrWhiteSpace(context.Summary))
             {
-                var next = context.Summary[length] <= 127 ? 0.25 : 1;
-                if (cost + next > summaryRoom) break;
-                cost += next;
-                length++;
-            }
-            if (length > 0 && char.IsHighSurrogate(context.Summary[length - 1])) length--;
-            if (length > 0)
-            {
-                var summary = summaryHeading + context.Summary[..length] + "\n";
-                sections.Add(summary);
-                remaining -= LorebookMatcher.EstimateTokens(summary);
+                var length = 0;
+                var cost = 0d;
+                while (length < context.Summary.Length)
+                {
+                    var next = context.Summary[length] <= 127 ? 0.25 : 1;
+                    if (cost + next > summaryRoom) break;
+                    cost += next;
+                    length++;
+                }
+                if (length > 0 && char.IsHighSurrogate(context.Summary[length - 1])) length--;
+                if (length > 0)
+                {
+                    summary = context.Summary[..length] + "\n";
+                    remaining -= LorebookMatcher.EstimateTokens(Heading(summaryBlock) + summary);
+                }
             }
         }
         var positions = history.Select((message, index) => (message.Id, index)).ToDictionary(pair => pair.Id, pair => pair.index);
         foreach (var memory in context.Memories.Where(memory => !memory.Pinned)
             .OrderByDescending(memory => memory.SourceMessageIds.Select(id => positions.GetValueOrDefault(id, -1)).DefaultIfEmpty(-1).Max())
             .ThenByDescending(memory => context.Memories.IndexOf(memory))) AddMemory(memory);
-        if (memories.Count > 0) sections.Add(memoryHeading + string.Concat(memories));
 
         var examples = new List<IReadOnlyList<RolePromptMessage>>();
-        foreach (var hit in lore.Hits.Where(hit => (hit.Position ?? hit.Entry.Placement) == LorePosition.BeforeExamples))
-            examples.AddRange(ParseExamples(hit.Content, character, variables.UserName, persona.Name));
-        examples.AddRange(ParseExamples(profile.ExampleDialogue, character, variables.UserName, persona.Name, Expand));
-        foreach (var hit in lore.Hits.Where(hit => (hit.Position ?? hit.Entry.Placement) == LorePosition.AfterExamples))
-            examples.AddRange(ParseExamples(hit.Content, character, variables.UserName, persona.Name));
+        if (Block(PromptBlockKind.Examples) is not null)
+        {
+            foreach (var text in Lore(LorePosition.BeforeExamples))
+                examples.AddRange(ParseExamples(text, character, variables.UserName, persona.Name));
+            examples.AddRange(ParseExamples(profile.ExampleDialogue, character, variables.UserName, persona.Name, Expand));
+            foreach (var text in Lore(LorePosition.AfterExamples))
+                examples.AddRange(ParseExamples(text, character, variables.UserName, persona.Name));
+        }
 
         var insertions = new List<RolePromptInsertion>();
         void Insert(string source, string role, int depth, int order, string text)
@@ -120,16 +121,77 @@ public static partial class RolePromptBuilder
             Insert(hit.BookName + " · " + hit.Entry.Name, hit.Role ?? hit.Entry.Role,
                 hit.Depth ?? hit.Entry.Depth, hit.Entry.Order, hit.Content);
         Insert("角色补充", profile.CharacterNoteRole, profile.CharacterNoteDepth, 0, Expand(profile.CharacterNote));
-        var authorNote = lore.Hits.Where(hit => (hit.Position ?? hit.Entry.Placement) == LorePosition.BeforeNote).Select(hit => hit.Content)
-            .Concat([Expand(context.AuthorNote)])
-            .Concat(lore.Hits.Where(hit => (hit.Position ?? hit.Entry.Placement) == LorePosition.AfterNote).Select(hit => hit.Content));
+        var authorNote = Lore(LorePosition.BeforeNote).Concat([Expand(context.AuthorNote)]).Concat(Lore(LorePosition.AfterNote));
         Insert("对话补充", context.AuthorNoteRole, context.AuthorNoteDepth, 1,
             string.Join("\n\n", authorNote.Where(text => !string.IsNullOrWhiteSpace(text))));
-        Insert("后置指令", "system", 0, int.MaxValue,
-            SystemPromptInterpolator.Interpolate(profile.PostHistoryInstructions, vars with { Original = "" }));
-        return new(string.Join("\n\n", sections.Where(text => !string.IsNullOrWhiteSpace(text))),
-            new RolePromptPlan(examples, insertions, reserveOutputTokens, continuation), lore,
-            storyBudget - remaining, contextBudget);
+
+        // Main and PostHistory follow SillyTavern: the role's own text wins, and
+        // reaches the template's text through {{original}}.
+        string Content(PromptBlock block)
+        {
+            switch (block.Kind)
+            {
+                case PromptBlockKind.Main:
+                    var fallback = Expand(block.Text);
+                    var main = string.IsNullOrWhiteSpace(persona.SystemPrompt) ? fallback
+                        : SystemPromptInterpolator.Interpolate(persona.SystemPrompt,
+                            block.Text.Length > 0 ? vars with { Original = fallback } : vars);
+                    return SystemPromptInterpolator.Combine(main,
+                        SystemPromptInterpolator.Interpolate(conversationPrompt, vars with { Original = main }), promptMode) ?? "";
+                case PromptBlockKind.PostHistory:
+                    var instruction = SystemPromptInterpolator.Interpolate(block.Text, vars with { Original = "" });
+                    return string.IsNullOrWhiteSpace(profile.PostHistoryInstructions) ? instruction
+                        : SystemPromptInterpolator.Interpolate(profile.PostHistoryInstructions, vars with { Original = instruction });
+                case PromptBlockKind.Text: return Expand(block.Text);
+                case PromptBlockKind.CharacterName: return character;
+                case PromptBlockKind.Description: return Expand(profile.Description);
+                case PromptBlockKind.Personality: return Expand(profile.Personality);
+                case PromptBlockKind.Scenario: return Expand(context.Scenario ?? profile.Scenario);
+                case PromptBlockKind.UserPersona: return Expand(fields["persona"]);
+                case PromptBlockKind.LoreBefore: return string.Join("\n\n", Lore(LorePosition.BeforeCharacter));
+                case PromptBlockKind.LoreAfter: return string.Join("\n\n", Lore(LorePosition.AfterCharacter));
+                case PromptBlockKind.Summary: return summary;
+                case PromptBlockKind.Events: return string.Concat(memories);
+                default: return "";
+            }
+        }
+
+        var system = new List<string>();
+        var before = new List<RolePromptMessage>();
+        var after = new List<RolePromptMessage>();
+        var examplesAt = 0;
+        var inSystem = true;
+        var afterHistory = false;
+        for (var index = 0; index < blocks.Length; index++)
+        {
+            var block = blocks[index];
+            if (block.Kind == PromptBlockKind.History) { afterHistory = true; continue; }
+            if (block.Kind == PromptBlockKind.Examples)
+            {
+                examplesAt = before.Count;
+                inSystem &= examples.Count == 0;
+                continue;
+            }
+            var content = Content(block);
+            if (string.IsNullOrWhiteSpace(content)) continue;
+            var text = block.UsesFormat && block.Text.Length > 0
+                ? Expand(block.Text).Replace(PromptBlock.Slot, content, StringComparison.Ordinal) : content;
+            if (block.Depth is { } depth) Insert(block.DisplayName, block.Role, depth, index, text);
+            else if (afterHistory) after.Add(new(block.Role, text));
+            else if (inSystem && block.Role == "system") system.Add(text);
+            else
+            {
+                inSystem = false;
+                before.Add(new(block.Role, text));
+            }
+        }
+        if (after.Count > 0 && after[^1].Role == "assistant")
+            throw new InvalidDataException("「" + template.Name + "」：对话历史之后实际发送的最后一块为角色身份，请调整顺序。");
+        // An empty prompt would hand the turn back to Pi's own coding-assistant prompt.
+        if (system.Count == 0) system.Add("角色：\n" + character);
+        return new(string.Join("\n\n", system),
+            new RolePromptPlan(examples, insertions, reserveOutputTokens, continuation, before, examplesAt, after), lore,
+            storyBudget - remaining, contextBudget, template.Name);
     }
 
     private static IReadOnlyList<IReadOnlyList<RolePromptMessage>> ParseExamples(string text,

@@ -25,6 +25,7 @@ function-plot：函数图像，可带参数滑块，用户可以缩放、拖动�
 props: {"title"?: string, "functions": [{"expr": string, "label"?: string}], "params"?: [{"name": string, "min": number, "max": number, "default"?: number, "step"?: number}], "x"?: [min, max], "y"?: [min, max]}
 - expr 可以是关于 x 的表达式（"x^2 - 1"）、"y = …"、"x = …"（关于 y）、"r = …"（极坐标，自变量 theta），或同时含 x、y 的方程（"x^2 + y^2 = 4"）。参数曲线写成 {"x": "cos(t)", "y": "sin(2*t)", "t": [0, "2*pi"]}。
 - 乘法写 *，乘方写 ^。可用函数：sin cos tan asin acos atan sinh cosh tanh sqrt cbrt abs exp ln log lg floor ceil round sign min max mod；常量 pi、e。ln 和 log 都是自然对数，lg 是常用对数，log(x, b) 以 b 为底。
+- 求和写 sum(k=1, n, 表达式)，连乘写 prod(k=1, n, 表达式)：上下限取整，最多 1000 项，不能嵌套。阶乘写 n!。
 - 讲「某个量如何影响图像」时，把它声明成 params 里的滑块并写进 expr（如 "a*sin(b*x + c)"），比画多条固定曲线更好。参数名不能用 x、y、t、theta、e、pi。
 - 最多 6 条曲线、4 个参数。x、y 的范围可以写数字，也可以写 "2*pi" 这样的表达式；不写 y 时按曲线自动取值。
 

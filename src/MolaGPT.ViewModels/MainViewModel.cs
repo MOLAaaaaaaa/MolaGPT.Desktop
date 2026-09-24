@@ -334,13 +334,15 @@ public sealed partial class MainViewModel : ObservableObject
                 ? $"额度剩余 {credits.RemainingPercent}% · 账号共用"
                 : "该模型暂不可用";
 
+        var uses = credits.EstimatedUses(modelStatus.CreditMultiplier) ?? 0;
+        if (uses == int.MaxValue)
+            return "不消耗额度 · 账号共用";
+
         if (credits.Exhausted)
             return $"额度已耗尽 · {credits.RecoveryLabel}";
 
-        var uses = credits.EstimatedUses(modelStatus.CreditMultiplier) ?? 0;
         return uses switch
         {
-            int.MaxValue => "不消耗额度 · 账号共用",
             <= 0 => "剩余额度不足以再发一次",
             _ => $"约 {uses} 次 · 账号共用"
         };

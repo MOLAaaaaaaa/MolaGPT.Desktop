@@ -726,6 +726,7 @@ public sealed partial class ChatViewModel : ObservableObject
             IReadOnlyList<ThinkingSegmentDelta>? thinkingSegments = null;
             var retryCurrent = 0;
             var wasStopped = false;
+            string? finishReason = null;
             var contextTokens = 0;
             var contextWindow = 0;
             var compactionTokensBefore = 0;
@@ -768,6 +769,7 @@ public sealed partial class ChatViewModel : ObservableObject
                         toolCalls);
                     wasStopped = doc.RootElement.TryGetProperty("stopped", out var st)
                                  && st.ValueKind == JsonValueKind.True;
+                    finishReason = ReadString(doc.RootElement, "finish_reason");
                     contextTokens = ReadMetaInt(doc.RootElement, "context_tokens");
                     contextWindow = ReadMetaInt(doc.RootElement, "context_window");
                     compactionTokensBefore = ReadMetaInt(doc.RootElement, "compaction_tokens_before");
@@ -825,7 +827,7 @@ public sealed partial class ChatViewModel : ObservableObject
                 generationSeconds,
                 personaId,
                 personaName,
-                row.ParentId) { ArtifactRefs = artifactRefs });
+                row.ParentId) { ArtifactRefs = artifactRefs, FinishReason = finishReason });
         }
 
         return prepared;
@@ -867,6 +869,7 @@ public sealed partial class ChatViewModel : ObservableObject
             RetryAttempts = prepared.RetryAttempts,
             RetryCurrentIndex = prepared.RetryCurrentIndex,
             WasStopped = prepared.WasStopped,
+            FinishReason = prepared.FinishReason,
             ContextTokens = prepared.ContextTokens,
             ContextWindow = prepared.ContextWindow,
             CompactionTokensBefore = prepared.CompactionTokensBefore,
@@ -927,6 +930,7 @@ public sealed partial class ChatViewModel : ObservableObject
         int BranchIndex = 0)
     {
         public IReadOnlyList<ArtifactRefChip>? ArtifactRefs { get; init; }
+        public string? FinishReason { get; init; }
     }
 
     /// <summary>
@@ -1188,6 +1192,7 @@ public sealed partial class ChatViewModel : ObservableObject
         if (!string.IsNullOrEmpty(vm.PersonaId)) meta["persona_id"] = vm.PersonaId;
         if (!string.IsNullOrEmpty(vm.PersonaName)) meta["persona_name"] = vm.PersonaName;
         if (vm.WasStopped) meta["stopped"] = true;
+        if (vm.FinishReason is { Length: > 0 } finish && finish != "stop") meta["finish_reason"] = finish;
         if (vm.Usage is not null)
         {
             meta["response_stats"] = BuildUsageJson(vm.Usage);
@@ -1364,6 +1369,8 @@ public sealed partial class ChatViewModel : ObservableObject
             ["sources"] = attempt.Sources is null ? (JsonNode?)null : BuildSourcesJson(attempt.Sources),
             ["stopped"] = attempt.WasStopped ? true : (JsonNode?)null
         };
+        if (attempt.FinishReason is { Length: > 0 } finish && finish != "stop")
+            result["finish_reason"] = finish;
         if (BuildTurnTimingJson(attempt.FirstTokenSeconds, attempt.GenerationSeconds) is { } timing)
             result["turn_timing"] = timing;
         if (!string.IsNullOrWhiteSpace(attempt.Thinking))
@@ -1843,7 +1850,8 @@ public sealed partial class ChatViewModel : ObservableObject
                 firstTokenSeconds,
                 generationSeconds,
                 item.TryGetProperty("persona_id", out var personaId) && personaId.ValueKind == JsonValueKind.String ? personaId.GetString() : null,
-                item.TryGetProperty("persona_name", out var personaName) && personaName.ValueKind == JsonValueKind.String ? personaName.GetString() : null));
+                item.TryGetProperty("persona_name", out var personaName) && personaName.ValueKind == JsonValueKind.String ? personaName.GetString() : null,
+                ReadString(item, "finish_reason")));
         }
 
         var current = ReadInt(retry, "current") ?? Math.Max(0, attempts.Count - 1);
