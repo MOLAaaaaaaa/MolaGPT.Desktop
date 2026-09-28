@@ -126,7 +126,12 @@ public static class MemoryProjector
         if (!fields.Any(field => field.Key == MemoryProfile.Language))
             fields.Add(("preferred_language", CultureInfo.CurrentCulture.Name));
         fields.Add(("timezone", LocalTimeZoneId()));
-        fields.Add(("current_time", now.ToString("ddd yy-MM-dd HH:mm", CultureInfo.InvariantCulture)));
+        // The day, not the minute. This block sits near the top of the system
+        // prompt, which is re-read every turn and precedes the whole history, so a
+        // clock here invalidated the provider's prefix cache on every turn sent in
+        // a new minute: 80% of such turns hit nothing, against 2% within a turn.
+        // Same rule as the persona's {{time}}.
+        fields.Add(("current_date", now.ToString("ddd yy-MM-dd", CultureInfo.InvariantCulture)));
 
         var sb = new StringBuilder("<user_profile>\n");
         foreach (var (key, value) in fields) sb.Append(key).Append(": ").Append(value).Append('\n');

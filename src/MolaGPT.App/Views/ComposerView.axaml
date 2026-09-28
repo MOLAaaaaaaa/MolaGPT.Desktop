@@ -39,6 +39,32 @@
           </DataTemplate>
         </ItemsControl.ItemTemplate>
       </ItemsControl>
+      <!-- Typed while the turn runs, not yet taken in by the agent. Withdrawing
+           puts the text back in the input box. -->
+      <ItemsControl ItemsSource="{Binding PendingInjections}"
+                    IsVisible="{Binding HasPendingInjections}"
+                    Margin="2,0,2,6">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="vm:PendingInjectionViewModel">
+            <Border Classes="queuechip" ToolTip.Tip="{Binding Text}" HorizontalAlignment="Left">
+              <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="6">
+                <TextBlock Text="{Binding ModeLabel}" FontSize="12" FontWeight="SemiBold"
+                           VerticalAlignment="Center" Foreground="{DynamicResource Brush.Primary}" />
+                <TextBlock Text="{Binding Preview}" FontSize="12" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Brush.Text.Secondary}"
+                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="420" />
+                <Button Width="18" Height="18" Padding="0" Classes="refchipclose"
+                        VerticalAlignment="Center" ToolTip.Tip="撤回"
+                        Command="{Binding $parent[ItemsControl].((vm:ComposerViewModel)DataContext).WithdrawInjectionCommand}"
+                        CommandParameter="{Binding}">
+                  <TextBlock Classes="icon" Text="&#xE711;" FontSize="9"
+                             Foreground="{DynamicResource Brush.Text.Muted}" />
+                </Button>
+              </StackPanel>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
       <Border Classes="attachstrip" IsVisible="{Binding HasAttachments}">
         <StackPanel>
           <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,5">
@@ -78,8 +104,8 @@
                             Background="{DynamicResource Brush.Bg.Tertiary}"
                             Margin="0,0,6,0" ClipToBounds="True">
                       <Panel>
-                        <r:AttachmentThumbnail Bytes="{Binding Bytes}"
-                                               IsVisible="{Binding IsImage}" />
+                        <r:AttachmentThumbnail Bytes="{Binding Bytes}" IsImage="{Binding IsImage}"
+                                                IsVisible="{Binding IsImage}" />
                         <TextBlock Classes="icon" Text="&#xE7C3;" FontSize="16"
                                    IsVisible="{Binding !IsImage}"
                                    Foreground="{DynamicResource Brush.Text.Secondary}"
@@ -375,21 +401,87 @@
                ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
 
       <!-- Row 4: hint on the left, context gauge and send/stop on the right -->
-      <Grid Grid.Row="4" ColumnDefinitions="*,Auto,Auto" Margin="0,6,0,0">
+      <Grid Grid.Row="4" ColumnDefinitions="*,Auto,Auto,Auto" Margin="0,6,0,0">
         <Panel Grid.Column="0" VerticalAlignment="Center">
-          <TextBlock Name="PART_Hint" Classes="muted"
-                     FontSize="{DynamicResource Font.Size.XSmall}"
-                     Text="Enter 发送 · Shift+Enter 换行"
-                     IsVisible="{Binding EnterToSend}" />
-          <TextBlock Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}"
-                     Text="Enter 换行 · Ctrl+Enter 发送"
-                     IsVisible="{Binding !EnterToSend}" />
+          <Panel IsVisible="{Binding !IsInjectAvailable}">
+            <TextBlock Name="PART_Hint" Classes="muted"
+                       FontSize="{DynamicResource Font.Size.XSmall}"
+                       Text="Enter 发送 · Shift+Enter 换行"
+                       IsVisible="{Binding EnterToSend}" />
+            <TextBlock Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}"
+                       Text="Enter 换行 · Ctrl+Enter 发送"
+                       IsVisible="{Binding !EnterToSend}" />
+          </Panel>
+          <Panel IsVisible="{Binding IsInjectAvailable}">
+            <TextBlock Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}"
+                       Text="{Binding RunningSendHint}" />
+          </Panel>
         </Panel>
+
+        <!-- Running background tasks of this conversation. State, not an event:
+             a count beside the gauge, the list and its stop buttons behind it. -->
+        <Button Grid.Column="1"
+                Name="PART_Tasks"
+                Classes="contextgauge"
+                IsVisible="{Binding Chat.HasRunningTasks}"
+                ToolTip.Tip="后台任务"
+                VerticalAlignment="Center"
+                Margin="0,0,4,0">
+          <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <TextBlock Classes="icon" Text="&#xE916;" FontSize="13" VerticalAlignment="Center"
+                       Foreground="{DynamicResource Brush.Primary}" />
+            <TextBlock Text="{Binding Chat.RunningTaskCount}"
+                       Classes="muted"
+                       FontSize="{DynamicResource Font.Size.XSmall}"
+                       VerticalAlignment="Center"
+                       Margin="5,0,0,0" />
+          </StackPanel>
+
+          <Button.Flyout>
+            <Flyout Placement="TopEdgeAlignedRight" FlyoutPresenterClasses="molaflyout">
+              <Border Classes="flyoutsurface contextpanel" Width="300">
+                <StackPanel Spacing="6">
+                  <TextBlock Text="后台任务" Classes="muted"
+                             FontSize="{DynamicResource Font.Size.XSmall}" />
+                  <ItemsControl ItemsSource="{Binding Chat.ConversationTasks}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="vm:TaskChipViewModel">
+                        <Grid ColumnDefinitions="*,Auto" Margin="0,4">
+                          <StackPanel Spacing="2" VerticalAlignment="Center">
+                             <Button IsVisible="{Binding CanInspect}" Command="{Binding InspectCommand}"
+                                     Click="OnInspectTask" Padding="0" Background="Transparent"
+                                     HorizontalContentAlignment="Left" ToolTip.Tip="查看执行">
+                               <TextBlock Text="{Binding Label}" FontSize="13"
+                                          TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                             </Button>
+                             <TextBlock Text="{Binding Label}" FontSize="13"
+                                        TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                        IsVisible="{Binding !CanInspect}" />
+                            <TextBlock Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}">
+                              <Run Text="{Binding KindLabel}" />
+                              <Run Text=" · " />
+                              <Run Text="{Binding Id}" />
+                              <Run Text=" · " />
+                              <Run Text="{Binding ElapsedText}" />
+                            </TextBlock>
+                          </StackPanel>
+                          <Button Grid.Column="1" Classes="toolchip" Content="停止"
+                                  Command="{Binding StopCommand}"
+                                  VerticalAlignment="Center" Margin="10,0,0,0" />
+                        </Grid>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+              </Border>
+            </Flyout>
+          </Button.Flyout>
+        </Button>
 
         <!-- Context gauge. Sits beside 发送 because that is where the decision it
              informs gets made: send another turn, or compact first. Absent rather
              than empty until there is a real reading — see ContextGaugeViewModel. -->
-        <Button Grid.Column="1"
+        <Button Grid.Column="2"
                 Name="PART_ContextGauge"
                 Classes="contextgauge"
                 IsVisible="{Binding ContextGauge.IsVisible}"
@@ -471,7 +563,17 @@
         <!-- Send and stop swap places rather than one button changing meaning:
              a button whose action changes under the cursor mid-stream is how
              people cancel answers they wanted to keep. -->
-        <Panel Grid.Column="2">
+        <!-- Running-turn send sits beside 停止 rather than replacing it: both are live while the
+             turn runs, and neither should move under the cursor. -->
+        <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6">
+        <Button Name="PART_Inject"
+                Classes="inject"
+                 Command="{Binding SendDuringTaskCommand}"
+                 IsVisible="{Binding IsInjectAvailable}"
+                 ToolTip.Tip="{Binding DefaultInjectionTooltip}">
+          <TextBlock Classes="icon" Text="&#xE724;" FontSize="14" />
+        </Button>
+        <Panel>
           <Button Name="PART_Send"
                   Classes="send"
                   Command="{Binding SendCommand}"
@@ -489,6 +591,7 @@
                        Foreground="{DynamicResource Brush.Text.OnPrimary}" />
           </Button>
         </Panel>
+        </StackPanel>
       </Grid>
     </Grid>
   </Border>
@@ -539,6 +642,43 @@
       <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
       <Setter Property="Padding" Value="8,4,4,4" />
     </Style>
+    <!-- Waiting to be taken into the running turn: neutral, because it is the
+         user's own text rather than something the app is pointing at. -->
+    <Style Selector="Border.queuechip">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="8,4,4,4" />
+      <Setter Property="Margin" Value="0,0,0,4" />
+    </Style>
+
+    <!-- Running-turn send: the square in its secondary form, beside 停止. No fade-in, unlike
+         Button.send: an Opacity animation can freeze short of 1 on this swap chain. -->
+    <Style Selector="Button.inject">
+      <Setter Property="Width" Value="{DynamicResource Size.SendButton}" />
+      <Setter Property="Height" Value="{DynamicResource Size.SendButton}" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.inject:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+    </Style>
+    <Style Selector="Button.inject TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+    <Style Selector="Button.inject:disabled /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    </Style>
+    <Style Selector="Button.inject:disabled TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+    </Style>
+
     <Style Selector="Button.refchipclose">
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />

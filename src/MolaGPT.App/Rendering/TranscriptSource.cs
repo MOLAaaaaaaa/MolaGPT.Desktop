@@ -305,6 +305,10 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         // own line.
         if (string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))
         {
+            // Written by the app, not typed by the user: a line, not a bubble.
+            if (message.IsTaskNotification)
+                return new List<TranscriptRow> { new TaskNoticeRow(message) };
+
             segment.Documents.TryGetValue(0, out var userPrevious);
             var userDocument = MessageDocumentParser.ParseIncremental(userPrevious, message.VisibleContent);
             segment.Documents[0] = userDocument;

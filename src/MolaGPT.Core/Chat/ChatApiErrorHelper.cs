@@ -16,8 +16,11 @@ public static class ChatApiErrorHelper
         if (response.IsSuccessStatusCode) return;
 
         var body = await ReadBodyAsync(response.Content, ct).ConfigureAwait(false);
-        var message = ExtractErrorMessage(body);
         var status = (int)response.StatusCode;
+        // 服务端 nginx 的长连接并发上限触发时回的是一页 HTML，剥完标签只剩「429 Too Many Requests nginx」
+        if (status == 429 && body.TrimStart().StartsWith('<'))
+            throw new InvalidOperationException($"{context}失败：当前使用人数较多，请稍后再试。");
+        var message = ExtractErrorMessage(body);
         var reason = response.ReasonPhrase;
         var label = string.IsNullOrWhiteSpace(reason) ? status.ToString() : $"{status} {reason}";
 

@@ -35,7 +35,19 @@ public sealed record LocalToolOptions(
     // override, so turning memory off really means the tool is not on the wire —
     // not merely that the model was not told about it.
     bool Memory = false,
-    bool MemoryRecall = false)
+    bool MemoryRecall = false,
+    // Work only: Python may run in the background (and time out into it), and the
+    // task tools are on the wire.
+    bool BackgroundTasks = false,
+    bool Subagents = false,
+    // Set on a sub-agent's own requests. Its tool list stays identical to the
+    // parent's — that is what keeps the cached prefix shared — so what it may not
+    // do is enforced when a call arrives, not by leaving tools out.
+    bool IsSubagent = false,
+    // The conversation whose working directory tools use. A sub-agent has its own
+    // transcript but works in its parent's folder, so the two ids differ.
+    string? WorkspaceConversationId = null,
+    string? AgentId = null)
 {
     public bool HasAny =>
         Network
@@ -106,7 +118,12 @@ public sealed record LocalToolOptions(
             Browser: ReadBrowser(raw),
             BrowserPermissionMode: ReadEnum(raw, "browserPermissionMode", ToolPermissionMode.Approval),
             Memory: ReadBool(raw, "memory"),
-            MemoryRecall: ReadBool(raw, "memoryRecall"));
+            MemoryRecall: ReadBool(raw, "memoryRecall"),
+            BackgroundTasks: ReadBool(raw, "backgroundTasks"),
+            Subagents: ReadBool(raw, "subagents"),
+            IsSubagent: ReadBool(raw, "subagent"),
+            WorkspaceConversationId: ReadString(raw, "workspaceConversation"),
+            AgentId: ReadString(raw, "agentId"));
     }
 
     private static BrowserControlOptions? ReadBrowser(object raw)

@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Tasks;
 using MolaGPT.Core.Memory;
 using MolaGPT.Core.Models;
 using MolaGPT.Presentation;
@@ -305,6 +306,17 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     /// pills carry that — so it is worth one line, not twenty numbered chips.</summary>
     public string SourcesLabel => $"{Sources?.Count ?? 0} 个来源";
     public bool HasToolCalls => ToolCalls.Count > 0;
+
+    /// <summary>
+    /// Set when this user-role message is a background task's notification rather
+    /// than something the user typed. It stays a real user message — the agent's
+    /// transcript has it as one, and retry, branching and history rebuilds all count
+    /// on the two agreeing — and only the transcript draws it differently.
+    /// </summary>
+    public TaskNotice? TaskNotification => _taskNotice;
+    public bool IsTaskNotification => _taskNotice is not null;
+    private TaskNotice? _taskNotice;
+
     public string VisibleContent => ProcessCitationRefs(StripSystemHints(Content));
     public IReadOnlyList<string> BranchSiblingIds { get; private set; } = [];
     public int BranchIndex { get; private set; }
@@ -496,6 +508,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         _role = role;
         _content = content;
         _timestamp = timestamp;
+        _taskNotice = role == ChatMessage.RoleUser ? TaskNotice.TryParse(content) : null;
         // Capture the UI sync context if we were constructed on the UI thread
         // (which is the normal case — ChatViewModel.AppendUserMessage and
         // BeginAssistantMessage both run on the dispatcher). Falls back to
@@ -934,7 +947,9 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
                     tool.ResultPreviewJson,
                     tool.Provider,
                     tool.ContentOffset,
-                    tool.TimelineIndex))
+                    tool.TimelineIndex,
+                    tool.BackgroundTaskId,
+                    tool.TaskState))
                 .ToArray();
 
         return new MessageAttempt(
@@ -1162,6 +1177,9 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     partial void OnRoleChanged(string value) => OnActionStateChanged();
     partial void OnContentChanged(string value)
     {
+        _taskNotice = Role == ChatMessage.RoleUser ? TaskNotice.TryParse(value) : null;
+        OnPropertyChanged(nameof(TaskNotification));
+        OnPropertyChanged(nameof(IsTaskNotification));
         OnPropertyChanged(nameof(VisibleContent));
         RebuildDisplayBlocks();
         OnActionStateChanged();
@@ -1653,11 +1671,14 @@ public sealed partial class ToolGroupViewModel : ObservableObject
     public ObservableCollection<ToolCallViewModel> Items { get; } = new();
 
     public string IconGlyph => ToolCallViewModel.IconGlyphFor(Name);
-    public string Label => ToolCallViewModel.LabelFor(Name);
+    public string Label => Name == SubagentTool.ToolName
+        ? $"{(IsRunning ? "派发" : "已派发")} {Count} 个子 Agent"
+        : ToolCallViewModel.LabelFor(Name);
     public int Count => Items.Count;
 
     public string CountText => Name switch
     {
+        SubagentTool.ToolName => string.Empty,
         ToolCallViewModel.SkillLoadKey => $"{Count} 个技能",
         "read_file" => $"{Count} 个文件",
         "glob_files" => $"{Count} 次查找",
@@ -1669,6 +1690,7 @@ public sealed partial class ToolGroupViewModel : ObservableObject
         MemoryTools.WriteToolName => $"{Count} 次更新",
         _ => $"{Count} 次"
     };
+    public bool HasCountText => CountText.Length > 0;
 
     private int DoneCount => Items.Count(i => i.IsCompleted);
     private int ErrorCount => Items.Count(i => i.IsError);
@@ -1681,6 +1703,7 @@ public sealed partial class ToolGroupViewModel : ObservableObject
     public string StatusText =>
         IsRunning ? $"{DoneCount}/{Count}"
         : ErrorCount > 0 ? $"{ErrorCount} 失败"
+        : Name == SubagentTool.ToolName ? "已完成"
         : $"{Count} 步完成";
 
     /// <summary>Reconcile this (kept) group's rows to match a freshly built one,
@@ -1707,8 +1730,10 @@ public sealed partial class ToolGroupViewModel : ObservableObject
 
     public void Refresh()
     {
+        OnPropertyChanged(nameof(Label));
         OnPropertyChanged(nameof(Count));
         OnPropertyChanged(nameof(CountText));
+        OnPropertyChanged(nameof(HasCountText));
         OnPropertyChanged(nameof(IsRunning));
         OnPropertyChanged(nameof(IsError));
         OnPropertyChanged(nameof(IsCompleted));
@@ -1733,6 +1758,11 @@ public sealed partial class ThinkingSegmentViewModel : ObservableObject
     }
 }
 
+public sealed record TaskCardItem(string Label, string Status, string? Detail)
+{
+    public bool HasDetail => !string.IsNullOrWhiteSpace(Detail);
+}
+
 public sealed partial class ToolCallViewModel : ObservableObject
 {
     private static readonly JsonSerializerOptions DisplayJsonOptions = new()
@@ -1754,6 +1784,12 @@ public sealed partial class ToolCallViewModel : ObservableObject
     [ObservableProperty] private string? _resultPreviewJson;
     [ObservableProperty] private string? _provider;
     [ObservableProperty] private ToolArgsView _argsView = ToolArgsView.Empty;
+    private bool _resultFailed;
+    private string? _cardResultLabel;
+    private string? _cardResultModel;
+    private string? _cardResultAgentId;
+    private string? _cardResultOutput;
+    private IReadOnlyList<TaskCardItem> _cardItems = [];
 
     public ToolCallViewModel(string id, string name)
     {
@@ -1777,8 +1813,9 @@ public sealed partial class ToolCallViewModel : ObservableObject
     public bool ShowArgumentsFold => HasArguments && !IsKnownBuiltInTool;
     public string? DisplayArgumentsJson => FormatDisplayJson(ArgumentsJson);
     public string? DisplayResultPreviewJson => FormatDisplayJson(ResultPreviewJson);
-    public bool IsCompleted => Status.Equals("completed", StringComparison.OrdinalIgnoreCase);
-    public bool IsError => Status.Equals("error", StringComparison.OrdinalIgnoreCase);
+    public bool IsCompleted => Status.Equals("completed", StringComparison.OrdinalIgnoreCase) && !_resultFailed;
+    public bool IsError => Status.Equals("error", StringComparison.OrdinalIgnoreCase)
+                           || Status.Equals("failed", StringComparison.OrdinalIgnoreCase) || _resultFailed;
     public bool IsSearch => Name.Equals("search_web", StringComparison.OrdinalIgnoreCase)
                             || Name.Equals("web_search", StringComparison.OrdinalIgnoreCase);
     public bool IsMemoryTool => Name is MemoryTools.RecallToolName or MemoryTools.WriteToolName;
@@ -1800,6 +1837,8 @@ public sealed partial class ToolCallViewModel : ObservableObject
         "read_file" => true,
         "glob_files" => true,
         "grep_files" => true,
+        SubagentTool.ToolName or TaskTools.StatusToolName or TaskTools.StopToolName => true,
+        "send_agent_message" or "followup_agent" or "wait_agents" => true,
         _ => false
     };
 
@@ -1842,14 +1881,52 @@ public sealed partial class ToolCallViewModel : ObservableObject
 
     public bool IsSkillLoad => SkillName is not null;
 
+    public bool IsTaskLogRead => Name is "read_file" or "Read"
+        && ArgsView.IsPathPrimary && TaskLogParts(ArgsView.PrimaryArg!.Value) is not null;
+    public bool IsTaskCard => IsTaskLogRead || Name is
+        SubagentTool.ToolName or "send_agent_message" or "followup_agent" or "wait_agents"
+        or TaskTools.StatusToolName or TaskTools.StopToolName;
+    public string TaskCardSubtitle => IsTaskLogRead
+        ? string.Join(" · ", TaskLogParts(ArgsView.PrimaryArg!.Value)!)
+        : string.Join(" · ", new[] { _cardResultLabel, _cardResultModel, _cardResultAgentId }
+            .Where(s => !string.IsNullOrWhiteSpace(s)));
+    public bool HasTaskCardSubtitle => !string.IsNullOrWhiteSpace(TaskCardSubtitle);
+    public string? TaskCardInput => IsTaskLogRead ? null : ArgsView.PrimaryArg?.Value;
+    public bool HasTaskCardInput => !string.IsNullOrWhiteSpace(TaskCardInput);
+    public IReadOnlyList<TaskCardItem> TaskCardItems => _cardItems;
+    public bool HasTaskCardItems => _cardItems.Count > 0;
+    public string? TaskCardOutput => _cardResultOutput;
+    public bool HasTaskCardOutput => !string.IsNullOrWhiteSpace(_cardResultOutput);
+    public string? TaskCardTaskStatus => BackgroundTaskId is not null ? TaskState : null;
+    public bool HasTaskCardTaskStatus => TaskCardTaskStatus is not null;
+    public string TaskCardTaskStatusText => TaskCardTaskStatus switch
+    {
+        "running" => "运行中",
+        "completed" => "任务完成",
+        "failed" => "任务失败",
+        "cancelled" => "已停止",
+        "interrupted" => "已中断",
+        _ => string.Empty
+    };
+
+    private static string[]? TaskLogParts(string path)
+    {
+        var parts = path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i + 2 < parts.Length; i++)
+            if (parts[i] == ".tasks" && parts[i + 1].StartsWith("run-", StringComparison.Ordinal)
+                && parts[i + 2] is "stdout.log" or "stderr.log" && i + 2 == parts.Length - 1)
+                return [parts[i + 1], parts[i + 2]];
+        return null;
+    }
+
     /// <summary>What the card actually shows. <see cref="Label"/> stays the tool's
     /// own name so nothing else has to know about skills.</summary>
-    public string DisplayLabel => IsSkillLoad
+    public string DisplayLabel => IsTaskLogRead ? "任务输出" : IsSkillLoad
         ? LabelFor(SkillLoadKey)
-        : IsMemoryTool
+        : IsMemoryTool || IsTaskCard
             ? LabelFor(Name)
             : Label;
-    public string DisplayIconGlyph => IsSkillLoad ? IconGlyphFor(SkillLoadKey) : IconGlyph;
+    public string DisplayIconGlyph => IsTaskLogRead ? "\uE916" : IsSkillLoad ? IconGlyphFor(SkillLoadKey) : IconGlyph;
 
     /// <summary>
     /// Canonical grouping key for tools we merge into one card when called back to
@@ -1871,6 +1948,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
         // A browser task is navigate → snapshot → click → snapshot …: a dozen
         // calls that are one errand. They group like the file reads do.
         "browser" => "browser",
+        SubagentTool.ToolName => SubagentTool.ToolName,
         MemoryTools.RecallToolName => MemoryTools.RecallToolName,
         MemoryTools.WriteToolName => MemoryTools.WriteToolName,
         _ => null
@@ -1878,7 +1956,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
 
     /// <summary>Skill loads form their own run: absorbed into a "读取文件 · 3 个文件"
     /// card they would be invisible again, which is the thing this exists to fix.</summary>
-    public string? GroupKey => IsSkillLoad ? SkillLoadKey : GroupKeyFor(Name);
+    public string? GroupKey => IsSkillLoad ? SkillLoadKey : IsTaskLogRead ? null : GroupKeyFor(Name);
     public bool IsGroupable => GroupKey is not null;
 
     /// <summary>
@@ -1900,6 +1978,11 @@ public sealed partial class ToolCallViewModel : ObservableObject
         // "加载技能 · browser-use" beats the absolute path it came from: the path
         // is ours, not something the user picked, and the name is the only part
         // they can act on.
+        if (IsTaskLogRead) return TaskLogParts(ArgsView.PrimaryArg!.Value)![1];
+        if (IsTaskCard && HasTaskCardSubtitle) return Clip(TaskCardSubtitle, HeaderArgMaxLength);
+        if (Name == SubagentTool.WaitToolName
+            && view.KeyValueArgs?.FirstOrDefault(item => item.Key == "timeout_seconds") is { } timeout)
+            return $"最多等待 {timeout.Value} 秒";
         if (SkillName is { Length: > 0 } skill) return skill;
 
         if (view.HasSearchQueries)
@@ -1953,16 +2036,154 @@ public sealed partial class ToolCallViewModel : ObservableObject
         "glob_files" => "\uE8B7",
         "grep_files" => "\uE773",
         MemoryTools.RecallToolName or MemoryTools.WriteToolName => "\uE81C",
+        SubagentTool.ToolName => "\uE716",
+        "send_agent_message" => "\uE8F2",
+        "followup_agent" => "\uE716",
+        "wait_agents" => "\uE916",
+        TaskTools.StatusToolName => "\uE916",
+        TaskTools.StopToolName => "\uE71A",
         _ => "\uE90F"
     };
-    public string StatusText => Status switch
+    public string StatusText => IsError ? "失败" : Name == "send_agent_message" && IsCompleted
+        ? "已入队" : Status switch
+        {
+            "preparing" => "准备调用",
+            "running" => "运行中",
+            "completed" => "已完成",
+            "error" => "出错",
+            "failed" => "失败",
+            _ => Status
+        };
+    public string GroupStatusText => Name == SubagentTool.ToolName && HasTaskCardTaskStatus
+        ? TaskCardTaskStatusText : StatusText;
+    public bool GroupIsCompleted => Name == SubagentTool.ToolName && HasTaskCardTaskStatus
+        ? TaskState == "completed" : IsCompleted;
+    public bool GroupIsError => Name == SubagentTool.ToolName && HasTaskCardTaskStatus
+        ? TaskState is "failed" or "interrupted" : IsError;
+
+    /// <summary>
+    /// The background task this call started, read from its result — set for a
+    /// Python run sent to the background (or timed out into it) and for a sub-agent.
+    /// The call itself completes at once; the card then follows the task.
+    /// </summary>
+    public string? BackgroundTaskId { get; private set; }
+
+    /// <summary>The task's state as the registry reports it; null when this session
+    /// never saw the task (it ran before a restart).</summary>
+    [ObservableProperty] private string? _taskState;
+
+    public bool IsBackgroundRunning => BackgroundTaskId is not null && TaskState == "running";
+
+    partial void OnTaskStateChanged(string? value)
     {
-        "preparing" => "准备调用",
+        OnPropertyChanged(nameof(IsBackgroundRunning));
+        RefreshComputed();
+        RefreshTaskCard();
+    }
+
+    private void ReadBackgroundTask(string? resultJson)
+    {
+        if (BackgroundTaskId is not null || string.IsNullOrWhiteSpace(resultJson)) return;
+        try
+        {
+            using var doc = JsonDocument.Parse(resultJson);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("background", out var flag) || flag.ValueKind != JsonValueKind.True
+                || !root.TryGetProperty("task_id", out var id) || id.ValueKind != JsonValueKind.String)
+                return;
+            BackgroundTaskId = id.GetString();
+            // Just started; the registry corrects it from here.
+            TaskState ??= "running";
+            OnPropertyChanged(nameof(BackgroundTaskId));
+            OnPropertyChanged(nameof(IsBackgroundRunning));
+            RefreshComputed();
+        }
+        catch (JsonException) { }
+    }
+
+    private void ReadTaskCardResult(string? resultJson)
+    {
+        _resultFailed = false;
+        _cardResultLabel = null;
+        _cardResultModel = null;
+        _cardResultAgentId = null;
+        _cardResultOutput = null;
+        _cardItems = [];
+        if (string.IsNullOrWhiteSpace(resultJson)) return;
+        try
+        {
+            using var doc = JsonDocument.Parse(resultJson);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return;
+            _resultFailed = root.TryGetProperty("success", out var success)
+                            && success.ValueKind == JsonValueKind.False;
+            _cardResultLabel = CardString(root, "label");
+            _cardResultModel = CardString(root, "model");
+            _cardResultAgentId = CardString(root, "agent_id");
+            _cardResultOutput = CardString(root, "error")
+                                ?? CardString(root, "content")
+                                ?? CardString(root, "recent_output")
+                                ?? CardString(root, "report")
+                                ?? CardString(root, "answer");
+
+            var collectionName = root.TryGetProperty("agents", out var agents)
+                                 && agents.ValueKind == JsonValueKind.Array ? "agents" : "tasks";
+            if (root.TryGetProperty(collectionName, out var items) && items.ValueKind == JsonValueKind.Array)
+                _cardItems = items.EnumerateArray()
+                    .Where(item => item.ValueKind == JsonValueKind.Object)
+                    .Select(item => new TaskCardItem(
+                        CardString(item, "label") ?? CardString(item, "agent_id")
+                            ?? CardString(item, "task_id") ?? "任务",
+                        CardStatus(CardString(item, "status")),
+                        CardString(item, "recent_output") ?? CardString(item, "report")))
+                    .ToArray();
+            else if (Name == TaskTools.StatusToolName && CardString(root, "status") is { } status)
+                _cardItems = [new TaskCardItem(
+                    CardString(root, "label") ?? CardString(root, "task_id") ?? "任务",
+                    CardStatus(status),
+                    CardString(root, "recent_output") ?? CardString(root, "report"))];
+            else if (Name == TaskTools.StopToolName && CardString(root, "status") is { } stopStatus)
+                _cardItems = [new TaskCardItem(
+                    CardString(root, "task_id") ?? "任务", CardStatus(stopStatus), null)];
+        }
+        catch (JsonException) { }
+    }
+
+    private static string? CardString(JsonElement root, string name) =>
+        root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() : null;
+
+    private static string CardStatus(string? status) => status switch
+    {
         "running" => "运行中",
         "completed" => "已完成",
-        "error" => "出错",
-        _ => Status
+        "failed" => "失败",
+        "cancelled" => "已停止",
+        "interrupted" => "已中断",
+        "stop_requested" => "停止中",
+        "idle" => "空闲",
+        _ => status ?? string.Empty
     };
+
+    private void RefreshTaskCard()
+    {
+        OnPropertyChanged(nameof(TaskCardSubtitle));
+        OnPropertyChanged(nameof(HasTaskCardSubtitle));
+        OnPropertyChanged(nameof(TaskCardInput));
+        OnPropertyChanged(nameof(HasTaskCardInput));
+        OnPropertyChanged(nameof(TaskCardItems));
+        OnPropertyChanged(nameof(HasTaskCardItems));
+        OnPropertyChanged(nameof(TaskCardOutput));
+        OnPropertyChanged(nameof(HasTaskCardOutput));
+        OnPropertyChanged(nameof(TaskCardTaskStatus));
+        OnPropertyChanged(nameof(HasTaskCardTaskStatus));
+        OnPropertyChanged(nameof(TaskCardTaskStatusText));
+        OnPropertyChanged(nameof(HeaderArgPreview));
+        OnPropertyChanged(nameof(HasHeaderArgPreview));
+        OnPropertyChanged(nameof(DisplayLabel));
+        OnPropertyChanged(nameof(DisplayIconGlyph));
+    }
 
     public void Apply(ToolCallDelta delta)
     {
@@ -1993,6 +2214,15 @@ public sealed partial class ToolCallViewModel : ObservableObject
         if (!string.IsNullOrWhiteSpace(delta.ResultPreviewJson))
             ResultPreviewJson = delta.ResultPreviewJson;
 
+        if (!string.IsNullOrWhiteSpace(delta.BackgroundTaskId)
+            && BackgroundTaskId != delta.BackgroundTaskId)
+        {
+            BackgroundTaskId = delta.BackgroundTaskId;
+            TaskState ??= "running";
+            OnPropertyChanged(nameof(BackgroundTaskId));
+        }
+        if (!string.IsNullOrWhiteSpace(delta.TaskState)) TaskState = delta.TaskState;
+
         if (!string.IsNullOrWhiteSpace(delta.Provider)) Provider = delta.Provider;
         RefreshComputed();
     }
@@ -2015,6 +2245,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
         OnPropertyChanged(nameof(IsKnownBuiltInTool));
         OnPropertyChanged(nameof(ShowArgumentsFold));
         OnPropertyChanged(nameof(IsFileOperation));
+        OnPropertyChanged(nameof(IsTaskCard));
         ArgsView = ToolArgsExtractor.Extract(value, ArgumentsJson);
         RefreshArgDerived();
     }
@@ -2027,6 +2258,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
         OnPropertyChanged(nameof(DisplayArgumentsJson));
         ArgsView = ToolArgsExtractor.Extract(Name, value);
         RefreshArgDerived();
+        RefreshTaskCard();
     }
 
     /// <summary>Everything downstream of <see cref="ArgsView"/>. Skill-ness is one
@@ -2034,6 +2266,9 @@ public sealed partial class ToolCallViewModel : ObservableObject
     /// the name would stay labelled 读取文件 for the whole turn.</summary>
     private void RefreshArgDerived()
     {
+        OnPropertyChanged(nameof(IsTaskLogRead));
+        OnPropertyChanged(nameof(IsTaskCard));
+        OnPropertyChanged(nameof(GroupKey));
         OnPropertyChanged(nameof(SkillName));
         OnPropertyChanged(nameof(IsSkillLoad));
         OnPropertyChanged(nameof(DisplayLabel));
@@ -2045,6 +2280,10 @@ public sealed partial class ToolCallViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(HasResultPreview));
         OnPropertyChanged(nameof(DisplayResultPreviewJson));
+        ReadTaskCardResult(value);
+        ReadBackgroundTask(value);
+        RefreshComputed();
+        RefreshTaskCard();
     }
     partial void OnProviderChanged(string? value) => OnPropertyChanged(nameof(HasProvider));
 
@@ -2053,6 +2292,9 @@ public sealed partial class ToolCallViewModel : ObservableObject
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(IsCompleted));
         OnPropertyChanged(nameof(IsError));
+        OnPropertyChanged(nameof(GroupStatusText));
+        OnPropertyChanged(nameof(GroupIsCompleted));
+        OnPropertyChanged(nameof(GroupIsError));
     }
 
     private static string ToolLabelFor(string name) => LabelFor(name);
@@ -2071,6 +2313,12 @@ public sealed partial class ToolCallViewModel : ObservableObject
         "generate_image" => "生成图片",
         MemoryTools.RecallToolName => "检索记忆",
         MemoryTools.WriteToolName => "更新记忆",
+        SubagentTool.ToolName => "派发子 Agent",
+        "send_agent_message" => "发送消息",
+        "followup_agent" => "继续派活",
+        "wait_agents" => "等待子 Agent",
+        TaskTools.StatusToolName => "查看任务",
+        TaskTools.StopToolName => "停止任务",
         // Claude Code / Codex agent tools (PascalCase). Friendly labels so the
         // console cards read naturally instead of bare English tool names.
         "Read" => "读取文件",
@@ -2104,6 +2352,9 @@ public sealed partial class ToolCallViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(json))
             return json;
+
+        if (!StreamingJson.CouldBeComplete(json))
+            return DecodeUnicodeEscapes(json);
 
         try
         {

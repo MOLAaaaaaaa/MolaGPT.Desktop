@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Providers;
+using MolaGPT.Core.Chat.Tasks;
 using MolaGPT.ViewModels.Services;
 
 namespace MolaGPT.ViewModels;
@@ -129,6 +130,8 @@ public sealed partial class MainViewModel : ObservableObject
         };
         _conversationList.ConversationsDeleted += (_, ids) =>
         {
+            // A deleted conversation's tasks have nowhere to report to.
+            foreach (var id in ids) Chat.Tasks?.StopConversation(id);
             if (!string.IsNullOrEmpty(Chat.ConversationId) && ids.Contains(Chat.ConversationId))
                 Chat.StartDraftConversation();
         };
@@ -251,6 +254,18 @@ public sealed partial class MainViewModel : ObservableObject
     public bool IsSystemPromptButtonVisible =>
         ConversationSystemPromptVisible && !IsImageWorkbenchVisible;
 
+    /// <summary>Branch the conversation at <paramref name="message"/> into one of its
+    /// own and open it. Branching at a user message puts that message back in the
+    /// input box, since the branch ends just before it.</summary>
+    public async Task BranchToNewConversationAsync(MessageViewModel message)
+    {
+        var branch = await Chat.BranchToNewConversationAsync(message);
+        if (branch is null) return;
+        ConversationList.UpsertItem(branch.Id, branch.Title, DateTimeOffset.UtcNow, branch.ProviderId, branch.PersonaLabel);
+        ConversationList.SelectById(branch.Id);
+        if (!string.IsNullOrWhiteSpace(branch.Draft)) Composer.Text = branch.Draft!;
+    }
+
     public async Task RefreshQuotaAsync(CancellationToken ct = default)
     {
         var version = ++_quotaRefreshVersion;
@@ -341,10 +356,12 @@ public sealed partial class MainViewModel : ObservableObject
         if (credits.Exhausted)
             return $"额度已耗尽 · {credits.RecoveryLabel}";
 
+        // 峰谷计价的模型，次数随时段变化，标出当前时段免得用户以为额度被偷偷扣了
+        var period = modelStatus.PricingPeriodLabel is { } label ? $"（{label}）" : string.Empty;
         return uses switch
         {
             <= 0 => "剩余额度不足以再发一次",
-            _ => $"约 {uses} 次 · 账号共用"
+            _ => $"约 {uses} 次{period} · 账号共用"
         };
     }
 
@@ -360,7 +377,27 @@ public sealed partial class MainViewModel : ObservableObject
     /// <summary>The drawer is offered whenever the conversation has anything in
     /// it. Fences exist in every mode; working-directory files only in BYOK,
     /// which <see cref="ChatViewModel.RefreshArtifacts"/> already accounts for.</summary>
-    public bool IsArtifactPanelAvailable => Chat.HasArtifacts;
+    public bool IsArtifactPanelAvailable => Chat.HasArtifacts || Chat.HasSubagents;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsArtifactPanelSelected))]
+    [NotifyPropertyChangedFor(nameof(IsSubagentListVisible))]
+    [NotifyPropertyChangedFor(nameof(IsSubagentDetailVisible))]
+    private bool _subagentPanelSelected;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsSubagentListVisible))]
+    [NotifyPropertyChangedFor(nameof(IsSubagentDetailVisible))]
+    private SubagentViewModel? _selectedSubagent;
+
+    public bool IsArtifactPanelSelected => !SubagentPanelSelected;
+    public bool IsSubagentListVisible => SubagentPanelSelected && SelectedSubagent is null;
+    public bool IsSubagentDetailVisible => SubagentPanelSelected && SelectedSubagent is not null;
+
+    partial void OnSubagentPanelSelectedChanged(bool value)
+    {
+        if (value) ArtifactCanvasVisible = false;
+    }
 
     /// <summary>Entry the canvas is showing.</summary>
     [ObservableProperty]
@@ -431,6 +468,29 @@ public sealed partial class MainViewModel : ObservableObject
             EnsureSelectionAlive();
         };
         Chat.ArtifactWorkspace.LiveArtifactChanged += OnLiveArtifactChanged;
+        Chat.Subagents.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(IsArtifactPanelAvailable));
+            OnPropertyChanged(nameof(IsArtifactHandleVisible));
+            if (!Chat.HasSubagents && SubagentPanelSelected)
+            {
+                SubagentPanelSelected = false;
+                SelectedSubagent = null;
+            }
+        };
+        Chat.TaskChanged += task =>
+        {
+            if (task.ConversationId != Chat.ConversationId || !task.IsRunning
+                || task.Kind != AgentTaskKinds.Agent || ArtifactPanelVisible || _autoOpenDismissed)
+                return;
+            SubagentPanelSelected = true;
+            ArtifactPanelVisible = true;
+        };
+        Chat.SubagentInspectRequested += agentId =>
+        {
+            var agent = Chat.Subagents.FirstOrDefault(item => item.Id == agentId);
+            if (agent is not null) OpenSubagent(agent);
+        };
         Chat.ArtifactActionRequested += (_, e) =>
         {
             switch (e.Action)
@@ -449,6 +509,8 @@ public sealed partial class MainViewModel : ObservableObject
             // Another conversation's artifacts are not this one's.
             SelectedArtifact = null;
             ArtifactCanvasVisible = false;
+            SelectedSubagent = null;
+            SubagentPanelSelected = false;
             ArtifactPanelVisible = false;
             _autoOpenDismissed = false;
         };
@@ -487,11 +549,12 @@ public sealed partial class MainViewModel : ObservableObject
 
         SelectedArtifact = null;
         ArtifactCanvasVisible = false;
-        if (!Chat.HasArtifacts) ArtifactPanelVisible = false;
+        if (!IsArtifactPanelAvailable) ArtifactPanelVisible = false;
     }
 
     public void OpenArtifact(ArtifactItemViewModel artifact, int versionIndex = -1)
     {
+        SubagentPanelSelected = false;
         if (versionIndex >= 0) artifact.SelectVersion(versionIndex);
         SelectedArtifact = artifact;
         _selectionAnchor = artifact.CurrentVersion is { } version ? (version.Message, version.Ordinal) : null;
@@ -512,8 +575,24 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void ShowArtifactList()
     {
+        SubagentPanelSelected = false;
         ArtifactCanvasMaximized = false;
         ArtifactCanvasVisible = false;
+        ArtifactPanelVisible = true;
+    }
+
+    [RelayCommand]
+    private void ShowSubagentList()
+    {
+        SubagentPanelSelected = true;
+        SelectedSubagent = null;
+        ArtifactPanelVisible = true;
+    }
+
+    public void OpenSubagent(SubagentViewModel agent)
+    {
+        SubagentPanelSelected = true;
+        SelectedSubagent = agent;
         ArtifactPanelVisible = true;
     }
 

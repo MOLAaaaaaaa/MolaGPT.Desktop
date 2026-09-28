@@ -70,6 +70,7 @@ public partial class App : Application
             var agentConfig = _services.GetRequiredService<DesktopAgentConfigProvider>();
             var agentStatus = _services.GetRequiredService<AgentBridgeStatusViewModel>();
             var updateCheck = _services.GetRequiredService<UpdateCheckService>();
+            var piSidecar = _services.GetRequiredService<PiSidecarRuntimeManager>();
             var autoUpdate = _services.GetRequiredService<AppAutoUpdateService>();
             var notifications = _services.GetRequiredService<NotificationCenter>();
             _notifications = notifications;
@@ -153,7 +154,7 @@ public partial class App : Application
                  _services.GetRequiredService<ConversationRepository>(),
                  _services.GetRequiredService<MessageRepository>(),
                  _services.GetRequiredService<PythonRuntimeManager>(),
-                 _services.GetRequiredService<PiSidecarRuntimeManager>(),
+                 piSidecar,
                  _services.GetRequiredService<PiWorkSidecarLocator>(),
                  notifications,
                 _services.GetRequiredService<SkillsViewModel>(),
@@ -242,6 +243,7 @@ public partial class App : Application
                     auth, providers, proxy, localTools, accountSession, window),
                 DispatcherPriority.Background);
             _ = RunUpdateCheckAsync(main, updateCheck, notifications);
+            _ = RunAgentRuntimeUpdateCheckAsync(window, piSidecar);
 
             desktop.ShutdownRequested += (_, _) =>
             {
@@ -447,6 +449,17 @@ public partial class App : Application
         });
     }
 
+    private static async Task RunAgentRuntimeUpdateCheckAsync(
+        MainWindow window,
+        PiSidecarRuntimeManager piSidecar)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        if (piSidecar.GetCompatibleInstalled() is null) return;
+        if (!await piSidecar.IsUpdateAvailableAsync()) return;
+
+        Dispatcher.UIThread.Post(window.AnnounceAvailableAgentRuntimeUpdate);
+    }
+
     private static string? FirstLine(string? notes)
     {
         if (string.IsNullOrWhiteSpace(notes)) return null;
@@ -515,7 +528,8 @@ public partial class App : Application
                 .ListActive()
                 .Select(conversation => conversation.Id)
                 .ToArray();
-            var removed = new PiWorkSessionSweeper(PiWorkSidecarLocator.SessionRoot).Sweep(live);
+            var children = _services.GetRequiredService<MessageRepository>().ListSubagentSessionKeys();
+            var removed = new PiWorkSessionSweeper(PiWorkSidecarLocator.SessionRoot).Sweep(live, children);
             if (removed > 0) DiagnosticLog.Write("pi-work", $"清理了 {removed} 个无主的 Pi 会话文件");
         }
         catch (Exception ex)

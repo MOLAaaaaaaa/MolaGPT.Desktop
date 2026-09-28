@@ -1,4 +1,8 @@
 using Dapper;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Tasks;
 
 namespace MolaGPT.Storage.Repositories;
 
@@ -41,6 +45,51 @@ public sealed class MessageRepository
               WHERE conversation_id = @conversationId
               ORDER BY created_at ASC, rowid ASC",
             new { conversationId }).ToList();
+    }
+
+    public IReadOnlyList<string> ListSubagentSessionKeys()
+    {
+        using var conn = _db.Open();
+        var metas = conn.Query<string>(
+            @"SELECT m.meta FROM messages AS m
+              JOIN conversations AS c ON c.id = m.conversation_id
+              WHERE c.deleted_at IS NULL AND m.role = 'assistant'
+                AND (m.meta LIKE '%spawn_agent%' OR m.meta LIKE '%followup_agent%')");
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        void Collect(JsonElement tools)
+        {
+            if (tools.ValueKind != JsonValueKind.Array) return;
+            foreach (var tool in tools.EnumerateArray())
+            {
+                if (tool.ValueKind != JsonValueKind.Object
+                    || !tool.TryGetProperty("name", out var name)
+                    || name.ValueKind != JsonValueKind.String
+                    || !tool.TryGetProperty("result_preview_json", out var preview)
+                    || preview.ValueKind != JsonValueKind.String) continue;
+                var stored = SubagentTool.ReadStored(new ToolCallDelta(string.Empty,
+                    name.GetString()!, string.Empty, ResultPreviewJson: preview.GetString()));
+                if (stored is not null) keys.Add("subagent_" + stored.AgentId);
+            }
+        }
+        foreach (var meta in metas)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(meta);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("tool_calls", out var tools)) Collect(tools);
+                if (root.TryGetProperty("retry", out var retry)
+                    && retry.ValueKind == JsonValueKind.Object
+                    && retry.TryGetProperty("attempts", out var attempts)
+                    && attempts.ValueKind == JsonValueKind.Array)
+                    foreach (var attempt in attempts.EnumerateArray())
+                        if (attempt.ValueKind == JsonValueKind.Object
+                            && attempt.TryGetProperty("tool_calls", out var attemptTools))
+                            Collect(attemptTools);
+            }
+            catch (JsonException) { }
+        }
+        return keys.ToArray();
     }
 
     public IReadOnlyList<MessageRow> ListSiblings(string conversationId, string? parentId, string role)
@@ -122,6 +171,62 @@ public sealed class MessageRepository
         using var conn = _db.Open();
         conn.Execute("UPDATE messages SET content = @content, meta = @meta WHERE id = @id",
             new { id, content, meta });
+    }
+
+    public void UpdateBackgroundTaskState(string conversationId, string taskId, string state)
+    {
+        using var conn = _db.Open();
+        var rows = conn.Query<MessageRow>(
+            @"SELECT id AS Id, conversation_id AS ConversationId, role AS Role,
+                     content AS Content, meta AS Meta, created_at AS CreatedAt, parent_id AS ParentId
+              FROM messages
+              WHERE conversation_id = @conversationId AND role = 'assistant' AND meta LIKE @needle",
+            new { conversationId, needle = "%" + taskId + "%" });
+        foreach (var row in rows)
+        {
+            if (JsonNode.Parse(row.Meta ?? "{}") is not JsonObject meta) continue;
+            var changed = UpdateToolStates(meta["tool_calls"] as JsonArray, taskId, state);
+            if (meta["retry"] is JsonObject retry && retry["attempts"] is JsonArray attempts)
+                foreach (var attempt in attempts.OfType<JsonObject>())
+                    changed |= UpdateToolStates(attempt["tool_calls"] as JsonArray, taskId, state);
+            if (changed)
+                conn.Execute("UPDATE messages SET meta = @meta WHERE id = @id",
+                    new { id = row.Id, meta = meta.ToJsonString() });
+        }
+    }
+
+    private static bool UpdateToolStates(JsonArray? tools, string taskId, string state)
+    {
+        if (tools is null) return false;
+        var changed = false;
+        foreach (var tool in tools.OfType<JsonObject>())
+        {
+            if (!MatchesBackgroundTask(tool, taskId)) continue;
+            if ((string?)tool["background_task_id"] == taskId
+                && (string?)tool["task_state"] == state) continue;
+            tool["background_task_id"] = taskId;
+            tool["task_state"] = state;
+            changed = true;
+        }
+        return changed;
+    }
+
+    private static bool MatchesBackgroundTask(JsonObject tool, string taskId)
+    {
+        if ((string?)tool["background_task_id"] == taskId) return true;
+        if ((string?)tool["result_preview_json"] is not { } preview) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(preview);
+            var root = doc.RootElement;
+            return root.ValueKind == JsonValueKind.Object
+                   && root.TryGetProperty("background", out var background)
+                   && background.ValueKind == JsonValueKind.True
+                   && root.TryGetProperty("task_id", out var id)
+                   && id.ValueKind == JsonValueKind.String
+                   && id.GetString() == taskId;
+        }
+        catch (JsonException) { return false; }
     }
 
     public void Delete(string id)

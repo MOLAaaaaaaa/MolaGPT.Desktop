@@ -416,6 +416,11 @@ public sealed class PiWorkLlmShim : IDisposable
             ?? throw new JsonException("Pi 请求体为空。");
         var merged = parsed.ToDictionary(kv => kv.Key, kv => (object?)kv.Value, StringComparer.Ordinal);
         if (uncap) RemoveOutputCap(merged, generation!.Api);
+        if (extra is not null
+            && (extra.ContainsKey("thinking_budget")
+                || (extra.TryGetValue("enable_thinking", out var enabled)
+                    && enabled.ValueKind == JsonValueKind.False)))
+            merged.Remove("reasoning_effort");
         if (hasExtra) CustomRequestParams.ApplyBody(merged, extra);
         if (hasGeneration) ApplyGenerationOptions(merged, generation!);
         if (hasDrops)

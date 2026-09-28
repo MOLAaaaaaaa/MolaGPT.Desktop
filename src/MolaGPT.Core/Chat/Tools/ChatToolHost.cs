@@ -1,5 +1,6 @@
 using System.Text.Json;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Tasks;
 using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
@@ -21,6 +22,8 @@ public sealed class ChatToolHost : IChatToolHost
     private readonly IToolApprovalService? _approval;
     private readonly BrowserActivityLog? _browserActivity;
     private readonly IMemoryToolBackend? _memory;
+    private readonly AgentTaskRegistry? _tasks;
+    private readonly ISubagentRunner? _subagents;
 
     public ChatToolHost(
         McpClientManager mcp,
@@ -31,9 +34,13 @@ public sealed class ChatToolHost : IChatToolHost
         BrowserControlTool browser,
         IToolApprovalService? approval = null,
         BrowserActivityLog? browserActivity = null,
-        IMemoryToolBackend? memory = null)
+        IMemoryToolBackend? memory = null,
+        AgentTaskRegistry? tasks = null,
+        ISubagentRunner? subagents = null)
     {
         _memory = memory;
+        _tasks = tasks;
+        _subagents = subagents;
         _mcp = mcp;
         _vision = vision;
         _imageAnalysis = imageAnalysis;
@@ -64,11 +71,28 @@ public sealed class ChatToolHost : IChatToolHost
         if (options.ImageGeneration?.Enabled == true && options.ImageGeneration.AsTool)
             tools.Add(ImageGenerationTool.BuildOpenAiToolDefinition());
 
+        var backgroundTasks = options.BackgroundTasks && _tasks is not null;
         if (options.Python?.Enabled == true)
-            tools.Add(PythonExecutionTool.BuildOpenAiToolDefinition(options.Python));
+            tools.Add(PythonExecutionTool.BuildOpenAiToolDefinition(options.Python, backgroundTasks));
 
         if (options.Browser?.Enabled == true)
             tools.Add(BrowserControlTool.BuildOpenAiToolDefinition(options.Browser));
+
+        // A sub-agent is offered exactly what its parent was, down to these, so the
+        // two requests share a prefix. Its limits are enforced in ExecuteAsync.
+        var subagents = options.Subagents && _subagents is not null && _tasks is not null;
+        if (subagents)
+        {
+            tools.Add(SubagentTool.BuildDefinition());
+            tools.Add(SubagentTool.BuildSendDefinition());
+            tools.Add(SubagentTool.BuildFollowupDefinition());
+            tools.Add(SubagentTool.BuildWaitDefinition());
+        }
+        if (backgroundTasks || subagents)
+        {
+            tools.Add(TaskTools.BuildStatusDefinition());
+            tools.Add(TaskTools.BuildStopDefinition());
+        }
 
         // Two switches, two tools: 使用记忆 owns the write side, 回忆对话 owns the
         // search side. They are independent because searching past chats sends
@@ -101,11 +125,16 @@ public sealed class ChatToolHost : IChatToolHost
     {
         options = WithConversationWorkspace(options, context);
 
+        // A sub-agent sees its parent's whole tool list, so these arrive as ordinary
+        // calls and are turned away here.
+        if (options.IsSubagent && SubagentRefusal(toolName) is { } blocked)
+            return ToolError(blocked);
+
         if (toolName is "search_web" or "web_fetch" or "read_file" or "glob_files" or "grep_files")
         {
             var request = WithWorkspaceScope(
                 ToolCapabilityCatalog.ForBuiltIn(toolName, argumentsJson), toolName, argumentsJson, options);
-            if (!await IsApprovedAsync(request, options.PermissionMode, ct).ConfigureAwait(false))
+            if (!await IsApprovedAsync(request, options.PermissionMode, options.IsSubagent, ct).ConfigureAwait(false))
                 return PermissionDenied(toolName);
             if (context.LocalHttpClient is null)
                 return ToolError("Local HTTP client is unavailable.");
@@ -121,7 +150,7 @@ public sealed class ChatToolHost : IChatToolHost
                 ToolCapability.Read | ToolCapability.External,
                 argumentsJson,
                 "把当前对话中的图片发送给已配置的视觉模型分析");
-            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.VisionPermissionMode), ct).ConfigureAwait(false))
+            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.VisionPermissionMode), options.IsSubagent, ct).ConfigureAwait(false))
                 return PermissionDenied(toolName);
             return await _vision.ExecuteAsync(argumentsJson, context, options.Vision, ct).ConfigureAwait(false);
         }
@@ -152,7 +181,7 @@ public sealed class ChatToolHost : IChatToolHost
                 };
             }
 
-            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.VisionPermissionMode), ct).ConfigureAwait(false))
+            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.VisionPermissionMode), options.IsSubagent, ct).ConfigureAwait(false))
                 return PermissionDenied(toolName);
             return await _imageAnalysis.ExecuteAsync(argumentsJson, options, ct).ConfigureAwait(false);
         }
@@ -165,14 +194,43 @@ public sealed class ChatToolHost : IChatToolHost
                 ToolCapability.Write | ToolCapability.External,
                 argumentsJson,
                 "调用外部图像服务并在本地创建图片");
-            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.ImageGenerationPermissionMode), ct).ConfigureAwait(false))
+            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.ImageGenerationPermissionMode), options.IsSubagent, ct).ConfigureAwait(false))
                 return PermissionDenied(toolName);
             return await _imageGeneration.ExecuteToolAsync(
                 argumentsJson, options.ImageGeneration, options.WorkspaceRoot, ct).ConfigureAwait(false);
         }
 
         if (string.Equals(toolName, PythonExecutionTool.ToolName, StringComparison.Ordinal))
-            return await _python.ExecuteAsync(argumentsJson, options.Python, context.Request.ConversationId, ct).ConfigureAwait(false);
+        {
+            var workspaceConversation = WorkspaceConversation(options, context);
+            var run = new PythonRunContext(
+                string.IsNullOrWhiteSpace(workspaceConversation)
+                    ? null
+                    : new AgentTaskOwner(workspaceConversation!, context.Request.SessionId),
+                AllowBackground: options.BackgroundTasks && !options.IsSubagent,
+                Unattended: options.IsSubagent);
+            return await _python.ExecuteAsync(argumentsJson, options.Python, workspaceConversation, run, ct).ConfigureAwait(false);
+        }
+
+        if (toolName is TaskTools.StatusToolName or TaskTools.StopToolName)
+        {
+            var conversation = WorkspaceConversation(options, context);
+            if (_tasks is null || string.IsNullOrWhiteSpace(conversation))
+                return ToolError("后台任务不可用。");
+            return toolName == TaskTools.StatusToolName
+                ? TaskTools.ExecuteStatus(_tasks, conversation!, argumentsJson)
+                : TaskTools.ExecuteStop(_tasks, conversation!, argumentsJson);
+        }
+
+        if (string.Equals(toolName, SubagentTool.ToolName, StringComparison.Ordinal))
+            return await SpawnSubagentAsync(argumentsJson, context, options, ct).ConfigureAwait(false);
+
+        if (toolName == SubagentTool.SendToolName)
+            return SendAgentMessage(argumentsJson, context, options);
+        if (toolName == SubagentTool.FollowupToolName)
+            return await FollowupAgentAsync(argumentsJson, context, options, ct).ConfigureAwait(false);
+        if (toolName == SubagentTool.WaitToolName)
+            return await WaitAgentsAsync(argumentsJson, context, options, ct).ConfigureAwait(false);
 
         if (string.Equals(toolName, BrowserControlTool.ToolName, StringComparison.Ordinal))
         {
@@ -213,7 +271,7 @@ public sealed class ChatToolHost : IChatToolHost
                     // FullAccess means "stop asking me about clicks", not "put the
                     // payment page through too".
                     AlwaysAsk: plan.IsProtected || (plan.AlwaysAsk && mode == ToolPermissionMode.Approval));
-                if (!await IsApprovedAsync(request, mode, ct).ConfigureAwait(false))
+                if (!await IsApprovedAsync(request, mode, options.IsSubagent, ct).ConfigureAwait(false))
                 {
                     RecordBrowserActivity(plan, success: false, note: "用户拒绝");
                     return PermissionDenied(toolName);
@@ -306,7 +364,7 @@ public sealed class ChatToolHost : IChatToolHost
                 descriptor.Capabilities,
                 argumentsJson,
                 descriptor.Description);
-            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.McpPermissionMode), ct).ConfigureAwait(false))
+            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.McpPermissionMode), options.IsSubagent, ct).ConfigureAwait(false))
                 return PermissionDenied(request.ToolName);
 
             return await _mcp.CallToolAsync(server, toolSlug, argumentsJson, ct).ConfigureAwait(false);
@@ -366,13 +424,21 @@ public sealed class ChatToolHost : IChatToolHost
         WorkspaceScope.IsInside(options.WorkspaceRoot, target)
         || options.ReadableRootList.Any(root => WorkspaceScope.Covers(root, target));
 
+    /// <summary>The conversation whose working directory this turn's tools use: the
+    /// request's own, except for a sub-agent, which works in its parent's.</summary>
+    private static string? WorkspaceConversation(LocalToolOptions options, ChatToolContext context) =>
+        string.IsNullOrWhiteSpace(options.WorkspaceConversationId)
+            ? context.Request.ConversationId
+            : options.WorkspaceConversationId;
+
     private static LocalToolOptions WithConversationWorkspace(LocalToolOptions options, ChatToolContext context)
     {
+        var conversation = WorkspaceConversation(options, context);
         if (!string.IsNullOrWhiteSpace(options.WorkspaceRoot)
-            || string.IsNullOrWhiteSpace(context.Request.ConversationId))
+            || string.IsNullOrWhiteSpace(conversation))
             return options;
 
-        var workspace = PythonExecutionTool.GetSessionDirectory(context.Request.ConversationId);
+        var workspace = PythonExecutionTool.GetSessionDirectory(conversation);
         Directory.CreateDirectory(workspace);
         return options with { WorkspaceRoot = workspace };
     }
@@ -423,12 +489,19 @@ public sealed class ChatToolHost : IChatToolHost
         }
     }
 
+    /// <param name="unattended">A sub-agent is asking: nobody is watching its turn, so
+    /// a dialog would appear out of nowhere. What would prompt is refused; what the
+    /// user's mode already lets through without a dialog still goes.</param>
     private async Task<bool> IsApprovedAsync(
         ToolApprovalRequest request,
         ToolPermissionMode mode,
+        bool unattended,
         CancellationToken ct)
     {
-        if (_approval is null)
+        if (unattended && mode == ToolPermissionMode.FullAccess)
+            return !request.AlwaysAsk;
+
+        if (_approval is null || unattended)
         {
             // Nobody to ask. Anything that would have prompted is refused rather
             // than waved through — including a read that leaves the workspace,
@@ -454,7 +527,242 @@ public sealed class ChatToolHost : IChatToolHost
     {
         success = false,
         error = message
-    });
+    }, ToolJson);
+
+    private static readonly JsonSerializerOptions ToolJson = new()
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    /// <summary>What a sub-agent may not do, and why, or null when the call may run.</summary>
+    private static string? SubagentRefusal(string toolName) => toolName switch
+    {
+        BrowserControlTool.ToolName => "子 Agent 不能操作浏览器。",
+        MemoryTools.WriteToolName => "子 Agent 不能写入记忆。",
+        SubagentTool.ToolName => "子 Agent 不能再创建子 Agent。",
+        TaskTools.StopToolName => "子 Agent 不能停止后台任务。",
+        SubagentTool.FollowupToolName => "子 Agent 不能给其他子 Agent 派活。",
+        _ => null
+    };
+
+    /// <summary>
+    /// Hand a task to a sub-agent. In the background by default: the task registry
+    /// owns the run, and its end reaches the parent as a notification. In the
+    /// foreground the call waits, and stopping the turn stops the sub-agent with it.
+    /// </summary>
+    private async Task<string> SpawnSubagentAsync(
+        string argumentsJson,
+        ChatToolContext context,
+        LocalToolOptions options,
+        CancellationToken ct)
+    {
+        if (_subagents is null || _tasks is null || !options.Subagents)
+            return ToolError("子 Agent 不可用。");
+        var conversation = context.Request.ConversationId;
+        if (string.IsNullOrWhiteSpace(conversation))
+            return ToolError("子 Agent 只能在对话中使用。");
+        if (SubagentTool.Parse(argumentsJson) is not { } args)
+            return ToolError("缺少任务说明（task）。");
+        SubagentModel model;
+        try { model = _subagents.ResolveModel(context); }
+        catch (InvalidOperationException ex) { return ToolError(ex.Message); }
+        if (args.InheritContext && model.ProviderId != context.ProviderId)
+            return ToolError("当前子 Agent 模型与主 Agent 使用不同服务，无法继承完整上下文。请使用 context=none。");
+        if (!_tasks.TryReserve(
+                new AgentTaskOwner(conversation!, context.Request.SessionId),
+                AgentTaskKinds.Agent,
+                out var reservation,
+                out var full))
+            return ToolError(full!);
+
+        using (reservation!)
+        {
+            var agent = _tasks.RegisterAgent(conversation!, args.Label, model.ProviderId, model.ModelId);
+            var request = new SubagentRequest(context, agent, args.Task, args.InheritContext, FirstRun: true);
+            var task = StartAgentTurn(reservation!, agent, request);
+            if (!args.Background)
+            {
+                await WaitForTaskAsync(task, ct).ConfigureAwait(false);
+                _tasks.MarkDelivered(task);
+                return JsonSerializer.Serialize(new { success = task.Status == AgentTaskStatus.Completed,
+                    agent_id = agent.Id, provider_id = agent.ProviderId, model = agent.ModelId,
+                    label = agent.Label, answer = task.Report }, ToolJson);
+            }
+            return JsonSerializer.Serialize(new
+            {
+                success = true,
+                background = true,
+                task_id = task.Id,
+                agent_id = agent.Id,
+                provider_id = agent.ProviderId,
+                model = agent.ModelId,
+                status = "running",
+                label = args.Label,
+                note = "子 Agent 已在后台运行。结束时会自动通知你。"
+            }, ToolJson);
+        }
+    }
+
+    private AgentTask StartAgentTurn(AgentTaskReservation reservation, AgentHandle agent, SubagentRequest request) =>
+        _tasks!.Start(reservation, agent.Label, async (_, taskCt) =>
+        {
+            var result = await _subagents!.RunAsync(request, taskCt).ConfigureAwait(false);
+            return new AgentTaskOutcome(result.Success, result.Answer);
+        }, () => agent.RecentOutput, agentId: agent.Id);
+
+    private async Task WaitForTaskAsync(AgentTask task, CancellationToken ct)
+    {
+        try
+        {
+            while (task.IsRunning)
+            {
+                var signal = _tasks!.CaptureChangeSignal();
+                if (!task.IsRunning) break;
+                await signal.WaitAsync(ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _tasks!.Stop(task.ConversationId, task.Id);
+            throw;
+        }
+    }
+
+    private string SendAgentMessage(string argumentsJson, ChatToolContext context, LocalToolOptions options)
+    {
+        if (_tasks is null) return ToolError("子 Agent 不可用。");
+        var conversation = WorkspaceConversation(options, context);
+        if (string.IsNullOrWhiteSpace(conversation)) return ToolError("当前对话不可用。");
+        using var doc = ParseToolArguments(argumentsJson);
+        if (doc is null) return ToolError("消息参数无效。");
+        var target = ReadToolString(doc.RootElement, "agent_id");
+        var message = ReadToolString(doc.RootElement, "message");
+        if (string.IsNullOrWhiteSpace(target) || string.IsNullOrWhiteSpace(message))
+            return ToolError("缺少 agent_id 或 message。");
+        var sender = options.IsSubagent ? options.AgentId : "parent";
+        if (sender is null) return ToolError("子 Agent 身份无效。");
+        var sent = target == "parent"
+            ? options.IsSubagent && _tasks.QueueToParent(conversation!, sender, message!)
+            : _tasks.QueueToAgent(conversation!, target!, sender, message!);
+        return sent
+            ? JsonSerializer.Serialize(new { success = true, agent_id = target, status = "queued" }, ToolJson)
+            : ToolError("收件方不在本对话中。");
+    }
+
+    private async Task<string> FollowupAgentAsync(
+        string argumentsJson, ChatToolContext context, LocalToolOptions options, CancellationToken ct)
+    {
+        if (_tasks is null || _subagents is null || !options.Subagents)
+            return ToolError("子 Agent 不可用。");
+        var conversation = context.Request.ConversationId;
+        if (string.IsNullOrWhiteSpace(conversation)) return ToolError("当前对话不可用。");
+        using var doc = ParseToolArguments(argumentsJson);
+        if (doc is null) return ToolError("派活参数无效。");
+        var agentId = ReadToolString(doc.RootElement, "agent_id");
+        var text = ReadToolString(doc.RootElement, "task");
+        if (string.IsNullOrWhiteSpace(agentId) || string.IsNullOrWhiteSpace(text))
+            return ToolError("缺少 agent_id 或 task。");
+        var agent = _tasks.FindAgent(conversation!, agentId!);
+        if (agent is null) return ToolError("本对话没有这个子 Agent。");
+        if (!_tasks.TryReserveAgentTurn(new AgentTaskOwner(conversation!, context.Request.SessionId),
+                agent.Id, out var reservation, out var error))
+            return ToolError(error!);
+        using (reservation!)
+        {
+            var request = new SubagentRequest(context, agent, text!, InheritContext: false, FirstRun: false);
+            var task = StartAgentTurn(reservation!, agent, request);
+            var background = !doc.RootElement.TryGetProperty("run_in_background", out var flag)
+                             || flag.ValueKind != JsonValueKind.False;
+            if (!background)
+            {
+                await WaitForTaskAsync(task, ct).ConfigureAwait(false);
+                _tasks.MarkDelivered(task);
+                return JsonSerializer.Serialize(new { success = task.Status == AgentTaskStatus.Completed,
+                    agent_id = agent.Id, provider_id = agent.ProviderId, model = agent.ModelId,
+                    label = agent.Label, answer = task.Report }, ToolJson);
+            }
+            return JsonSerializer.Serialize(new { success = true, background = true,
+                agent_id = agent.Id, task_id = task.Id, label = agent.Label,
+                provider_id = agent.ProviderId, model = agent.ModelId,
+                status = "running" }, ToolJson);
+        }
+    }
+
+    private async Task<string> WaitAgentsAsync(
+        string argumentsJson, ChatToolContext context, LocalToolOptions options, CancellationToken ct)
+    {
+        if (_tasks is null) return ToolError("子 Agent 不可用。");
+        var conversation = WorkspaceConversation(options, context);
+        if (string.IsNullOrWhiteSpace(conversation)) return ToolError("当前对话不可用。");
+        using var doc = ParseToolArguments(argumentsJson);
+        if (doc is null || !doc.RootElement.TryGetProperty("agent_ids", out var idsElement)
+            || idsElement.ValueKind != JsonValueKind.Array)
+            return ToolError("缺少 agent_ids。");
+        var ids = idsElement.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String)
+            .Select(e => e.GetString()!).Distinct(StringComparer.Ordinal).ToArray();
+        if (ids.Length == 0 || ids.Length > 8) return ToolError("agent_ids 数量应为 1 到 8。");
+        var agents = ids.Select(id => _tasks.FindAgent(conversation!, id)).ToArray();
+        if (agents.Any(a => a is null))
+            return ToolError("有子 Agent 不在当前任务列表中，无法等待；这些 ID 当前没有运行中的任务。");
+        var timeout = doc.RootElement.TryGetProperty("timeout_seconds", out var seconds)
+                      && seconds.ValueKind == JsonValueKind.Number && seconds.TryGetInt32(out var value)
+            ? Math.Clamp(value, 1, 60) : 30;
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(timeout);
+        while (true)
+        {
+            var signal = _tasks.CaptureChangeSignal();
+            var states = agents.Select(a => DescribeAgent(_tasks, a!)).ToArray();
+            var inbox = options.IsSubagent && options.AgentId is { } agentId
+                ? _tasks.PeekAgentMessages(conversation!, agentId)
+                : _tasks.PeekParentMessages(conversation!);
+            var hasMessage = inbox
+                .Any(m => ids.Contains(m.AgentId, StringComparer.Ordinal));
+            if (states.Any(s => s.status != "running") || hasMessage)
+            {
+                foreach (var state in states)
+                {
+                    if (state.task_id is { } taskId && state.status != "running"
+                        && _tasks.Find(conversation!, taskId) is { IsRunning: false } task)
+                        _tasks.MarkDelivered(task);
+                }
+                return JsonSerializer.Serialize(new { agents = states, has_message = hasMessage }, ToolJson);
+            }
+            var remaining = deadline - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+                return JsonSerializer.Serialize(new { agents = states, has_message = false, timed_out = true }, ToolJson);
+            if (!await AgentTaskRegistry.WaitForChangeAsync(signal, remaining, ct).ConfigureAwait(false))
+                return JsonSerializer.Serialize(new { agents = states, has_message = false, timed_out = true }, ToolJson);
+        }
+    }
+
+    private sealed record AgentStatus(string agent_id, string label, string model, string status,
+        string? task_id, string? recent_output, string? report);
+
+    private static AgentStatus
+        DescribeAgent(AgentTaskRegistry registry, AgentHandle agent)
+    {
+        var task = agent.LatestTaskId is { } id ? registry.Find(agent.ConversationId, id) : null;
+        return new AgentStatus(agent.Id, agent.Label, agent.ModelId,
+            task is null ? "idle" : TaskTools.StatusName(task.Status),
+            task?.Id, task?.IsRunning == true ? task.Tail() : null,
+            task?.IsRunning == false ? task.Report : null);
+    }
+
+    private static JsonDocument? ParseToolArguments(string json)
+    {
+        try
+        {
+            var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
+            if (document.RootElement.ValueKind == JsonValueKind.Object) return document;
+            document.Dispose();
+            return null;
+        }
+        catch (JsonException) { return null; }
+    }
+
+    private static string? ReadToolString(JsonElement root, string property) =>
+        root.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()?.Trim() : null;
 
     /// <summary>Global FullAccess overrides per-tool; per-tool FullAccess overrides global Approval.</summary>
     private static ToolPermissionMode EffectiveMode(ToolPermissionMode global, ToolPermissionMode perTool) =>

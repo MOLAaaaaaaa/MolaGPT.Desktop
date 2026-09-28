@@ -11,6 +11,8 @@ internal static class PythonWorkspaceInternals
         ".tmp",
         ".appdata",
         ".localappdata",
+        // Per-run runners, logs and sandbox reports.
+        ".tasks",
         "__pycache__"
     };
 
@@ -51,6 +53,11 @@ internal static class PythonWorkspaceInternals
 
         var name = Path.GetFileName(file);
         if (string.IsNullOrWhiteSpace(name))
+            return false;
+
+        if (string.Equals(relative, name, StringComparison.OrdinalIgnoreCase)
+            && name.StartsWith(PythonExecutionTool.RuntimeScriptPrefix, StringComparison.OrdinalIgnoreCase)
+            && name.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
             return false;
 
         if (runtimeScriptFileNames?.Any(s => string.Equals(s, name, StringComparison.OrdinalIgnoreCase)) == true)

@@ -19,7 +19,19 @@ public sealed record ChatChunk(
     string? RawJson = null,
     CompactionDelta? Compaction = null,
     ContextUsageDelta? ContextUsage = null,
-    RolePromptTrace? PromptTrace = null);
+    RolePromptTrace? PromptTrace = null,
+    InjectedMessageDelta? Injected = null,
+    QueueStateDelta? Queue = null);
+
+/// <summary>
+/// A user-role message the agent took in mid-run: a message the user sent while the
+/// turn was running (插队 / 排队), or a background-task notification. Everything the
+/// agent says after it answers it, so the transcript splits the reply here.
+/// </summary>
+public sealed record InjectedMessageDelta(string Text);
+
+/// <summary>What is still waiting to be delivered into the running turn.</summary>
+public sealed record QueueStateDelta(IReadOnlyList<string> Steering, IReadOnlyList<string> FollowUp);
 
 /// <summary>
 /// How full the model's context is after this turn.
@@ -85,4 +97,6 @@ public sealed record ToolCallDelta(
     string? ResultPreviewJson = null,
     string? Provider = null,
     int? ContentOffset = null,
-    int? TimelineIndex = null);
+    int? TimelineIndex = null,
+    string? BackgroundTaskId = null,
+    string? TaskState = null);

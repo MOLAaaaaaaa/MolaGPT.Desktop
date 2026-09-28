@@ -52,6 +52,19 @@ public sealed class UserMessageRow : TranscriptRow
     public IReadOnlyList<RenderBlock> Blocks { get; }
 }
 
+/// <summary>
+/// 「后台任务已完成 · … · 6m12s」 — the notification that woke the model, in the
+/// place the model received it. The message is a user turn to the agent; to the
+/// user it is an event, so it gets a line rather than a bubble with their avatar.
+/// </summary>
+public sealed class TaskNoticeRow : TranscriptRow
+{
+    public TaskNoticeRow(MessageViewModel message) : base(message, message.RowKey() + ":task")
+        => Notice = message.TaskNotification!;
+
+    public TaskNotice Notice { get; }
+}
+
 /// <summary>Assistant avatar plus model name — row 0 of the AssistantGrid.</summary>
 public sealed class HeaderRow : TranscriptRow, INotifyPropertyChanged
 {

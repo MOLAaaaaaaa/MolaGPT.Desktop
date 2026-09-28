@@ -14,7 +14,18 @@ public sealed class BackgroundStreamTask
     public string? ModelId { get; init; }
     public string? ProviderId { get; init; }
     public ProviderKind ProviderKind { get; init; } = ProviderKind.Custom;
-    public MessageViewModel AssistantMessage { get; init; } = default!;
+
+    /// <summary>The bubble the stream is writing into. Replaced mid-stream when the
+    /// agent takes in a message queued into the run: the reply splits there.</summary>
+    public MessageViewModel AssistantMessage { get; set; } = default!;
+
+    /// <summary>Tool calls in flight right now. While there are any, the agent is in
+    /// its tool loop and a message queued into the run lands before its next model
+    /// call; with none, the reply may already be the final answer.</summary>
+    internal HashSet<string> RunningTools { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>Started by a background task's notification rather than by the user.</summary>
+    public bool IsWakeTurn { get; init; }
     public CancellationTokenSource Cts { get; set; } = default!;
     public Task StreamTask { get; set; } = default!;
     public bool IsDetached { get; set; }

@@ -38,6 +38,19 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     private const int FileRetryLimit = 5;
     private static readonly TimeSpan FileRetryDelay = TimeSpan.FromMilliseconds(120);
 
+    /// <summary>A turn in flight, and whether Pi has already declared it settled —
+    /// past that point nothing queued into it would ever be delivered.</summary>
+    private sealed class ActiveTurn(PiSidecarSession session)
+    {
+        public PiSidecarSession Session { get; } = session;
+        public volatile bool Settled;
+        public bool SeenPrompt;
+    }
+
+    /// <summary>Turns currently streaming, by conversation key, so a message typed
+    /// mid-turn reaches the process that is running it.</summary>
+    private readonly ConcurrentDictionary<string, ActiveTurn> _activeTurns = new(StringComparer.Ordinal);
+
     public PiWorkProvider(
         PiWorkProviderConfig config,
         IChatToolHost toolHost,
@@ -153,8 +166,12 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         var binding = new PiWorkToolBridge.TurnBinding(
             async (name, argsJson, toolCt) =>
             {
+                // Stop cancels the tool as well as the stream. The bridge would get
+                // there once the lease is released; linking here does not wait for
+                // the stream to unwind first.
+                using var call = CancellationTokenSource.CreateLinkedTokenSource(toolCt, ct);
                 var result = await _toolHost
-                    .ExecuteAsync(name, argsJson, toolContext, options, toolCt)
+                    .ExecuteAsync(name, argsJson, toolContext, options, call.Token)
                     .ConfigureAwait(false);
                 return string.Equals(name, "search_web", StringComparison.Ordinal)
                     ? citations.Number(result)
@@ -184,7 +201,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             request.ConversationId ?? PiRuntime.DraftKey,
             target,
             binding,
-            ct).ConfigureAwait(false);
+            ct,
+            request.IsSubagent).ConfigureAwait(false);
 
         // A cold sidecar costs a Node boot (~2.7s measured) before the model is even
         // asked anything. Saying so beats a generic "等待模型回答" that makes the wait
@@ -213,27 +231,39 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // on file" distinct from "this turn happened to cost nothing".
         var priced = activeModel?.Pricing is not null;
 
-        await foreach (var line in lease.Session
-                           .SendTurnAsync(creds.Model, thinkingLevel, userText, images, ct)
-                           .ConfigureAwait(false))
+        var turnKey = request.ConversationId ?? PiRuntime.DraftKey;
+        var turn = new ActiveTurn(lease.Session);
+        _activeTurns[turnKey] = turn;
+        try
         {
-            if (Volatile.Read(ref promptError) is { } roleError) throw new InvalidOperationException(roleError);
-            if (Interlocked.Exchange(ref promptTrace, null) is { } trace) yield return new ChatChunk(PromptTrace: trace);
-            var chunk = MapLine(
-                line,
-                options,
-                pendingArgs,
-                preview,
-                generationSpeed,
-                contextWindow,
-                priced,
-                ref errorMessage,
-                ref finalStopReason);
-            if (chunk is not null) yield return chunk;
-            // Tool results come back on the bridge thread, so the sources show up
-            // between lines rather than on one; polling here is what puts them on
-            // the message while the answer is still being written.
-            if (citations.TryTakeUpdate(out var found)) yield return new ChatChunk(Sources: found);
+            await foreach (var line in lease.Session
+                               .SendTurnAsync(creds.Model, thinkingLevel, userText, images, ct)
+                               .ConfigureAwait(false))
+            {
+                if (Volatile.Read(ref promptError) is { } roleError) throw new InvalidOperationException(roleError);
+                if (Interlocked.Exchange(ref promptTrace, null) is { } trace) yield return new ChatChunk(PromptTrace: trace);
+                var chunk = MapLine(
+                    line,
+                    options,
+                    pendingArgs,
+                    preview,
+                    generationSpeed,
+                    contextWindow,
+                    priced,
+                    turn,
+                    ref errorMessage,
+                    ref finalStopReason);
+                if (chunk is not null) yield return chunk;
+                // Tool results come back on the bridge thread, so the sources show up
+                // between lines rather than on one; polling here is what puts them on
+                // the message while the answer is still being written.
+                if (citations.TryTakeUpdate(out var found)) yield return new ChatChunk(Sources: found);
+            }
+        }
+        finally
+        {
+            turn.Settled = true;
+            _activeTurns.TryRemove(KeyValuePair.Create(turnKey, turn));
         }
 
         // A search that finished after the last line would otherwise be dropped.
@@ -367,6 +397,10 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             text = text[(separator + 1)..].Trim();
         }
 
+        // MolaGPT 服务端长连接并发满时 nginx 回一页 HTML，里面没有可读的原因
+        if (status == 429 && text.StartsWith('<'))
+            return "当前使用人数较多，请稍后再试（429）。";
+
         var detail = ChatApiErrorHelper.ExtractErrorMessage(text);
         if (string.IsNullOrWhiteSpace(detail)) detail = text;
 
@@ -432,6 +466,150 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         finally { File.Delete(temporaryPath); }
     }
 
+    /// <summary>Whether a turn is streaming for this conversation and can still take
+    /// a queued message.</summary>
+    public bool CanEnqueue(string? conversationId) =>
+        _activeTurns.TryGetValue(conversationId ?? PiRuntime.DraftKey, out var turn) && !turn.Settled;
+
+    /// <summary>
+    /// Queue <paramref name="text"/> into the conversation's running turn: as a steer
+    /// (after the current tool calls) or a follow-up (once the agent would stop).
+    /// False when no turn is running or it has already settled — the caller then
+    /// sends the text as an ordinary message instead.
+    /// </summary>
+    public bool TryEnqueue(string? conversationId, string text, bool followUp)
+    {
+        if (!_activeTurns.TryGetValue(conversationId ?? PiRuntime.DraftKey, out var turn) || turn.Settled)
+            return false;
+        turn.Session.Enqueue(text, followUp);
+        return true;
+    }
+
+    /// <summary>Drop what is still queued in the conversation's running turn.</summary>
+    public bool TryClearQueue(string? conversationId)
+    {
+        if (!_activeTurns.TryGetValue(conversationId ?? PiRuntime.DraftKey, out var turn) || turn.Settled)
+            return false;
+        turn.Session.ClearQueue();
+        return true;
+    }
+
+    /// <summary>
+    /// Start <paramref name="childKey"/>'s transcript as a copy of the parent's, so a
+    /// sub-agent begins with the parent's whole context.
+    ///
+    /// A byte-for-byte copy on purpose. The child runs on the parent's system prompt
+    /// and tool list, so with an identical history its first request shares the
+    /// parent's prefix and reads it from the provider's cache instead of paying for
+    /// it again. Rebuilding the history from the UI, or filtering it down to answers
+    /// only, would cost exactly that.
+    ///
+    /// The one thing dropped is the tail the parent is in the middle of: the
+    /// assistant message that called spawn_agent has no result yet, and a provider
+    /// rejects a tool call without its result.
+    /// </summary>
+    public async Task<bool> ForkSessionAsync(string parentConversationId, string childKey, CancellationToken ct)
+    {
+        var source = PiRuntime.ResolveSessionPath(_config.Spec.SessionRoot, parentConversationId);
+        if (!File.Exists(source)) return false;
+
+        string[] lines;
+        using (var stream = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (var reader = new StreamReader(stream, Encoding.UTF8))
+        {
+            var text = await reader.ReadToEndAsync(ct).ConfigureAwait(false);
+            lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        }
+
+        var keep = PiSessionFork.KeepCountWithoutOpenToolCalls(lines);
+        if (keep <= 0) return false;
+
+        var target = PiRuntime.ResolveSessionPath(_config.Spec.SessionRoot, childKey);
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+        var output = new StringBuilder();
+        for (var i = 0; i < keep; i++)
+        {
+            var line = lines[i].TrimEnd('\r');
+            output.Append(i == 0 ? PiSessionFork.WithNewSessionId(line) : line).Append('\n');
+        }
+        await File.WriteAllTextAsync(target, output.ToString(), new UTF8Encoding(false), ct).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>
+    /// Give a branched-off conversation its transcript: the source's first
+    /// <paramref name="userTurns"/> turns, copied byte for byte, so its first request
+    /// reads the source's cached prefix.
+    ///
+    /// The copy is only trusted when the source file and the app agree on how many
+    /// user turns there are — an unsynced edit, or a 续写 prompt the app never shows,
+    /// throws the count off. Then the history is rebuilt from what the app shows
+    /// instead: correct, just not cached.
+    /// </summary>
+    public async Task BranchSessionAsync(
+        string sourceConversationId,
+        string targetConversationId,
+        int userTurns,
+        int sourceUserTurns,
+        IReadOnlyList<ChatMessage> fallbackHistory,
+        string modelId,
+        CancellationToken ct)
+    {
+        var source = PiRuntime.ResolveSessionPath(_config.Spec.SessionRoot, sourceConversationId);
+        string[]? lines = null;
+        if (File.Exists(source))
+        {
+            using var stream = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            lines = (await reader.ReadToEndAsync(ct).ConfigureAwait(false))
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        }
+
+        var keep = lines is not null && PiSessionFork.CountUserMessages(lines) == sourceUserTurns
+            ? PiSessionFork.KeepCountThroughUserTurns(lines, userTurns)
+            : -1;
+        if (keep <= 0 || lines is null)
+        {
+            await ReplaceHistoryAsync(targetConversationId, modelId, fallbackHistory, ct).ConfigureAwait(false);
+            return;
+        }
+
+        var target = PiRuntime.ResolveSessionPath(_config.Spec.SessionRoot, targetConversationId);
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+        var output = new StringBuilder();
+        for (var i = 0; i < keep; i++)
+        {
+            var line = lines[i].TrimEnd('\r');
+            output.Append(i == 0 ? PiSessionFork.WithNewSessionId(line) : line).Append('\n');
+        }
+        await File.WriteAllTextAsync(target, output.ToString(), new UTF8Encoding(false), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Whether a child can continue its saved Pi conversation.</summary>
+    public bool HasSession(string key) =>
+        File.Exists(PiRuntime.ResolveSessionPath(_config.Spec.SessionRoot, key));
+
+    /// <summary>Remove a transcript that is no longer needed.</summary>
+    public async Task DeleteSessionAsync(string key)
+    {
+        await _runtime.EvictConversationAsync(key).ConfigureAwait(false);
+        var path = PiRuntime.ResolveSessionPath(_config.Spec.SessionRoot, key);
+        for (var attempt = 0; attempt <= FileRetryLimit; attempt++)
+        {
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+                return;
+            }
+            catch (IOException) when (attempt < FileRetryLimit)
+            {
+                await Task.Delay(FileRetryDelay).ConfigureAwait(false);
+            }
+            catch (IOException) { return; }
+            catch (UnauthorizedAccessException) { return; }
+        }
+    }
+
     /// <summary>Remove the latest user turn and its responses before regenerating it.</summary>
     public async Task<bool> ForgetLastTurnAsync(string? conversationId, CancellationToken ct = default)
     {
@@ -478,6 +656,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         GenerationSpeedTracker generationSpeed,
         int contextWindow,
         bool priced,
+        ActiveTurn turn,
         ref string? errorMessage,
         ref string? finalStopReason)
     {
@@ -518,8 +697,29 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                     return null;
 
                 case "message_end":
+                    if (root.TryGetProperty("message", out var ended)
+                        && ended.TryGetProperty("role", out var endedRole)
+                        && endedRole.GetString() == "user")
+                    {
+                        // The first user message of a run is the prompt this turn
+                        // sent; any later one was queued into the run while it went.
+                        if (!turn.SeenPrompt)
+                        {
+                            turn.SeenPrompt = true;
+                            return null;
+                        }
+                        var injected = MessageText(ended);
+                        return string.IsNullOrWhiteSpace(injected)
+                            ? null
+                            : new ChatChunk(Injected: new InjectedMessageDelta(injected));
+                    }
                     generationSpeed.CompleteMessage(root);
                     return null;
+
+                case "queue_update":
+                    return new ChatChunk(Queue: new QueueStateDelta(
+                        StringArray(root, "steering"),
+                        StringArray(root, "followUp")));
 
                 case "tool_execution_start":
                 {
@@ -667,6 +867,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                 // everything on thinking, looks like one that simply ended unless
                 // the reason travels with it.
                 case "agent_settled":
+                    // Nothing queued from here on would be delivered.
+                    turn.Settled = true;
                     if (errorMessage is not null) return null;
                     return new ChatChunk(FinishReason: finalStopReason == "length" ? "length" : "stop");
 
@@ -780,17 +982,25 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         };
     }
 
-    /// <summary>Join the turn's system messages, in order. Null when there are
-    /// none, which leaves Pi on its own prompt rather than blanking it.</summary>
-    private static string? ExtractSystemPrompt(IReadOnlyList<ChatMessage> messages)
+    /// <summary>
+    /// Join the turn's system messages, in order.
+    ///
+    /// Never empty. The extension leaves Pi's prompt in place when given nothing,
+    /// and Pi's prompt introduces a coding agent with read/bash/edit/write tools
+    /// and a docs directory — none of which exist here. A chat with no persona and
+    /// every tool switched off reaches that case.
+    /// </summary>
+    private static string ExtractSystemPrompt(IReadOnlyList<ChatMessage> messages)
     {
         var parts = messages
             .Where(m => m.Role == ChatMessage.RoleSystem)
             .Select(m => m.AsText())
             .Where(t => !string.IsNullOrWhiteSpace(t))
             .ToArray();
-        return parts.Length == 0 ? null : string.Join("\n\n", parts);
+        return parts.Length == 0 ? FallbackSystemPrompt : string.Join("\n\n", parts);
     }
+
+    internal const string FallbackSystemPrompt = "你是一个 AI 助手。";
 
     private static ChatMessage? LatestUserMessage(IReadOnlyList<ChatMessage> messages)
     {
@@ -941,24 +1151,14 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         if (ev.TryGetProperty("delta", out var d) && d.ValueKind == JsonValueKind.String)
             state.Arguments.Append(d.GetString());
 
-        // The id and name are on the accumulated message, not on the delta — and not
-        // necessarily on the first one. contentIndex is the block's own position, so
-        // read exactly that block: scanning them all picks up a sibling call's id when
-        // the model makes two in one message.
-        if ((state.Id.Length == 0 || state.Name.Length == 0)
-            && ev.TryGetProperty("partial", out var partial)
-            && partial.TryGetProperty("content", out var content)
-            && content.ValueKind == JsonValueKind.Array
-            && index < content.GetArrayLength())
-        {
-            var block = content[index];
-            if (state.Name.Length == 0
-                && block.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String)
-                state.Name = n.GetString() ?? "";
-            if (state.Id.Length == 0
-                && block.TryGetProperty("id", out var i) && i.ValueKind == JsonValueKind.String)
-                state.Id = i.GetString() ?? "";
-        }
+        // Pi's JSON event carries the call id and name on toolcall_start; partial
+        // is removed before the event reaches this provider.
+        if (state.Name.Length == 0
+            && ev.TryGetProperty("toolName", out var name) && name.ValueKind == JsonValueKind.String)
+            state.Name = name.GetString() ?? "";
+        if (state.Id.Length == 0
+            && ev.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String)
+            state.Id = id.GetString() ?? "";
 
         // A card needs a stable key — not a known name. Waiting for both is what left
         // the UI blank for the entire time the model spent writing a long script:
@@ -1037,6 +1237,35 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
 
     private static string Str(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) ? v.GetString() ?? "" : "";
+
+    /// <summary>The text of a Pi message, whose content is either a string or a list
+    /// of parts.</summary>
+    private static string MessageText(JsonElement message)
+    {
+        if (!message.TryGetProperty("content", out var content)) return "";
+        if (content.ValueKind == JsonValueKind.String) return content.GetString() ?? "";
+        if (content.ValueKind != JsonValueKind.Array) return "";
+
+        var parts = new List<string>();
+        foreach (var part in content.EnumerateArray())
+        {
+            if (part.ValueKind == JsonValueKind.Object
+                && part.TryGetProperty("text", out var text)
+                && text.ValueKind == JsonValueKind.String)
+                parts.Add(text.GetString() ?? "");
+        }
+        return string.Join("\n", parts);
+    }
+
+    private static IReadOnlyList<string> StringArray(JsonElement e, string name)
+    {
+        if (!e.TryGetProperty(name, out var array) || array.ValueKind != JsonValueKind.Array)
+            return Array.Empty<string>();
+        return array.EnumerateArray()
+            .Where(item => item.ValueKind == JsonValueKind.String)
+            .Select(item => item.GetString() ?? "")
+            .ToList();
+    }
 
     private static int Int(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n)

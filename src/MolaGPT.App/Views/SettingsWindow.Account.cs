@@ -176,7 +176,8 @@ public partial class SettingsWindow
                 PriceIsSuccess = symbol?.Length is 0 or 1,
                 PriceIsWarning = symbol?.Length == 3,
                 PriceIsError = symbol?.Length >= 4,
-                Detail = credits.TokensFor(row.Id, status.TokensUsage) is var usedTokens && usedTokens > 0
+                PricingPeriod = row.Status?.PricingPeriodLabel ?? string.Empty,
+                Detail =credits.TokensFor(row.Id, status.TokensUsage) is var usedTokens && usedTokens > 0
                     ? $"{credits.SpentLabel} {FormatTokens(usedTokens)}"
                     : string.Empty
             });
@@ -298,6 +299,8 @@ public sealed class AccountModelRow
     public bool PriceIsSuccess { get; init; }
     public bool PriceIsWarning { get; init; }
     public bool PriceIsError { get; init; }
+    public string PricingPeriod { get; init; } = string.Empty;
+    public bool HasPricingPeriod => PricingPeriod.Length > 0;
     public string RightText { get; init; } = string.Empty;
     public bool HasRightText { get; init; }
     public bool RightIsSuccess { get; init; }

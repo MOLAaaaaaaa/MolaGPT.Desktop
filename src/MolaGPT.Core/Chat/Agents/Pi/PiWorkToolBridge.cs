@@ -45,6 +45,21 @@ public sealed class PiWorkToolBridge : IDisposable
         RolePromptPlan? RolePlan = null,
         Action<string>? PromptError = null);
 
+    /// <summary>A binding and the signal that its turn is over. Tool calls run
+    /// against <see cref="Ended"/>, so whatever a turn still has in flight when it
+    /// ends — an approval dialog, a running script — is cancelled with it.</summary>
+    private sealed record Bound(TurnBinding Binding, CancellationTokenSource Ended);
+
+    /// <summary>
+    /// How often a running tool call writes a byte to its response.
+    ///
+    /// Pi's fetch gives up on a response whose headers or next body chunk take
+    /// longer than five minutes, and a tool call can: approval waits on a person,
+    /// and Python alone may run for 300 s. The heartbeat is also how a hung-up
+    /// sidecar is noticed — a write to a closed connection fails.
+    /// </summary>
+    private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(20);
+
     private readonly HttpListener _listener = new();
     private readonly CancellationTokenSource _cts = new();
 
@@ -57,12 +72,16 @@ public sealed class PiWorkToolBridge : IDisposable
     /// shared "current dispatcher" would let one conversation's tool call execute
     /// against another conversation's workspace and approvals.
     /// </summary>
-    private readonly ConcurrentDictionary<string, TurnBinding> _bindings = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Bound> _bindings = new(StringComparer.Ordinal);
+    private readonly object _bindingGate = new();
 
     public string Url { get; }
 
+    private readonly Action<string>? _log;
+
     public PiWorkToolBridge(Action<string>? log = null)
     {
+        _log = log;
         var port = FreeTcpPort();
         Url = $"http://127.0.0.1:{port}";
         _listener.Prefixes.Add($"{Url}/");
@@ -72,11 +91,22 @@ public sealed class PiWorkToolBridge : IDisposable
 
     /// <summary>Bind one sidecar's callbacks for the turn it is about to run, or
     /// pass null to unbind. Calls arriving without a binding are refused rather
-    /// than served from whatever ran last.</summary>
+    /// than served from whatever ran last, and calls still running under the
+    /// previous binding are cancelled.</summary>
     public void SetBinding(string sidecarToken, TurnBinding? binding)
     {
-        if (binding is null) _bindings.TryRemove(sidecarToken, out _);
-        else _bindings[sidecarToken] = binding;
+        Bound? previous;
+        lock (_bindingGate)
+        {
+            _bindings.TryGetValue(sidecarToken, out previous);
+            if (binding is null) _bindings.TryRemove(sidecarToken, out _);
+            else _bindings[sidecarToken] = new Bound(binding, new CancellationTokenSource());
+        }
+
+        // Not disposed: a call that has just looked the binding up may still be
+        // about to read its token.
+        try { previous?.Ended.Cancel(); }
+        catch (AggregateException ex) { _log?.Invoke("[tool-bridge] 取消工具调用时出错：" + ex.InnerException?.Message); }
     }
 
     private async Task AcceptLoopAsync(Action<string>? log)
@@ -102,7 +132,7 @@ public sealed class PiWorkToolBridge : IDisposable
             var segments = ctx.Request.Url?.AbsolutePath.Trim('/').Split('/') ?? Array.Empty<string>();
             var token = ctx.Request.Headers["x-mola-token"];
 
-            if (string.IsNullOrEmpty(token) || !_bindings.TryGetValue(token, out var binding))
+            if (string.IsNullOrEmpty(token) || !_bindings.TryGetValue(token, out var bound))
             {
                 // Either something else on the box found the port, or the sidecar
                 // outlived its turn. Both are "not now", never "use the last one".
@@ -112,25 +142,24 @@ public sealed class PiWorkToolBridge : IDisposable
             else if (segments is ["tools"])
             {
                 // GET /tools — the sidecar asks what MolaGPT can do right now.
-                responseJson = binding.Catalog();
+                responseJson = bound.Binding.Catalog();
             }
             else if (segments is ["system-prompt"])
             {
-                responseJson = JsonSerializer.Serialize(new { prompt = binding.SystemPrompt(), rolePlan = binding.RolePlan }, RoleJson.Options);
+                responseJson = JsonSerializer.Serialize(new { prompt = bound.Binding.SystemPrompt(), rolePlan = bound.Binding.RolePlan }, RoleJson.Options);
             }
             else if (segments is ["prompt-error"])
             {
                 using var error = JsonDocument.Parse(body);
-                binding.PromptError?.Invoke(error.RootElement.GetProperty("message").GetString() ?? "角色上下文处理失败。");
+                bound.Binding.PromptError?.Invoke(error.RootElement.GetProperty("message").GetString() ?? "角色上下文处理失败。");
                 responseJson = "{}";
             }
             else
             {
                 // POST /tools/<name>
                 var name = segments.Length >= 2 ? segments[1] : "";
-                var argsJson = ExtractArgs(body);
-                var output = await binding.Dispatcher(name, argsJson, _cts.Token).ConfigureAwait(false);
-                responseJson = JsonSerializer.Serialize(new { output });
+                await RunToolAsync(ctx, bound, name, ExtractArgs(body), log).ConfigureAwait(false);
+                return;
             }
         }
         catch (Exception ex)
@@ -150,6 +179,100 @@ public sealed class PiWorkToolBridge : IDisposable
         }
         catch { /* client gone */ }
         finally { try { ctx.Response.Close(); } catch { /* ignore */ } }
+    }
+
+    /// <summary>
+    /// POST /tools/&lt;name&gt;: run one tool call for the turn bound to this sidecar.
+    ///
+    /// The response is committed before the tool runs — status 200, chunked, a
+    /// single space — and a space follows every <see cref="HeartbeatInterval"/>
+    /// until the result is written. JSON allows the leading whitespace, so the
+    /// extension reads the body exactly as before. The price is that a failure can
+    /// no longer be a 500; it travels as <c>error: true</c> beside the output.
+    ///
+    /// The call is cancelled when its turn ends or the sidecar hangs up (Stop, or
+    /// Pi aborting the call), rather than finishing into a connection nobody
+    /// reads: a script left running, or an approval dialog that runs the tool
+    /// when clicked after the turn has already moved on.
+    /// </summary>
+    private async Task RunToolAsync(
+        HttpListenerContext ctx,
+        Bound bound,
+        string name,
+        string argsJson,
+        Action<string>? log)
+    {
+        using var call = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, bound.Ended.Token);
+        var response = ctx.Response;
+        response.StatusCode = 200;
+        response.ContentType = "application/json";
+        response.SendChunked = true;
+        var stream = response.OutputStream;
+        using var writes = new SemaphoreSlim(1, 1);
+        using var stopHeartbeat = new CancellationTokenSource();
+        var heartbeat = HeartbeatAsync(stream, writes, call, stopHeartbeat.Token);
+
+        string json;
+        try
+        {
+            var output = await bound.Binding.Dispatcher(name, argsJson, call.Token).ConfigureAwait(false);
+            json = JsonSerializer.Serialize(new { output });
+        }
+        // The dispatcher may be cancelled through its own turn's token before this
+        // call's is, so either counts.
+        catch (OperationCanceledException ex)
+            when (call.IsCancellationRequested || ex.CancellationToken.IsCancellationRequested)
+        {
+            json = JsonSerializer.Serialize(new { output = "工具调用已取消。", error = true });
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke("[tool-bridge] " + ex.Message);
+            json = JsonSerializer.Serialize(new { output = "工具执行失败：" + ex.Message, error = true });
+        }
+
+        stopHeartbeat.Cancel();
+        await heartbeat.ConfigureAwait(false);
+
+        try { await WriteAsync(stream, writes, Encoding.UTF8.GetBytes(json)).ConfigureAwait(false); }
+        catch { /* client gone */ }
+        finally { try { response.Close(); } catch { /* ignore */ } }
+    }
+
+    private static async Task HeartbeatAsync(
+        Stream stream,
+        SemaphoreSlim writes,
+        CancellationTokenSource call,
+        CancellationToken stop)
+    {
+        try
+        {
+            // The first byte is what sends the headers.
+            await WriteAsync(stream, writes, Space).ConfigureAwait(false);
+            while (true)
+            {
+                await Task.Delay(HeartbeatInterval, stop).ConfigureAwait(false);
+                await WriteAsync(stream, writes, Space).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested)
+        {
+        }
+        catch (Exception)
+        {
+            // The sidecar hung up on this call.
+            try { call.Cancel(); }
+            catch (AggregateException) { /* the call reports its own failure */ }
+        }
+    }
+
+    private static readonly byte[] Space = " "u8.ToArray();
+
+    private static async Task WriteAsync(Stream stream, SemaphoreSlim writes, byte[] bytes)
+    {
+        await writes.WaitAsync().ConfigureAwait(false);
+        try { await stream.WriteAsync(bytes).ConfigureAwait(false); }
+        finally { writes.Release(); }
     }
 
     /// <summary>The extension posts <c>{ ...toolArgs }</c>; MolaGPT tools take the

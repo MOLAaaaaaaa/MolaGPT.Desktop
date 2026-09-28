@@ -45,6 +45,14 @@ internal static class FileToolset
     private static string Clip(string line) =>
         line.Length > GrepLineClip ? line[..GrepLineClip] + "…" : line;
 
+    private static string ReadTextShared(string path)
+    {
+        // Python task logs stay open for writing until the process exits.
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        return reader.ReadToEnd();
+    }
+
     /// <summary>The lines in [from, to], clamped to the file. Clipped like matches
     /// are, so one long line of context cannot dwarf the hit it belongs to.</summary>
     private static string[] Surrounding(string[] lines, int from, int to)
@@ -107,7 +115,7 @@ internal static class FileToolset
             if (info.Length > MaxReadBytes)
                 return Error($"文件过大（{info.Length / 1024}KB），超过 {MaxReadBytes / 1024 / 1024}MB 上限，无法读取。");
 
-            var raw = File.ReadAllText(full, Encoding.UTF8);
+            var raw = ReadTextShared(full);
             if (raw.Length > 0 && BinaryProbe.IsMatch(raw))
                 return Error("该文件看起来是二进制文件，无法作为文本读取。");
 
@@ -267,7 +275,7 @@ internal static class FileToolset
                 string[] lines;
                 try
                 {
-                    var text = File.ReadAllText(file, Encoding.UTF8);
+                    var text = ReadTextShared(file);
                     if (text.Length > 0 && BinaryProbe.IsMatch(text)) continue;
                     lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
                 }

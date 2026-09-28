@@ -4,6 +4,7 @@ using System.Text.Json;
 using CommunityToolkit.Mvvm.ComponentModel;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
@@ -30,6 +31,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string StreamFadeKey = "stream_tail_fade";
     private const string StatusDotsKey = "status_dots";
     private const string AutoCompactionKey = "auto_compaction";
+    private const string BackgroundTaskWakeKey = "background_task_wake";
+    private const string RunningTaskSendModeKey = "running_task_send_mode";
+    private const string SubagentsEnabledKey = "subagents_enabled";
+    public const string SubagentProviderIdKey = "subagent_provider_id";
+    public const string SubagentModelIdKey = "subagent_model_id";
+    public const string SubagentMaxPerConversationKey = "subagent_max_per_conversation";
     private const string TracksEnabledKey = "molagpt_tracks_enabled";
     private const string CompletionNotificationKey = "completion_notification";
     private const string ThemeModeKey = "theme_mode";
@@ -155,6 +162,16 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// actually taken; this is only where the answer is kept.
     /// </summary>
     [ObservableProperty] private bool _autoCompactionEnabled = true;
+
+    /// <summary>When a background task ends, start a turn so the model can report on it.
+    /// Off: the result waits for the next message the user sends.</summary>
+    [ObservableProperty] private bool _backgroundTaskWakeEnabled = true;
+    [ObservableProperty] private int _runningTaskSendModeIndex;
+
+    /// <summary>Offer Work models the spawn_agent tool.</summary>
+    [ObservableProperty] private bool _subagentsEnabled = true;
+    [ObservableProperty] private TitleProviderModelOption? _selectedSubagentProviderModel;
+    [ObservableProperty] private int _subagentMaxPerConversation = 4;
     public const double MinFontScale = 0.8;
     public const double MaxFontScale = 1.4;
     [ObservableProperty] private double _fontScale = 1.0;
@@ -238,23 +255,29 @@ public sealed partial class SettingsViewModel : ObservableObject
     public ObservableCollection<ProviderEntry> Providers { get; } = new();
     public ObservableCollection<McpServerEntry> McpServers { get; } = new();
     public ObservableCollection<TitleProviderModelOption> TitleProviderModels { get; } = new();
+    public ObservableCollection<TitleProviderModelOption> SubagentProviderModels { get; } = new();
     public ObservableCollection<VisionProviderModelOption> VisionProviderModels { get; } = new();
     public ObservableCollection<ImageGenerationProviderModelOption> ImageGenerationProviderModels { get; } = new();
 
     private readonly ProviderRepository? _repo;
     private readonly CredentialStore? _credentialStore;
     private readonly SettingsRepository? _settingsRepo;
+    private readonly ProviderRegistry? _providerRegistry;
     private bool _loadingSettings;
     private string? _titleProviderId;
     private string? _titleModelId;
+    private string? _subagentProviderId;
+    private string? _subagentModelId;
 
     public SettingsViewModel() { }
 
-    public SettingsViewModel(ProviderRepository? repo, CredentialStore? credentialStore, SettingsRepository? settingsRepo = null)
+    public SettingsViewModel(ProviderRepository? repo, CredentialStore? credentialStore,
+        SettingsRepository? settingsRepo = null, ProviderRegistry? providerRegistry = null)
     {
         _repo = repo;
         _credentialStore = credentialStore;
         _settingsRepo = settingsRepo;
+        _providerRegistry = providerRegistry;
         Reload();
     }
 
@@ -274,6 +297,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             Providers.Add(new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat, customHeaders));
         }
         RefreshTitleProviderModels();
+        RefreshSubagentProviderModels();
         RefreshMemoryProviderModels();
         RefreshVisionProviderModels();
         RefreshImageGenerationProviderModels();
@@ -305,6 +329,15 @@ public sealed partial class SettingsViewModel : ObservableObject
                 ShowStatusDots = statusDots;
             if (bool.TryParse(_settingsRepo.Get(AutoCompactionKey), out var autoCompaction))
                 AutoCompactionEnabled = autoCompaction;
+            if (bool.TryParse(_settingsRepo.Get(BackgroundTaskWakeKey), out var taskWake))
+                BackgroundTaskWakeEnabled = taskWake;
+            RunningTaskSendModeIndex = _settingsRepo.Get(RunningTaskSendModeKey) == "queue" ? 1 : 0;
+            if (bool.TryParse(_settingsRepo.Get(SubagentsEnabledKey), out var subagents))
+                SubagentsEnabled = subagents;
+            _subagentProviderId = _settingsRepo.Get(SubagentProviderIdKey);
+            _subagentModelId = _settingsRepo.Get(SubagentModelIdKey);
+            if (int.TryParse(_settingsRepo.Get(SubagentMaxPerConversationKey), out var perConversation))
+                SubagentMaxPerConversation = Math.Clamp(perConversation, 1, 4);
             LoadResponsePostProcessing();
             LoadMemorySettings();
             if (bool.TryParse(_settingsRepo.Get(TracksEnabledKey), out var tracksEnabled))
@@ -480,6 +513,40 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(AutoCompactionKey, value.ToString());
+    }
+
+    partial void OnBackgroundTaskWakeEnabledChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(BackgroundTaskWakeKey, value.ToString());
+    }
+
+    partial void OnRunningTaskSendModeIndexChanged(int value)
+    {
+        if (_loadingSettings || _settingsRepo is null || value is not (0 or 1)) return;
+        _settingsRepo.Set(RunningTaskSendModeKey, value == 1 ? "queue" : "steer");
+    }
+
+    partial void OnSubagentsEnabledChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(SubagentsEnabledKey, value.ToString());
+    }
+
+    partial void OnSelectedSubagentProviderModelChanged(TitleProviderModelOption? value)
+    {
+        if (_loadingSettings) return;
+        _subagentProviderId = value?.ProviderId;
+        _subagentModelId = value?.ModelId;
+        SetOrRemove(SubagentProviderIdKey, _subagentProviderId);
+        SetOrRemove(SubagentModelIdKey, _subagentModelId);
+    }
+
+    partial void OnSubagentMaxPerConversationChanged(int value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        SubagentMaxPerConversation = Math.Clamp(value, 1, 4);
+        _settingsRepo.Set(SubagentMaxPerConversationKey, SubagentMaxPerConversation.ToString());
     }
 
     partial void OnFontScaleChanged(double value)
@@ -878,6 +945,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 : null));
         RefreshVisionProviderModels();
         RefreshTitleProviderModels();
+        RefreshSubagentProviderModels();
         RefreshMemoryProviderModels();
         RefreshImageGenerationProviderModels();
 
@@ -1119,6 +1187,43 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
     }
 
+    public void RefreshSubagentProviderModels()
+    {
+        var wasLoading = _loadingSettings;
+        _loadingSettings = true;
+        try
+        {
+            SubagentProviderModels.Clear();
+            var followCurrent = new TitleProviderModelOption(null, null, "跟随主 Agent");
+            SubagentProviderModels.Add(followCurrent);
+            if (_providerRegistry is not null)
+            {
+                foreach (var provider in _providerRegistry.Providers.OfType<PiWorkProvider>())
+                {
+                    foreach (var model in provider.Models)
+                        SubagentProviderModels.Add(new TitleProviderModelOption(
+                            provider.Id, model.Id, $"{provider.DisplayName} / {model.DisplayName}"));
+                }
+            }
+
+            var selected = SubagentProviderModels.FirstOrDefault(option =>
+                string.Equals(option.ProviderId, _subagentProviderId, StringComparison.Ordinal)
+                && string.Equals(option.ModelId, _subagentModelId, StringComparison.Ordinal));
+            if (selected is null)
+            {
+                selected = new TitleProviderModelOption(
+                    _subagentProviderId, _subagentModelId,
+                    $"{_subagentProviderId} / {_subagentModelId}（不可用）");
+                SubagentProviderModels.Add(selected);
+            }
+            SelectedSubagentProviderModel = selected;
+        }
+        finally
+        {
+            _loadingSettings = wasLoading;
+        }
+    }
+
     public void RefreshImageGenerationProviderModels()
     {
         ImageGenerationProviderModels.Clear();
@@ -1194,6 +1299,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         var existing = Providers.FirstOrDefault(p => p.Id == id);
         if (existing is not null) Providers.Remove(existing);
         RefreshTitleProviderModels();
+        RefreshSubagentProviderModels();
         RefreshMemoryProviderModels();
         RefreshImageGenerationProviderModels();
 

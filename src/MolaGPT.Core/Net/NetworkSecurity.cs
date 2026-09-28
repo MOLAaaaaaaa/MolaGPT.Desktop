@@ -21,6 +21,15 @@ public static class NetworkSecurity
         return normalized;
     }
 
+    public static string RequireHttpOrHttpsBaseUrl(string baseUrl, string context)
+    {
+        var normalized = baseUrl.TrimEnd('/') + "/";
+        var uri = new Uri(normalized, UriKind.Absolute);
+        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+            throw new InvalidOperationException($"{context} 必须使用 HTTP 或 HTTPS。当前地址: {uri}");
+        return normalized;
+    }
+
     /// <summary>
     /// Joins a base URL with an explicit, user-editable endpoint path. The
     /// convention across the app is: base URL = host root up to (but not
@@ -30,7 +39,7 @@ public static class NetworkSecurity
     /// </summary>
     public static Uri CombineEndpoint(string baseUrl, string path, string context)
     {
-        var normalizedBase = RequireHttpsBaseUrl(baseUrl, context); // trailing slash, HTTPS-checked
+        var normalizedBase = RequireHttpOrHttpsBaseUrl(baseUrl, context);
         var trimmedPath = path.Trim().TrimStart('/');
         return new Uri(normalizedBase + trimmedPath, UriKind.Absolute);
     }

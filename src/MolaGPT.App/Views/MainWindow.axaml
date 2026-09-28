@@ -86,7 +86,7 @@
               Classes="artifacthandle"
               IsVisible="{Binding IsArtifactHandleVisible}"
               Command="{Binding ToggleArtifactPanelCommand}"
-              ToolTip.Tip="交付物" AutomationProperties.Name="交付物面板">
+               ToolTip.Tip="侧边栏" AutomationProperties.Name="侧边栏">
         <Panel>
           <!-- Closed → points left, "pull it out". Open → points right, "push
                it back". These were the wrong way round, so the arrow described
@@ -115,10 +115,10 @@
               BorderBrush="{DynamicResource Brush.Border.Subtle}"
               BorderThickness="1" CornerRadius="{DynamicResource Radius.Xxl}"
               ClipToBounds="True">
-        <Grid Margin="16,14,14,14" RowDefinitions="Auto,*">
+        <Grid Margin="16,14,14,14" RowDefinitions="Auto,Auto,*">
           <!-- Header: what this is, how many, and the list / canvas switch. -->
           <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto" Margin="2,0,0,12">
-            <StackPanel VerticalAlignment="Center" Spacing="2">
+            <StackPanel VerticalAlignment="Center" Spacing="2" IsVisible="{Binding IsArtifactPanelSelected}">
               <TextBlock Text="交付物" FontWeight="SemiBold"
                          FontSize="{DynamicResource Font.Size.Heading}"
                          TextWrapping="NoWrap" />
@@ -128,8 +128,14 @@
                          TextWrapping="NoWrap"
                          IsVisible="{Binding Chat.HasArtifacts}" />
             </StackPanel>
+            <StackPanel VerticalAlignment="Center" Spacing="2" IsVisible="{Binding SubagentPanelSelected}">
+              <TextBlock Text="子 Agent" FontWeight="SemiBold"
+                         FontSize="{DynamicResource Font.Size.Heading}" />
+              <TextBlock Text="{Binding Chat.SubagentCount, StringFormat='{}{0} 个'}"
+                         Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}" />
+            </StackPanel>
             <Border Grid.Column="1" Classes="artifacttabs" VerticalAlignment="Center" Margin="8,0,6,0"
-                    IsVisible="{Binding Chat.HasArtifacts}">
+                     IsVisible="{Binding IsArtifactPanelSelected}">
               <StackPanel Orientation="Horizontal">
                 <ToggleButton Classes="artifacttab" Content="列表"
                               Command="{Binding ShowArtifactListCommand}"
@@ -146,8 +152,22 @@
             </Button>
           </Grid>
 
+          <Border Grid.Row="1" Classes="artifacttabs" HorizontalAlignment="Left"
+                  Margin="0,0,0,12" IsVisible="{Binding Chat.HasSubagents}">
+            <StackPanel Orientation="Horizontal">
+              <ToggleButton Classes="artifacttab" Content="交付物"
+                            Command="{Binding ShowArtifactListCommand}"
+                            IsVisible="{Binding Chat.HasArtifacts}"
+                            IsChecked="{Binding IsArtifactPanelSelected, Mode=OneWay}" />
+              <ToggleButton Classes="artifacttab" Content="子 Agent"
+                            Command="{Binding ShowSubagentListCommand}"
+                            IsChecked="{Binding SubagentPanelSelected, Mode=OneWay}" />
+            </StackPanel>
+          </Border>
+
+          <Grid Grid.Row="2" IsVisible="{Binding IsArtifactPanelSelected}">
           <!-- list -->
-          <Grid Grid.Row="1" IsVisible="{Binding !ArtifactCanvasVisible}">
+          <Grid IsVisible="{Binding !ArtifactCanvasVisible}">
             <TextBlock Text="暂无交付物" Classes="muted"
                        Margin="2,8,2,0" IsVisible="{Binding !Chat.HasArtifacts}" />
             <ScrollViewer IsVisible="{Binding Chat.HasArtifacts}"
@@ -192,7 +212,7 @@
           </Grid>
 
           <!-- canvas -->
-          <Grid Grid.Row="1" IsVisible="{Binding ArtifactCanvasVisible}" RowDefinitions="Auto,*">
+          <Grid IsVisible="{Binding ArtifactCanvasVisible}" RowDefinitions="Auto,*">
             <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,10">
               <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
                 <Button Classes="headericon" Command="{Binding SelectPreviousArtifactCommand}" ToolTip.Tip="上一项">
@@ -259,6 +279,115 @@
             <Border Grid.Row="1" Classes="artifactcanvasbody">
               <views:ArtifactCanvasBodyHost Name="PART_ArtifactCanvas" Main="{Binding}" />
             </Border>
+          </Grid>
+          </Grid>
+
+          <Grid Grid.Row="2" IsVisible="{Binding SubagentPanelSelected}">
+            <ScrollViewer IsVisible="{Binding IsSubagentListVisible}"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+              <ItemsControl ItemsSource="{Binding Chat.Subagents}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:SubagentViewModel">
+                    <Button Classes="artifactrow" Tag="{Binding}" Click="OnSubagentClick">
+                      <StackPanel Spacing="4">
+                        <Grid ColumnDefinitions="*,Auto">
+                          <TextBlock Text="{Binding Label}" FontSize="13" FontWeight="SemiBold"
+                                     TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                          <TextBlock Grid.Column="1" Text="{Binding StatusText}"
+                                     Classes="muted" FontSize="11" Margin="8,0,0,0" />
+                        </Grid>
+                        <TextBlock Text="{Binding Model}" Classes="muted" FontSize="11"
+                                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{Binding CurrentAction}" Classes="muted" FontSize="11"
+                                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                   IsVisible="{Binding IsRunning}" />
+                      </StackPanel>
+                    </Button>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+
+            <Grid IsVisible="{Binding IsSubagentDetailVisible}" RowDefinitions="Auto,*">
+              <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,10">
+                <Button Grid.Column="0" Classes="headericon" Command="{Binding ShowSubagentListCommand}"
+                        ToolTip.Tip="返回列表">
+                  <TextBlock Classes="icon" Text="&#xE76B;" />
+                </Button>
+                <StackPanel Grid.Column="1" Margin="8,0" Spacing="2">
+                  <TextBlock Text="{Binding SelectedSubagent.Label}" FontSize="13" FontWeight="SemiBold"
+                             TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                  <StackPanel Orientation="Horizontal" Spacing="6">
+                    <TextBlock Text="{Binding SelectedSubagent.StatusText}" Classes="muted" FontSize="11" />
+                    <TextBlock Text="{Binding SelectedSubagent.ElapsedText}" Classes="muted" FontSize="11" />
+                  </StackPanel>
+                </StackPanel>
+                <Button Grid.Column="2" Classes="toolchip" Content="停止"
+                        Command="{Binding SelectedSubagent.StopCommand}"
+                        IsVisible="{Binding SelectedSubagent.IsRunning}" />
+              </Grid>
+              <ScrollViewer Grid.Row="1" Name="PART_SubagentScroll"
+                            VerticalScrollBarVisibility="Auto"
+                            HorizontalScrollBarVisibility="Disabled">
+                <StackPanel>
+                <ItemsControl ItemsSource="{Binding SelectedSubagent.Activity}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:SubagentActivityViewModel">
+                      <StackPanel Margin="0,0,0,12">
+                        <Border Classes="artifactbadge" CornerRadius="6" Padding="9"
+                                IsVisible="{Binding IsTask}">
+                          <StackPanel Spacing="4">
+                            <TextBlock Text="任务" FontSize="11" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding TaskText}" FontSize="12" TextWrapping="Wrap" />
+                          </StackPanel>
+                        </Border>
+                        <StackPanel IsVisible="{Binding IsThinking}" Spacing="4">
+                          <TextBlock Text="思考" Classes="muted" FontSize="11" />
+                          <SelectableTextBlock Text="{Binding Message.Content}" FontSize="12"
+                                               TextWrapping="Wrap" IsVisible="{Binding Message.IsStreaming}" />
+                          <r:MarkdownTextBlock Markdown="{Binding RenderedMarkdown}" FontSize="12"
+                                               TextWrapping="Wrap" IsVisible="{Binding !Message.IsStreaming}" />
+                        </StackPanel>
+                        <StackPanel IsVisible="{Binding IsText}">
+                          <SelectableTextBlock Text="{Binding Message.Content}" FontSize="13"
+                                               TextWrapping="Wrap" IsVisible="{Binding Message.IsStreaming}" />
+                          <r:MarkdownTextBlock Markdown="{Binding RenderedMarkdown}" FontSize="13"
+                                               TextWrapping="Wrap" IsVisible="{Binding !Message.IsStreaming}" />
+                        </StackPanel>
+                        <Expander IsVisible="{Binding IsTool}">
+                          <Expander.Header>
+                            <Grid ColumnDefinitions="*,Auto" MinWidth="240">
+                              <StackPanel Spacing="2">
+                                <TextBlock Text="{Binding Tool.DisplayLabel}" FontSize="12"
+                                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{Binding Tool.HeaderArgPreview}" Classes="muted" FontSize="11"
+                                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                           IsVisible="{Binding Tool.HasHeaderArgPreview}" />
+                              </StackPanel>
+                              <TextBlock Grid.Column="1" Text="{Binding Tool.StatusText}"
+                                         Classes="muted" FontSize="11" Margin="8,0,0,0" />
+                            </Grid>
+                          </Expander.Header>
+                          <StackPanel Spacing="6" Margin="0,8,0,0">
+                            <TextBlock Text="{Binding Tool.Detail}" Classes="muted" FontSize="11"
+                                       TextWrapping="Wrap" IsVisible="{Binding Tool.HasDetail}" />
+                            <r:RawPayloadView Text="{Binding Tool.DisplayArgumentsJson}"
+                                              IsVisible="{Binding Tool.HasArguments}" />
+                            <r:RawPayloadView Text="{Binding Tool.DisplayResultPreviewJson}"
+                                              IsVisible="{Binding Tool.HasResultPreview}" />
+                          </StackPanel>
+                        </Expander>
+                      </StackPanel>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock Text="{Binding SelectedSubagent.FailureText}"
+                           Classes="muted" FontSize="12" TextWrapping="Wrap"
+                           IsVisible="{Binding SelectedSubagent.HasFailure}" />
+                </StackPanel>
+              </ScrollViewer>
+            </Grid>
           </Grid>
         </Grid>
       </Border>

@@ -156,6 +156,10 @@ public partial class MainWindow : MolaWindow
         PART_Transcript.DataContext = _chat;
         PART_Transcript.AttachAttachmentStore(_attachmentStore);
         PART_Composer.DataContext = _composer;
+        // The composer floats over the transcript; whatever height it has is kept
+        // clear at the transcript's bottom.
+        PART_Composer.SizeChanged += (_, e) => PART_Transcript.SetBottomReserve(
+            e.NewSize.Height + PART_Composer.Margin.Bottom - ComposerOverTranscriptPadding);
         DataContext = _main;
         ApplyFontScale(_settings.FontScale);
         StreamTailFade.Configure(_settings.StreamFadeEnabled);
@@ -217,6 +221,11 @@ public partial class MainWindow : MolaWindow
         PART_ArtifactCard.Transitions = _artifactPanelTransitions;
         PART_ArtifactGap.Transitions = _artifactPanelTransitions;
         _main.PropertyChanged += OnMainPropertyChanged;
+        PART_SubagentScroll.ScrollChanged += OnSubagentScrollChanged;
+        PART_SubagentScroll.PointerWheelChanged += (_, e) =>
+        {
+            if (e.Delta.Y > 0) _subagentFollowBottom = false;
+        };
         SyncArtifactPanel();
         // A narrower window must not leave the canvas wider than its share.
         PART_BodyGrid.SizeChanged += (_, _) =>
@@ -290,6 +299,12 @@ public partial class MainWindow : MolaWindow
             try { await _chat.SelectMessageBranchAsync(message, offset); }
             catch (Exception ex) { _notifications.Error("无法切换时间线", ex.Message, "conversation-branch"); }
         };
+        PART_Transcript.BranchToConversationRequested += async (_, message) =>
+        {
+            try { await _main.BranchToNewConversationAsync(message); }
+            catch (Exception ex) { _notifications.Error("无法建立分支", ex.Message, "conversation-fork"); }
+        };
+        PART_Transcript.StopTaskRequested += (_, taskId) => _chat.StopTask(taskId);
 
         // The only recoverable error the view model raises is "switch model",
         // and the picker lives in the header — so the banner's button opens it
@@ -482,7 +497,7 @@ public partial class MainWindow : MolaWindow
     private void SyncArtifactPanel()
     {
         var open = _main.ArtifactPanelVisible && _main.IsArtifactPanelAvailable;
-        var canvas = open && _main.ArtifactCanvasVisible;
+        var canvas = open && _main.IsArtifactPanelSelected && _main.ArtifactCanvasVisible;
         var maximized = canvas && _main.ArtifactCanvasMaximized;
 
         PART_MainCard.IsVisible = !maximized;
@@ -517,6 +532,11 @@ public partial class MainWindow : MolaWindow
     }
 
     private static readonly Thickness NotificationsMargin = new(0, 58, 30, 0);
+
+    /// <summary>How far the composer may reach into the transcript's 24px bottom
+    /// padding: the gap between the last row and the composer that the layout has
+    /// always had.</summary>
+    private const double ComposerOverTranscriptPadding = 16;
 
     private double ClampArtifactCanvasWidth(double width)
     {
@@ -670,11 +690,17 @@ public partial class MainWindow : MolaWindow
             Key = AgentRuntimeNotificationKey,
             Kind = NotifyKind.Info,
             Title = updating ? "Agent 运行环境有更新" : "需要 Agent 运行环境",
-            Body = body ?? "使用 Work 与 BYOK 前需要此环境。",
+            Body = body ?? (updating ? null : "使用 Work 与 BYOK 前需要此环境。"),
             ActionText = updating ? "更新" : "下载",
             Action = StartAgentRuntimeDownload,
             Sticky = true
         });
+    }
+
+    internal void AnnounceAvailableAgentRuntimeUpdate()
+    {
+        if (_piSidecar.GetCompatibleInstalled() is not null)
+            AnnounceAgentRuntimeUpdate();
     }
 
     /// <summary>
@@ -1016,5 +1042,38 @@ public partial class MainWindow : MolaWindow
         {
             _main.OpenArtifactInCanvasCommand.Execute(artifact);
         }
+    }
+
+    private bool _subagentFollowBottom = true;
+    private bool _subagentScrollQueued;
+
+    private void OnSubagentClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is not Control { Tag: SubagentViewModel agent }) return;
+        _main.OpenSubagent(agent);
+        _subagentFollowBottom = true;
+        QueueSubagentScrollToEnd();
+    }
+
+    private void OnSubagentScrollChanged(object? sender, ScrollChangedEventArgs e)
+    {
+        if (e.OffsetDelta.Y < -0.5)
+            _subagentFollowBottom = false;
+        if (PART_SubagentScroll.Offset.Y >= PART_SubagentScroll.Extent.Height
+            - PART_SubagentScroll.Viewport.Height - 24)
+            _subagentFollowBottom = true;
+        if (_subagentFollowBottom && e.ExtentDelta.Y > 0.5)
+            QueueSubagentScrollToEnd();
+    }
+
+    private void QueueSubagentScrollToEnd()
+    {
+        if (_subagentScrollQueued) return;
+        _subagentScrollQueued = true;
+        Dispatcher.UIThread.Post(() =>
+        {
+            _subagentScrollQueued = false;
+            if (_subagentFollowBottom) PART_SubagentScroll.ScrollToEnd();
+        });
     }
 }

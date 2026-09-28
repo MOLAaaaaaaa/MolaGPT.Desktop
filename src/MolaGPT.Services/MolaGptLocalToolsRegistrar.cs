@@ -98,8 +98,8 @@ public sealed class MolaGptLocalToolsRegistrar
 
         // The relay URL and the account JWT stay in this process: the shim inside
         // PiWorkProvider stamps the live token per request, so nothing sensitive is
-        // handed to the Node child. Model comes from the request, since it's baked
-        // into the sidecar at spawn (a model switch respawns it).
+        // handed to the Node child. Model comes from the request: every model is
+        // registered at spawn, and a switch is a set_model on the same process.
         var endpoint = new Uri(new Uri(ValidateMolaGptBaseUrl(_proxy.BaseUrl)), MolaGptProxyProvider.LocalToolsChatPath).ToString();
         const string api = "openai-completions";
         var config = new PiWorkProviderConfig(

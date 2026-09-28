@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Tasks;
 
 namespace MolaGPT.Core.Chat.Tools.PythonExecution;
 
@@ -10,6 +11,7 @@ public sealed class PythonExecutionTool
     public const string ToolName = "execute_python_code";
 
     private const string UserScriptFileName = "main.py";
+    internal const string RuntimeScriptPrefix = ".molagpt-run-";
     private const string RunnerScriptFileName = "runner.py";
 
     /// <summary>Where a run's complete output goes when the inline copy had to be
@@ -45,19 +47,28 @@ public sealed class PythonExecutionTool
     private readonly IPythonExecutionApprovalService? _approval;
     private readonly IPythonSessionAllowList? _sessionAllowList;
     private readonly IToolGrantStore? _grants;
+    private readonly AgentTaskRegistry? _tasks;
 
     public PythonExecutionTool(
         IPythonExecutionApprovalService? approval = null,
         IPythonSessionAllowList? sessionAllowList = null,
-        IToolGrantStore? grants = null)
+        IToolGrantStore? grants = null,
+        AgentTaskRegistry? tasks = null)
     {
         _approval = approval;
         _sessionAllowList = sessionAllowList;
         _grants = grants;
+        _tasks = tasks;
     }
 
-    public static object BuildOpenAiToolDefinition(PythonExecutionOptions options)
+    /// <param name="allowBackground">Offer <c>run_in_background</c>, describe the
+    /// timeout as a move to the background rather than a kill, and say in the tool's
+    /// own description that code may outlive the turn — a parameter description is
+    /// read too late to change whether the model takes the job on.</param>
+    public static object BuildOpenAiToolDefinition(PythonExecutionOptions options, bool allowBackground = false)
     {
+        if (allowBackground)
+            return WithBackground(BuildOpenAiToolDefinition(options));
         // In approval mode a confirmation dialog may appear before a run (any
         // code above the auto-approve bar), so the model must always state what
         // the code is for. Make `description` required there; optional otherwise.
@@ -115,16 +126,47 @@ public sealed class PythonExecutionTool
         };
     }
 
+    private static object WithBackground(object definition)
+    {
+        var node = JsonSerializer.SerializeToNode(definition)!;
+        var function = node["function"]!;
+        function["description"] = (string)function["description"]!
+            + " Long runs can continue in the background (run_in_background); a foreground run that outlasts its timeout moves there instead of being killed.";
+        var properties = function["parameters"]!["properties"]!.AsObject();
+        properties["timeout_seconds"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["type"] = "integer",
+            ["description"] = "Seconds before this run moves to the background (optional). The host clamps it to a safe range."
+        };
+        properties["run_in_background"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["type"] = "boolean",
+            ["description"] = "Return a task id at once and keep running in the background. Use it when the code may run longer than about a minute. You are notified when the process exits, so make it end when its work is done and print a summary last."
+        };
+        return node;
+    }
+
+    public Task<string> ExecuteAsync(
+        string argumentsJson,
+        PythonExecutionOptions? options,
+        string? conversationId,
+        CancellationToken ct) =>
+        ExecuteAsync(argumentsJson, options, conversationId, null, ct);
+
+    /// <param name="run">Who is calling and what the call may do beyond a plain
+    /// foreground run. Null behaves as before: foreground only, approvals asked.</param>
     public async Task<string> ExecuteAsync(
         string argumentsJson,
         PythonExecutionOptions? options,
         string? conversationId,
+        PythonRunContext? run,
         CancellationToken ct)
     {
         if (options?.Enabled != true)
             return Error("Python tool is not enabled.");
 
         var (code, description, requestedTimeout, declaredPaths) = ParseArguments(argumentsJson);
+        var wantsBackground = ReadBackgroundFlag(argumentsJson);
         if (string.IsNullOrWhiteSpace(code))
             return Error("A non-empty Python code string is required.");
 
@@ -155,7 +197,7 @@ public sealed class PythonExecutionTool
                 .ToArray();
 
         var permission = await ResolvePermissionAsync(
-            code!, description, effectiveOptions, risk, newScopeRequests, ct).ConfigureAwait(false);
+            code!, description, effectiveOptions, risk, newScopeRequests, run?.Unattended == true, ct).ConfigureAwait(false);
         if (!permission.Approved)
         {
             return Error(
@@ -169,14 +211,30 @@ public sealed class PythonExecutionTool
         var timeout = TimeSpan.FromSeconds(Math.Clamp(requestedTimeout ?? options.TimeoutSeconds, 5, 300));
         var maxOutput = Math.Clamp(options.MaxOutputCharacters, 2000, 100000);
         var sessionDir = workspaceRoot;
+        var canBackground = run is { AllowBackground: true, Owner: not null, Unattended: false } && _tasks is not null;
+        var label = TaskLabel(description, code!);
+
+        // Asked for the background, but there is no room: say so rather than
+        // quietly running in the foreground for however long it takes.
+        if (wantsBackground && canBackground
+            && _tasks!.CheckCapacity(run!.Owner!.ConversationId, AgentTaskKinds.Python) is { } full)
+            return Error(full + "等待已有任务结束，或改为前台运行。", sessionDir);
+
+        var background = wantsBackground && canBackground;
 
         try
         {
             Directory.CreateDirectory(sessionDir);
-            var userScriptPath = Path.Combine(sessionDir, UserScriptFileName);
-            var runnerScriptPath = Path.Combine(sessionDir, RunnerScriptFileName);
-            await File.WriteAllTextAsync(userScriptPath, code!, new UTF8Encoding(false), ct).ConfigureAwait(false);
-            await File.WriteAllTextAsync(runnerScriptPath, BuildRunnerScript(), new UTF8Encoding(false), ct).ConfigureAwait(false);
+
+            // Every run keeps its own scripts, logs and audit report. The user
+            // script stays at the workspace root so __file__-relative outputs
+            // continue to land with other conversation artifacts.
+            var files = PythonRunFiles.ForRun(sessionDir);
+            Directory.CreateDirectory(Path.GetDirectoryName(files.ScriptPath)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(files.ReportPath)!);
+            await File.WriteAllTextAsync(files.ScriptPath, code!, new UTF8Encoding(false), ct).ConfigureAwait(false);
+            await File.WriteAllTextAsync(files.RunnerPath, BuildRunnerScript(), new UTF8Encoding(false), ct).ConfigureAwait(false);
+            var runnerScriptPath = files.RunnerPath;
 
             var python = await ResolvePythonAsync(options, ct).ConfigureAwait(false);
 
@@ -204,18 +262,101 @@ public sealed class PythonExecutionTool
                         .Concat(_grants?.WritablePathPrefixes ?? Array.Empty<string>())
                         .Concat(newScopeRequests));
 
-            var startedAt = Stopwatch.StartNew();
-            var run = await RunPythonAsync(
+            AgentTaskReservation? reservation = null;
+            if (background
+                && !_tasks!.TryReserve(run!.Owner!, AgentTaskKinds.Python, out reservation, out var capacityError))
+                return Error(capacityError! + "等待已有任务结束，或改为前台运行。", sessionDir);
+            using var backgroundReservation = reservation;
+
+            var process = StartPython(
                 python,
                 runnerScriptPath,
                 sessionDir,
-                timeout,
                 maxOutput,
                 options.AllowNetwork,
                 scope,
-                ct).ConfigureAwait(false);
-            startedAt.Stop();
-            var sandbox = ReadSandboxReport(sessionDir);
+                files);
+
+            if (background)
+            {
+                AgentTask task;
+                try
+                {
+                    task = HandOff(process, run!.Owner!, backgroundReservation!, label, sessionDir, runStartUtc, files);
+                }
+                catch
+                {
+                    process.Kill();
+                    await process.WaitQuietlyAsync().ConfigureAwait(false);
+                    process.Dispose();
+                    throw;
+                }
+                return BackgroundStarted(task, description, sessionDir, files, moved: false);
+            }
+
+            PythonRunResult outcome;
+            var handedOff = false;
+            try
+            {
+                var timedOut = false;
+                try
+                {
+                    await process.Exited.WaitAsync(timeout, ct).ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    timedOut = true;
+                }
+                catch (OperationCanceledException)
+                {
+                    process.Kill();
+                    await process.WaitQuietlyAsync().ConfigureAwait(false);
+                    throw;
+                }
+
+                // Out of time. Where the turn allows it, the run keeps going in the
+                // background instead of being thrown away with everything it had done.
+                if (timedOut && canBackground
+                    && _tasks!.TryReserve(
+                        run!.Owner!,
+                        AgentTaskKinds.Python,
+                        out var timeoutReservation,
+                        out _))
+                {
+                    using (timeoutReservation!)
+                    {
+                        AgentTask task;
+                        try
+                        {
+                            task = HandOff(process, run!.Owner!, timeoutReservation!, label, sessionDir, runStartUtc, files);
+                        }
+                        catch
+                        {
+                            process.Kill();
+                            await process.WaitQuietlyAsync().ConfigureAwait(false);
+                            throw;
+                        }
+
+                        handedOff = true;
+                        return BackgroundStarted(task, description, sessionDir, files, moved: true, timeout);
+                    }
+                }
+
+                if (timedOut)
+                {
+                    process.Kill();
+                    await process.WaitQuietlyAsync().ConfigureAwait(false);
+                }
+                outcome = process.Result(timedOut);
+            }
+            finally
+            {
+                if (!handedOff) process.Dispose();
+            }
+
+            var startedAt = process.Clock;
+            var sandbox = ReadSandboxReport(files.ReportPath);
+            var runOutcome = outcome;
 
             var scannedArtifacts = ScanArtifacts(sessionDir, runStartUtc);
             var artifacts = scannedArtifacts
@@ -232,7 +373,7 @@ public sealed class PythonExecutionTool
 
             return JsonSerializer.Serialize(new
             {
-                success = !run.TimedOut && run.ExitCode == 0,
+                success = !runOutcome.TimedOut && runOutcome.ExitCode == 0,
                 source = "local_python",
                 description,
                 python = python.DisplayName,
@@ -240,17 +381,17 @@ public sealed class PythonExecutionTool
                 permission = BuildPermissionMeta(effectiveOptions, risk, "approved"),
                 artifacts,
                 display_instructions = BuildDisplayInstructions(scannedArtifacts),
-                stdout = run.Stdout,
-                stderr = run.Stderr,
-                stdout_truncated = run.StdoutTruncated,
-                stderr_truncated = run.StderrTruncated,
+                stdout = runOutcome.Stdout,
+                stderr = runOutcome.Stderr,
+                stdout_truncated = runOutcome.StdoutTruncated,
+                stderr_truncated = runOutcome.StderrTruncated,
                 // Present only when output was cut. Relative to this conversation's
                 // working directory, so read_file / grep_files can open it directly.
-                stdout_full_file = run.StdoutFullFile,
-                stderr_full_file = run.StderrFullFile,
-                exit_code = run.ExitCode,
+                stdout_full_file = runOutcome.StdoutTruncated ? runOutcome.StdoutFullFile : null,
+                stderr_full_file = runOutcome.StderrTruncated ? runOutcome.StderrFullFile : null,
+                exit_code = runOutcome.ExitCode,
                 duration_ms = (long)startedAt.Elapsed.TotalMilliseconds,
-                timed_out = run.TimedOut,
+                timed_out = runOutcome.TimedOut,
                 // What the run actually touched, and what it was refused. The
                 // refusals matter most: they are the model's cue to explain what
                 // it needs rather than retry the same call, and they are where a
@@ -292,6 +433,7 @@ public sealed class PythonExecutionTool
         PythonExecutionOptions options,
         PythonExecutionRiskAnalysis risk,
         IReadOnlyList<string> newScopeRequests,
+        bool unattended,
         CancellationToken ct)
     {
         // Layered permission filter (deny -> full-access -> auto-allow -> ask),
@@ -308,6 +450,8 @@ public sealed class PythonExecutionTool
         // must not be hidden by FullAccess or a remembered import/path rule.
         if (risk.Flags.Any(flag => string.Equals(flag.Code, "package_install", StringComparison.Ordinal)))
         {
+            if (unattended)
+                return new PermissionDecision(false, UnattendedReason);
             if (_approval is null)
                 return new PermissionDecision(false, "包安装需要审批，但审批服务不可用");
 
@@ -323,6 +467,8 @@ public sealed class PythonExecutionTool
         // selected FullAccess, matching the global tool policy.
         if (risk.Flags.Any(flag => string.Equals(flag.Code, "destructive_file", StringComparison.Ordinal)))
         {
+            if (unattended)
+                return new PermissionDecision(false, UnattendedReason);
             if (_approval is null)
                 return new PermissionDecision(false, "该文件操作需要审批，但审批服务不可用");
 
@@ -345,6 +491,8 @@ public sealed class PythonExecutionTool
             return new PermissionDecision(true, "未发现需要审批的操作，已自动放行");
 
         // [4] Everything else needs an explicit user decision.
+        if (unattended)
+            return new PermissionDecision(false, UnattendedReason);
         if (_approval is null)
             return new PermissionDecision(false, "需要审批，但审批服务不可用");
 
@@ -458,34 +606,51 @@ public sealed class PythonExecutionTool
         return process.ExitCode == 0 ? (stdout + stderr).Trim() : null;
     }
 
-    private static async Task<PythonRunResult> RunPythonAsync(
+    /// <summary>
+    /// Start one run and return it still running. The caller decides whether to
+    /// wait for it, give up on it, or hand it to the task registry — which is why
+    /// the process, its output and its job object live on one disposable object
+    /// instead of in the scope of a single await.
+    /// </summary>
+    private static PythonProcessRun StartPython(
         PythonCandidate candidate,
         string runnerScriptPath,
         string workingDirectory,
-        TimeSpan timeout,
         int maxOutputCharacters,
         bool allowNetwork,
         PythonSandboxScope? scope,
-        CancellationToken ct)
+        PythonRunFiles files)
     {
-        using var process = CreateProcess(candidate, new[] { "-I", "-X", "utf8", "-u", runnerScriptPath }, workingDirectory, allowNetwork);
+        var process = CreateProcess(candidate, new[] { "-I", "-X", "utf8", "-u", runnerScriptPath }, workingDirectory, allowNetwork);
         if (scope is not null)
             process.StartInfo.Environment["MOLAGPT_SANDBOX_SCOPE"] = scope.ToJson();
-        using var stdout = new BoundedTextCollector(
-            maxOutputCharacters, Path.Combine(workingDirectory, StdoutOverflowFileName));
-        using var stderr = new BoundedTextCollector(
-            maxOutputCharacters, Path.Combine(workingDirectory, StderrOverflowFileName));
+        process.StartInfo.Environment["MOLAGPT_MAIN_SCRIPT"] = files.ScriptPath;
+        process.StartInfo.Environment["MOLAGPT_SANDBOX_REPORT"] = files.ReportPath;
+
+        var stdout = new BoundedTextCollector(maxOutputCharacters, files.StdoutPath, files.Mirror);
+        var stderr = new BoundedTextCollector(maxOutputCharacters, files.StderrPath, files.Mirror);
         process.OutputDataReceived += (_, e) => stdout.AppendLine(e.Data);
         process.ErrorDataReceived += (_, e) => stderr.AppendLine(e.Data);
 
         // Caps the whole process tree and guarantees its teardown. Disposed at the
         // end of the run, which is what kills anything still alive.
-        using var job = OperatingSystem.IsWindows()
+        var job = OperatingSystem.IsWindows()
             ? WindowsJobObject.TryCreate(JobMemoryLimitBytes, JobActiveProcessLimit)
             : null;
 
-        if (!process.Start())
-            throw new InvalidOperationException("Python process failed to start.");
+        try
+        {
+            if (!process.Start())
+                throw new InvalidOperationException("Python process failed to start.");
+        }
+        catch
+        {
+            job?.Dispose();
+            stdout.Dispose();
+            stderr.Dispose();
+            process.Dispose();
+            throw;
+        }
 
         // Assigned immediately after start. A child spawned in the microseconds
         // before this lands would escape the job; closing that window needs
@@ -496,37 +661,235 @@ public sealed class PythonExecutionTool
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        var timedOut = false;
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(timeout);
-        try
+        return new PythonProcessRun(process, job, stdout, stderr, files);
+    }
+
+    private sealed class PythonProcessRun : IDisposable
+    {
+        private readonly Process _process;
+        private readonly WindowsJobObject? _job;
+        private readonly BoundedTextCollector _stdout;
+        private readonly BoundedTextCollector _stderr;
+        private readonly PythonRunFiles _files;
+
+        public PythonProcessRun(
+            Process process,
+            WindowsJobObject? job,
+            BoundedTextCollector stdout,
+            BoundedTextCollector stderr,
+            PythonRunFiles files)
         {
-            await process.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            timedOut = true;
-            TryKill(process);
-            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            TryKill(process);
-            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-            throw;
+            _process = process;
+            _job = job;
+            _stdout = stdout;
+            _stderr = stderr;
+            _files = files;
+            Clock = Stopwatch.StartNew();
+            // Awaits the output streams too, so every line is in before it completes.
+            Exited = process.WaitForExitAsync(CancellationToken.None);
         }
 
-        process.WaitForExit();
-        return new PythonRunResult(
-            process.ExitCode,
-            stdout.Text,
-            stderr.Text,
-            stdout.Truncated,
-            stderr.Truncated,
-            timedOut,
-            stdout.OverflowPath is null ? null : StdoutOverflowFileName,
-            stderr.OverflowPath is null ? null : StderrOverflowFileName);
+        public Stopwatch Clock { get; }
+        public Task Exited { get; }
+
+        public void Kill() => TryKill(_process);
+
+        public async Task WaitQuietlyAsync()
+        {
+            try { await Exited.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); }
+            catch (TimeoutException) { /* the job object ends it on dispose */ }
+        }
+
+        public string StdoutTail() => _stdout.Tail();
+        public string StderrTail() => _stderr.Tail();
+
+        public string Tail()
+        {
+            var err = _stderr.Tail();
+            return string.IsNullOrWhiteSpace(err) ? _stdout.Tail() : _stdout.Tail() + "\n[stderr]\n" + err;
+        }
+
+        public PythonRunResult Result(bool timedOut)
+        {
+            _process.WaitForExit();
+            Clock.Stop();
+            return new PythonRunResult(
+                _process.ExitCode,
+                _stdout.Text,
+                _stderr.Text,
+                _stdout.Truncated,
+                _stderr.Truncated,
+                timedOut,
+                _stdout.OverflowPath is null ? null : _files.StdoutRelative,
+                _stderr.OverflowPath is null ? null : _files.StderrRelative);
+        }
+
+        public void Dispose()
+        {
+            _stdout.Dispose();
+            _stderr.Dispose();
+            _job?.Dispose();
+            _process.Dispose();
+        }
     }
+
+    /// <summary>
+    /// Where one run keeps its scripts, output logs and audit report. The user
+    /// script lives at the conversation root for __file__-relative paths; the
+    /// runner, logs and report live under the run's private directory.
+    /// </summary>
+    private sealed record PythonRunFiles(
+        string ScriptPath,
+        string RunnerPath,
+        string ReportPath,
+        string StdoutPath,
+        string StderrPath,
+        string StdoutRelative,
+        string StderrRelative,
+        bool Mirror)
+    {
+        public const string TasksDirectoryName = ".tasks";
+
+        public static PythonRunFiles ForRun(string sessionDir)
+        {
+            var id = Guid.NewGuid().ToString("N")[..8];
+            var name = "run-" + id;
+            var dir = Path.Combine(sessionDir, TasksDirectoryName, name);
+            var relative = TasksDirectoryName + "/" + name + "/";
+            return new PythonRunFiles(
+                Path.Combine(sessionDir, RuntimeScriptPrefix + id + ".py"),
+                Path.Combine(dir, RunnerScriptFileName),
+                Path.Combine(dir, "sandbox-report.jsonl"),
+                Path.Combine(dir, "stdout.log"),
+                Path.Combine(dir, "stderr.log"),
+                relative + "stdout.log",
+                relative + "stderr.log",
+                Mirror: true);
+        }
+    }
+
+    /// <summary>A background run's longest life. Long enough for real batch work,
+    /// short enough that a forgotten loop does not run until the machine sleeps.</summary>
+    private static readonly TimeSpan BackgroundCeiling = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Give a started run to the task registry. From here it answers to the task's
+    /// own cancellation, not to the turn's: the turn is about to end, and ending it
+    /// must not end the run.
+    /// </summary>
+    private AgentTask HandOff(
+        PythonProcessRun process,
+        AgentTaskOwner owner,
+        AgentTaskReservation reservation,
+        string label,
+        string sessionDir,
+        DateTime runStartUtc,
+        PythonRunFiles files)
+    {
+        return _tasks!.Start(reservation, label, async (_, taskCt) =>
+        {
+            using (process)
+            {
+                var timedOut = false;
+                try
+                {
+                    var left = BackgroundCeiling - process.Clock.Elapsed;
+                    await process.Exited.WaitAsync(left > TimeSpan.Zero ? left : TimeSpan.Zero, taskCt).ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    timedOut = true;
+                    process.Kill();
+                    await process.WaitQuietlyAsync().ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    process.Kill();
+                    await process.WaitQuietlyAsync().ConfigureAwait(false);
+                    throw;
+                }
+
+                var result = process.Result(timedOut);
+                var sandbox = ReadSandboxReport(files.ReportPath);
+                var artifacts = ScanArtifacts(sessionDir, runStartUtc);
+                var report = JsonSerializer.Serialize(new
+                {
+                    success = !timedOut && result.ExitCode == 0,
+                    exit_code = result.ExitCode,
+                    duration_ms = (long)process.Clock.Elapsed.TotalMilliseconds,
+                    timed_out = timedOut,
+                    stdout_tail = process.StdoutTail(),
+                    stderr_tail = process.StderrTail(),
+                    // Relative to the working directory, for read_file.
+                    stdout_file = result.StdoutFullFile,
+                    stderr_file = result.StderrFullFile,
+                    artifacts = artifacts.Select(a => new { name = a.Name, relative_path = a.RelativePath, bytes = a.Bytes }).ToArray(),
+                    display_instructions = BuildDisplayInstructions(artifacts),
+                    sandbox_denied = sandbox.Denied
+                }, ReportJsonOptions);
+                return new AgentTaskOutcome(!timedOut && result.ExitCode == 0, report);
+            }
+        }, process.Tail, process.Clock.Elapsed);
+    }
+
+    private static readonly JsonSerializerOptions ReportJsonOptions = new()
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    private static string BackgroundStarted(
+        AgentTask task,
+        string? description,
+        string sessionDir,
+        PythonRunFiles files,
+        bool moved,
+        TimeSpan timeout = default)
+    {
+        return JsonSerializer.Serialize(new
+        {
+            success = true,
+            source = "local_python",
+            background = true,
+            task_id = task.Id,
+            status = "running",
+            description,
+            working_directory = sessionDir,
+            stdout_file = files.Mirror ? files.StdoutRelative : null,
+            stderr_file = files.Mirror ? files.StderrRelative : null,
+            partial_stdout = moved ? task.Tail() : null,
+            note = moved
+                ? $"运行超过 {(int)timeout.TotalSeconds} 秒，已转入后台继续运行。"
+                  + "结束时会自动通知你，不要轮询；可以先做别的，或告诉用户它在后台运行并结束本轮回答。"
+                : "已在后台运行。结束时会自动通知你，不要轮询；可以先做别的，或告诉用户它在后台运行并结束本轮回答。"
+        }, ReportJsonOptions);
+    }
+
+    private static string TaskLabel(string? description, string code)
+    {
+        var text = !string.IsNullOrWhiteSpace(description)
+            ? description!
+            : code.Replace("\r", "").Split('\n').FirstOrDefault(line => !string.IsNullOrWhiteSpace(line))?.Trim() ?? "Python";
+        text = text.Replace('\n', ' ').Trim();
+        return text.Length <= 40 ? text : text[..40] + "…";
+    }
+
+    private static bool ReadBackgroundFlag(string argumentsJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(argumentsJson) ? "{}" : argumentsJson);
+            return doc.RootElement.ValueKind == JsonValueKind.Object
+                   && doc.RootElement.TryGetProperty("run_in_background", out var flag)
+                   && (flag.ValueKind == JsonValueKind.True
+                       || (flag.ValueKind == JsonValueKind.String && flag.GetString() == "true"));
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private const string UnattendedReason = "子 Agent 无法请求用户授权，这一步需要交给主 Agent。";
 
     private static Process CreateProcess(
         PythonCandidate candidate,
@@ -719,7 +1082,7 @@ public sealed class PythonExecutionTool
         if _enforce:
             try:
                 _report_fd = os.open(
-                    os.path.join(os.getcwd(), ".sandbox-report.jsonl"),
+                    os.environ.get("MOLAGPT_SANDBOX_REPORT") or os.path.join(os.getcwd(), ".sandbox-report.jsonl"),
                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
             except OSError:
                 _report_fd = -1
@@ -842,7 +1205,7 @@ public sealed class PythonExecutionTool
         except Exception:
             pass
 
-        runpy.run_path("main.py", run_name="__main__")
+        runpy.run_path(os.environ.get("MOLAGPT_MAIN_SCRIPT") or "main.py", run_name="__main__")
         """;
 
     /// <summary>
@@ -991,9 +1354,8 @@ public sealed class PythonExecutionTool
     /// Best effort throughout: a missing or malformed report means the run has
     /// nothing to say about itself, never that the run failed.
     /// </summary>
-    private static SandboxReport ReadSandboxReport(string sessionDir)
+    private static SandboxReport ReadSandboxReport(string path)
     {
-        var path = Path.Combine(sessionDir, SandboxReportFileName);
         if (!File.Exists(path)) return SandboxReport.Empty;
 
         var allowed = new List<object>();
@@ -1258,34 +1620,53 @@ public sealed class PythonExecutionTool
     }, JsonOptions);
 
     /// <summary>
-    /// Collects a stream into a bounded in-memory copy, and — once that bound is
-    /// reached — spills the <em>whole</em> stream to a file.
+    /// Collects a stream into a bounded in-memory copy and keeps its complete
+    /// output in a per-run log while the process is active.
     ///
     /// Without the spill, everything past the limit was simply gone: a script that
     /// printed more than the cap left the model holding a prefix and a "truncated"
     /// flag, with no way to reach the rest except running it again differently.
-    /// The file lands in the conversation's working directory, so the existing
-    /// read_file / grep_files tools can go straight at it.
-    ///
-    /// The file is opened lazily, on the first overflow, so runs that stay under
-    /// the cap — nearly all of them — touch the disk not at all.
+    /// The log is under the conversation's working directory, so read_file and
+    /// grep_files can open it while another process writes to it.
     /// </summary>
     private sealed class BoundedTextCollector : IDisposable
     {
+        /// <summary>How much of the most recent output is kept for status queries
+        /// and the end-of-task report.</summary>
+        private const int TailCapacity = 4000;
+
         private readonly int _maxChars;
         private readonly StringBuilder _builder;
+        private readonly StringBuilder _tail = new();
         private readonly string? _overflowPath;
+        private readonly object _sync = new();
+        private readonly bool _mirror;
         private StreamWriter? _overflow;
 
-        public BoundedTextCollector(int maxChars, string? overflowPath = null)
+        /// <param name="mirror">Write the whole stream to <paramref name="overflowPath"/>
+        /// from the first byte so a running task's log stays readable.</param>
+        public BoundedTextCollector(int maxChars, string? overflowPath = null, bool mirror = false)
         {
             _maxChars = maxChars;
             _builder = new StringBuilder(Math.Min(maxChars, 4096));
             _overflowPath = overflowPath;
+            _mirror = mirror;
+            if (mirror) BeginOverflow();
         }
 
         public bool Truncated { get; private set; }
-        public string Text => _builder.ToString();
+
+        public string Text
+        {
+            get { lock (_sync) return _builder.ToString(); }
+        }
+
+        /// <summary>The last few thousand characters, readable from any thread while
+        /// the process is still writing.</summary>
+        public string Tail()
+        {
+            lock (_sync) return _tail.ToString();
+        }
 
         /// <summary>Path of the complete output, or null when nothing was cut.</summary>
         public string? OverflowPath { get; private set; }
@@ -1294,13 +1675,19 @@ public sealed class PythonExecutionTool
         {
             if (line is null)
                 return;
-            Append(line);
-            Append(Environment.NewLine);
+            lock (_sync)
+            {
+                Append(line);
+                Append(Environment.NewLine);
+            }
         }
 
         private void Append(string text)
         {
             if (text.Length == 0) return;
+
+            _tail.Append(text);
+            if (_tail.Length > TailCapacity) _tail.Remove(0, _tail.Length - TailCapacity);
 
             if (Truncated)
             {
@@ -1312,14 +1699,16 @@ public sealed class PythonExecutionTool
             if (text.Length <= remaining)
             {
                 _builder.Append(text);
+                _overflow?.Write(text); // only open here when mirroring
                 return;
             }
 
             // First overflow: start the file with everything kept so far, so it is
-            // the complete stream rather than only the tail.
+            // the complete stream rather than only the tail. Opened before this
+            // text joins the in-memory copy, or its first part would be written twice.
             Truncated = true;
+            if (_overflow is null) BeginOverflow();
             if (remaining > 0) _builder.Append(text.AsSpan(0, remaining));
-            BeginOverflow();
             _overflow?.Write(text);
         }
 
@@ -1328,7 +1717,8 @@ public sealed class PythonExecutionTool
             if (_overflowPath is null) return;
             try
             {
-                _overflow = new StreamWriter(_overflowPath, append: false, new UTF8Encoding(false));
+                Directory.CreateDirectory(Path.GetDirectoryName(_overflowPath)!);
+                _overflow = new StreamWriter(_overflowPath, append: false, new UTF8Encoding(false)) { AutoFlush = _mirror };
                 _overflow.Write(_builder.ToString());
                 OverflowPath = _overflowPath;
             }
@@ -1342,9 +1732,12 @@ public sealed class PythonExecutionTool
 
         public void Dispose()
         {
-            try { _overflow?.Flush(); _overflow?.Dispose(); }
-            catch { /* best effort */ }
-            _overflow = null;
+            lock (_sync)
+            {
+                try { _overflow?.Flush(); _overflow?.Dispose(); }
+                catch { /* best effort */ }
+                _overflow = null;
+            }
         }
     }
 
@@ -1373,3 +1766,10 @@ public sealed class PythonExecutionTool
         long Bytes,
         bool Truncated);
 }
+
+/// <summary>What a Python call may do beyond a plain foreground run.</summary>
+/// <param name="Owner">The conversation and turn a background task would belong to.</param>
+/// <param name="AllowBackground">May run in, or time out into, the background.</param>
+/// <param name="Unattended">Nobody is there to approve anything — a sub-agent. A
+/// run that would need a decision is refused instead of asked.</param>
+public sealed record PythonRunContext(AgentTaskOwner? Owner, bool AllowBackground, bool Unattended);

@@ -8,6 +8,7 @@ using MolaGPT.Core.Chat.Agents.Relay;
 using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Providers;
+using MolaGPT.Core.Chat.Tasks;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
@@ -123,7 +124,8 @@ internal static class AppServices
 
         // ---- local tool gateway (Work mode) --------------------------------
         services.AddSingleton(sp => new PiSidecarRuntimeManager(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt)));
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            Environment.GetEnvironmentVariable("MOLAGPT_PI_SIDECAR_MANIFEST_URL")));
         services.AddSingleton(sp => new PiWorkSidecarLocator(
             () => sp.GetRequiredService<PiSidecarRuntimeManager>().GetCompatibleInstalled()));
         // One runtime for the whole app: it owns the loopback shim, the tool bridge
@@ -214,6 +216,22 @@ internal static class AppServices
         services.AddSingleton<IPythonExecutionApprovalService>(sp => sp.GetRequiredService<ToolApprovalService>());
         services.AddSingleton<IToolApprovalService>(sp => sp.GetRequiredService<ToolApprovalService>());
 
+        // Background tasks outlive the turn, and the Pi lease, that started them, so
+        // one registry for the whole app holds them.
+        services.AddSingleton<Func<SubagentRuntimeOptions>>(sp =>
+        {
+            var settings = sp.GetRequiredService<SettingsRepository>();
+            return () => new SubagentRuntimeOptions(
+                settings.Get(SettingsViewModel.SubagentProviderIdKey),
+                settings.Get(SettingsViewModel.SubagentModelIdKey),
+                int.TryParse(settings.Get(SettingsViewModel.SubagentMaxPerConversationKey), out var perConversation)
+                    ? Math.Clamp(perConversation, 1, 4) : 4);
+        });
+        services.AddSingleton(sp => new AgentTaskRegistry(sp.GetRequiredService<Func<SubagentRuntimeOptions>>()));
+        services.AddSingleton<ISubagentRunner>(sp => new PiSubagentRunner(
+            sp.GetRequiredService<ProviderRegistry>(),
+            sp.GetRequiredService<Func<SubagentRuntimeOptions>>(),
+            sp.GetRequiredService<AgentTaskRegistry>()));
         services.AddSingleton<PythonExecutionTool>();
         services.AddSingleton(sp => new BrowserControlTool(
             new WebBridgeClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok))));
@@ -269,16 +287,28 @@ internal static class AppServices
             sp.GetRequiredService<ConversationRepository>(),
             sp.GetRequiredService<PersonaListViewModel>(),
             sp.GetRequiredService<SettingsRepository>()));
-        services.AddSingleton(sp => new ChatViewModel(
-            sp.GetRequiredService<ProviderRegistry>(),
-            sp.GetRequiredService<MessageRepository>(),
-            sp.GetRequiredService<ConversationRepository>(),
-            sp.GetRequiredService<PersonaListViewModel>(),
-            sp.GetRequiredService<SettingsRepository>()));
+        services.AddSingleton(sp =>
+        {
+            var chat = new ChatViewModel(
+                sp.GetRequiredService<ProviderRegistry>(),
+                sp.GetRequiredService<MessageRepository>(),
+                sp.GetRequiredService<ConversationRepository>(),
+                sp.GetRequiredService<PersonaListViewModel>(),
+                sp.GetRequiredService<SettingsRepository>());
+            chat.AttachTaskRegistry(
+                sp.GetRequiredService<AgentTaskRegistry>(),
+                action =>
+                {
+                    if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess()) action();
+                    else Avalonia.Threading.Dispatcher.UIThread.Post(action);
+                });
+            return chat;
+        });
         services.AddSingleton(sp => new SettingsViewModel(
             sp.GetRequiredService<ProviderRepository>(),
             sp.GetRequiredService<CredentialStore>(),
-            sp.GetRequiredService<SettingsRepository>()));
+            sp.GetRequiredService<SettingsRepository>(),
+            sp.GetRequiredService<ProviderRegistry>()));
         services.AddSingleton(sp => new MemoryPageViewModel(
             sp.GetRequiredService<MemoryService>(),
             sp.GetRequiredService<MemoryConsolidator>(),

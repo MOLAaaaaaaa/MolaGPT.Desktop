@@ -69,21 +69,14 @@ public static class PiModelCatalog
     }
 
     /// <summary>
-    /// Hands the agent runtime an explicit "off" expression, or leaves it to decide.
-    ///
-    /// On the two OpenAI-shaped apis the runtime cannot see which endpoint is really
-    /// behind the shim, so its idea of off is a guess: the completions path writes
-    /// nothing at all, the responses path writes <c>effort: "none"</c>, and the two
-    /// disagree over the same missing map. A null here means "write nothing" on both,
-    /// and <see cref="ThinkingParams"/> — which does know the endpoint and what the
-    /// provider published about the model — supplies the real one.
-    ///
-    /// Anthropic and Google are deliberately absent: there the runtime already picks
-    /// correctly (a disabled thinking block; Gemini 3's lowest thinking level, since
-    /// those models cannot be taken to zero), and a null would silence that.
+    /// Pi treats an explicit null off mapping as "off is unavailable" and clamps it
+    /// to minimal. Completions needs a real off level: Pi then omits its effort field,
+    /// and <see cref="ThinkingParams"/> supplies the endpoint's off expression.
+    /// Responses keeps the existing mapping because its default off expression is
+    /// effort: none, which some endpoints reject.
     /// </summary>
     private static Dictionary<string, object?>? BuildThinkingLevelMap(string api) =>
-        ThinkingParams.Owns(api) ? new Dictionary<string, object?>(StringComparer.Ordinal) { ["off"] = null } : null;
+        api == "openai-responses" ? new Dictionary<string, object?>(StringComparer.Ordinal) { ["off"] = null } : null;
 
     /// <summary>Pi reads all four rates unconditionally, so a missing cache price
     /// falls back to the matching base rate rather than to zero — charging nothing

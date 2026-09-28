@@ -171,6 +171,7 @@
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="常规" />
                 <ListBoxItem Content="外观" Tag="PAGE_Appearance" />
                 <ListBoxItem Content="对话" Tag="PAGE_Chat" />
+                <ListBoxItem Content="任务与子 Agent" Tag="PAGE_Tasks" />
                 <ListBoxItem Content="通知与托盘" Tag="PAGE_System" />
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="个性化" />
                 <ListBoxItem Name="PART_PersonasNav" Content="角色" Tag="PAGE_Personas" />
@@ -284,7 +285,7 @@
                           <DataTemplate x:DataType="v:AccountModelRow">
                             <Border Classes="providercard" Padding="14,10" Opacity="{Binding Opacity}">
                               <StackPanel>
-                                <Grid ColumnDefinitions="*,Auto,Auto">
+                                <Grid ColumnDefinitions="*,Auto,Auto,Auto">
                                   <TextBlock Grid.Column="0" Text="{Binding Name}" FontWeight="SemiBold"
                                              TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
                                   <TextBlock Grid.Column="1" Text="{Binding PriceSymbol}"
@@ -295,7 +296,11 @@
                                              FontFamily="{DynamicResource Font.Mono}"
                                              FontSize="12" FontWeight="Bold" Margin="6,0,0,0"
                                              VerticalAlignment="Center" ToolTip.Tip="消耗档位，$ 越多越贵" />
-                                  <TextBlock Grid.Column="2" Text="{Binding RightText}"
+                                  <TextBlock Grid.Column="2" Text="{Binding PricingPeriod}"
+                                             IsVisible="{Binding HasPricingPeriod}"
+                                             Classes="hint" FontSize="12" Margin="6,0,0,0"
+                                             VerticalAlignment="Center" ToolTip.Tip="当前时段的计价，档位随时段变化" />
+                                  <TextBlock Grid.Column="3" Text="{Binding RightText}"
                                              IsVisible="{Binding HasRightText}"
                                              Classes.success="{Binding RightIsSuccess}"
                                              Classes.warning="{Binding RightIsWarning}"
@@ -602,6 +607,80 @@
                 </Border>
               </StackPanel>
 
+              <StackPanel Name="PAGE_Tasks" IsVisible="False">
+                <TextBlock Classes="pagetitle" Text="任务与子 Agent" />
+
+                <TextBlock Classes="section" Text="运行时发送" Margin="2,4,2,8" />
+                <Border Classes="settingscard">
+                  <Grid Classes="settingrow" ColumnDefinitions="220,*">
+                    <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                      <TextBlock Classes="rowtitle" Text="默认发送方式" />
+                      <TextBlock Classes="hint" TextWrapping="Wrap"
+                                 Text="回答运行时，发送按钮与常用快捷键使用此方式。" />
+                    </StackPanel>
+                    <ComboBox Grid.Column="1" Classes="settingsinput"
+                              HorizontalAlignment="Stretch"
+                              SelectedIndex="{Binding RunningTaskSendModeIndex, Mode=TwoWay}">
+                      <ComboBoxItem Content="插队" />
+                      <ComboBoxItem Content="排队" />
+                    </ComboBox>
+                  </Grid>
+                </Border>
+
+                <TextBlock Classes="section" Text="后台任务" />
+                <Border Classes="settingscard">
+                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                    <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                      <TextBlock Classes="rowtitle" Text="任务结束后唤醒模型" />
+                      <TextBlock Classes="hint" TextWrapping="Wrap"
+                                 Text="后台任务结束时自动开始一轮回答。关闭后，结果随下一条消息送达。" />
+                    </StackPanel>
+                    <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                  IsChecked="{Binding BackgroundTaskWakeEnabled, Mode=TwoWay}"
+                                  VerticalAlignment="Center" />
+                  </Grid>
+                </Border>
+
+                <TextBlock Classes="section" Text="子 Agent" />
+                <Border Classes="settingscard">
+                  <StackPanel>
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="启用子 Agent" />
+                        <TextBlock Classes="hint" TextWrapping="Wrap"
+                                   Text="允许模型把可独立完成的任务交给子 Agent。子 Agent 不能操作浏览器，也不能执行需要授权的操作。" />
+                      </StackPanel>
+                      <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                    IsChecked="{Binding SubagentsEnabled, Mode=TwoWay}"
+                                    VerticalAlignment="Center" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="220,*" IsEnabled="{Binding SubagentsEnabled}">
+                      <TextBlock Grid.Column="0" Classes="rowtitle" Text="默认模型"
+                                 VerticalAlignment="Center" />
+                      <ComboBox Grid.Column="1" Classes="settingsinput"
+                                HorizontalAlignment="Stretch"
+                                ItemsSource="{Binding SubagentProviderModels}"
+                                SelectedItem="{Binding SelectedSubagentProviderModel, Mode=TwoWay}">
+                        <ComboBox.ItemTemplate>
+                          <DataTemplate x:DataType="vm:TitleProviderModelOption">
+                            <TextBlock Text="{Binding Label}" />
+                          </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                      </ComboBox>
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto" IsEnabled="{Binding SubagentsEnabled}">
+                      <TextBlock Grid.Column="0" Classes="rowtitle" Text="每个对话同时运行"
+                                 VerticalAlignment="Center" />
+                      <NumericUpDown Grid.Column="1" Classes="settingsinput" Width="120"
+                                     Minimum="1" Maximum="4" Increment="1" FormatString="0"
+                                     Value="{Binding SubagentMaxPerConversation, Mode=TwoWay}" />
+                    </Grid>
+                  </StackPanel>
+                </Border>
+              </StackPanel>
+
               <StackPanel Name="PAGE_System" IsVisible="False">
                 <TextBlock Classes="pagetitle" Text="通知与托盘" />
                 <TextBlock Classes="pagesubtitle" Text="回答完成时的提醒，以及关闭窗口后软件的去向。" />
@@ -743,6 +822,13 @@
                         <TextBox Name="PART_ProviderName" Classes="settingsinput"
                                  PlaceholderText="例如 我的 DeepSeek" />
                       </StackPanel>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock Grid.Column="0" Text="使用 HTTPS 传输" VerticalAlignment="Center" />
+                        <ToggleButton Grid.Column="1" Name="PART_ProviderHttps"
+                                      Classes="settingtoggle" IsChecked="True"
+                                      VerticalAlignment="Center" />
+                      </Grid>
 
                       <StackPanel>
                         <TextBlock Classes="label" Text="接口地址" />
@@ -1860,6 +1946,7 @@
                                   VerticalAlignment="Center" />
                   </Grid>
                 </Border>
+
               </StackPanel>
 
               <StackPanel Name="PAGE_Browser" IsVisible="False">

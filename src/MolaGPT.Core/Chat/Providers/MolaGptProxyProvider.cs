@@ -147,7 +147,9 @@ public sealed class MolaGptProxyProvider : IChatProvider
                 SupportsThinking: supportsThinking,
                 SupportsReasoningEffort: supportsReasoning,
                 SupportsToolCalling: supportsToolCalling,
-                ThinkingConfig: BuildLocalToolsThinkingConfig(modelName!, supportsThinking, supportsReasoning)));
+                ThinkingConfig: BuildLocalToolsThinkingConfig(
+                    modelName!, supportsThinking, supportsReasoning,
+                    cfg["reasoningEffortAdapter"]?.GetValue<string>())));
         }
 
         return list;
@@ -156,11 +158,17 @@ public sealed class MolaGptProxyProvider : IChatProvider
     private static ThinkingConfig? BuildLocalToolsThinkingConfig(
         string modelName,
         bool supportsThinking,
-        bool supportsReasoningEffort)
+        bool supportsReasoningEffort,
+        string? reasoningEffortAdapter)
     {
         if (!supportsThinking && !supportsReasoningEffort) return null;
 
-        var inferred = ThinkingParamKindInference.InferFromModelId(modelName);
+        var inferred = reasoningEffortAdapter switch
+        {
+            "openai_chat_reasoning_effort" => ThinkingParamKind.OpenAiReasoningEffort,
+            "qwen_thinking_budget" => ThinkingParamKind.QwenThinkingBudget,
+            _ => ThinkingParamKindInference.InferFromModelId(modelName)
+        };
         if (inferred == ThinkingParamKind.None && supportsReasoningEffort)
             inferred = ThinkingParamKind.OpenAiReasoningEffort;
         if (inferred == ThinkingParamKind.None) return null;
@@ -282,7 +290,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
                     // null multiplier = the model has no price on file, which the
                     // server treats as unusable rather than free.
                     CreditMultiplier: ParseDouble(s["credit_multiplier"]),
-                    CreditSymbol: s["credit_symbol"]?.GetValue<string>());
+                    CreditSymbol: s["credit_symbol"]?.GetValue<string>(),
+                    PricingPeriod: s["pricing_period"]?.GetValue<string>());
             }
         }
 
@@ -1422,6 +1431,9 @@ public sealed record MolaGptModelLimit(
 /// on file, which the server treats as unusable rather than free.</param>
 /// <param name="CreditSymbol">Price tier as a run of <c>$</c>. Empty string =
 /// free, null = unpriced. Rendered verbatim; the server owns the thresholds.</param>
+/// <param name="PricingPeriod"><c>peak</c> / <c>off_peak</c> for models with
+/// time-of-day pricing; the multiplier above is already the current period's.
+/// Null for flat-priced models.</param>
 public sealed record MolaGptModelStatus(
     bool Available,
     int? Remaining,
@@ -1429,7 +1441,17 @@ public sealed record MolaGptModelStatus(
     string? Reason,
     string? Message,
     double? CreditMultiplier = null,
-    string? CreditSymbol = null);
+    string? CreditSymbol = null,
+    string? PricingPeriod = null)
+{
+    /// <summary>「峰时」/「谷时」, or null when the model has one flat price.</summary>
+    public string? PricingPeriodLabel => PricingPeriod switch
+    {
+        "peak" => "峰时",
+        "off_peak" => "谷时",
+        _ => null
+    };
+}
 
 /// <summary>
 /// The shared credit pool that replaced the per-model request/token quotas.

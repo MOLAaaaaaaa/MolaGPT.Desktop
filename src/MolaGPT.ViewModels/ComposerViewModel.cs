@@ -17,6 +17,7 @@ using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Providers;
+using MolaGPT.Core.Chat.Tasks;
 using MolaGPT.Core.Models;
 using MolaGPT.ViewModels.Services;
 
@@ -195,6 +196,9 @@ public sealed partial class ComposerViewModel : ObservableObject
         // The chip is only offered before the first message, so its visibility
         // follows the transcript rather than any one property.
         _chat.Messages.CollectionChanged += (_, _) => OnPropertyChanged(nameof(IsMemoryChipVisible));
+        _chat.TaskChanged += OnTaskChanged;
+        _chat.AgentMessageQueued += OnAgentMessageQueued;
+        PendingInjections.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasPendingInjections));
         _chat.RoleOptionsRequested += ApplyRoleOptions;
         ApplyRoleOptions(true);
         WireContextGauge();
@@ -281,7 +285,16 @@ public sealed partial class ComposerViewModel : ObservableObject
                     OnPropertyChanged(nameof(MemoryOnForConversation));
                 }
                 if (e.PropertyName is nameof(SettingsViewModel.EnterToSend))
+                {
                     OnPropertyChanged(nameof(EnterToSend));
+                    OnPropertyChanged(nameof(RunningSendHint));
+                }
+                if (e.PropertyName is nameof(SettingsViewModel.RunningTaskSendModeIndex))
+                {
+                    OnPropertyChanged(nameof(QueueDuringTaskByDefault));
+                    OnPropertyChanged(nameof(RunningSendHint));
+                    OnPropertyChanged(nameof(DefaultInjectionTooltip));
+                }
 
                 if (e.PropertyName is nameof(SettingsViewModel.ImageGenerationEnabled)
                     or nameof(SettingsViewModel.ImageGenerationProviderId)
@@ -318,12 +331,12 @@ public sealed partial class ComposerViewModel : ObservableObject
         Attachments.CollectionChanged += (_, _) =>
         {
             OnPropertyChanged(nameof(HasAttachments));
-            SendCommand.NotifyCanExecuteChanged();
+            NotifyInjectState();
         };
         ArtifactReferences.CollectionChanged += (_, _) =>
         {
             OnPropertyChanged(nameof(HasArtifactReferences));
-            SendCommand.NotifyCanExecuteChanged();
+            NotifyInjectState();
         };
     }
 
@@ -534,6 +547,21 @@ public sealed partial class ComposerViewModel : ObservableObject
         && _chat.ActiveModel?.SupportsToolCalling == true
         && _settings is not null
         && (_chat.ActivePersona?.Profile.EnableFileTools ?? _settings.FileToolsEnabled);
+
+    /// <summary>
+    /// Background Python and sub-agents belong to the agent engine, and stay out of
+    /// 氛围模式: a roleplay reply is one generation, not a work session. The tool
+    /// switches and the system prompt both read these, so the prompt never
+    /// describes a tool that is not on the wire.
+    /// </summary>
+    private bool IsAgentWorkTurn =>
+        _chat.ActiveProvider is PiWorkProvider
+        && !_chat.IsAtmosphereMode
+        && _chat.ActiveModel?.SupportsToolCalling == true;
+
+    private bool CanRunPythonInBackground => IsAgentWorkTurn && CanUseByokPythonTool;
+
+    private bool CanSpawnSubagents => IsAgentWorkTurn && _settings?.SubagentsEnabled != false;
 
     public IReadOnlyList<ImageGenerationOption> ImageAspectRatioOptions { get; } =
     [
@@ -875,6 +903,11 @@ public sealed partial class ComposerViewModel : ObservableObject
                 : AppendHiddenSystemHint(outgoingUserText, referencePrompt);
         }
 
+        var summarizedTasks = new List<AgentTask>();
+        var agentMessages = new List<AgentMessage>();
+        if (provider is PiWorkProvider)
+            outgoingUserText = AppendTaskSummary(conversationId, outgoingUserText, summarizedTasks, agentMessages);
+
         var msgs = _chat.Messages
             .Where(m => !m.IsStreaming || m == assistantMsg)
             .Where(m => m != assistantMsg)
@@ -904,6 +937,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             GenerateTitleOnCompletion = generateLocalTitleOnCompletion
         };
         _activeTask = streamContext;
+        _injectable = true;
+        NotifyInjectState();
 
         var wasCancelled = false;
         string? failureMessage = null;
@@ -921,23 +956,30 @@ public sealed partial class ComposerViewModel : ObservableObject
                 ExtraBody: BuildExtras(), ThinkingBudgetTokens: IsThinkingEnabled ? ThinkingBudgetTokens : null,
                 ThinkingParamKind: ResolveActiveThinkingParamKind(), RolePrompt: role?.Plan);
             req = ApplyRoleRequestOptions(req, BuildHistorySeed(userMsg), maxTokens);
+            RememberTurnTemplate(conversationId, provider, model, req, assistantMsg);
             var streamTask = RunStreamLoopAsync(provider, req, assistantMsg, cts, streamContext);
             streamContext.StreamTask = streamTask;
             _activeStreamTask = streamTask;
             await streamContext.StreamTask;
+            if (streamContext.CompletedSuccessfully)
+            {
+                foreach (var task in summarizedTasks) _chat.Tasks?.MarkDelivered(task);
+                _chat.Tasks?.AcknowledgeParentMessages(conversationId, agentMessages.Select(m => m.Id));
+            }
             _chat.MarkHistorySynchronized(conversationId, req.HistoryRevision);
         }
         catch (OperationCanceledException)
         {
             wasCancelled = true;
             // Marks the bubble as stopped rather than merely empty, so it keeps its
-            // action bar (retry) and says why there is nothing there.
-            assistantMsg.WasStopped = true;
+            // action bar (retry) and says why there is nothing there. The stream's
+            // bubble, not the first one: a queued message may have split the reply.
+            streamContext.AssistantMessage.WasStopped = true;
         }
         catch (MolaGptAuthExpiredException ex)
         {
             failureMessage = ex.Message;
-            assistantMsg.AppendDelta($"\n\n> {ex.Message}");
+            streamContext.AssistantMessage.AppendDelta($"\n\n> {ex.Message}");
             try
             {
                 if (MolaGptProviderIds.IsMolaGptAccount(provider.Id) && _chat.ActiveProvider?.Id == provider.Id)
@@ -952,11 +994,14 @@ public sealed partial class ComposerViewModel : ObservableObject
         catch (Exception ex)
         {
             failureMessage = ex.Message;
-            assistantMsg.AppendDelta($"\n\n> **错误**：{ex.Message}");
-            ClassifyActionableError(assistantMsg, ex);
+            streamContext.AssistantMessage.AppendDelta($"\n\n> **错误**：{ex.Message}");
+            ClassifyActionableError(streamContext.AssistantMessage, ex);
         }
         finally
         {
+            _inflightTaskResults.ExceptWith(summarizedTasks);
+            _inflightAgentMessages.ExceptWith(agentMessages);
+            FlushPendingInjections(streamContext, wasCancelled);
             CompleteStreamContext(streamContext, publishNotification: !wasCancelled, failureMessage);
             // A turn ended; whether that is worth a consolidation pass is the
             // consolidator's call, not ours. Cancelled and failed turns count as
@@ -970,6 +1015,8 @@ public sealed partial class ComposerViewModel : ObservableObject
                 _activeAssistantMsg = null;
                 _activeTask = null;
                 _cts = null;
+                _injectable = false;
+                NotifyInjectState();
             }
             cts.Dispose();
         }
@@ -995,12 +1042,17 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         _backgroundStreams.Register(_activeTask);
 
+        // What is already queued stays queued in the agent; the chips belong to the
+        // conversation being left, and come back from its next queue update.
+        PendingInjections.Clear();
+        _injectable = false;
         _cts = null;
         _activeStreamTask = null;
         _activeAssistantMsg = null;
         _activeTask = null;
         IsSending = false;
         _chat.IsStreaming = false;
+        NotifyInjectState();
 
         return true;
     }
@@ -1035,8 +1087,10 @@ public sealed partial class ComposerViewModel : ObservableObject
             _cts = task.Cts;
             _activeStreamTask = task.StreamTask;
             _activeTask = task;
+            _injectable = !task.IsRegeneration && !task.IsContinuation;
             IsSending = true;
             _chat.IsStreaming = true;
+            NotifyInjectState();
             return;
         }
 
@@ -1124,6 +1178,20 @@ public sealed partial class ComposerViewModel : ObservableObject
         {
             if (chunk.PromptTrace is { } trace && trackingTask is not null)
                 _chat.SetRolePromptTrace(trackingTask.ConversationId, trace);
+            if (trackingTask is not null)
+            {
+                if (chunk.Injected is { } injected)
+                {
+                    assistantMsg = SplitAtInjection(trackingTask, assistantMsg, injected.Text);
+                    continue;
+                }
+                if (chunk.Queue is { } queue)
+                {
+                    ApplyQueueState(trackingTask, queue);
+                    continue;
+                }
+                if (chunk.Tool is { } tool) TrackTool(trackingTask, tool);
+            }
             ApplyStreamChunk(assistantMsg, chunk);
             if (trackingTask is not null && chunk.RawJson is not null)
                 trackingTask.ReceivedChunkCount++;
@@ -1251,6 +1319,12 @@ public sealed partial class ComposerViewModel : ObservableObject
                     readableRoots.Add(_memory.Files.Root);
                 if (readableRoots.Count > 0)
                     enabledTools["fileToolsReadableRoots"] = string.Join(",", readableRoots);
+            }
+
+            if (IsAgentWorkTurn)
+            {
+                enabledTools["backgroundTasks"] = CanRunPythonInBackground;
+                enabledTools["subagents"] = CanSpawnSubagents;
             }
 
             // Rebuilt every turn from the global switches and this conversation's
@@ -1658,7 +1732,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         // machine can do, this one describes who is asking.
         var appendices = new[]
             {
-                BuildMemoryHint(), BuildPythonEnvironmentHint(), BuildBrowserProtocolHint(), BuildSkillCatalogHint(),
+                BuildMemoryHint(), BuildPythonEnvironmentHint(), BuildBackgroundTaskHint(), BuildBrowserProtocolHint(), BuildSkillCatalogHint(),
                 VisualAnswersEnabled ? VisualAnswerPrompt.Text : null
             }
             .Where(hint => !string.IsNullOrWhiteSpace(hint))
@@ -1739,6 +1813,45 @@ public sealed partial class ComposerViewModel : ObservableObject
             lines.Add("网络默认关闭，不要依赖下载文件或抓取网页。");
 
         return "<运行环境>\n" + string.Join("\n", lines) + "\n</运行环境>";
+    }
+
+    /// <summary>
+    /// How work outlives a turn, stated whenever background Python or sub-agents
+    /// are on the wire.
+    ///
+    /// The schemas alone were not enough: whether a job is doable at all is
+    /// decided before any parameter description is read, from the prior that one
+    /// turn is all the model gets — asked for something that takes a while, a
+    /// model holding run_in_background said it could not. So this says what the
+    /// platform does and nothing else. When to reach for each tool is in that
+    /// tool's description, and what to do right after starting one is in its
+    /// result; each is said once.
+    ///
+    /// Keyed on the feature switches. What changes per turn, such as the tasks
+    /// still running, rides on the user message, or the prefix cache goes.
+    /// </summary>
+    private string? BuildBackgroundTaskHint()
+    {
+        var python = CanRunPythonInBackground;
+        var agents = CanSpawnSubagents;
+        if (!python && !agents) return null;
+
+        var entry = (python, agents) switch
+        {
+            (true, true) => "execute_python_code（run_in_background）和 spawn_agent",
+            (true, false) => "execute_python_code（run_in_background）",
+            _ => "spawn_agent"
+        };
+        return "<后台任务>\n"
+            + $"{entry}可以把工作放到后台：调用立即返回任务 ID，工作继续进行。"
+            + (_settings?.BackgroundTaskWakeEnabled != false
+                ? "结束时，结果以 <task-notification> 消息送达；空闲时会自动继续处理，无需用户发言。\n"
+                : "结果随下一次用户消息送达，也可通过 task_status 查询。\n")
+            + "任务运行中可以推进其他工作；不要重复执行已委派的部分，接手前先确认或停止对应任务。\n"
+            + (agents
+                ? "子 Agent 与你共享工作目录，请明确各自负责的文件。send_agent_message 交换信息，followup_agent 给同一个子 Agent 追加任务，wait_agents 等待状态变化；执行结束后仍须检查结果是否满足委派目标。<agent-message> 是子 Agent 的消息，不是用户的新要求。\n"
+                : string.Empty)
+            + "</后台任务>";
     }
 
     /// <summary>
@@ -1837,6 +1950,10 @@ public sealed partial class ComposerViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanStop))]
     public void Stop()
     {
+        // Stopping a turn stops the background work it started as well: 停止 means
+        // "no more of this", not "no more of the part I can see".
+        if (_activeTask is { SessionId: { } turn } stream)
+            _chat.Tasks?.StopTurn(stream.ConversationId, turn);
         _cts?.Cancel();
     }
 
@@ -1979,6 +2096,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 ThinkingParamKind: thinkingKind,
                 RolePrompt: role?.Plan);
             req = ApplyRoleRequestOptions(req, seed, maxTokens);
+            RememberTurnTemplate(conversationId, activeProvider, activeModel, req, assistantMsg);
 
             var streamTask = RunStreamLoopAsync(activeProvider, req, assistantMsg, cts, streamContext);
             streamContext.StreamTask = streamTask;
@@ -2355,6 +2473,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         bool publishNotification,
         string? failureMessage = null)
     {
+        OnStreamCompletedForTasks(streamContext);
         PrepareCompletedResponse(streamContext, failureMessage);
 
         // A regeneration's bubble is already a row; finalizing it the normal way
@@ -2470,9 +2589,16 @@ public sealed partial class ComposerViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(IsComposerPlaceholderVisible));
         SendCommand.NotifyCanExecuteChanged();
+        SendDuringTaskCommand.NotifyCanExecuteChanged();
+        SteerCommand.NotifyCanExecuteChanged();
+        QueueCommand.NotifyCanExecuteChanged();
     }
     partial void OnIsSendingChanged(bool value)
     {
+        OnPropertyChanged(nameof(IsInjectAvailable));
+        SendDuringTaskCommand.NotifyCanExecuteChanged();
+        SteerCommand.NotifyCanExecuteChanged();
+        QueueCommand.NotifyCanExecuteChanged();
         SendCommand.NotifyCanExecuteChanged();
         StopCommand.NotifyCanExecuteChanged();
         RetryCommand.NotifyCanExecuteChanged();

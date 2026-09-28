@@ -36,6 +36,11 @@ public static partial class ToolArgsExtractor
 
         var isPython = string.Equals(toolName, "execute_python_code", System.StringComparison.OrdinalIgnoreCase);
 
+        if (!StreamingJson.CouldBeComplete(argumentsJson))
+            return isPython && TryExtractPartialPythonCode(argumentsJson, out var partial)
+                ? new ToolArgsView(null, null, null, 0, new ToolCodeArgView(partial!, "python"))
+                : ToolArgsView.Empty;
+
         JsonDocument? doc = null;
         try
         {
@@ -69,6 +74,15 @@ public static partial class ToolArgsExtractor
                 if (queries is not null)
                     return new ToolArgsView(queries, null, null, 0);
             }
+
+            if ((string.Equals(toolName, "spawn_agent", System.StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(toolName, "followup_agent", System.StringComparison.OrdinalIgnoreCase))
+                && TryExtractPrimary(root, new[] { "task" }, ToolPrimaryArgKind.Text, out var brief))
+                return new ToolArgsView(null, brief, null, 0);
+
+            if (string.Equals(toolName, "send_agent_message", System.StringComparison.OrdinalIgnoreCase)
+                && TryExtractPrimary(root, new[] { "message" }, ToolPrimaryArgKind.Text, out var message))
+                return new ToolArgsView(null, message, null, 0);
 
             if (TryExtractPrimary(root, UrlKeys,  ToolPrimaryArgKind.Url,  out var url))
                 return new ToolArgsView(null, url, null, 0);

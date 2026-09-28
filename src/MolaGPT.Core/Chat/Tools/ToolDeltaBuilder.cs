@@ -1,5 +1,6 @@
 using System.Text.Json;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Tasks;
 using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
@@ -86,6 +87,8 @@ public static class ToolDeltaBuilder
 
     private static string? BuildToolSummary(string name, string args)
     {
+        if (!StreamingJson.CouldBeComplete(args) && !string.IsNullOrWhiteSpace(args))
+            return name == PythonExecutionTool.ToolName ? "正在生成 Python 代码" : args;
         try
         {
             using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(args) ? "{}" : args);
@@ -236,7 +239,7 @@ public static class ToolDeltaBuilder
 
     private static int CountSearchQueries(string args)
     {
-        if (string.IsNullOrWhiteSpace(args)) return 0;
+        if (!StreamingJson.CouldBeComplete(args)) return 0;
         try
         {
             using var doc = JsonDocument.Parse(args);
@@ -266,6 +269,7 @@ public static class ToolDeltaBuilder
     private static string PrettyJson(string json)
     {
         if (string.IsNullOrWhiteSpace(json)) return "{}";
+        if (!StreamingJson.CouldBeComplete(json)) return json;
         try
         {
             using var doc = JsonDocument.Parse(json);
@@ -301,6 +305,12 @@ public static class ToolDeltaBuilder
         ImageGenerationTool.ToolName => "生成图片",
         MemoryTools.RecallToolName => "检索记忆",
         MemoryTools.WriteToolName => "更新记忆",
+        SubagentTool.ToolName => "派发子 Agent",
+        SubagentTool.SendToolName => "发送消息",
+        SubagentTool.FollowupToolName => "继续派活",
+        SubagentTool.WaitToolName => "等待子 Agent",
+        TaskTools.StatusToolName => "查看任务",
+        TaskTools.StopToolName => "停止任务",
         _ => "调用工具"
     };
 

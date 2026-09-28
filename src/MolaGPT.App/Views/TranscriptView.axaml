@@ -135,7 +135,7 @@
                       <Border Width="24" Height="24" CornerRadius="{DynamicResource Radius.Xs}" ClipToBounds="True"
                               Background="{DynamicResource Brush.Bg.Tertiary}">
                         <Panel>
-                          <r:AttachmentThumbnail Bytes="{Binding Bytes}" IsVisible="{Binding IsImage}" />
+                          <r:AttachmentThumbnail Bytes="{Binding Bytes}" IsImage="{Binding IsImage}" IsVisible="{Binding IsImage}" />
                           <TextBlock Classes="icon" Text="&#xE7C3;" FontSize="12"
                                      IsVisible="{Binding !IsImage}"
                                      HorizontalAlignment="Center" VerticalAlignment="Center"
@@ -327,7 +327,8 @@
         <Expander Classes="toolbody" IsExpanded="{Binding IsExpanded, Mode=TwoWay}">
           <Expander.Resources>
             <DataTemplate x:Key="ToolBodyTemplate" x:DataType="r:ToolRow">
-              <StackPanel Spacing="8" Margin="0,10,0,0">
+              <Grid>
+              <StackPanel Spacing="8" Margin="0,10,0,0" IsVisible="{Binding !Tool.IsTaskCard}">
                 <!-- search_web: one chip per query -->
                 <ItemsControl ItemsSource="{Binding Tool.ArgsView.SearchQueries}"
                               IsVisible="{Binding Tool.ArgsView.HasSearchQueries}">
@@ -403,11 +404,38 @@
                                     IsExpanded="{Binding IsResultExpanded, Mode=TwoWay}" />
                 </Border>
               </StackPanel>
+              <StackPanel Spacing="8" Margin="0,10,0,0" IsVisible="{Binding Tool.IsTaskCard}">
+                <TextBlock Text="{Binding Tool.TaskCardTaskStatusText}"
+                           IsVisible="{Binding Tool.HasTaskCardTaskStatus}"
+                           Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}" />
+                <TextBlock Text="{Binding Tool.TaskCardInput}"
+                           IsVisible="{Binding Tool.HasTaskCardInput}"
+                           TextWrapping="Wrap" FontSize="12" />
+                <ItemsControl ItemsSource="{Binding Tool.TaskCardItems}"
+                              IsVisible="{Binding Tool.HasTaskCardItems}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:TaskCardItem">
+                      <StackPanel Spacing="2" Margin="0,2">
+                        <TextBlock Text="{Binding Label}" FontSize="12" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding Status}" Classes="muted" FontSize="11" />
+                        <TextBlock Text="{Binding Detail}" TextWrapping="Wrap"
+                                   FontSize="11" IsVisible="{Binding HasDetail}" />
+                      </StackPanel>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <ScrollViewer MaxHeight="260" VerticalScrollBarVisibility="Auto"
+                              IsVisible="{Binding Tool.HasTaskCardOutput}">
+                  <TextBlock Text="{Binding Tool.TaskCardOutput}" TextWrapping="Wrap"
+                             FontFamily="{DynamicResource Font.Mono}" FontSize="11" />
+                </ScrollViewer>
+              </StackPanel>
+              </Grid>
             </DataTemplate>
           </Expander.Resources>
 
           <Expander.Header>
-            <Grid ColumnDefinitions="Auto,10,*,Auto">
+            <Grid ColumnDefinitions="Auto,10,*,Auto,Auto">
               <Border Grid.Column="0" Classes="toolicon"
                       CornerRadius="{DynamicResource Radius.Sm}"
                       Background="{DynamicResource Brush.Primary.Tint}"
@@ -431,15 +459,43 @@
 
               <Border Grid.Column="3" Classes="statuschip"
                       Classes.errored="{Binding Tool.IsError}"
-                      Classes.done="{Binding Tool.IsCompleted}">
+                      Classes.done="{Binding Tool.IsCompleted}"
+                      Classes.background="{Binding Tool.IsBackgroundRunning}">
                 <TextBlock Text="{Binding Tool.StatusText}" FontSize="11" FontWeight="SemiBold" />
               </Border>
+
+              <!-- The call finished when the task began; the task is what can
+                   still be stopped. -->
+              <Button Grid.Column="4" Classes="inlineaction" Width="26" Height="24"
+                      Margin="6,0,0,0" VerticalAlignment="Center"
+                      IsVisible="{Binding Tool.IsBackgroundRunning}"
+                      Click="OnStopTask" ToolTip.Tip="停止任务">
+                <TextBlock Classes="icon" Text="&#xE71A;" FontSize="11" />
+              </Button>
             </Grid>
           </Expander.Header>
 
           <ContentControl Content="{Binding BodyContent}"
                           ContentTemplate="{StaticResource ToolBodyTemplate}" />
         </Expander>
+      </Border>
+    </DataTemplate>
+
+    <!-- A background task ended and the model was told. An event between turns,
+         so a line in the assistant column rather than a bubble with the user's
+         avatar — the user did not write it. -->
+    <DataTemplate DataType="r:TaskNoticeRow">
+      <Border Classes="assistantcol" Margin="0,10,0,0">
+        <Border Classes="tasknotice" Classes.failed="{Binding Notice.IsFailure}"
+                HorizontalAlignment="Left">
+          <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="6">
+            <TextBlock Classes="icon" Text="{Binding Notice.Glyph}" FontSize="12"
+                       VerticalAlignment="Center" />
+            <TextBlock Text="{Binding Notice.Text}" FontSize="12" VerticalAlignment="Center"
+                       Foreground="{DynamicResource Brush.Text.Secondary}"
+                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="560" />
+          </StackPanel>
+        </Border>
       </Border>
     </DataTemplate>
 
@@ -464,6 +520,7 @@
                 <TextBlock Text="{Binding Group.Label}" FontSize="13" FontWeight="Medium"
                            TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
                 <TextBlock Text="{Binding Group.CountText}" Classes="muted"
+                           IsVisible="{Binding Group.HasCountText}"
                            FontSize="{DynamicResource Font.Size.XSmall}"
                            TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
               </StackPanel>
@@ -479,7 +536,7 @@
           <ItemsControl ItemsSource="{Binding Group.Items}" Margin="0,10,0,0">
             <ItemsControl.ItemTemplate>
               <DataTemplate x:DataType="vm:ToolCallViewModel">
-                <Grid ColumnDefinitions="*,Auto" Margin="0,3">
+                <Grid ColumnDefinitions="*,Auto,Auto" Margin="0,3">
                   <Panel Grid.Column="0" VerticalAlignment="Center">
                     <TextBlock Text="{Binding HeaderArgPreview}"
                                IsVisible="{Binding HasHeaderArgPreview}"
@@ -494,10 +551,17 @@
                                TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
                   </Panel>
                   <Border Grid.Column="1" Classes="statuschip"
-                          Classes.errored="{Binding IsError}"
-                          Classes.done="{Binding IsCompleted}">
-                    <TextBlock Text="{Binding StatusText}" FontSize="11" FontWeight="SemiBold" />
+                           Classes.errored="{Binding GroupIsError}"
+                           Classes.done="{Binding GroupIsCompleted}"
+                           Classes.background="{Binding IsBackgroundRunning}">
+                    <TextBlock Text="{Binding GroupStatusText}" FontSize="11" FontWeight="SemiBold" />
                   </Border>
+                  <Button Grid.Column="2" Classes="inlineaction" Width="26" Height="24"
+                          Margin="6,0,0,0" VerticalAlignment="Center"
+                          IsVisible="{Binding IsBackgroundRunning}"
+                          Click="OnStopTask" ToolTip.Tip="停止任务">
+                    <TextBlock Classes="icon" Text="&#xE71A;" FontSize="11" />
+                  </Button>
                 </Grid>
               </DataTemplate>
             </ItemsControl.ItemTemplate>
@@ -584,6 +648,10 @@
         </Button>
         <Button Classes="inlineaction" Click="OnCopyMessage" ToolTip.Tip="复制回答">
           <TextBlock Classes="icon" Text="&#xE8C8;" FontSize="14" />
+        </Button>
+        <Button Classes="inlineaction" Click="OnBranchToConversation" ToolTip.Tip="分支为新对话"
+                IsVisible="{Binding $parent[views:TranscriptView].AllowMessageEditing}">
+          <TextBlock Classes="icon" Text="&#xE8A7;" FontSize="14" />
         </Button>
         <Button Classes="inlineaction" Click="OnMessageMore" ToolTip.Tip="编辑 · 续写 · 从此处建立分支"
                 IsVisible="{Binding $parent[views:TranscriptView].IsRoleChat}"
@@ -733,7 +801,9 @@
       </StackPanel>
     </StackPanel>
 
-    <!-- Scroll-to-bottom affordance: 32×32 circle, 196 above the bottom. -->
+    <!-- Scroll-to-bottom affordance: 32×32 circle, 36 above the composer.
+         This margin and PART_Scroll's follow the composer's height in code
+         (SetBottomReserve); the values here are the resting layout. -->
     <Button Name="PART_JumpLatest"
             Classes="jumpbottom"
             Width="32" Height="32"
@@ -1009,6 +1079,23 @@
     </Style>
     <Style Selector="Border.statuschip.errored TextBlock">
       <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
+    </Style>
+    <!-- Still running after its call returned: brand text on the neutral chip,
+         between 运行中 and 已完成. -->
+    <Style Selector="Border.statuschip.background TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+
+    <Style Selector="Border.tasknotice">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="10,6" />
+    </Style>
+    <Style Selector="Border.tasknotice TextBlock.icon">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Success}" />
+    </Style>
+    <Style Selector="Border.tasknotice.failed TextBlock.icon">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Warning.Foreground}" />
     </Style>
 
     <!-- A failed call drops the brand tint: an error must not look like a

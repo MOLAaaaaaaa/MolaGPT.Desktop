@@ -32,6 +32,23 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
     private bool _positionsDirty = true;
     private IScrollAnchorProvider? _anchorProvider;
     private int _scrollToIndex = -1;
+    private (object First, object Last)? _kept;
+
+    /// <summary>
+    /// Keeps every realized row from <paramref name="first"/> to
+    /// <paramref name="last"/> alive, whatever the viewport does.
+    ///
+    /// A text selection lives in the controls it highlights, so a row recycled
+    /// out from under it takes its part of the selection with it — the
+    /// highlight vanishes and a later copy silently skips that stretch. Held by
+    /// item rather than index: loading older messages shifts every index while
+    /// the selection is still up.
+    ///
+    /// Only rows that are already realized are kept; nothing is realized on
+    /// this panel's behalf. Pass nulls to let them go.
+    /// </summary>
+    public void KeepRealized(object? first, object? last) =>
+        _kept = first is null || last is null ? null : (first, last);
 
     public StableVirtualizingStackPanel()
     {
@@ -433,8 +450,10 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
     private void RecycleOutside(int first, int last)
     {
         var currentAnchor = _anchorProvider?.CurrentAnchor;
+        var (keepFirst, keepLast) = KeptRange();
         foreach (var realized in _realized.Values
                      .Where(x => (x.Index < first || x.Index > last)
+                                  && (x.Index < keepFirst || x.Index > keepLast)
                                   && !x.Control.IsKeyboardFocusWithin
                                   && !x.Control.IsPointerOver
                                   && !ReferenceEquals(x.Control, currentAnchor))
@@ -442,6 +461,18 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
         {
             Recycle(realized);
         }
+    }
+
+    private (int First, int Last) KeptRange()
+    {
+        if (_kept is not { } kept
+            || !_realized.TryGetValue(kept.First, out var first)
+            || !_realized.TryGetValue(kept.Last, out var last))
+        {
+            return (0, -1);
+        }
+
+        return (Math.Min(first.Index, last.Index), Math.Max(first.Index, last.Index));
     }
 
     private void RecycleAll()

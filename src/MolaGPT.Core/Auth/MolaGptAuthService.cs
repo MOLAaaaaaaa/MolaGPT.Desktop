@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using MolaGPT.Core.Chat;
 using MolaGPT.Core.Net;
 
 namespace MolaGPT.Core.Auth;
@@ -255,6 +256,11 @@ public sealed class MolaGptAuthService
         {
             return "服务器返回了 HTML 而不是 JSON,登录接口可能被中间层改写,或被 WAF/Nginx 拦截。";
         }
+
+        // 限频（429）、账号服务不可用（503）等都带 {success:false, message}，只显示那一句
+        var message = ChatApiErrorHelper.ExtractErrorMessage(body);
+        if (!string.IsNullOrWhiteSpace(message) && !message.StartsWith('{'))
+            return message;
 
         var compact = body.Replace("\r", " ").Replace("\n", " ").Trim();
         return compact.Length <= 180 ? compact : compact[..180] + "...";

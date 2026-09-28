@@ -23,11 +23,11 @@ namespace MolaGPT.Core.Chat.Agents.Pi;
 /// </summary>
 public sealed class PiRuntime : IAsyncDisposable
 {
-    /// <summary>Ceiling on live sidecars, and therefore on concurrent turns. Three
-    /// is enough for "one streaming in the background while you work in another
-    /// chat" without letting a busy session climb back to the old per-conversation
-    /// footprint.</summary>
-    public const int DefaultMaxSidecars = 3;
+    /// <summary>Ceiling on live sidecars, and therefore on concurrent turns. The
+    /// three normal-turn permits remain available while up to eight child turns
+    /// run, so a parent waiting for its child never occupies the child's slot.</summary>
+    public const int DefaultMaxSidecars = 11;
+    private const int MaxSubagentSidecars = 8;
 
     /// <summary>How long an unused sidecar lingers before it is reclaimed. The pool
     /// cap bounds the worst case; this decides how quickly the common case falls
@@ -41,10 +41,11 @@ public sealed class PiRuntime : IAsyncDisposable
     private readonly Action<string>? _log;
     private readonly int _maxSidecars;
 
-    /// <summary>Admission control: holding a slot is what entitles a turn to a
-    /// sidecar, so the pool can never exceed the cap and a fourth concurrent turn
-    /// waits rather than spawning.</summary>
+    /// <summary>Total sidecar ceiling and the split permits that keep regular turns
+    /// from occupying every slot needed by a child turn.</summary>
     private readonly SemaphoreSlim _slots;
+    private readonly SemaphoreSlim _turnSlots;
+    private readonly SemaphoreSlim? _subagentSlots;
 
     private readonly object _gate = new();
     private readonly List<Entry> _entries = [];
@@ -69,6 +70,12 @@ public sealed class PiRuntime : IAsyncDisposable
         _log = log;
         _maxSidecars = Math.Max(1, maxSidecars);
         _slots = new SemaphoreSlim(_maxSidecars, _maxSidecars);
+        var subagentSlots = Math.Min(
+            MaxSubagentSidecars,
+            _maxSidecars - 1);
+        var turnSlots = _maxSidecars - subagentSlots;
+        _turnSlots = new SemaphoreSlim(turnSlots, turnSlots);
+        _subagentSlots = subagentSlots == 0 ? null : new SemaphoreSlim(subagentSlots, subagentSlots);
         _shim = new PiWorkLlmShim(http, log);
         _bridge = new PiWorkToolBridge(log);
         _idleSweep = new Timer(_ => SweepIdle(), null, IdleSweepInterval, IdleSweepInterval);
@@ -130,13 +137,21 @@ public sealed class PiRuntime : IAsyncDisposable
         string conversationKey,
         PiWorkLlmShim.ForwardTarget target,
         PiWorkToolBridge.TurnBinding binding,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool subagent = false)
     {
+        var classSlots = subagent
+            ? _subagentSlots ?? throw new InvalidOperationException("当前 Pi 运行时没有可用的子 Agent 槽位。")
+            : _turnSlots;
+
         Task? prewarm = null;
-        lock (_gate)
+        if (!subagent)
         {
-            if (_prewarms.TryGetValue(spec.Key, out var operation))
-                prewarm = operation.Completion.Task;
+            lock (_gate)
+            {
+                if (_prewarms.TryGetValue(spec.Key, out var operation))
+                    prewarm = operation.Completion.Task;
+            }
         }
 
         if (prewarm is not null)
@@ -151,7 +166,7 @@ public sealed class PiRuntime : IAsyncDisposable
             }
         }
 
-        await _slots.WaitAsync(ct).ConfigureAwait(false);
+        await WaitForSlotAsync(classSlots, ct).ConfigureAwait(false);
         Entry entry;
         try
         {
@@ -159,7 +174,7 @@ public sealed class PiRuntime : IAsyncDisposable
         }
         catch
         {
-            _slots.Release();
+            ReleaseSlots(classSlots);
             throw;
         }
 
@@ -198,13 +213,33 @@ public sealed class PiRuntime : IAsyncDisposable
             }
 
             entry.ConversationKey = conversationKey;
-            return new PiTurnLease(this, entry, wasWarm);
+            return new PiTurnLease(this, entry, classSlots, wasWarm);
         }
         catch
         {
-            Release(entry);
+            Release(entry, classSlots);
             throw;
         }
+    }
+
+    private async Task WaitForSlotAsync(SemaphoreSlim classSlots, CancellationToken ct)
+    {
+        await classSlots.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _slots.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            classSlots.Release();
+            throw;
+        }
+    }
+
+    private void ReleaseSlots(SemaphoreSlim classSlots)
+    {
+        _slots.Release();
+        classSlots.Release();
     }
 
     /// <summary>Drop whatever process is currently holding
@@ -264,7 +299,7 @@ public sealed class PiRuntime : IAsyncDisposable
     {
         try
         {
-            await _slots.WaitAsync(operation.Cancellation.Token).ConfigureAwait(false);
+            await WaitForSlotAsync(_turnSlots, operation.Cancellation.Token).ConfigureAwait(false);
             Entry entry;
             try
             {
@@ -272,7 +307,7 @@ public sealed class PiRuntime : IAsyncDisposable
                 {
                     if (_background)
                     {
-                        _slots.Release();
+                        ReleaseSlots(_turnSlots);
                         operation.Completion.TrySetResult();
                         return;
                     }
@@ -281,7 +316,7 @@ public sealed class PiRuntime : IAsyncDisposable
             }
             catch
             {
-                _slots.Release();
+                ReleaseSlots(_turnSlots);
                 throw;
             }
 
@@ -291,7 +326,7 @@ public sealed class PiRuntime : IAsyncDisposable
             }
             finally
             {
-                Release(entry);
+                Release(entry, _turnSlots);
             }
 
             operation.Completion.TrySetResult();
@@ -404,7 +439,7 @@ public sealed class PiRuntime : IAsyncDisposable
         }
     }
 
-    private void Release(Entry entry)
+    private void Release(Entry entry, SemaphoreSlim classSlots)
     {
         _shim.SetTarget(entry.Token, null);
         _bridge.SetBinding(entry.Token, null);
@@ -419,11 +454,11 @@ public sealed class PiRuntime : IAsyncDisposable
                 retire = true;
             }
         }
-        _slots.Release();
+        ReleaseSlots(classSlots);
         if (retire) RetireDetached(entry);
     }
 
-    internal void ReleaseLease(Entry entry) => Release(entry);
+    internal void ReleaseLease(Entry entry, SemaphoreSlim classSlots) => Release(entry, classSlots);
 
     /// <summary>隐藏窗口时释放当前空闲 sidecar；后台任务结束后保留短暂复用时间。</summary>
     public void SetBackgroundMode(bool background)
@@ -503,6 +538,8 @@ public sealed class PiRuntime : IAsyncDisposable
         _bridge.Dispose();
         _shim.Dispose();
         _slots.Dispose();
+        _turnSlots.Dispose();
+        _subagentSlots?.Dispose();
         _lifetimeCts.Dispose();
     }
 
@@ -534,12 +571,14 @@ public sealed class PiTurnLease : IAsyncDisposable
 {
     private readonly PiRuntime _runtime;
     private readonly PiRuntime.Entry _entry;
+    private readonly SemaphoreSlim _classSlots;
     private int _released;
 
-    internal PiTurnLease(PiRuntime runtime, PiRuntime.Entry entry, bool wasWarm)
+    internal PiTurnLease(PiRuntime runtime, PiRuntime.Entry entry, SemaphoreSlim classSlots, bool wasWarm)
     {
         _runtime = runtime;
         _entry = entry;
+        _classSlots = classSlots;
         WasWarm = wasWarm;
     }
 
@@ -553,7 +592,7 @@ public sealed class PiTurnLease : IAsyncDisposable
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _released, 1) == 0)
-            _runtime.ReleaseLease(_entry);
+            _runtime.ReleaseLease(_entry, _classSlots);
         return ValueTask.CompletedTask;
     }
 }

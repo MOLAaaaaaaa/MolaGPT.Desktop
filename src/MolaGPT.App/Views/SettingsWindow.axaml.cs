@@ -73,6 +73,7 @@ public partial class SettingsWindow : MolaContentWindow
     private readonly List<DetectedModelRow> _detectedModels = [];
     private ProviderEntry? _editingProvider;
     private PersonaItemViewModel? _editingPersona;
+    private readonly PersonaItemViewModel _emptyPersona = new();
     private McpServerEntry? _editingMcpServer;
     private bool _editingPersonaIsDraft;
     private bool _loadingPersonaForm;
@@ -180,15 +181,14 @@ public partial class SettingsWindow : MolaContentWindow
         // Before DataContext: the search index reads the text the XAML spells
         // out, and bound text is still empty at this point.
         InitializeSearch();
-        DataContext = _settings;
 
         foreach (var item in PART_Nav.Items.OfType<ListBoxItem>())
         {
             if (item.Tag is string name && this.FindControl<StackPanel>(name) is { } page)
                 _navPages[item] = page;
         }
+        PART_PersonaEditor.DataContext = _emptyPersona;
         InitializeMemoryPage(memoryPage);
-        InitializeAccountPage(proxy);
         PAGE_Agent.DataContext = _agentStatus;
         PAGE_Personas.DataContext = _personas;
 
@@ -197,6 +197,8 @@ public partial class SettingsWindow : MolaContentWindow
         _browserBridge = new BrowserBridgeStatusViewModel(
             new WebBridgeClient(_byokHttpFactory?.Invoke() ?? new HttpClient()));
         PART_BrowserBridgeCard.DataContext = _browserBridge;
+        DataContext = _settings;
+        InitializeAccountPage(proxy);
         PART_ContentScroll.SizeChanged += (_, _) => UpdatePersonaViewport();
         PART_PersonaPageHeader.SizeChanged += (_, _) => UpdatePersonaViewport();
         PART_PersonaModeFilter.SelectionChanged += (_, _) => RefreshPersonaLibrary();
@@ -249,6 +251,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_ProviderType.SelectionChanged += OnProviderTypeChanged;
         PART_ProviderImageFormat.SelectionChanged += OnProviderImageFormatChanged;
         PART_ProviderBaseUrl.TextChanged += OnProviderEndpointChanged;
+        PART_ProviderHttps.IsCheckedChanged += OnProviderHttpsChanged;
         PART_ProviderApiPath.TextChanged += OnProviderEndpointChanged;
         PART_ProviderImageEditPath.TextChanged += OnProviderEndpointChanged;
         PART_DetectedModelSearch.TextChanged += (_, _) => RefreshDetectedModelFilter();
@@ -295,7 +298,11 @@ public partial class SettingsWindow : MolaContentWindow
             RefreshSkills();
             _ = RefreshRuntimeStatusAsync();
         };
-        Activated += (_, _) => _ = RefreshRuntimeStatusAsync();
+        Activated += (_, _) =>
+        {
+            _settings.RefreshSubagentProviderModels();
+            _ = RefreshRuntimeStatusAsync();
+        };
 
         PART_TestImageGeneration.IsEnabled = _imageGenerationTool is not null;
         PART_TestSearch.IsEnabled = _byokHttpFactory is not null;
@@ -831,6 +838,7 @@ public partial class SettingsWindow : MolaContentWindow
                 PART_ProviderType.SelectedIndex = ProviderTypeIndex(existing.Type);
                 PART_ProviderName.Text = existing.Name;
                 PART_ProviderBaseUrl.Text = existing.BaseUrl ?? string.Empty;
+                PART_ProviderHttps.IsChecked = !PART_ProviderBaseUrl.Text.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
                 PART_ProviderApiPath.Text = string.IsNullOrWhiteSpace(existing.ApiPath)
                     ? DefaultProviderApiPath(existing.Purpose, existing.ImageFormat, existing.Type)
                     : existing.ApiPath;
@@ -980,6 +988,7 @@ public partial class SettingsWindow : MolaContentWindow
         }
 
         _settings.RefreshTitleProviderModels();
+        _settings.RefreshSubagentProviderModels();
         _settings.RefreshMemoryProviderModels();
         _settings.RefreshVisionProviderModels();
         _settings.RefreshImageGenerationProviderModels();
@@ -1075,11 +1084,11 @@ public partial class SettingsWindow : MolaContentWindow
         var normalizedBaseUrl = baseUrl.TrimEnd('/') + "/";
         try
         {
-            NetworkSecurity.RequireHttpsBaseUrl(normalizedBaseUrl, $"{name} 接入地址");
+            NetworkSecurity.RequireHttpOrHttpsBaseUrl(normalizedBaseUrl, $"{name} 接入地址");
         }
         catch (Exception ex) when (ex is InvalidOperationException or UriFormatException)
         {
-            FailProviderEdit("接入地址必须是有效的 https:// 地址。");
+            FailProviderEdit("接入地址必须是有效的 http:// 或 https:// 地址。");
             entry = default!;
             return false;
         }
@@ -1162,6 +1171,7 @@ public partial class SettingsWindow : MolaContentWindow
         _settings.Delete(entry.Id);
         if (_providerRegistry is not null)
             ProviderRestorer.RemoveEntry(entry.Id, _providerRegistry, _piByokProviderFactory);
+        _settings.RefreshSubagentProviderModels();
         RefreshProviders();
         RefreshSpecializedModelChoices();
     }
@@ -1274,6 +1284,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_ProviderName.Text = preset.Name;
         PART_ProviderType.SelectedIndex = ProviderTypeIndex(preset.Type);
         PART_ProviderBaseUrl.Text = preset.BaseUrl;
+        PART_ProviderHttps.IsChecked = !preset.BaseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
         PART_ProviderApiPath.Text = string.IsNullOrWhiteSpace(preset.ApiPath)
             ? DefaultProviderApiPath(preset.Purpose, preset.ImageFormat, preset.Type)
             : preset.ApiPath;
@@ -1355,7 +1366,24 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void OnProviderEndpointChanged(object? sender, TextChangedEventArgs e)
     {
-        if (!_loadingProviderForm) UpdateProviderEndpointPreview();
+        if (_loadingProviderForm) return;
+        var baseUrl = PART_ProviderBaseUrl.Text?.Trim() ?? string.Empty;
+        if (baseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            PART_ProviderHttps.IsChecked = false;
+        else if (baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            PART_ProviderHttps.IsChecked = true;
+        UpdateProviderEndpointPreview();
+    }
+
+    private void OnProviderHttpsChanged(object? sender, RoutedEventArgs e)
+    {
+        if (_loadingProviderForm) return;
+        var baseUrl = PART_ProviderBaseUrl.Text ?? string.Empty;
+        if (baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            PART_ProviderBaseUrl.Text = (PART_ProviderHttps.IsChecked == true ? "https://" : "http://") + baseUrl[8..];
+        else if (baseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            PART_ProviderBaseUrl.Text = (PART_ProviderHttps.IsChecked == true ? "https://" : "http://") + baseUrl[7..];
+        UpdateProviderEndpointPreview();
     }
 
     private void UpdateProviderEndpointPreview()
@@ -1829,7 +1857,7 @@ public partial class SettingsWindow : MolaContentWindow
             }
 
             using var http = _byokHttpFactory();
-            var baseUrl = NetworkSecurity.RequireHttpsBaseUrl(entry.BaseUrl ?? DefaultProviderBaseUrl(entry.Type), $"{entry.Name} 接入地址");
+            var baseUrl = NetworkSecurity.RequireHttpOrHttpsBaseUrl(entry.BaseUrl ?? DefaultProviderBaseUrl(entry.Type), $"{entry.Name} 接入地址");
             var path = string.IsNullOrWhiteSpace(entry.ApiPath)
                 ? DefaultProviderApiPath(entry.Purpose, entry.ImageFormat, entry.Type)
                 : entry.ApiPath;
@@ -1866,7 +1894,7 @@ public partial class SettingsWindow : MolaContentWindow
     private async Task<List<ProviderModelEntry>> FetchProviderModelsAsync(ProviderEntry entry)
     {
         var preset = FindProviderPreset(entry);
-        var baseUrl = NetworkSecurity.RequireHttpsBaseUrl(entry.BaseUrl ?? DefaultProviderBaseUrl(entry.Type), $"{entry.Name} 接入地址");
+        var baseUrl = NetworkSecurity.RequireHttpOrHttpsBaseUrl(entry.BaseUrl ?? DefaultProviderBaseUrl(entry.Type), $"{entry.Name} 接入地址");
         var modelsPath = preset?.ModelsPath ?? (entry.Type == "gemini" ? "models" : "v1/models");
         var url = NetworkSecurity.CombineEndpoint(baseUrl, modelsPath, $"{entry.Name} 接入地址");
 
@@ -2899,7 +2927,7 @@ public partial class SettingsWindow : MolaContentWindow
         _loadingPersonaForm = true;
         try
         {
-            var switched = !ReferenceEquals(PART_PersonaEditor.DataContext, persona);
+            var switched = !ReferenceEquals(PART_PersonaEditor.DataContext, persona ?? _emptyPersona);
             PART_PersonaEditor.IsVisible = persona is not null;
             PART_PersonaRail.IsVisible = persona is null;
             PART_PersonaEditorSurface.IsVisible = persona is not null;
@@ -2907,7 +2935,7 @@ public partial class SettingsWindow : MolaContentWindow
             PART_PersonaLibraryActions.IsVisible = persona is null;
             PART_PersonaPageTitle.Text = persona is null ? "角色" : _editingPersonaIsDraft ? "新建角色" : "编辑角色";
             PART_PersonaFooter.IsVisible = persona is not null;
-            PART_PersonaEditor.DataContext = persona;
+            PART_PersonaEditor.DataContext = persona ?? _emptyPersona;
             if (switched) PART_PersonaTabs.SelectedIndex = 0;
 
             if (persona is null)

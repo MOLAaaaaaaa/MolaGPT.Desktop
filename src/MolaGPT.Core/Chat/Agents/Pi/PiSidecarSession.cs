@@ -173,6 +173,30 @@ public sealed class PiSidecarSession : IAsyncDisposable
     }
 
     /// <summary>
+    /// Queue a message into the running turn. <c>steer</c> lands after the current
+    /// batch of tool calls, before the next model call; <c>follow_up</c> when the
+    /// agent would otherwise stop, continuing the same run.
+    ///
+    /// Written without waiting for Pi's reply: while a turn runs, its stream is the
+    /// only reader of stdout, so the acknowledgement and the queue_update that follows
+    /// arrive there. Only meaningful mid-turn — an idle sidecar just holds the message
+    /// until the next switch_session discards it.
+    /// </summary>
+    public void Enqueue(string text, bool followUp)
+    {
+        if (!IsAlive || string.IsNullOrWhiteSpace(text)) return;
+        Send(new { type = followUp ? "follow_up" : "steer", message = text });
+    }
+
+    /// <summary>Drop everything still waiting in the running turn's queue. Same
+    /// reply-less shape as <see cref="Enqueue"/>.</summary>
+    public void ClearQueue()
+    {
+        if (!IsAlive) return;
+        Send(new { type = "clear_queue" });
+    }
+
+    /// <summary>
     /// Point this sidecar at <paramref name="sessionPath"/>, spawning it first if
     /// it is not running yet. Returns true when the process was already alive, so
     /// the caller can tell a cold start from a warm hand-over.
@@ -506,6 +530,9 @@ public sealed class PiSidecarSession : IAsyncDisposable
 
         try
         {
+            // First, or Pi carries on with whatever was queued into the turn once
+            // the abort lands. The app puts that text back in the input box.
+            Send(new { type = "clear_queue" });
             Send(new { type = "abort" });
             // Auto-retry means the agent can be waiting to try again rather than
             // running; aborting the turn alone leaves that timer to fire.

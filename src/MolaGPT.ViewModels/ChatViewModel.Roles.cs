@@ -25,6 +25,7 @@ public sealed partial class ChatViewModel
         SetRoleEvaluation(null);
         LastRolePromptTrace = null;
         OnPropertyChanged(nameof(LastRolePromptTrace));
+        RefreshConversationTasks();
     }
 
     public (string Name, string Description) ResolveRoleIdentity()
@@ -354,8 +355,11 @@ public sealed partial class ChatViewModel
     private void PersistHistoryEdit(MessageViewModel message, ConversationRoleContext context)
     {
         if (_messageRepo is not null && ConversationId is not null && message.MessageId is not null)
+        {
+            SyncMessageTaskStates(message, ConversationId);
             _messageRepo.UpdateRoleMessage(ConversationId, message.MessageId, message.FullContent,
                 BuildMessageMeta(message), RoleJson.Serialize(context));
+        }
         RoleContext = context;
         OnPropertyChanged(nameof(RoleContext));
     }

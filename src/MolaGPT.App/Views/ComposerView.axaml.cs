@@ -76,6 +76,8 @@ public partial class ComposerView : UserControl
         PART_Input.CaretIndex = PART_Input.Text?.Length ?? 0;
     });
 
+    private void OnInspectTask(object? sender, RoutedEventArgs e) => PART_Tasks.Flyout?.Hide();
+
     /// <summary>Left-hand hint text in the action bar.</summary>
     public void SetHint(string? hint) => PART_Hint.Text = hint ?? string.Empty;
 
@@ -177,6 +179,15 @@ public partial class ComposerView : UserControl
 
         if (e.Key != Key.Enter) return;
 
+        // Alt+Enter uses the other running-turn delivery mode.
+        if (e.KeyModifiers.HasFlag(KeyModifiers.Alt))
+        {
+            e.Handled = true;
+            var alternate = vm.QueueDuringTaskByDefault ? vm.SteerCommand : vm.QueueCommand;
+            if (alternate.CanExecute(null)) alternate.Execute(null);
+            return;
+        }
+
         // Ctrl+Enter always sends, in both preference modes.
         var wantsSend = e.KeyModifiers.HasFlag(KeyModifiers.Control)
             || (vm.EnterToSend && !e.KeyModifiers.HasFlag(KeyModifiers.Shift));
@@ -184,6 +195,12 @@ public partial class ComposerView : UserControl
         if (!wantsSend) return;
 
         e.Handled = true;
+        // Mid-turn the normal send shortcut uses the configured delivery mode.
+        if (vm.IsSending)
+        {
+            if (vm.SendDuringTaskCommand.CanExecute(null)) vm.SendDuringTaskCommand.Execute(null);
+            return;
+        }
         if (vm.SendCommand.CanExecute(null)) vm.SendCommand.Execute(null);
     }
 

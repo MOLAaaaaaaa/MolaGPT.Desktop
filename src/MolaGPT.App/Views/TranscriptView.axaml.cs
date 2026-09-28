@@ -89,6 +89,23 @@ public partial class TranscriptView : UserControl
     }
 
 
+    /// <summary>Space above the jump-to-latest button, over the reserve.</summary>
+    private const double JumpLatestLift = 36;
+
+    /// <summary>
+    /// How much of the view's bottom the floating composer covers. The composer
+    /// grows with queued messages, attachments and multi-line input; the viewport
+    /// ends where it begins, so its growth moves the last row up instead of
+    /// hiding it.
+    /// </summary>
+    public void SetBottomReserve(double reserve)
+    {
+        reserve = Math.Max(0, Math.Round(reserve));
+        if (Math.Abs(PART_Scroll.Margin.Bottom - reserve) < 0.5) return;
+        PART_Scroll.Margin = new Thickness(0, 0, 0, reserve);
+        PART_JumpLatest.Margin = new Thickness(0, 0, 0, reserve + JumpLatestLift);
+    }
+
     // ---- wiring ------------------------------------------------------------
 
     private void Attach(ChatViewModel? chat)
@@ -244,6 +261,8 @@ public partial class TranscriptView : UserControl
     {
         if (_scroll is null) return;
 
+        FollowSelectionThroughScroll();
+
         var atBottom = IsNearBottom();
         // The affordance means "you have scrolled away from the newest message",
         // which is intent, not geometry: while following, a gap is just the panel
@@ -278,7 +297,11 @@ public partial class TranscriptView : UserControl
         // because its rows are keyed by a hash of their own text and therefore
         // get swapped on every delta — following a reasoning model worked or not
         // depending on which kind of row happened to be at the bottom.
-        if (_followBottom && e.ExtentDelta.Y > ScrollCorrectionEpsilon
+        // A viewport that shrinks from below — the composer growing, the window
+        // getting shorter — keeps its top where it was, so while following the
+        // newest row would slide out of view.
+        if (_followBottom
+            && (e.ExtentDelta.Y > ScrollCorrectionEpsilon || e.ViewportDelta.Y < -ScrollCorrectionEpsilon)
             && e.OffsetDelta.Y >= -ScrollCorrectionEpsilon)
         {
             _expectedOffset = null;
@@ -681,6 +704,8 @@ public partial class TranscriptView : UserControl
     public event EventHandler<MessageViewModel>? RetryRequested;
     public event EventHandler<MessageViewModel>? EditRequested;
     public event EventHandler<MessageViewModel>? ForkRequested;
+    public event EventHandler<MessageViewModel>? BranchToConversationRequested;
+    public event EventHandler<string>? StopTaskRequested;
     public event EventHandler<MessageViewModel>? ContinueRequested;
     public event Action<MessageViewModel, int>? BranchSelectionRequested;
 
@@ -736,7 +761,28 @@ public partial class TranscriptView : UserControl
             _messageMenu.Items.Add(MenuEntry("续写", () => ContinueRequested?.Invoke(this, message)));
         _messageMenu.Items.Add(new MenuItem { Header = "-" });
         _messageMenu.Items.Add(MenuEntry("从此处建立分支", () => ForkRequested?.Invoke(this, message)));
+        _messageMenu.Items.Add(MenuEntry("分支为新对话", () => BranchToConversationRequested?.Invoke(this, message)));
         _messageMenu.ShowAt(anchor);
+    }
+
+    private void OnBranchToConversation(object? sender, RoutedEventArgs e)
+    {
+        if (AllowMessageEditing && sender is Control { DataContext: TranscriptRow row })
+            BranchToConversationRequested?.Invoke(this, row.Message);
+    }
+
+    private void OnStopTask(object? sender, RoutedEventArgs e)
+    {
+        // Inside the card's header: without this the click would also fold the card.
+        e.Handled = true;
+        var id = (sender as Control)?.DataContext switch
+        {
+            ToolRow row => row.Tool.BackgroundTaskId,
+            ToolCallViewModel tool => tool.BackgroundTaskId,
+            _ => null
+        };
+        if (id is not null)
+            StopTaskRequested?.Invoke(this, id);
     }
 
     private static MenuItem MenuEntry(string header, Action invoke)

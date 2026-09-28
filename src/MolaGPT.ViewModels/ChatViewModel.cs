@@ -539,6 +539,7 @@ public sealed partial class ChatViewModel : ObservableObject
         // New conversation has no working directory yet — clear artifacts
         // and dismiss the panel so the previous conversation's files don't stick.
         RefreshArtifacts();
+        RefreshConversationTasks();
     }
 
     private string? ResolveDefaultPersonaId() =>
@@ -611,6 +612,7 @@ public sealed partial class ChatViewModel : ObservableObject
 
                 conversationRow = snapshot.conversation;
                 var prepared = snapshot.messages;
+                RestoreSubagents(conversationId, prepared, conversationRow?.ProviderId);
                 Spend = snapshot.spend;
 
                 // From the whole snapshot, not just the materialized tail: the
@@ -671,6 +673,7 @@ public sealed partial class ChatViewModel : ObservableObject
             // Surface any artifacts already sitting in this conversation's
             // working directory (from earlier python runs / uploads).
             RefreshArtifacts();
+            RefreshConversationTasks();
         }
         finally
         {
@@ -957,6 +960,7 @@ public sealed partial class ChatViewModel : ObservableObject
             Messages.Insert(i, CreateMessageViewModel(_pendingOlderMessages[start + i]));
         _pendingOlderMessages.RemoveRange(start, take);
 
+        ApplyTaskStates();
         OnPropertyChanged(nameof(HasOlderMessages));
         return take;
     }
@@ -1090,7 +1094,7 @@ public sealed partial class ChatViewModel : ObservableObject
         vm.CompleteStreaming();
         vm.IsStreaming = false;
         vm.StopThinking();
-        UpdatePersistedMessage(vm);
+        UpdatePersistedMessage(vm, conversationId);
 
         if (string.IsNullOrWhiteSpace(conversationId)) TouchConversation();
         else TouchConversation(conversationId);
@@ -1124,6 +1128,7 @@ public sealed partial class ChatViewModel : ObservableObject
     private void PersistMessage(MessageViewModel vm, string conversationId)
     {
         if (_messageRepo is null || string.IsNullOrEmpty(conversationId)) return;
+        SyncMessageTaskStates(vm, conversationId);
         var meta = BuildMessageMeta(vm);
         var id = Guid.NewGuid().ToString("N");
         vm.ParentMessageId = _messageRepo.Insert(new MessageRow(
@@ -1143,9 +1148,11 @@ public sealed partial class ChatViewModel : ObservableObject
                 siblings.ToList().FindIndex(message => message.Id == id));
     }
 
-    public void UpdatePersistedMessage(MessageViewModel vm)
+    public void UpdatePersistedMessage(MessageViewModel vm, string? conversationId = null)
     {
         if (_messageRepo is null || string.IsNullOrWhiteSpace(vm.MessageId)) return;
+        var targetConversation = conversationId ?? ConversationId;
+        if (!string.IsNullOrEmpty(targetConversation)) SyncMessageTaskStates(vm, targetConversation);
         _messageRepo.Update(vm.MessageId, vm.FullContent, BuildMessageMeta(vm));
     }
 
@@ -1293,7 +1300,9 @@ public sealed partial class ChatViewModel : ObservableObject
                     ["result_preview_json"] = t.ResultPreviewJson,
                     ["provider"] = t.Provider,
                     ["content_offset"] = t.ContentOffset,
-                    ["timeline_index"] = t.TimelineIndex
+                    ["timeline_index"] = t.TimelineIndex,
+                    ["background_task_id"] = t.BackgroundTaskId,
+                    ["task_state"] = t.TaskState
                 })
                 .Cast<JsonNode?>()
                 .ToArray());
@@ -1390,7 +1399,9 @@ public sealed partial class ChatViewModel : ObservableObject
                     ["result_preview_json"] = tool.ResultPreviewJson,
                     ["provider"] = tool.Provider,
                     ["content_offset"] = tool.ContentOffset,
-                    ["timeline_index"] = tool.TimelineIndex
+                    ["timeline_index"] = tool.TimelineIndex,
+                    ["background_task_id"] = tool.BackgroundTaskId,
+                    ["task_state"] = tool.TaskState
                 })
                 .Cast<JsonNode?>()
                 .ToArray());
@@ -1909,7 +1920,9 @@ public sealed partial class ChatViewModel : ObservableObject
                 ReadString(item, "result_preview_json") ?? ReadString(item, "resultPreviewJson"),
                 ReadString(item, "provider"),
                 ReadInt(item, "content_offset") ?? ReadInt(item, "contentOffset"),
-                ReadInt(item, "timeline_index") ?? ReadInt(item, "timelineIndex")));
+                ReadInt(item, "timeline_index") ?? ReadInt(item, "timelineIndex"),
+                ReadString(item, "background_task_id"),
+                ReadString(item, "task_state")));
             fallbackIndex++;
         }
 

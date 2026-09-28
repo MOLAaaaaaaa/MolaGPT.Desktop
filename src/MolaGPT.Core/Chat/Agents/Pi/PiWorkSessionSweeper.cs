@@ -30,6 +30,7 @@ public sealed class PiWorkSessionSweeper
     /// Remove session files not belonging to any of <paramref name="liveConversationIds"/>.
     /// Returns the number of files deleted.
     /// </summary>
+    /// <param name="liveSubagentKeys">Child sessions named in retained conversation history.</param>
     /// <remarks>
     /// Matching is by <em>containment</em> of the sanitised conversation id in the file
     /// name, because Pi decorates the name it is given (<c>&lt;timestamp&gt;_&lt;id&gt;.jsonl</c>).
@@ -37,7 +38,8 @@ public sealed class PiWorkSessionSweeper
     /// conversation id which is a prefix of another would spare the other's file, which
     /// is the safe direction to err in.
     /// </remarks>
-    public int Sweep(IReadOnlyCollection<string> liveConversationIds)
+    public int Sweep(IReadOnlyCollection<string> liveConversationIds,
+        IReadOnlyCollection<string>? liveSubagentKeys = null)
     {
         // An empty set almost certainly means "could not read the database", not
         // "the user has no conversations". Deleting everything on that reading
@@ -46,6 +48,7 @@ public sealed class PiWorkSessionSweeper
         if (!Directory.Exists(_sessionRoot)) return 0;
 
         var live = liveConversationIds
+            .Concat(liveSubagentKeys ?? [])
             .Where(id => !string.IsNullOrWhiteSpace(id))
             .Select(PiWorkProvider.SanitizeSessionId)
             .ToArray();

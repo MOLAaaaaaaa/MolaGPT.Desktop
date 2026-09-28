@@ -2,6 +2,7 @@ using System.Net.Http;
 using System.Net.WebSockets;
 using System.Text.Json;
 using System.Threading.Channels;
+using MolaGPT.Core.Auth;
 
 namespace MolaGPT.Desktop.Services;
 
@@ -21,6 +22,7 @@ public sealed partial class HttpRelayProducer
                 response.EnsureSuccessStatusCode();
                 using var ticket = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
                 using var socket = new ClientWebSocket();
+                socket.Options.SetRequestHeader("User-Agent", UserAgentProvider.FixedUa);
                 socket.Options.SetRequestHeader("Authorization", "Bearer " + ticket.RootElement.GetProperty("ticket").GetString());
                 socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
                 socket.Options.KeepAliveTimeout = TimeSpan.FromSeconds(20);

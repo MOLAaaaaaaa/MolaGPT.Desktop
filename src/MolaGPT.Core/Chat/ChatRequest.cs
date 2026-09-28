@@ -22,7 +22,8 @@ public sealed record ChatRequest(
     double? TopP = null,
     IReadOnlyList<ChatMessage>? HistorySeed = null,
     string? HistoryRevision = null,
-    RolePromptPlan? RolePrompt = null);
+    RolePromptPlan? RolePrompt = null,
+    bool IsSubagent = false);
 
 /// <summary>
 /// Keys the app packs into <see cref="ChatRequest.ExtraBody"/> for its own

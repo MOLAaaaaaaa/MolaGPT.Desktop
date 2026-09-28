@@ -18,6 +18,8 @@ public sealed class AttachmentThumbnail : Image
 {
     public static readonly StyledProperty<byte[]?> BytesProperty =
         AvaloniaProperty.Register<AttachmentThumbnail, byte[]?>(nameof(Bytes));
+    public static readonly StyledProperty<bool> IsImageProperty =
+        AvaloniaProperty.Register<AttachmentThumbnail, bool>(nameof(IsImage));
 
     public byte[]? Bytes
     {
@@ -25,11 +27,18 @@ public sealed class AttachmentThumbnail : Image
         set => SetValue(BytesProperty, value);
     }
 
+    public bool IsImage
+    {
+        get => GetValue(IsImageProperty);
+        set => SetValue(IsImageProperty, value);
+    }
+
     private Bitmap? _owned;
 
     static AttachmentThumbnail()
     {
         BytesProperty.Changed.AddClassHandler<AttachmentThumbnail>((x, _) => x.Refresh());
+        IsImageProperty.Changed.AddClassHandler<AttachmentThumbnail>((x, _) => x.Refresh());
     }
 
     public AttachmentThumbnail()
@@ -44,7 +53,7 @@ public sealed class AttachmentThumbnail : Image
         _owned?.Dispose();
         _owned = null;
 
-        if (Bytes is not { Length: > 0 } bytes) return;
+        if (!IsImage || Bytes is not { Length: > 0 } bytes) return;
 
         try
         {
