@@ -178,6 +178,12 @@
                   <DataTemplate x:DataType="vm:ArtifactItemViewModel">
                     <Button Classes="artifactrow" Tag="{Binding}" Click="OnArtifactClick"
                             ToolTip.Tip="{Binding ToolTip}">
+                      <Button.ContextMenu>
+                        <ContextMenu Opened="OnArtifactMenuOpened">
+                          <MenuItem Header="打开" Click="OnArtifactMenuOpen" />
+                          <MenuItem Header="打开文件夹" Click="OnArtifactMenuOpenFolder" />
+                        </ContextMenu>
+                      </Button.ContextMenu>
                       <Grid ColumnDefinitions="40,*">
                         <Border Grid.Column="0" Width="36" Height="36"
                                 CornerRadius="{DynamicResource Radius.Sm}"

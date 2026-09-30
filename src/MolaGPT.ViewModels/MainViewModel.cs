@@ -127,6 +127,7 @@ public sealed partial class MainViewModel : ObservableObject
                 _conversationList.SetGenerating(id, false);
                 await Composer.ReattachFromBackgroundAsync(id);
             }
+            Composer.RestoreUnsentInjections(id);
         };
         _conversationList.ConversationsDeleted += (_, ids) =>
         {
@@ -454,11 +455,9 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void WireArtifacts()
     {
-        // Working-directory files open the drawer, as they did before fences
-        // joined it: on conversation load and after a python run or upload.
-        Chat.ArtifactsRefreshed += (_, hasFiles) =>
+        Chat.ArtifactsRefreshed += (_, hasNewFiles) =>
         {
-            if (hasFiles) ArtifactPanelVisible = true;
+            if (hasNewFiles && !_autoOpenDismissed) ArtifactPanelVisible = true;
             EnsureSelectionAlive();
         };
         Chat.ArtifactWorkspace.Changed += (_, _) =>

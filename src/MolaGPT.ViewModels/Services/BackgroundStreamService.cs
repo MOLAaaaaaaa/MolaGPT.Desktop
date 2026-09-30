@@ -24,6 +24,10 @@ public sealed class BackgroundStreamTask
     /// call; with none, the reply may already be the final answer.</summary>
     internal HashSet<string> RunningTools { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>Messages sent into the run that it has not taken in yet. Kept here
+    /// rather than on the composer, so they outlive a switch to another conversation.</summary>
+    internal List<PendingInjectionViewModel> Injections { get; } = new();
+
     /// <summary>Started by a background task's notification rather than by the user.</summary>
     public bool IsWakeTurn { get; init; }
     public CancellationTokenSource Cts { get; set; } = default!;

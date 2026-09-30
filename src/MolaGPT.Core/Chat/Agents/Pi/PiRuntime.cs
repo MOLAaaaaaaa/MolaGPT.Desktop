@@ -635,5 +635,11 @@ public sealed record PiSidecarSpec(
             AuthHeader,
             bridgeUrl,
             token,
-            ModelsJson);
+            ModelsJson,
+            AgentDirectory);
+
+    /// <summary>Pi's config directory, beside the transcripts. Derived rather than
+    /// passed so every spec shares one: it holds settings, not anything per provider.</summary>
+    private string AgentDirectory =>
+        Path.Combine(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(SessionRoot))!, "pi-agent");
 }

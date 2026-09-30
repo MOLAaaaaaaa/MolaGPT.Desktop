@@ -124,7 +124,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // schemas can never drift from what ChatToolHost dispatches on.
         var localDefs = LocalToolRegistry.BuildOpenAiToolDefinitions(options);
         var hostDefs = await _toolHost.BuildToolDefinitionsAsync(toolContext, options, ct).ConfigureAwait(false);
-        var toolCatalogJson = JsonSerializer.Serialize(localDefs.Concat(hostDefs).ToArray());
+        var hints = await _toolHost.DescribeAgentToolsAsync(options, ct).ConfigureAwait(false);
+        var toolCatalogJson = BuildToolCatalog(localDefs.Concat(hostDefs), hints);
 
         var creds = _config.ResolveCreds(request);
 
@@ -481,17 +482,21 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     {
         if (!_activeTurns.TryGetValue(conversationId ?? PiRuntime.DraftKey, out var turn) || turn.Settled)
             return false;
-        turn.Session.Enqueue(text, followUp);
-        return true;
+        return turn.Session.Enqueue(text, followUp);
     }
 
-    /// <summary>Drop what is still queued in the conversation's running turn.</summary>
-    public bool TryClearQueue(string? conversationId)
+    /// <summary>Take a queued message back out of the conversation's running turn.</summary>
+    public async Task<PiWithdrawal> TryWithdrawAsync(
+        string? conversationId,
+        string text,
+        bool followUp,
+        CancellationToken ct = default)
     {
         if (!_activeTurns.TryGetValue(conversationId ?? PiRuntime.DraftKey, out var turn) || turn.Settled)
-            return false;
-        turn.Session.ClearQueue();
-        return true;
+            return PiWithdrawal.TurnEnded;
+        return await turn.Session.WithdrawAsync(text, followUp, ct).ConfigureAwait(false)
+            ? PiWithdrawal.Withdrawn
+            : PiWithdrawal.AlreadyTaken;
     }
 
     /// <summary>
@@ -715,11 +720,6 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                     }
                     generationSpeed.CompleteMessage(root);
                     return null;
-
-                case "queue_update":
-                    return new ChatChunk(Queue: new QueueStateDelta(
-                        StringArray(root, "steering"),
-                        StringArray(root, "followUp")));
 
                 case "tool_execution_start":
                 {
@@ -1191,6 +1191,25 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         preview.Finish(idx.GetInt32(), call);
     }
 
+    /// <summary>The tool definitions the sidecar registers, each with its agent
+    /// hints under <c>molagpt</c>. An extension that predates the hints ignores
+    /// the field and declares every tool directly, as before.</summary>
+    private static string BuildToolCatalog(
+        IEnumerable<object> definitions,
+        IReadOnlyDictionary<string, AgentToolHints> hints)
+    {
+        var catalog = new JsonArray();
+        foreach (var definition in definitions)
+        {
+            var node = JsonSerializer.SerializeToNode(definition)!;
+            if (node["function"]?["name"]?.GetValue<string>() is { } name
+                && hints.TryGetValue(name, out var hint))
+                node["molagpt"] = hint.ToJson();
+            catalog.Add(node);
+        }
+        return catalog.ToJsonString();
+    }
+
     private static string UnwrapToolResult(JsonElement result)
     {
         if (result.ValueKind == JsonValueKind.Object
@@ -1255,16 +1274,6 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                 parts.Add(text.GetString() ?? "");
         }
         return string.Join("\n", parts);
-    }
-
-    private static IReadOnlyList<string> StringArray(JsonElement e, string name)
-    {
-        if (!e.TryGetProperty(name, out var array) || array.ValueKind != JsonValueKind.Array)
-            return Array.Empty<string>();
-        return array.EnumerateArray()
-            .Where(item => item.ValueKind == JsonValueKind.String)
-            .Select(item => item.GetString() ?? "")
-            .ToList();
     }
 
     private static int Int(JsonElement e, string name) =>
@@ -1346,3 +1355,16 @@ public sealed record PiProviderCreds(
     PiWorkLlmShim.AuthStyle Auth = PiWorkLlmShim.AuthStyle.Bearer,
     IReadOnlyList<string>? DropBodyKeys = null,
     PiWorkLlmShim.TargetPathMode PathMode = PiWorkLlmShim.TargetPathMode.Fixed);
+
+/// <summary>What became of a message taken back out of a running turn.</summary>
+public enum PiWithdrawal
+{
+    /// <summary>Removed from Pi's queue before the agent read it.</summary>
+    Withdrawn,
+
+    /// <summary>The agent had already read it; the transcript shows it as sent.</summary>
+    AlreadyTaken,
+
+    /// <summary>No turn is running, so nothing will deliver it.</summary>
+    TurnEnded,
+}

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
 
 namespace MolaGPT.Core.Chat.Agents.Pi;
@@ -189,6 +190,8 @@ public sealed class PiWorkToolBridge : IDisposable
     /// until the result is written. JSON allows the leading whitespace, so the
     /// extension reads the body exactly as before. The price is that a failure can
     /// no longer be a 500; it travels as <c>error: true</c> beside the output.
+    /// A tool that ran and reported failure in its own result — a refused approval,
+    /// an MCP error — is marked <c>failed: true</c>, so Pi records it as failed too.
     ///
     /// The call is cancelled when its turn ends or the sidecar hangs up (Stop, or
     /// Pi aborting the call), rather than finishing into a connection nobody
@@ -216,7 +219,7 @@ public sealed class PiWorkToolBridge : IDisposable
         try
         {
             var output = await bound.Binding.Dispatcher(name, argsJson, call.Token).ConfigureAwait(false);
-            json = JsonSerializer.Serialize(new { output });
+            json = JsonSerializer.Serialize(new { output, failed = ToolDeltaBuilder.IsToolError(output) });
         }
         // The dispatcher may be cancelled through its own turn's token before this
         // call's is, so either counts.

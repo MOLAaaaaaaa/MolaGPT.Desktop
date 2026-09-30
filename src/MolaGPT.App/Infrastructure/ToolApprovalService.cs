@@ -20,6 +20,14 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
     private readonly IPythonSessionAllowList _sessionAllowList;
     private readonly SettingsViewModel _settings;
 
+    /// <summary>
+    /// Parallel tool calls — a codemode script, several sub-agents — would stack one
+    /// modal dialog on another. They are asked one at a time, and the stored grants
+    /// are read again when a call's turn comes, so answering "always allow" once
+    /// settles the calls still waiting.
+    /// </summary>
+    private readonly SemaphoreSlim _prompting = new(1, 1);
+
     public ToolApprovalService(
         IToolGrantStore grants,
         IPythonSessionAllowList sessionAllowList,
@@ -44,6 +52,26 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
 
         var forWriting = request.Capabilities.HasFlag(ToolCapability.Write)
                          || request.Capabilities.HasFlag(ToolCapability.Destructive);
+
+        try { await _prompting.WaitAsync(ct).ConfigureAwait(true); }
+        catch (OperationCanceledException) { return ToolApprovalDecision.Denied; }
+        try
+        {
+            return await AskOnceAsync(request, mode, outsideWorkspace, forWriting, ct).ConfigureAwait(true);
+        }
+        finally
+        {
+            _prompting.Release();
+        }
+    }
+
+    private async Task<ToolApprovalDecision> AskOnceAsync(
+        ToolApprovalRequest request,
+        ToolPermissionMode mode,
+        bool outsideWorkspace,
+        bool forWriting,
+        CancellationToken ct)
+    {
         if (outsideWorkspace
             && request.ResolvedPath is { Length: > 0 } resolvedPath
             && _grants.IsPathGranted(resolvedPath, forWriting))
@@ -70,6 +98,22 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
     }
 
     public async Task<PythonExecutionApprovalDecision> RequestApprovalAsync(
+        PythonExecutionApprovalRequest request,
+        CancellationToken ct)
+    {
+        try { await _prompting.WaitAsync(ct).ConfigureAwait(true); }
+        catch (OperationCanceledException) { return PythonExecutionApprovalDecision.Denied; }
+        try
+        {
+            return await AskPythonAsync(request, ct).ConfigureAwait(true);
+        }
+        finally
+        {
+            _prompting.Release();
+        }
+    }
+
+    private async Task<PythonExecutionApprovalDecision> AskPythonAsync(
         PythonExecutionApprovalRequest request,
         CancellationToken ct)
     {

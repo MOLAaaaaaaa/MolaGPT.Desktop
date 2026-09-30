@@ -44,8 +44,8 @@ public sealed partial class ChatViewModel : ObservableObject
     public int ArtifactCount => Artifacts.Count;
 
     /// <summary>Raised after <see cref="RefreshArtifacts"/> rescans the working
-    /// directory. Carries whether it holds any files, so the shell can open the
-    /// panel for a conversation that has some.</summary>
+    /// directory. Carries whether this refresh found a generated file that
+    /// should open the panel.</summary>
     public event EventHandler<bool>? ArtifactsRefreshed;
 
     /// <summary>A transcript chip asked for something done with its artifact.</summary>
@@ -56,14 +56,14 @@ public sealed partial class ChatViewModel : ObservableObject
     /// enumeration; safe on the UI thread after a tool run, an upload, or a
     /// conversation load. Fences are not touched — the transcript owns those.
     /// </summary>
-    public void RefreshArtifacts()
+    public void RefreshArtifacts(bool autoOpenNewFiles = false)
     {
         var scanned = string.IsNullOrEmpty(ConversationId) || ActiveProvider?.Kind == ProviderKind.MolaGptProxy
             ? Array.Empty<MolaGPT.Core.Chat.Tools.PythonExecution.WorkspaceArtifact>()
             : MolaGPT.Core.Chat.Tools.PythonExecution.WorkspaceArtifactScanner.Scan(ConversationId);
 
-        ArtifactWorkspace.SetPhysical(scanned);
-        ArtifactsRefreshed?.Invoke(this, ArtifactWorkspace.HasPhysical);
+        var hasNewFiles = ArtifactWorkspace.SetPhysical(scanned);
+        ArtifactsRefreshed?.Invoke(this, autoOpenNewFiles && hasNewFiles);
     }
 
     /// <summary>
@@ -595,7 +595,7 @@ public sealed partial class ChatViewModel : ObservableObject
                 {
                     var activeRows = _messageRepo.List(conversationId);
                     var allRows = _messageRepo.ListAll(conversationId);
-                    var messages = PrepareMessageSnapshot(activeRows);
+                    var messages = PrepareMessageSnapshot(activeRows, conversationId);
                     ApplyBranchMetadata(messages, allRows);
                     var conversation = _conversationRepo?.Get(conversationId);
                     // allRows is already in hand for the branch metadata, and it is
@@ -684,9 +684,10 @@ public sealed partial class ChatViewModel : ObservableObject
         }
     }
 
-    private static List<PreparedMessage> PrepareMessageSnapshot(IReadOnlyList<MessageRow> rows)
+    private static List<PreparedMessage> PrepareMessageSnapshot(IReadOnlyList<MessageRow> rows, string conversationId)
     {
         var prepared = new List<PreparedMessage>(rows.Count);
+        var workspaceContext = PythonArtifactMarkdownRewriter.CreateWorkspaceContext(conversationId);
         IReadOnlyList<SourceReference>? lastKnownSources = null;
 
         // Every retry attempt carries a full copy of that answer's body, so a
@@ -801,6 +802,8 @@ public sealed partial class ChatViewModel : ObservableObject
                 var imageContext = PythonArtifactMarkdownRewriter.CreateAttachmentContext(attachments);
                 if (imageContext is not null)
                     rewriteContexts.Add(imageContext);
+                if (workspaceContext is not null)
+                    rewriteContexts.Add(workspaceContext);
                 visibleContent = PythonArtifactMarkdownRewriter.Rewrite(visibleContent, rewriteContexts);
             }
 

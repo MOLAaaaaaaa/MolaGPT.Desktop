@@ -115,6 +115,9 @@ public static partial class MessageDocumentParser
 
         var cutIndex = Math.Max(0, previous.Blocks.Count - IncrementalTailBlocks);
         var cutOffset = previous.Blocks[cutIndex].SourceStart;
+        // Several image rows can belong to one Markdown paragraph; reparse that paragraph as a unit.
+        while (cutIndex > 0 && previous.Blocks[cutIndex - 1].SourceStart == cutOffset)
+            cutIndex--;
         if (cutOffset <= 0 || cutOffset > normalized.Length) return Parse(body, ct);
 
         try
@@ -408,6 +411,10 @@ public static partial class MessageDocumentParser
             if (length <= 0) continue;
             var slice = segment.Substring(start, length);
 
+            if (node is MdParagraph imageParagraph
+                && TryAppendImages(imageParagraph, segmentStart + start, length, blocks, seen, ct))
+                continue;
+
             if (splitDisplayMath
                 && node is MdParagraph
                 && TryAppendDisplayMathParagraph(
@@ -575,17 +582,6 @@ public static partial class MessageDocumentParser
                     Key = MakeKey("hr", slice, seen)
                 };
 
-            case MdParagraph paragraph when TryLoneImage(paragraph) is { } image:
-                return new ImageBlock
-                {
-                    Url = image.Url,
-                    Alt = image.Alt,
-                    Title = image.Title,
-                    SourceStart = start,
-                    SourceLength = length,
-                    Key = MakeKey("img", image.Url, seen)
-                };
-
             default:
                 return new ParagraphBlock
                 {
@@ -597,35 +593,43 @@ public static partial class MessageDocumentParser
         }
     }
 
-    /// <summary>
-    /// A paragraph whose only visible content is a single image — rendered as a
-    /// standalone card rather than as an inline run, matching what the current
-    /// renderer does.
-    /// </summary>
-    private static (string Url, string? Alt, string? Title)? TryLoneImage(MdParagraph paragraph)
+    private static bool TryAppendImages(
+        MdParagraph paragraph, int start, int length, List<RenderBlock> blocks,
+        Dictionary<string, int> seen, CancellationToken ct)
     {
-        if (paragraph.Inline is null) return null;
+        if (paragraph.Inline is null) return false;
 
-        LinkInline? image = null;
+        var images = new List<LinkInline>();
         foreach (var inline in paragraph.Inline)
         {
             switch (inline)
             {
-                case LinkInline { IsImage: true } link when image is null:
-                    image = link;
+                case LinkInline { IsImage: true, Url.Length: > 0 } image:
+                    images.Add(image);
                     break;
-                case LiteralInline literal when literal.Content.ToString().Trim().Length == 0:
-                    break;
+                case LiteralInline literal when string.IsNullOrWhiteSpace(literal.Content.ToString()):
                 case LineBreakInline:
                     break;
                 default:
-                    return null;
+                    return false;
             }
         }
+        if (images.Count == 0) return false;
 
-        if (image?.Url is not { Length: > 0 } url) return null;
-        var alt = image.FirstChild is LiteralInline alt0 ? alt0.Content.ToString() : null;
-        return (url, alt, image.Title);
+        foreach (var image in images)
+        {
+            ct.ThrowIfCancellationRequested();
+            blocks.Add(new ImageBlock
+            {
+                Url = image.Url!,
+                Alt = image.FirstChild is LiteralInline alt ? alt.Content.ToString() : null,
+                Title = image.Title,
+                SourceStart = start,
+                SourceLength = length,
+                Key = MakeKey("img", image.Url!, seen)
+            });
+        }
+        return true;
     }
 
     /// <summary>

@@ -4,8 +4,6 @@ using Avalonia.Controls.Documents;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
-using Avalonia.Media.Imaging;
-using Avalonia.Threading;
 using System.Text.RegularExpressions;
 using Markdig;
 using Markdig.Syntax;
@@ -110,11 +108,8 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
     private IReadOnlyDictionary<string, string>? _protectedMath;
     private bool _containsInlineMath;
 
-    /// <summary>Whether a source pill was drawn into this paragraph. Kept apart
-    /// from <see cref="_containsInlineMath"/> because they want the same escape
-    /// from a fixed line height for different reasons — a formula is too tall,
-    /// a pill is only a little taller than the text but overlaps the next line
-    /// all the same.</summary>
+    /// <summary>Inline controls such as source pills and images need natural
+    /// line height just like inline formulae.</summary>
     private bool _containsInlineBox;
     private bool _usingAdaptiveLineHeight;
     private double _configuredLineHeight;
@@ -809,11 +804,6 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
         _links.Add(new LinkSpan(start, _cursor - start, url!));
     }
 
-    /// <summary>
-    /// An image that shares a paragraph with text. Sized modestly and loaded
-    /// off the UI thread; a lone image is a <see cref="MarkdownImageView"/> card
-    /// instead, decided by the parser.
-    /// </summary>
     private void AppendInlineImage(InlineCollection target, LinkInline image)
     {
         if (image.Url is not { Length: > 0 } url)
@@ -822,33 +812,16 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
             return;
         }
 
-        var control = new Image
+        _containsInlineBox = true;
+        var control = new MarkdownImageView
         {
             MaxWidth = 360,
-            MaxHeight = 240,
-            Stretch = Stretch.Uniform,
-            StretchDirection = StretchDirection.DownOnly,
+            Url = url,
+            Alt = LinkText(image),
             VerticalAlignment = VerticalAlignment.Center
         };
-        RenderOptions.SetBitmapInterpolationMode(control, BitmapInterpolationMode.HighQuality);
-        ToolTip.SetTip(control, url);
-
-        Add(target, new InlineUIContainer(control), 1);
-        LoadInline(control, url);
-    }
-
-    private static async void LoadInline(Image target, string url)
-    {
-        try
-        {
-            var bitmap = await ImageSourceLoader.LoadAsync(url, 540);
-            if (bitmap is null) return;
-            await Dispatcher.UIThread.InvokeAsync(() => target.Source = bitmap);
-        }
-        catch (OperationCanceledException)
-        {
-            // Row went away while the fetch was in flight.
-        }
+        control.Classes.Add("imagecard");
+        Add(target, new InlineUIContainer(control) { BaselineAlignment = BaselineAlignment.Center }, 1);
     }
 
     /// <summary>Whether this link is a citation marker rather than prose the

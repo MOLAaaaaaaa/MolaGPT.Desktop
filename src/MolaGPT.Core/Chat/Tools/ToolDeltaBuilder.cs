@@ -50,7 +50,7 @@ public static class ToolDeltaBuilder
             name,
             status,
             LocalToolPendingLabel(name),
-            BuildToolSummary(name, args),
+            BuildToolSummary(name, args, options),
             BuildToolDetail(name, args, options, status, resultJson),
             PrettyJson(args),
             resultJson is null ? null : PrettyJson(resultJson),
@@ -85,7 +85,7 @@ public static class ToolDeltaBuilder
         }
     }
 
-    private static string? BuildToolSummary(string name, string args)
+    private static string? BuildToolSummary(string name, string args, LocalToolOptions? options)
     {
         if (!StreamingJson.CouldBeComplete(args) && !string.IsNullOrWhiteSpace(args))
             return name == PythonExecutionTool.ToolName ? "正在生成 Python 代码" : args;
@@ -119,8 +119,12 @@ public static class ToolDeltaBuilder
                 return ReadString(root, "text")
                        ?? ReadString(root, "target")
                        ?? "维护长期记忆";
+            if (name == CodemodeToolName)
+                return FirstNonEmptyLine(ScriptBody(ReadString(root, "code"))) ?? "执行脚本";
+            if (name == ToolSearchToolName)
+                return ReadString(root, "query") ?? "查找工具";
             if (McpToolName.TryDecode(name, out var server, out var tool))
-                return $"{server} / {tool}";
+                return $"{McpServerLabel(server, options)} / {tool}";
         }
         catch (JsonException)
         {
@@ -175,8 +179,12 @@ public static class ToolDeltaBuilder
             return "检索本机记忆和历史对话";
         if (name == MemoryTools.WriteToolName)
             return "维护本机长期记忆";
+        if (name == CodemodeToolName)
+            return "脚本内调用工具";
+        if (name == ToolSearchToolName)
+            return "检索并加载未声明的工具";
         if (McpToolName.TryDecode(name, out var server, out _))
-            return $"MCP: {server}";
+            return $"MCP: {McpServerLabel(server, options)}";
         return null;
     }
 
@@ -311,8 +319,26 @@ public static class ToolDeltaBuilder
         SubagentTool.WaitToolName => "等待子 Agent",
         TaskTools.StatusToolName => "查看任务",
         TaskTools.StopToolName => "停止任务",
+        CodemodeToolName => "执行脚本",
+        ToolSearchToolName => "查找工具",
         _ => "调用工具"
     };
+
+    /// <summary>Pi's built-in orchestration tools (see PiSidecarSession).</summary>
+    private const string CodemodeToolName = "codemode";
+    private const string ToolSearchToolName = "tool_search";
+
+    /// <summary>A codemode script without its leading <c>// @options</c> line.</summary>
+    private static string? ScriptBody(string? code)
+    {
+        if (code is null || !code.TrimStart().StartsWith("// @options", StringComparison.Ordinal)) return code;
+        var end = code.IndexOf('\n');
+        return end < 0 ? string.Empty : code[(end + 1)..];
+    }
+
+    /// <summary>The server's name as configured; tool names carry its id.</summary>
+    private static string McpServerLabel(string serverSlug, LocalToolOptions? options) =>
+        options?.McpServers?.FirstOrDefault(s => McpToolName.Slugify(s.Id) == serverSlug)?.Name ?? serverSlug;
 
     private static int? ReadInt(JsonElement obj, string name)
     {

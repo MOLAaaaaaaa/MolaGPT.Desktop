@@ -41,7 +41,7 @@ public partial class SettingsWindow : MolaContentWindow
     private readonly AgentBridgeStatusViewModel? _agentStatus;
     private readonly PersonaListViewModel _personas;
     private readonly PersonalizationViewModel? _personalization;
-    private readonly McpHttpClient? _mcpClient;
+    private readonly McpClientManager? _mcp;
     private readonly ImageGenerationTool? _imageGenerationTool;
     private readonly PythonRuntimeManager? _pythonRuntime;
     private readonly PiSidecarRuntimeManager? _piSidecar;
@@ -139,7 +139,7 @@ public partial class SettingsWindow : MolaContentWindow
         ConversationListViewModel? conversations = null,
         AgentBridgeStatusViewModel? agentStatus = null,
         PersonaListViewModel? personas = null,
-        McpHttpClient? mcpClient = null,
+        McpClientManager? mcp = null,
         ImageGenerationTool? imageGenerationTool = null,
         PythonRuntimeManager? pythonRuntime = null,
         PiSidecarRuntimeManager? piSidecar = null,
@@ -162,7 +162,7 @@ public partial class SettingsWindow : MolaContentWindow
         _conversations = conversations;
         _agentStatus = agentStatus;
         _personas = personas ?? new PersonaListViewModel();
-        _mcpClient = mcpClient;
+        _mcp = mcp;
         _imageGenerationTool = imageGenerationTool;
         _pythonRuntime = pythonRuntime;
         _piSidecar = piSidecar;
@@ -263,6 +263,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_CancelMcp.Click += (_, _) => CloseMcpEditor();
         PART_SaveMcp.Click += (_, _) => SaveMcp();
         PART_TestMcp.Click += OnTestMcp;
+        PART_McpTransport.SelectionChanged += (_, _) => ShowMcpTransportFields();
         PART_RevealMcpToken.Click += (_, _) =>
             PART_McpToken.PasswordChar = PART_McpToken.PasswordChar == '\0' ? '•' : '\0';
         PART_SyncNow.Click += OnSyncNowClick;
@@ -2278,6 +2279,19 @@ public partial class SettingsWindow : MolaContentWindow
         _editingMcpServer = entry;
         PART_McpEditorTitle.Text = entry is null ? "添加 MCP 服务器" : $"编辑「{entry.Name}」";
         PART_McpName.Text = entry?.Name ?? string.Empty;
+        PART_McpTransport.SelectedIndex = entry?.IsStdio == true ? 1 : 0;
+        PART_McpCommand.Text = entry?.Command ?? string.Empty;
+        PART_McpArguments.Text = string.Join(Environment.NewLine, entry?.Arguments ?? []);
+        PART_McpWorkingDirectory.Text = entry?.WorkingDirectory ?? string.Empty;
+        PART_McpEnvironment.Text = string.Join(Environment.NewLine,
+            (entry?.Environment ?? new Dictionary<string, string>()).Select(pair => $"{pair.Key}={pair.Value}"));
+        PART_McpExposure.SelectedIndex = McpExposures.Normalize(entry?.Exposure) switch
+        {
+            McpExposures.Deferred => 1,
+            McpExposures.Direct => 2,
+            _ => 0
+        };
+        ShowMcpTransportFields();
         PART_McpUrl.Text = entry?.Url ?? string.Empty;
         PART_McpHeader.Text = string.IsNullOrWhiteSpace(entry?.HeaderName) ? "Authorization" : entry.HeaderName;
         PART_McpToken.Text = entry?.Token ?? string.Empty;
@@ -2285,7 +2299,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_McpEnabled.IsChecked = entry?.Enabled ?? true;
         PART_McpStatus.Text = string.Empty;
         PART_McpError.IsVisible = false;
-        PART_TestMcp.IsEnabled = _mcpClient is not null;
+        PART_TestMcp.IsEnabled = _mcp is not null;
         PART_McpOverview.IsVisible = false;
         PART_McpEditor.IsVisible = true;
         PART_McpName.Focus();
@@ -2299,63 +2313,122 @@ public partial class SettingsWindow : MolaContentWindow
         RefreshMcpServers();
     }
 
+    private void ShowMcpTransportFields()
+    {
+        var stdio = PART_McpTransport.SelectedIndex == 1;
+        PART_McpStdioFields.IsVisible = stdio;
+        PART_McpHttpFields.IsVisible = !stdio;
+    }
+
     private bool TryBuildMcpEntry(out McpServerEntry entry)
     {
         entry = default!;
+        var stdio = PART_McpTransport.SelectedIndex == 1;
         var url = PART_McpUrl.Text?.Trim() ?? string.Empty;
-        if (url.Length == 0)
-        {
-            FailMcpEdit("请填写服务器地址。");
-            return false;
-        }
+        string? command = null;
+        IReadOnlyList<string>? arguments = null;
+        IReadOnlyDictionary<string, string>? environment = null;
 
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
-            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        if (stdio)
         {
-            FailMcpEdit("地址必须以 http:// 或 https:// 开头。");
-            return false;
-        }
+            command = PART_McpCommand.Text?.Trim();
+            if (string.IsNullOrEmpty(command))
+            {
+                FailMcpEdit("请填写命令。");
+                return false;
+            }
 
-        if (uri.Scheme == Uri.UriSchemeHttp && !uri.IsLoopback)
+            arguments = Lines(PART_McpArguments.Text).ToArray();
+            var variables = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var line in Lines(PART_McpEnvironment.Text))
+            {
+                var separator = line.IndexOf('=');
+                if (separator <= 0)
+                {
+                    FailMcpEdit($"环境变量格式无效：{line}");
+                    return false;
+                }
+                variables[line[..separator].Trim()] = line[(separator + 1)..];
+            }
+            environment = variables.Count > 0 ? variables : null;
+        }
+        else
         {
-            FailMcpEdit("远程地址必须使用 https://，仅本地服务器可用 http://。");
-            return false;
+            if (url.Length == 0)
+            {
+                FailMcpEdit("请填写服务器地址。");
+                return false;
+            }
+
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            {
+                FailMcpEdit("地址必须以 http:// 或 https:// 开头。");
+                return false;
+            }
+
+            if (uri.Scheme == Uri.UriSchemeHttp && !uri.IsLoopback)
+            {
+                FailMcpEdit("远程地址必须使用 https://，仅本地服务器可用 http://。");
+                return false;
+            }
         }
 
         var name = string.IsNullOrWhiteSpace(PART_McpName.Text) ? "MCP Server" : PART_McpName.Text.Trim();
         var header = string.IsNullOrWhiteSpace(PART_McpHeader.Text) ? "Authorization" : PART_McpHeader.Text.Trim();
         var token = string.IsNullOrWhiteSpace(PART_McpToken.Text) ? null : PART_McpToken.Text.Trim();
+        var workingDirectory = PART_McpWorkingDirectory.Text?.Trim();
         entry = new McpServerEntry(
             _editingMcpServer?.Id ?? Guid.NewGuid().ToString("N"),
             name,
-            url,
-            "http",
+            stdio ? string.Empty : url,
+            stdio ? McpTransports.Stdio : McpTransports.Http,
             header,
-            token,
-            PART_McpEnabled.IsChecked == true);
+            stdio ? null : token,
+            PART_McpEnabled.IsChecked == true,
+            command,
+            arguments,
+            stdio && !string.IsNullOrEmpty(workingDirectory) ? workingDirectory : null,
+            environment,
+            PART_McpExposure.SelectedIndex switch
+            {
+                1 => McpExposures.Deferred,
+                2 => McpExposures.Direct,
+                _ => McpExposures.Codemode
+            });
         return true;
     }
+
+    private static IEnumerable<string> Lines(string? text) =>
+        (text ?? string.Empty)
+            .Split(["\r\n", "\n"], StringSplitOptions.None)
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0);
 
     private void SaveMcp()
     {
         if (!TryBuildMcpEntry(out var entry)) return;
         _settings.UpsertMcpServer(entry);
+        // An edited configuration reconnects on its next use; a disabled server
+        // is closed now so a stdio process does not keep running.
+        if (!entry.Enabled) _ = _mcp?.CloseAsync(entry.Id);
         CloseMcpEditor();
     }
 
     private async void OnDeleteMcp(object? sender, RoutedEventArgs e)
     {
         if (sender is not Control { Tag: McpServerEntry entry }) return;
-        if (!await Confirm.AskAsync(this, $"删除「{entry.Name}」？", "该服务器的 Token 会一并移除。", "删除"))
+        if (!await Confirm.AskAsync(this, $"删除「{entry.Name}」？", "该服务器的 Token 与环境变量会一并移除。", "删除"))
             return;
 
         _settings.DeleteMcpServer(entry);
+        _ = _mcp?.CloseAsync(entry.Id);
         RefreshMcpServers();
     }
 
     private async void OnTestMcp(object? sender, RoutedEventArgs e)
     {
-        if (_mcpClient is null || !TryBuildMcpEntry(out var entry)) return;
+        if (_mcp is null || !TryBuildMcpEntry(out var entry)) return;
 
         PART_TestMcp.IsEnabled = false;
         PART_TestMcp.Content = "连接中...";
@@ -2363,13 +2436,14 @@ public partial class SettingsWindow : MolaContentWindow
         PART_McpError.IsVisible = false;
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            // A stdio server started through npx or uvx may download its package first.
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(entry.IsStdio ? 90 : 15));
             var options = new McpServerOptions(
                 entry.Id, entry.Name, entry.Url, entry.Transport,
-                entry.HeaderName, entry.Token, entry.Enabled);
-            var session = await _mcpClient.InitializeAsync(options, cts.Token);
-            var tools = await _mcpClient.ListToolsAsync(session, cts.Token);
-            PART_McpStatus.Text = $"连接成功，发现 {tools.Count} 个工具。";
+                entry.HeaderName, entry.Token, entry.Enabled,
+                entry.Command, entry.Arguments, entry.WorkingDirectory, entry.Environment, entry.Exposure);
+            var listing = await _mcp.ProbeAsync(options, cts.Token);
+            PART_McpStatus.Text = $"连接成功，发现 {listing.Tools.Count} 个工具。";
         }
         catch (OperationCanceledException)
         {

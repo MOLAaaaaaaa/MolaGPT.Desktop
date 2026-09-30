@@ -100,22 +100,25 @@ public sealed class ArtifactWorkspace
         Regroup();
     }
 
-    public void SetPhysical(IEnumerable<MolaGPT.Core.Chat.Tools.PythonExecution.WorkspaceArtifact> files)
+    public bool SetPhysical(IEnumerable<MolaGPT.Core.Chat.Tools.PythonExecution.WorkspaceArtifact> files)
     {
         var next = new List<ArtifactItemViewModel>();
+        var hasNewOrUpdatedFiles = false;
         foreach (var file in files)
         {
             // Keep the selected instance when a later python run overwrites the file.
             var existing = _physical.FirstOrDefault(p =>
                 string.Equals(p.FullPath, file.FullPath, StringComparison.OrdinalIgnoreCase));
-            existing?.UpdatePhysical(file);
+            if (existing is null) hasNewOrUpdatedFiles = true;
+            else hasNewOrUpdatedFiles |= existing.UpdatePhysical(file);
             next.Add(existing ?? new ArtifactItemViewModel(file));
         }
 
-        if (next.SequenceEqual(_physical)) return;
+        if (next.SequenceEqual(_physical)) return hasNewOrUpdatedFiles;
         _physical.Clear();
         _physical.AddRange(next);
         Publish();
+        return hasNewOrUpdatedFiles;
     }
 
     public ArtifactItemViewModel? FindItem(MessageViewModel message, int ordinal)

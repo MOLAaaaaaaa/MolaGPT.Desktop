@@ -123,7 +123,7 @@ public partial class TranscriptView : UserControl
         }
 
         _chat.PropertyChanged += OnChatPropertyChanged;
-        _rows = new TranscriptSource(_chat);
+        _rows = new TranscriptSource(_chat, CanAutoCollapseTools);
         _rows.CollectionChanged += (_, _) => OnRowsChanged();
         PART_Rows.ItemsSource = _rows;
         PART_Hints.ItemsSource = _chat.HintChips;
@@ -197,6 +197,10 @@ public partial class TranscriptView : UserControl
         if (_chat is null) return;
         if (sender is Control { Tag: string id } && id.Length > 0) _chat.SaveActivePersona(id);
     }
+
+    private bool CanAutoCollapseTools() => _followBottom && !_wheelAnimating && !_jumping
+        && !_selectionDragging && _selection is null && _pressedBlock is null
+        && !this.GetVisualDescendants().OfType<ToolRunView>().Any(view => view.IsPointerOver);
 
     private void OnRowsChanged()
     {
@@ -301,8 +305,8 @@ public partial class TranscriptView : UserControl
         // getting shorter — keeps its top where it was, so while following the
         // newest row would slide out of view.
         if (_followBottom
-            && (e.ExtentDelta.Y > ScrollCorrectionEpsilon || e.ViewportDelta.Y < -ScrollCorrectionEpsilon)
-            && e.OffsetDelta.Y >= -ScrollCorrectionEpsilon)
+            && (Math.Abs(e.ExtentDelta.Y) > ScrollCorrectionEpsilon || e.ViewportDelta.Y < -ScrollCorrectionEpsilon)
+            && (e.ExtentDelta.Y < -ScrollCorrectionEpsilon || e.OffsetDelta.Y >= -ScrollCorrectionEpsilon))
         {
             _expectedOffset = null;
             PinToBottom();
@@ -351,8 +355,8 @@ public partial class TranscriptView : UserControl
         // corrections below are carried. Only while following: a reader who
         // wheeled upwards must not be dragged after the new content. The jump
         // animation needs nothing here — it re-reads the bottom every frame.
-        if (_followBottom && _wheelAnimating && e.ExtentDelta.Y > ScrollCorrectionEpsilon)
-            _wheelTarget += e.ExtentDelta.Y;
+        if (_followBottom && _wheelAnimating && Math.Abs(e.ExtentDelta.Y) > ScrollCorrectionEpsilon)
+            _wheelTarget = Math.Max(0, _wheelTarget + e.ExtentDelta.Y);
 
         double correction;
         if (_expectedOffset is { } expected)

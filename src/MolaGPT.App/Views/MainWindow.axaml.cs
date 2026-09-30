@@ -42,7 +42,7 @@ public partial class MainWindow : MolaWindow
     private readonly MolaGptLocalToolsRegistrar _localToolsRegistrar;
     private readonly CloudSyncService _cloudSync;
     private readonly AgentBridgeStatusViewModel _agentStatus;
-    private readonly McpHttpClient _mcpHttpClient;
+    private readonly McpClientManager _mcp;
     private readonly ImageGenerationTool _imageGenerationTool;
     private readonly AttachmentStore _attachmentStore;
     private readonly ConversationRepository _conversationRepository;
@@ -103,7 +103,7 @@ public partial class MainWindow : MolaWindow
         MolaGptLocalToolsRegistrar localToolsRegistrar,
         CloudSyncService cloudSync,
         AgentBridgeStatusViewModel agentStatus,
-        McpHttpClient mcpHttpClient,
+        McpClientManager mcp,
         ImageGenerationTool imageGenerationTool,
         AttachmentStore attachmentStore,
         ConversationRepository conversationRepository,
@@ -133,7 +133,7 @@ public partial class MainWindow : MolaWindow
         _localToolsRegistrar = localToolsRegistrar;
         _cloudSync = cloudSync;
         _agentStatus = agentStatus;
-        _mcpHttpClient = mcpHttpClient;
+        _mcp = mcp;
         _imageGenerationTool = imageGenerationTool;
         _attachmentStore = attachmentStore;
         _conversationRepository = conversationRepository;
@@ -178,6 +178,9 @@ public partial class MainWindow : MolaWindow
         PART_Composer.PersonaSettingsRequested += (_, startNew) => OpenPersonaSettings(startNew);
         PART_Composer.PersonaSelectionFailed += (_, error) => _notifications.Error("角色切换失败", error, "persona-selection");
         _chat.HistorySaveFailed += error => _notifications.Error("回复版本保存失败", error, "message-history");
+        // An event, not a state: this turn ran without the server's tools.
+        _mcp.ServerUnavailable += (server, error) =>
+            _notifications.Warning($"MCP 服务器「{server.Name}」不可用", error, "mcp-" + server.Id);
         _composer.AutoStorySummaryAsync = async (conversationId, providerId, modelId, ct) =>
         {
             try
@@ -1002,7 +1005,7 @@ public partial class MainWindow : MolaWindow
         }
 
         var window = new SettingsWindow(
-            _settings, _auth, _cloudSync, _conversations, _agentStatus, _main.Personas, _mcpHttpClient,
+            _settings, _auth, _cloudSync, _conversations, _agentStatus, _main.Personas, _mcp,
             _imageGenerationTool, _pythonRuntime, _piSidecar, _notifications, _skills, _browserActivity,
             () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory,
             ActivateAgentRuntimeAsync, DeactivateAgentRuntime, _personalization, _memoryPage, _proxy);
@@ -1042,6 +1045,32 @@ public partial class MainWindow : MolaWindow
         {
             _main.OpenArtifactInCanvasCommand.Execute(artifact);
         }
+    }
+
+    private void OnArtifactMenuOpened(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is not ContextMenu menu) return;
+        var artifact = menu.DataContext as ArtifactItemViewModel
+                       ?? menu.PlacementTarget?.DataContext as ArtifactItemViewModel;
+        var actions = menu.Items.OfType<MenuItem>().ToArray();
+        if (actions.Length != 2) return;
+        actions[0].Tag = artifact;
+        actions[1].Tag = artifact;
+        actions[1].IsEnabled = artifact?.CanReveal == true;
+    }
+
+    private void OnArtifactMenuOpen(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is MenuItem { Tag: ArtifactItemViewModel artifact }
+            && _main.OpenArtifactInCanvasCommand.CanExecute(artifact))
+            _main.OpenArtifactInCanvasCommand.Execute(artifact);
+    }
+
+    private void OnArtifactMenuOpenFolder(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is MenuItem { Tag: ArtifactItemViewModel artifact }
+            && _main.RevealArtifactCommand.CanExecute(artifact))
+            _main.RevealArtifactCommand.Execute(artifact);
     }
 
     private bool _subagentFollowBottom = true;

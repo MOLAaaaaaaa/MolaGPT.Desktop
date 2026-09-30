@@ -71,14 +71,19 @@ public partial class ImagePreviewWindow : MolaWindow
     /// so the same http / file:// / bare-Windows-path / data: handling the
     /// transcript already does applies here too.
     /// </summary>
-    public static async Task ShowAsync(Window? owner, string? url, string? caption)
+    public static async Task ShowAsync(Window? owner, string? url, string? caption, Bitmap? fallback = null)
     {
         if (owner is null || string.IsNullOrWhiteSpace(url)) return;
 
         // Full width: this is the "see it properly" path, so decoding to the
         // thumbnail size the transcript used would defeat the point.
         var bitmap = await ImageSourceLoader.LoadAsync(url, decodeWidth: 0).ConfigureAwait(true);
-        if (bitmap is null) return;
+        if (bitmap is null)
+        {
+            if (fallback is not null)
+                await ShowCoreAsync(owner, fallback, null, caption, ownsBitmap: false).ConfigureAwait(true);
+            return;
+        }
 
         var bytes = ImageSourceLoader.TryResolveLocalPath(url, out var path)
             ? TryReadAllBytes(path)

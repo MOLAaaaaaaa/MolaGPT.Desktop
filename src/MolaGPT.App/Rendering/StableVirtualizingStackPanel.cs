@@ -193,6 +193,11 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
         }
         else
         {
+            if (e.Action == NotifyCollectionChangedAction.Replace && e.NewItems is not null)
+            {
+                foreach (var item in e.NewItems)
+                    if (item is not null && !_realized.ContainsKey(item)) _heights.Remove(item);
+            }
             var current = new HashSet<object>(
                 items.Where(x => x is not null).Cast<object>(),
                 ItemIdentityComparer.Instance);
@@ -368,8 +373,9 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
     {
         HeaderRow => 60,
         UserMessageRow => 96,
-        ToolRow => 80,
-        ToolGroupRow => 56,
+        ToolRunRow run => run.EstimatedHeight,
+        ToolRow { IsExpanded: true } => 180,
+        ToolRow => 28,
         ThinkingRow { Segment.IsExpanded: false } => 42,
         ThinkingRow => 88,
         PendingRow => 48,

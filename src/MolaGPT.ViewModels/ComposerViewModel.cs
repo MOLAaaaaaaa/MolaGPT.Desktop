@@ -697,7 +697,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     [RelayCommand]
     public void ClearAttachments() => Attachments.Clear();
 
-    [RelayCommand(CanExecute = nameof(CanSend))]
+    [RelayCommand(CanExecute = nameof(CanSend), AllowConcurrentExecutions = true)]
     public async Task SendAsync()
     {
         if (string.IsNullOrWhiteSpace(Text) && Attachments.Count == 0 && ArtifactReferences.Count == 0) return;
@@ -1042,8 +1042,8 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         _backgroundStreams.Register(_activeTask);
 
-        // What is already queued stays queued in the agent; the chips belong to the
-        // conversation being left, and come back from its next queue update.
+        // What is already queued stays queued in the agent; the chips stay with the
+        // stream and come back when its conversation is opened again.
         PendingInjections.Clear();
         _injectable = false;
         _cts = null;
@@ -1087,6 +1087,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             _cts = task.Cts;
             _activeStreamTask = task.StreamTask;
             _activeTask = task;
+            ShowInjections(task);
             _injectable = !task.IsRegeneration && !task.IsContinuation;
             IsSending = true;
             _chat.IsStreaming = true;
@@ -1174,6 +1175,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         // 首字延迟的起点。放在这里而不是 SendAsync/RetryAsync 里：发送、重试、
         // 后台续流都走这个入口，且刻意排除附件上传与模型路由的耗时。
         assistantMsg.MarkRequestStarted();
+        RememberArtifactContext(assistantMsg, PythonArtifactMarkdownRewriter.CreateWorkspaceContext(req.ConversationId));
         await foreach (var chunk in provider.StreamChatAsync(req, cts.Token).WithCancellation(cts.Token))
         {
             if (chunk.PromptTrace is { } trace && trackingTask is not null)
@@ -1183,16 +1185,12 @@ public sealed partial class ComposerViewModel : ObservableObject
                 if (chunk.Injected is { } injected)
                 {
                     assistantMsg = SplitAtInjection(trackingTask, assistantMsg, injected.Text);
-                    continue;
-                }
-                if (chunk.Queue is { } queue)
-                {
-                    ApplyQueueState(trackingTask, queue);
+                    RememberArtifactContext(assistantMsg, PythonArtifactMarkdownRewriter.CreateWorkspaceContext(req.ConversationId));
                     continue;
                 }
                 if (chunk.Tool is { } tool) TrackTool(trackingTask, tool);
             }
-            ApplyStreamChunk(assistantMsg, chunk);
+            ApplyStreamChunk(assistantMsg, chunk, req.ConversationId);
             if (trackingTask is not null && chunk.RawJson is not null)
                 trackingTask.ReceivedChunkCount++;
             if (chunk.FinishReason is not null) break;
@@ -1213,9 +1211,10 @@ public sealed partial class ComposerViewModel : ObservableObject
     {
         // 幂等：续流重连不会覆盖最初请求的起点。
         assistantMsg.MarkRequestStarted();
+        RememberArtifactContext(assistantMsg, PythonArtifactMarkdownRewriter.CreateWorkspaceContext(trackingTask?.ConversationId));
         await foreach (var chunk in provider.ResumeStreamAsync(sessionId, offset, apiUrl, cts.Token).WithCancellation(cts.Token))
         {
-            ApplyStreamChunk(assistantMsg, chunk);
+            ApplyStreamChunk(assistantMsg, chunk, trackingTask?.ConversationId);
             if (trackingTask is not null && chunk.RawJson is not null)
                 trackingTask.ReceivedChunkCount++;
             if (chunk.FinishReason is not null) break;
@@ -1847,7 +1846,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             + (_settings?.BackgroundTaskWakeEnabled != false
                 ? "结束时，结果以 <task-notification> 消息送达；空闲时会自动继续处理，无需用户发言。\n"
                 : "结果随下一次用户消息送达，也可通过 task_status 查询。\n")
-            + "任务运行中可以推进其他工作；不要重复执行已委派的部分，接手前先确认或停止对应任务。\n"
+            + (python ? "预计耗时超过 13 秒的 Python 任务优先使用 run_in_background。" : string.Empty)
+            + "任务运行中先推进独立工作；已有足够信息时先回答并结束本轮，结果送达后再补充。只有当前回答必须依赖任务结果时，才用 task_status 按 ID 限时等待；到期仍在运行就告知进展并结束本轮，不要连续等待。不要重复执行已委派的部分，接手前先确认或停止对应任务。\n"
             + (agents
                 ? "子 Agent 与你共享工作目录，请明确各自负责的文件。send_agent_message 交换信息，followup_agent 给同一个子 Agent 追加任务，wait_agents 等待状态变化；执行结束后仍须检查结果是否满足委派目标。<agent-message> 是子 Agent 的消息，不是用户的新要求。\n"
                 : string.Empty)
@@ -1957,10 +1957,10 @@ public sealed partial class ComposerViewModel : ObservableObject
         _cts?.Cancel();
     }
 
-    [RelayCommand(CanExecute = nameof(CanRetry))]
+    [RelayCommand(CanExecute = nameof(CanRetry), AllowConcurrentExecutions = true)]
     public Task RetryAsync(MessageViewModel? assistantMsg) => GenerateAgainAsync(assistantMsg, false);
 
-    [RelayCommand(CanExecute = nameof(CanContinue))]
+    [RelayCommand(CanExecute = nameof(CanContinue), AllowConcurrentExecutions = true)]
     public Task ContinueAsync(MessageViewModel? assistantMsg) => GenerateAgainAsync(assistantMsg, true);
 
     public Task ReplyToExistingUserAsync(MessageViewModel? userMessage)
@@ -2207,8 +2207,9 @@ public sealed partial class ComposerViewModel : ObservableObject
             || model.DisplayName.Contains("MolaGPT Routes", StringComparison.OrdinalIgnoreCase);
     }
 
-    private void ApplyStreamChunk(MessageViewModel assistantMsg, ChatChunk chunk)
+    private void ApplyStreamChunk(MessageViewModel assistantMsg, ChatChunk chunk, string? conversationId)
     {
+        var isCurrentConversation = string.Equals(_chat.ConversationId, conversationId, StringComparison.Ordinal);
         if (chunk.Pending is { } pending)
             assistantMsg.SetPendingStatus(pending.Label, pending.Detail, pending.IsRoutes);
         if (chunk.Tool is { } tool)
@@ -2228,7 +2229,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 RewritePythonArtifactMarkdownLinks(assistantMsg);
                 // A python run may have produced new files; refresh the
                 // session-level artifact panel so they appear immediately.
-                _chat.RefreshArtifacts();
+                if (isCurrentConversation) _chat.RefreshArtifacts(autoOpenNewFiles: true);
             }
             // Browser screenshots land in the same workspace and get embedded the
             // same way, so they need the same rewrite — the model shortens the
@@ -2240,7 +2241,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                     assistantMsg,
                     PythonArtifactMarkdownRewriter.CreateBrowserScreenshotContext(tool.ResultPreviewJson));
                 RewritePythonArtifactMarkdownLinks(assistantMsg);
-                _chat.RefreshArtifacts();
+                if (isCurrentConversation) _chat.RefreshArtifacts(autoOpenNewFiles: true);
             }
         }
         if (chunk.Sources is { Count: > 0 })
@@ -2249,7 +2250,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             assistantMsg.Usage = chunk.Usage;
         if (chunk.ContextUsage is { } contextUsage)
         {
-            _chat.ContextGauge.Apply(contextUsage);
+            if (isCurrentConversation) _chat.ContextGauge.Apply(contextUsage);
             // Also on the message, so the reading survives a reload — the gauge
             // itself is rebuilt empty on every conversation load.
             if (contextUsage.Tokens is > 0) assistantMsg.ContextTokens = contextUsage.Tokens.Value;
@@ -2257,7 +2258,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         if (chunk.Compaction is { } compaction)
         {
-            _chat.ContextGauge.ApplyCompaction(compaction);
+            if (isCurrentConversation) _chat.ContextGauge.ApplyCompaction(compaction);
             // Recorded on the message rather than announced as a banner: this is
             // where in the conversation the history was cut, and a notification that
             // scrolls away cannot say "here".

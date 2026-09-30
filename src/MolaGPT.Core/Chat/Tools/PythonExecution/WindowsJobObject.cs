@@ -36,9 +36,10 @@ public sealed class WindowsJobObject : IDisposable
 
     /// <summary>
     /// Create a job with the given caps, or null if unavailable on this platform
-    /// or refused by the OS.
+    /// or refused by the OS. Without caps the job only ties the tree's lifetime
+    /// to the handle.
     /// </summary>
-    public static WindowsJobObject? TryCreate(long memoryLimitBytes, int activeProcessLimit, Action<string>? log = null)
+    public static WindowsJobObject? TryCreate(long? memoryLimitBytes, int? activeProcessLimit, Action<string>? log = null)
     {
         if (!OperatingSystem.IsWindows()) return null;
 
@@ -49,17 +50,17 @@ public sealed class WindowsJobObject : IDisposable
             if (handle == nint.Zero)
                 throw new Win32Exception();
 
+            var flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+            if (memoryLimitBytes is not null) flags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+            if (activeProcessLimit is not null) flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
             var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
             {
                 BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
                 {
-                    LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-                                 | JOB_OBJECT_LIMIT_JOB_MEMORY
-                                 | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
-                                 | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
-                    ActiveProcessLimit = (uint)Math.Max(1, activeProcessLimit),
+                    LimitFlags = flags,
+                    ActiveProcessLimit = (uint)Math.Max(1, activeProcessLimit ?? 1),
                 },
-                JobMemoryLimit = (nuint)Math.Max(1, memoryLimitBytes),
+                JobMemoryLimit = (nuint)Math.Max(1, memoryLimitBytes ?? 1),
             };
 
             var size = Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
@@ -80,7 +81,7 @@ public sealed class WindowsJobObject : IDisposable
         catch (Exception ex)
         {
             if (handle != nint.Zero) CloseHandle(handle);
-            log?.Invoke("[python] 无法创建作业对象，本次不设资源上限：" + ex.Message);
+            log?.Invoke("无法创建作业对象：" + ex.Message);
             return null;
         }
     }
@@ -96,7 +97,7 @@ public sealed class WindowsJobObject : IDisposable
         }
         catch (Exception ex)
         {
-            log?.Invoke("[python] 无法把进程加入作业对象：" + ex.Message);
+            log?.Invoke("无法把进程加入作业对象：" + ex.Message);
             return false;
         }
     }

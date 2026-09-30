@@ -20,8 +20,7 @@ public sealed record ChatChunk(
     CompactionDelta? Compaction = null,
     ContextUsageDelta? ContextUsage = null,
     RolePromptTrace? PromptTrace = null,
-    InjectedMessageDelta? Injected = null,
-    QueueStateDelta? Queue = null);
+    InjectedMessageDelta? Injected = null);
 
 /// <summary>
 /// A user-role message the agent took in mid-run: a message the user sent while the
@@ -29,9 +28,6 @@ public sealed record ChatChunk(
 /// agent says after it answers it, so the transcript splits the reply here.
 /// </summary>
 public sealed record InjectedMessageDelta(string Text);
-
-/// <summary>What is still waiting to be delivered into the running turn.</summary>
-public sealed record QueueStateDelta(IReadOnlyList<string> Steering, IReadOnlyList<string> FollowUp);
 
 /// <summary>
 /// How full the model's context is after this turn.

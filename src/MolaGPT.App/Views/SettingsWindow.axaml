@@ -1696,14 +1696,14 @@
               <StackPanel Name="PAGE_Vision" IsVisible="False">
                 <TextBlock Classes="pagetitle" Text="视觉理解" />
                 <TextBlock Classes="pagesubtitle"
-                           Text="让不支持图片输入的模型也能看懂图片。" />
+                           Text="为不支持多模态的模型启用视觉理解。" />
 
                 <Border Classes="settingscard">
                   <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                     <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                      <TextBlock Classes="rowtitle" Text="借助视觉模型看图" />
+                      <TextBlock Classes="rowtitle" Text="在对话中使用视觉理解" />
                       <TextBlock Classes="hint"
-                                 Text="开启后，不支持图片输入的模型会调用下方视觉模型来解析图片。" />
+                                 Text="开启后，不支持图片输入的模型可调用下方视觉模型来理解图像。" />
                     </StackPanel>
                     <ToggleButton Grid.Column="1" Classes="settingtoggle"
                                   IsChecked="{Binding VisionProxyEnabled, Mode=TwoWay}"
@@ -1876,10 +1876,11 @@
                   <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,16,*">
                       <StackPanel Grid.Column="0">
-                        <TextBlock Classes="label" Text="超时（秒）" />
+                        <TextBlock Classes="label" Text="前台执行超时（秒）" />
                         <NumericUpDown Classes="settingsinput"
                                        Value="{Binding PythonToolTimeoutSeconds, Mode=TwoWay}"
                                        Minimum="5" Maximum="300" Increment="5" />
+                        <TextBlock Classes="hint" Text="支持后台时，运行 13 秒后自动转入后台。" />
                       </StackPanel>
                       <StackPanel Grid.Column="2">
                         <TextBlock Classes="label" Text="输出上限（字符）" />
@@ -2194,7 +2195,7 @@
                                       ToolTip.Tip="是否启用" />
                             <StackPanel Grid.Column="1" Spacing="3">
                               <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                              <TextBlock Text="{Binding Url}"
+                              <TextBlock Text="{Binding Endpoint}"
                                          FontSize="{DynamicResource Font.Size.XSmall}"
                                          Foreground="{DynamicResource Brush.Text.Muted}"
                                          TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
@@ -2233,7 +2234,7 @@
                 <StackPanel Name="PART_McpEditor" IsVisible="False">
                   <TextBlock Name="PART_McpEditorTitle" Classes="pagetitle" />
                   <TextBlock Classes="pagesubtitle"
-                             Text="仅支持 Streamable HTTP 服务器。" />
+                             Text="支持远程 HTTP 服务器与本地 stdio 服务器。" />
 
                   <Border Classes="settingscard" Padding="16">
                     <StackPanel Spacing="14">
@@ -2244,33 +2245,78 @@
                       </StackPanel>
 
                       <StackPanel>
-                        <TextBlock Classes="label" Text="服务器地址" />
-                        <TextBox Name="PART_McpUrl" Classes="settingsinput"
-                                 PlaceholderText="https://example.com/mcp" />
-                        <TextBlock Classes="hint"
-                                   Text="远程地址使用 https://；本地服务器可用 http://localhost。" />
+                        <TextBlock Classes="label" Text="连接方式" />
+                        <ComboBox Name="PART_McpTransport" Classes="settingsinput" SelectedIndex="0">
+                          <ComboBoxItem Content="远程（HTTP）" />
+                          <ComboBoxItem Content="本地（stdio）" />
+                        </ComboBox>
                       </StackPanel>
 
-                      <Grid ColumnDefinitions="180,14,*">
-                        <StackPanel Grid.Column="0">
-                          <TextBlock Classes="label" Text="请求头名称" />
-                          <TextBox Name="PART_McpHeader" Classes="settingsinput"
-                                   Text="Authorization" />
+                      <StackPanel Name="PART_McpStdioFields" Spacing="14" IsVisible="False">
+                        <StackPanel>
+                          <TextBlock Classes="label" Text="命令" />
+                          <TextBox Name="PART_McpCommand" Classes="settingsinput"
+                                   PlaceholderText="npx" />
                         </StackPanel>
-                        <StackPanel Grid.Column="2">
-                          <TextBlock Classes="label" Text="Token" />
-                          <Border Classes="input">
-                            <Grid ColumnDefinitions="*,Auto">
-                              <TextBox Grid.Column="0" Name="PART_McpToken" PasswordChar="•"
-                                       VerticalContentAlignment="Center" />
-                              <Button Grid.Column="1" Name="PART_RevealMcpToken" Classes="inlineaction"
-                                      Width="28" Height="26" ToolTip.Tip="显示 / 隐藏">
-                                <TextBlock Classes="icon" Text="&#xE7B3;" FontSize="12" />
-                              </Button>
-                            </Grid>
-                          </Border>
+                        <StackPanel>
+                          <TextBlock Classes="label" Text="参数" />
+                          <TextBox Name="PART_McpArguments" Classes="settingsinput"
+                                   AcceptsReturn="True" TextWrapping="NoWrap" MinHeight="64"
+                                   PlaceholderText="每行一个参数" />
                         </StackPanel>
-                      </Grid>
+                        <StackPanel>
+                          <TextBlock Classes="label" Text="工作目录" />
+                          <TextBox Name="PART_McpWorkingDirectory" Classes="settingsinput"
+                                   PlaceholderText="留空则为用户目录" />
+                        </StackPanel>
+                        <StackPanel>
+                          <TextBlock Classes="label" Text="环境变量" />
+                          <TextBox Name="PART_McpEnvironment" Classes="settingsinput"
+                                   AcceptsReturn="True" TextWrapping="NoWrap" MinHeight="64"
+                                   PlaceholderText="KEY=VALUE，每行一个" />
+                        </StackPanel>
+                      </StackPanel>
+
+                      <StackPanel Name="PART_McpHttpFields" Spacing="14">
+                        <StackPanel>
+                          <TextBlock Classes="label" Text="服务器地址" />
+                          <TextBox Name="PART_McpUrl" Classes="settingsinput"
+                                   PlaceholderText="https://example.com/mcp" />
+                          <TextBlock Classes="hint"
+                                     Text="远程地址使用 https://；本地服务器可用 http://localhost。" />
+                        </StackPanel>
+
+                        <Grid ColumnDefinitions="180,14,*">
+                          <StackPanel Grid.Column="0">
+                            <TextBlock Classes="label" Text="请求头名称" />
+                            <TextBox Name="PART_McpHeader" Classes="settingsinput"
+                                     Text="Authorization" />
+                          </StackPanel>
+                          <StackPanel Grid.Column="2">
+                            <TextBlock Classes="label" Text="Token" />
+                            <Border Classes="input">
+                              <Grid ColumnDefinitions="*,Auto">
+                                <TextBox Grid.Column="0" Name="PART_McpToken" PasswordChar="•"
+                                         VerticalContentAlignment="Center" />
+                                <Button Grid.Column="1" Name="PART_RevealMcpToken" Classes="inlineaction"
+                                        Width="28" Height="26" ToolTip.Tip="显示 / 隐藏">
+                                  <TextBlock Classes="icon" Text="&#xE7B3;" FontSize="12" />
+                                </Button>
+                              </Grid>
+                            </Border>
+                          </StackPanel>
+                        </Grid>
+                      </StackPanel>
+
+                      <StackPanel>
+                        <TextBlock Classes="label" Text="工具加载方式" />
+                        <ComboBox Name="PART_McpExposure" Classes="settingsinput" SelectedIndex="0">
+                          <ComboBoxItem Content="脚本调用" />
+                          <ComboBoxItem Content="按需加载" />
+                          <ComboBoxItem Content="全部声明" />
+                        </ComboBox>
+                        <TextBlock Classes="hint" Text="仅作用于 Work 与 BYOK 对话。" />
+                      </StackPanel>
 
                       <Grid ColumnDefinitions="*,Auto">
                         <StackPanel Grid.Column="0">

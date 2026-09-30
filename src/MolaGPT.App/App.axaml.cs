@@ -148,7 +148,7 @@ public partial class App : Application
                 settings,
                 _services.GetRequiredService<UpdateCheckService>(),
                  auth, proxy, localTools, cloudSync, agentStatus,
-                 _services.GetRequiredService<McpHttpClient>(),
+                 _services.GetRequiredService<McpClientManager>(),
                  _services.GetRequiredService<ImageGenerationTool>(),
                  _services.GetRequiredService<AttachmentStore>(),
                  _services.GetRequiredService<ConversationRepository>(),

@@ -1,8 +1,10 @@
-﻿using System.Diagnostics;
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Channels;
 
 namespace MolaGPT.Core.Chat.Agents.Pi;
 
@@ -26,9 +28,7 @@ public sealed class PiSidecarSession : IAsyncDisposable
     private readonly SemaphoreSlim _turnGate = new(1, 1);
     private readonly object _stdinLock = new();
 
-    private Process? _process;
-    private StreamWriter? _stdin;
-    private StreamReader? _stdout;
+    private Pipe? _pipe;
     private string? _activeModel;
     private string? _activeThinkingLevel;
     private bool _autoRetryEnabled;
@@ -39,7 +39,30 @@ public sealed class PiSidecarSession : IAsyncDisposable
         _log = log;
     }
 
-    public bool IsAlive => _process is { HasExited: false };
+    public bool IsAlive => _pipe?.Process is { HasExited: false };
+
+    /// <summary>
+    /// One process's stdout, read by a single pump for the life of the process.
+    ///
+    /// A response to a command that carries an id goes to whoever awaits it, even
+    /// mid-turn; everything else goes to the turn reading <see cref="Events"/>, or
+    /// nowhere between turns. Reading stdout from two places at once is what made
+    /// every reply to a mid-turn command unreachable before.
+    /// </summary>
+    private sealed class Pipe(Process process)
+    {
+        public Process Process { get; } = process;
+        public ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> Pending { get; } =
+            new(StringComparer.Ordinal);
+
+        /// <summary>Steers and follow-ups Pi has not answered yet.</summary>
+        public List<Task> Enqueues { get; } = [];
+
+        /// <summary>Guarded by the pipe itself, together with <see cref="Exited"/>, so a
+        /// turn attaching as the process dies still sees its channel completed.</summary>
+        public Channel<string>? Events;
+        public bool Exited;
+    }
 
     /// <summary>Start the RPC process and wait until it can answer a command,
     /// without opening a conversation or sending anything to a model.</summary>
@@ -49,9 +72,7 @@ public sealed class PiSidecarSession : IAsyncDisposable
         try
         {
             await Task.Run(EnsureStarted, ct).ConfigureAwait(false);
-            using (await RequestAsync("get_state", new { }, ct).ConfigureAwait(false))
-            {
-            }
+            await RequestAsync("get_state", new { }, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -81,6 +102,7 @@ public sealed class PiSidecarSession : IAsyncDisposable
         };
         Directory.CreateDirectory(_launch.SessionRoot);
         Directory.CreateDirectory(_launch.WorkingDirectory);
+        PrepareAgentDirectory(_launch.AgentDirectory);
 
         foreach (var arg in new[]
                  {
@@ -99,6 +121,14 @@ public sealed class PiSidecarSession : IAsyncDisposable
                      "--provider", PiWorkProvider.SidecarProviderId,
                      "--model", _launch.Model, "-e", _launch.ExtensionPath,
 
+                     // Pi's orchestration tools, registered inactive. The extension
+                     // declares them when the catalogue has tools that need them:
+                     // codemode runs scripts that call tools (in parallel, and keep
+                     // only what the model needs), tool_search declares deferred
+                     // tools on request. Both reach tools through the extension, so
+                     // every call still goes through MolaGPT's approval.
+                     "-e", "builtin:codemode", "-e", "builtin:tool-search",
+
                      // Pi is a *coding* agent by default: `read, bash, edit, write`
                      // are enabled unless told otherwise. MolaGPT Work is not that —
                      // its only execution surface is the sandboxed Python tool (risk
@@ -110,7 +140,9 @@ public sealed class PiSidecarSession : IAsyncDisposable
                      // Isolate from the user's own Pi installation: no globally
                      // installed extensions/skills/templates/themes get loaded into
                      // Work, and no AGENTS.md/CLAUDE.md is picked up from the working
-                     // directory. Explicit `-e` above is unaffected.
+                     // directory. Explicit `-e` above is unaffected. Since Pi 0.99
+                     // this also drops Pi's built-in extensions (MCP, codemode, tool
+                     // search, llama.cpp); each has to be named with `-e builtin:`.
                      "--no-extensions", "--no-skills", "--no-prompt-templates",
                      "--no-themes", "--no-context-files",
 
@@ -132,15 +164,17 @@ public sealed class PiSidecarSession : IAsyncDisposable
         psi.Environment["MOLA_PROVIDER_MODELS"] = _launch.ModelsJson;
         psi.Environment["MOLA_TOOL_CALLBACK_URL"] = _launch.ToolCallbackUrl;
         psi.Environment["MOLA_TOOL_TOKEN"] = _launch.ToolCallbackToken;
+        psi.Environment["PI_CODING_AGENT_DIR"] = _launch.AgentDirectory;
 
         var proc = Process.Start(psi)
             ?? throw new InvalidOperationException("无法启动 Pi sidecar（node 未找到？）");
-        _process = proc;
-        _stdin = proc.StandardInput;
-        _stdout = proc.StandardOutput;
+        var pipe = new Pipe(proc);
+        _pipe = pipe;
         _activeModel = null;
         _activeThinkingLevel = null;
         _autoRetryEnabled = false;
+
+        _ = Task.Run(() => PumpAsync(pipe));
 
         // Drain stderr so the pipe never blocks; forward diagnostics to the log.
         _ = Task.Run(async () =>
@@ -149,6 +183,80 @@ public sealed class PiSidecarSession : IAsyncDisposable
             while ((line = await proc.StandardError.ReadLineAsync().ConfigureAwait(false)) is not null)
                 _log?.Invoke("[pi] " + line);
         });
+    }
+
+    /// <summary>
+    /// Settings every sidecar runs with, pinned rather than left to Pi's defaults.
+    /// </summary>
+    private static readonly (string Key, string Value)[] PinnedSettings =
+    [
+        // One queued message per model call: each one becomes its own turn in the
+        // transcript, which is how the app splits the reply around it.
+        ("steeringMode", "one-at-a-time"),
+        ("followUpMode", "one-at-a-time"),
+        // A cache refresh is a model request billed to the user that nobody asked for.
+        ("cacheWarming", "off"),
+    ];
+
+    private static readonly object AgentDirectoryGate = new();
+
+    /// <summary>
+    /// Pi's config directory for MolaGPT's sidecars, apart from the user's own
+    /// <c>~/.pi/agent</c>. Sharing it let personal Pi settings change how Work
+    /// behaves, and wrote the sidecars' <c>set_model</c> and
+    /// <c>set_auto_compaction</c> into the user's settings.
+    ///
+    /// Merged rather than overwritten: Pi records its own state in the same file.
+    /// A failed write only leaves Pi's defaults in place, so it never blocks a spawn.
+    /// </summary>
+    private void PrepareAgentDirectory(string directory)
+    {
+        lock (AgentDirectoryGate)
+        {
+            try
+            {
+                Directory.CreateDirectory(directory);
+                var path = Path.Combine(directory, "settings.json");
+                JsonObject settings;
+                try
+                {
+                    settings = File.Exists(path)
+                        ? JsonNode.Parse(File.ReadAllText(path)) as JsonObject ?? new JsonObject()
+                        : new JsonObject();
+                }
+                catch (JsonException)
+                {
+                    settings = new JsonObject();
+                }
+
+                var changed = false;
+                foreach (var (key, value) in PinnedSettings)
+                {
+                    if (settings[key] is JsonValue current
+                        && current.TryGetValue<string>(out var text)
+                        && text == value)
+                        continue;
+                    settings[key] = value;
+                    changed = true;
+                }
+                if (!changed) return;
+
+                var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    File.WriteAllText(temporaryPath, settings.ToJsonString(CommandJsonOptions), new UTF8Encoding(false));
+                    File.Move(temporaryPath, path, overwrite: true);
+                }
+                finally
+                {
+                    if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _log?.Invoke("[pi] 无法写入 Agent 设置：" + ex.Message);
+            }
+        }
     }
 
     /// <summary>
@@ -165,35 +273,257 @@ public sealed class PiSidecarSession : IAsyncDisposable
     private void Send(object command)
     {
         var json = JsonSerializer.Serialize(command, CommandJsonOptions);
+        var stdin = (_pipe ?? throw new InvalidOperationException("Pi sidecar 未启动。")).Process.StandardInput;
         lock (_stdinLock)
         {
-            _stdin!.WriteLine(json);
-            _stdin.Flush();
+            stdin.WriteLine(json);
+            stdin.Flush();
         }
     }
+
+    private static Dictionary<string, object?> Command(string type, string id, object payload)
+    {
+        var command = new Dictionary<string, object?>(StringComparer.Ordinal) { ["type"] = type, ["id"] = id };
+        foreach (var property in payload.GetType().GetProperties())
+            command[property.Name] = property.GetValue(payload);
+        return command;
+    }
+
+    private async Task PumpAsync(Pipe pipe)
+    {
+        try
+        {
+            string? line;
+            while ((line = await pipe.Process.StandardOutput.ReadLineAsync().ConfigureAwait(false)) is not null)
+            {
+                line = line.TrimEnd('\r');
+                if (line.Length == 0 || Route(pipe, line)) continue;
+                Channel<string>? events;
+                lock (pipe) events = pipe.Events;
+                events?.Writer.TryWrite(line);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log?.Invoke("[pi] 读取 sidecar 输出失败：" + ex.Message);
+        }
+        finally
+        {
+            Channel<string>? events;
+            lock (pipe)
+            {
+                pipe.Exited = true;
+                events = pipe.Events;
+            }
+            var exited = new InvalidOperationException("Pi sidecar 已退出。");
+            foreach (var pending in pipe.Pending.Values) pending.TrySetException(exited);
+            events?.Writer.TryComplete();
+        }
+    }
+
+    /// <summary>Handle a line that is not the running turn's business: a response
+    /// someone is awaiting, or an extension UI request. False for everything else.</summary>
+    private bool Route(Pipe pipe, string line)
+    {
+        // Almost every line is a streaming delta; only parse the ones that can match.
+        var response = line.Contains("\"response\"", StringComparison.Ordinal);
+        var uiRequest = line.Contains("\"extension_ui_request\"", StringComparison.Ordinal);
+        if (!response && !uiRequest) return false;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            var type = root.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String
+                ? t.GetString()
+                : null;
+
+            if (type == "extension_ui_request")
+            {
+                AnswerUiRequest(root);
+                return true;
+            }
+
+            if (type == "response"
+                && root.TryGetProperty("id", out var id)
+                && id.ValueKind == JsonValueKind.String
+                && pipe.Pending.TryRemove(id.GetString()!, out var pending))
+            {
+                pending.TrySetResult(root.Clone());
+                return true;
+            }
+        }
+        catch (JsonException)
+        {
+            // Not a protocol line; the turn decides what to do with it.
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Extension UI requests are answered inline so the loop can't stall. Tool
+    /// approval is handled inside <see cref="Tools.IChatToolHost"/> when the loopback
+    /// callback executes, not over the RPC UI channel.
+    /// </summary>
+    private void AnswerUiRequest(JsonElement request)
+    {
+        if (!request.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String) return;
+        var method = request.TryGetProperty("method", out var m) ? m.GetString() : null;
+        // Dialog methods need an answer; fire-and-forget ones don't.
+        if (method is "confirm")
+            Send(new { type = "extension_ui_response", id = id.GetString(), confirmed = true });
+        else if (method is "select" or "input" or "editor")
+            Send(new { type = "extension_ui_response", id = id.GetString(), cancelled = true });
+    }
+
+    /// <summary>Send one command with an id and return its response. Safe mid-turn:
+    /// the reply is routed here by id rather than read off the turn's stream.</summary>
+    private Task<JsonElement> StartRequest(string type, object payload)
+    {
+        var pipe = _pipe ?? throw new InvalidOperationException("Pi sidecar 未启动。");
+        var id = Guid.NewGuid().ToString("N");
+        var pending = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (pipe)
+        {
+            if (pipe.Exited) throw new InvalidOperationException("Pi sidecar 已退出。");
+            pipe.Pending[id] = pending;
+        }
+
+        try
+        {
+            Send(Command(type, id, payload));
+        }
+        catch
+        {
+            pipe.Pending.TryRemove(id, out _);
+            throw;
+        }
+
+        var response = CheckedAsync(type, pending.Task);
+        // A caller that stops waiting leaves the reply behind; observe its failure.
+        _ = response.ContinueWith(
+            static task => _ = task.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+        return response;
+    }
+
+    private static async Task<JsonElement> CheckedAsync(string type, Task<JsonElement> reply)
+    {
+        var root = await reply.ConfigureAwait(false);
+        if (root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False)
+        {
+            var error = root.TryGetProperty("error", out var e) ? e.ToString() : "unknown";
+            throw new InvalidOperationException($"Pi sidecar 拒绝了 {type}：{error}");
+        }
+        return root;
+    }
+
+    private Task<JsonElement> RequestAsync(string type, object payload, CancellationToken ct) =>
+        StartRequest(type, payload).WaitAsync(ct);
 
     /// <summary>
     /// Queue a message into the running turn. <c>steer</c> lands after the current
     /// batch of tool calls, before the next model call; <c>follow_up</c> when the
     /// agent would otherwise stop, continuing the same run.
     ///
-    /// Written without waiting for Pi's reply: while a turn runs, its stream is the
-    /// only reader of stdout, so the acknowledgement and the queue_update that follows
-    /// arrive there. Only meaningful mid-turn — an idle sidecar just holds the message
-    /// until the next switch_session discards it.
+    /// Not awaited by the caller: the app holds the message until the run takes it
+    /// in, and sends whatever is left as the next message once the turn ends. Only
+    /// meaningful mid-turn — an idle sidecar holds the message until the next
+    /// switch_session discards it.
     /// </summary>
-    public void Enqueue(string text, bool followUp)
+    public bool Enqueue(string text, bool followUp)
     {
-        if (!IsAlive || string.IsNullOrWhiteSpace(text)) return;
-        Send(new { type = followUp ? "follow_up" : "steer", message = text });
+        if (!IsAlive || string.IsNullOrWhiteSpace(text)) return false;
+        var pipe = _pipe!;
+        Task<JsonElement> request;
+        try
+        {
+            request = StartRequest(followUp ? "follow_up" : "steer", new { message = text });
+        }
+        catch (InvalidOperationException ex)
+        {
+            _log?.Invoke("[pi] 无法插入消息：" + ex.Message);
+            return false;
+        }
+
+        lock (pipe.Enqueues) pipe.Enqueues.Add(request);
+        _ = request.ContinueWith(task =>
+        {
+            lock (pipe.Enqueues) pipe.Enqueues.Remove(task);
+            if (task.IsFaulted) _log?.Invoke("[pi] 插入的消息未被接受：" + task.Exception?.InnerException?.Message);
+        }, TaskScheduler.Default);
+        return true;
     }
 
-    /// <summary>Drop everything still waiting in the running turn's queue. Same
-    /// reply-less shape as <see cref="Enqueue"/>.</summary>
-    public void ClearQueue()
+    /// <summary>How long a clear waits for queued messages still on their way.</summary>
+    private static readonly TimeSpan EnqueueSettleTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Wait until Pi has answered every steer and follow-up sent so far.
+    ///
+    /// Since Pi 0.99 both pass through the extension input hooks before they reach
+    /// the queue, while clear_queue acts at once — so a clear sent right behind a
+    /// message runs first and misses it.
+    /// </summary>
+    private static async Task WaitForEnqueuesAsync(Pipe pipe)
     {
-        if (!IsAlive) return;
-        Send(new { type = "clear_queue" });
+        Task[] inflight;
+        lock (pipe.Enqueues) inflight = [.. pipe.Enqueues];
+        if (inflight.Length == 0) return;
+        try
+        {
+            await Task.WhenAll(inflight).WaitAsync(EnqueueSettleTimeout).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // A refused message is not queued, and a slow one is not worth holding
+            // the clear for; either way, clear what is there.
+        }
+    }
+
+    /// <summary>
+    /// Take one message back out of the running turn's queue. False when Pi had
+    /// already taken it in.
+    ///
+    /// Pi's queue has no "remove one": it is emptied and everything else goes back
+    /// in order. What goes back is what the clear actually removed, not the app's
+    /// view of the queue, which lags behind Pi and would re-send a message Pi had
+    /// just taken in. A run that ends before they are back never reads them; the
+    /// app still holds them and sends them as the next message.
+    /// </summary>
+    public async Task<bool> WithdrawAsync(string text, bool followUp, CancellationToken ct)
+    {
+        var pipe = _pipe;
+        if (pipe is null || !IsAlive) return false;
+        await WaitForEnqueuesAsync(pipe).ConfigureAwait(false);
+        var cleared = await RequestAsync("clear_queue", new { }, ct).ConfigureAwait(false);
+
+        var withdrawn = false;
+        foreach (var (queued, isFollowUp) in QueuedMessages(cleared))
+        {
+            if (!withdrawn && isFollowUp == followUp && queued == text)
+            {
+                withdrawn = true;
+                continue;
+            }
+            Enqueue(queued, isFollowUp);
+        }
+        return withdrawn;
+    }
+
+    private static IEnumerable<(string Text, bool FollowUp)> QueuedMessages(JsonElement response)
+    {
+        if (!response.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
+            yield break;
+        foreach (var (key, followUp) in new[] { ("steering", false), ("followUp", true) })
+        {
+            if (!data.TryGetProperty(key, out var list) || list.ValueKind != JsonValueKind.Array) continue;
+            foreach (var item in list.EnumerateArray())
+                if (item.ValueKind == JsonValueKind.String)
+                    yield return (item.GetString()!, followUp);
+        }
     }
 
     /// <summary>
@@ -233,10 +563,10 @@ public sealed class PiSidecarSession : IAsyncDisposable
     /// <summary>
     /// Summarize the transcript now rather than waiting for the threshold.
     ///
-    /// Takes the turn gate because it is a turn in all but name: it calls the model,
-    /// it rewrites the history, and it shares the one stdout reader. Slow by nature —
-    /// the summary is a model call — so the caller has to show it as work in
-    /// progress, not as a click that appeared to do nothing.
+    /// Takes the turn gate because it is a turn in all but name: it calls the model
+    /// and it rewrites the history. Slow by nature — the summary is a model call —
+    /// so the caller has to show it as work in progress, not as a click that
+    /// appeared to do nothing.
     ///
     /// <paramref name="modelId"/> is selected first for the same reason a turn does
     /// it: a compaction that ran on whichever model the process happened to boot
@@ -254,21 +584,19 @@ public sealed class PiSidecarSession : IAsyncDisposable
 
             if (!string.Equals(_activeModel, modelId, StringComparison.Ordinal))
             {
-                using (await RequestAsync(
-                           "set_model",
-                           new { provider = PiWorkProvider.SidecarProviderId, modelId },
-                           ct).ConfigureAwait(false))
-                {
-                }
+                await RequestAsync(
+                    "set_model",
+                    new { provider = PiWorkProvider.SidecarProviderId, modelId },
+                    ct).ConfigureAwait(false);
                 _activeModel = modelId;
             }
 
-            using var response = await RequestAsync(
+            var response = await RequestAsync(
                 "compact",
                 new { customInstructions },
                 ct).ConfigureAwait(false);
 
-            if (!response.RootElement.TryGetProperty("data", out var data)
+            if (!response.TryGetProperty("data", out var data)
                 || data.ValueKind != JsonValueKind.Object)
             {
                 return null;
@@ -307,9 +635,7 @@ public sealed class PiSidecarSession : IAsyncDisposable
         try
         {
             if (!IsAlive) return;
-            using (await RequestAsync("set_auto_compaction", new { enabled }, ct).ConfigureAwait(false))
-            {
-            }
+            await RequestAsync("set_auto_compaction", new { enabled }, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -369,51 +695,9 @@ public sealed class PiSidecarSession : IAsyncDisposable
         return true;
     }
 
-    /// <summary>Send one command and read until its response arrives, discarding
-    /// unrelated traffic. Only safe between turns — the caller must hold the turn
-    /// gate, since it shares the single stdout reader with the streaming path.</summary>
-    private async Task<JsonDocument> RequestAsync(string type, object payload, CancellationToken ct)
-    {
-        var id = Guid.NewGuid().ToString("N");
-        var command = new Dictionary<string, object?>(StringComparer.Ordinal) { ["type"] = type, ["id"] = id };
-        foreach (var property in payload.GetType().GetProperties())
-            command[property.Name] = property.GetValue(payload);
-        Send(command);
-
-        var reader = _stdout!;
-        while (true)
-        {
-            var line = await reader.ReadLineAsync(ct).ConfigureAwait(false)
-                       ?? throw new InvalidOperationException($"Pi sidecar 在响应 {type} 前退出。");
-            if (TryHandleUiRequest(line)) continue;
-
-            JsonDocument doc;
-            try { doc = JsonDocument.Parse(line); }
-            catch { continue; }
-
-            var root = doc.RootElement;
-            if (root.TryGetProperty("id", out var responseId)
-                && responseId.ValueKind == JsonValueKind.String
-                && responseId.GetString() == id)
-            {
-                if (root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False)
-                {
-                    var error = root.TryGetProperty("error", out var e) ? e.ToString() : "unknown";
-                    doc.Dispose();
-                    throw new InvalidOperationException($"Pi sidecar 拒绝了 {type}：{error}");
-                }
-                return doc;
-            }
-            doc.Dispose();
-        }
-    }
-
     /// <summary>
     /// Send one user turn and stream the raw Pi RPC event lines (JSONL) until the
     /// run settles. Serialized: Work drives one turn at a time per conversation.
-    /// Extension UI requests (e.g. select) are auto-cancelled so the agent never
-    /// hangs — tool approval is handled inside <see cref="Tools.IChatToolHost"/>
-    /// when the loopback callback executes, not over the RPC UI channel.
     /// </summary>
     public async IAsyncEnumerable<string> SendTurnAsync(
         string modelId,
@@ -423,6 +707,8 @@ public sealed class PiSidecarSession : IAsyncDisposable
         [EnumeratorCancellation] CancellationToken ct)
     {
         await _turnGate.WaitAsync(ct).ConfigureAwait(false);
+        Pipe? pipe = null;
+        Channel<string>? events = null;
         try
         {
             // Spawn + prompt run off the caller's thread on purpose. Writing to the
@@ -433,6 +719,7 @@ public sealed class PiSidecarSession : IAsyncDisposable
             // `await foreach`, whose iterator body runs on the caller's thread until
             // the first real suspension, so doing this inline froze the UI.
             await Task.Run(EnsureStarted, ct).ConfigureAwait(false);
+            pipe = _pipe!;
 
             // Re-sent whenever the model changes — and after every session switch,
             // which re-creates the runtime and forgets the selection. The whole
@@ -447,15 +734,22 @@ public sealed class PiSidecarSession : IAsyncDisposable
             // one that still registers a single model — would produce.
             if (!string.Equals(_activeModel, modelId, StringComparison.Ordinal))
             {
-                using (await RequestAsync(
-                           "set_model",
-                           new { provider = PiWorkProvider.SidecarProviderId, modelId },
-                           ct).ConfigureAwait(false))
-                {
-                }
+                await RequestAsync(
+                    "set_model",
+                    new { provider = PiWorkProvider.SidecarProviderId, modelId },
+                    ct).ConfigureAwait(false);
                 _activeModel = modelId;
             }
 
+            events = Channel.CreateUnbounded<string>(
+                new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+            lock (pipe)
+            {
+                if (pipe.Exited) events.Writer.TryComplete();
+                else pipe.Events = events;
+            }
+
+            var promptId = Guid.NewGuid().ToString("N");
             await Task.Run(() =>
             {
                 // Fire-and-forget, unlike set_model: getting these wrong degrades a
@@ -474,29 +768,26 @@ public sealed class PiSidecarSession : IAsyncDisposable
                     Send(new { type = "set_auto_retry", enabled = true });
                     _autoRetryEnabled = true;
                 }
-            }, ct).ConfigureAwait(false);
 
-            await Task.Run(() =>
-            {
                 // Images ride on the prompt command rather than being flattened into
                 // text: dropping them would silently cost vision, which the direct
                 // provider supports.
-                if (images.Count > 0)
-                    Send(new { type = "prompt", message = userText, images });
-                else
-                    Send(new { type = "prompt", message = userText });
+                Send(images.Count > 0
+                    ? Command("prompt", promptId, new { message = userText, images })
+                    : Command("prompt", promptId, new { message = userText }));
             }, ct).ConfigureAwait(false);
 
-            var reader = _stdout!;
-            while (!ct.IsCancellationRequested)
+            await foreach (var line in events.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
-                var line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
-                if (line is null) yield break;          // process exited
-                line = line.TrimEnd('\r');
-                if (line.Length == 0) continue;
-
-                // Answer/close any extension UI request inline so the loop can't stall.
-                if (TryHandleUiRequest(line)) continue;
+                // The prompt's own reply is read here rather than awaited: a rejected
+                // prompt starts no run, so no agent_settled would ever end the loop.
+                if (line.Contains(promptId, StringComparison.Ordinal) && ReadResponse(line) is { } reply)
+                {
+                    if (!reply.Success) throw new InvalidOperationException("Pi 未接受本轮输入：" + reply.Error);
+                    // Consumed by an extension input handler: no run starts.
+                    if (reply.Disposition == "handled") yield break;
+                    continue;
+                }
 
                 yield return line;
 
@@ -511,10 +802,43 @@ public sealed class PiSidecarSession : IAsyncDisposable
             // writing events. The next turn would then read the abandoned turn's
             // output, leaving the stream a whole turn out of step and the UI
             // waiting forever for a reply that already came and went.
-            if (ct.IsCancellationRequested)
-                await AbortAndDrainAsync().ConfigureAwait(false);
+            if (ct.IsCancellationRequested && pipe is not null && events is not null)
+                await AbortAndDrainAsync(pipe, events).ConfigureAwait(false);
+
+            if (pipe is not null)
+            {
+                lock (pipe)
+                {
+                    if (ReferenceEquals(pipe.Events, events)) pipe.Events = null;
+                }
+            }
 
             _turnGate.Release();
+        }
+    }
+
+    private sealed record PromptReply(bool Success, string? Error, string? Disposition);
+
+    private static PromptReply? ReadResponse(string line)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("type", out var type) || type.GetString() != "response") return null;
+            var success = !(root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False);
+            var error = root.TryGetProperty("error", out var e) ? e.ToString() : null;
+            var disposition = root.TryGetProperty("data", out var data)
+                              && data.ValueKind == JsonValueKind.Object
+                              && data.TryGetProperty("disposition", out var d)
+                              && d.ValueKind == JsonValueKind.String
+                ? d.GetString()
+                : null;
+            return new PromptReply(success, error, disposition);
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 
@@ -524,12 +848,17 @@ public sealed class PiSidecarSession : IAsyncDisposable
     /// does not settle, kill it rather than hand out a session in an unknown state —
     /// the next turn respawns and resumes from the persisted session.
     /// </summary>
-    private async Task AbortAndDrainAsync()
+    private async Task AbortAndDrainAsync(Pipe pipe, Channel<string> events)
     {
         if (!IsAlive) return;
 
         try
         {
+            // A message still on its way would land after the clear below and be
+            // written to the transcript after the abort, while the app has put its
+            // text back in the input box.
+            await WaitForEnqueuesAsync(pipe).ConfigureAwait(false);
+
             // First, or Pi carries on with whatever was queued into the turn once
             // the abort lands. The app puts that text back in the input box.
             Send(new { type = "clear_queue" });
@@ -539,23 +868,17 @@ public sealed class PiSidecarSession : IAsyncDisposable
             Send(new { type = "abort_retry" });
 
             using var cts = new CancellationTokenSource(AbortDrainTimeout);
-            var reader = _stdout!;
-            while (true)
-            {
-                var line = await reader.ReadLineAsync(cts.Token).ConfigureAwait(false);
-                if (line is null) return;                       // process exited
-                if (TryHandleUiRequest(line)) continue;
+            await foreach (var line in events.Reader.ReadAllAsync(cts.Token).ConfigureAwait(false))
                 if (IsSettled(line)) return;
-            }
+            // The channel completes when the process exits.
         }
         catch (Exception ex)
         {
             _log?.Invoke("[pi] 中止后未能在超时内回到空闲，重启 sidecar：" + ex.Message);
-            var proc = _process;
-            _process = null;
-            try { if (proc is { HasExited: false }) proc.Kill(entireProcessTree: true); }
+            if (ReferenceEquals(_pipe, pipe)) _pipe = null;
+            try { if (!pipe.Process.HasExited) pipe.Process.Kill(entireProcessTree: true); }
             catch { /* already gone */ }
-            proc?.Dispose();
+            pipe.Process.Dispose();
         }
     }
 
@@ -564,48 +887,26 @@ public sealed class PiSidecarSession : IAsyncDisposable
     /// hold the conversation hostage.</summary>
     private static readonly TimeSpan AbortDrainTimeout = TimeSpan.FromSeconds(10);
 
-    private bool TryHandleUiRequest(string line)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(line);
-            if (doc.RootElement.TryGetProperty("type", out var t) && t.GetString() == "extension_ui_request")
-            {
-                if (doc.RootElement.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String)
-                {
-                    var method = doc.RootElement.TryGetProperty("method", out var m) ? m.GetString() : null;
-                    // Dialog methods need an answer; fire-and-forget ones don't.
-                    if (method is "confirm")
-                        Send(new { type = "extension_ui_response", id = id.GetString(), confirmed = true });
-                    else if (method is "select" or "input" or "editor")
-                        Send(new { type = "extension_ui_response", id = id.GetString(), cancelled = true });
-                }
-                return true;
-            }
-        }
-        catch { /* not our concern; let the normal path see it */ }
-        return false;
-    }
-
     private static bool IsSettled(string line)
     {
+        if (!line.Contains("\"agent_settled\"", StringComparison.Ordinal)) return false;
         try
         {
             using var doc = JsonDocument.Parse(line);
             return doc.RootElement.TryGetProperty("type", out var t) && t.GetString() == "agent_settled";
         }
-        catch { return false; }
+        catch (JsonException) { return false; }
     }
 
     public async ValueTask DisposeAsync()
     {
         _turnGate.Dispose();
-        var proc = _process;
-        _process = null;
-        if (proc is null) return;
-        try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); }
+        var pipe = _pipe;
+        _pipe = null;
+        if (pipe is null) return;
+        try { if (!pipe.Process.HasExited) pipe.Process.Kill(entireProcessTree: true); }
         catch { /* best-effort */ }
-        try { proc.Dispose(); }
+        try { pipe.Process.Dispose(); }
         catch { /* ignore */ }
         await Task.CompletedTask.ConfigureAwait(false);
     }
@@ -639,6 +940,8 @@ public sealed record PiImage(string data, string mimeType)
 /// <c>ProviderConfigInput.models</c> shape, carrying each model's wire api and
 /// compatibility profile. Registered up front so switching models mid-conversation
 /// is a <c>set_model</c> rather than a respawn.</param>
+/// <param name="AgentDirectory">Pi's config directory (<c>PI_CODING_AGENT_DIR</c>),
+/// owned by MolaGPT rather than shared with the user's own Pi.</param>
 public sealed record PiSidecarLaunchOptions(
     string NodePath,
     string CliJsPath,
@@ -652,4 +955,5 @@ public sealed record PiSidecarLaunchOptions(
     bool AuthHeader,
     string ToolCallbackUrl,
     string ToolCallbackToken,
-    string ModelsJson);
+    string ModelsJson,
+    string AgentDirectory);

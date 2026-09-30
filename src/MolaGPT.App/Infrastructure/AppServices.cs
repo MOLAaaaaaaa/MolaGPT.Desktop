@@ -143,9 +143,9 @@ internal static class AppServices
             line => DiagnosticLog.Write("pi-byok", line)));
 
         services.AddSingleton<BackgroundStreamService>();
-        services.AddSingleton(sp => new McpHttpClient(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok)));
-        services.AddSingleton<McpClientManager>();
+        services.AddSingleton(sp => new McpClientManager(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            line => DiagnosticLog.Write("mcp", line)));
 
         // ---- Agent Bridge --------------------------------------------------
         services.AddSingleton<AgentCliResolver>();

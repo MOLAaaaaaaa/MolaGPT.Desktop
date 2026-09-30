@@ -280,6 +280,11 @@ public sealed class RawPayloadView : Control
         AvaloniaProperty.Register<RawPayloadView, bool>(
             nameof(IsExpanded), defaultBindingMode: Avalonia.Data.BindingMode.TwoWay);
 
+    public static readonly StyledProperty<bool> AnimateChangesProperty =
+        AvaloniaProperty.Register<RawPayloadView, bool>(nameof(AnimateChanges));
+
+    public bool AnimateChanges { get => GetValue(AnimateChangesProperty); set => SetValue(AnimateChangesProperty, value); }
+
     public string? Text
     {
         get => GetValue(TextProperty);
@@ -296,20 +301,44 @@ public sealed class RawPayloadView : Control
     private readonly Crop _crop;
     private readonly Button _toggle;
     private double _cropHeight;
+    private double _fullHeight;
+    private double _collapsedHeight;
+    private double _targetHeight;
+    private bool _animatingHeight;
+    private readonly ToolMotion _heightMotion;
 
     static RawPayloadView()
     {
-        TextProperty.Changed.AddClassHandler<RawPayloadView>((x, e) => x._body.Text = e.NewValue as string);
+        TextProperty.Changed.AddClassHandler<RawPayloadView>((x, e) =>
+        {
+            x._heightMotion.Stop();
+            x._animatingHeight = false;
+            x._body.Text = e.NewValue as string;
+        });
         AffectsMeasure<RawPayloadView>(IsExpandedProperty);
     }
 
     public RawPayloadView()
     {
+        _heightMotion = new ToolMotion(this, value =>
+        {
+            _cropHeight = value;
+            if (Math.Abs(value - _targetHeight) < 0.01) _animatingHeight = false;
+            InvalidateMeasure();
+        });
         _crop = new Crop { Child = _body, ClipToBounds = true };
 
         _toggle = new Button { HorizontalAlignment = HorizontalAlignment.Left, IsVisible = false };
         _toggle.Classes.Add("rawtoggle");
-        _toggle.Click += (_, _) => IsExpanded = !IsExpanded;
+        _toggle.Click += (_, _) =>
+        {
+            var from = _cropHeight;
+            IsExpanded = !IsExpanded;
+            if (!AnimateChanges) return;
+            _targetHeight = IsExpanded ? _fullHeight : _collapsedHeight;
+            _animatingHeight = true;
+            _heightMotion.Start(from, _targetHeight, TimeSpan.FromMilliseconds(180));
+        };
 
         LogicalChildren.Add(_crop);
         LogicalChildren.Add(_toggle);
@@ -326,10 +355,23 @@ public sealed class RawPayloadView : Control
             _body.FontFamily = family;
     }
 
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        _heightMotion.Stop();
+        _animatingHeight = false;
+        base.OnDetachedFromVisualTree(e);
+    }
+
     protected override Size MeasureOverride(Size availableSize)
     {
         _crop.Measure(new Size(availableSize.Width, double.PositiveInfinity));
         var full = _crop.DesiredSize;
+        if (_animatingHeight && Math.Abs(full.Height - _fullHeight) > 0.5)
+        {
+            _heightMotion.Stop();
+            _animatingHeight = false;
+        }
+        _fullHeight = full.Height;
 
         // A payload that fits gets no toggle: an affordance for content already
         // fully on screen is noise.
@@ -341,7 +383,8 @@ public sealed class RawPayloadView : Control
         }
 
         var lines = string.IsNullOrEmpty(_body.Text) ? null : _body.TextLayout.TextLines;
-        _cropHeight = IsExpanded ? full.Height : WholeLines(lines);
+        _collapsedHeight = WholeLines(lines);
+        if (!_animatingHeight) _cropHeight = IsExpanded ? full.Height : _collapsedHeight;
 
         _toggle.IsVisible = true;
         _toggle.Content = IsExpanded ? "收起" : $"显示全部 {lines?.Count ?? 0} 行";

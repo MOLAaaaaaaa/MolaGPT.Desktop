@@ -556,8 +556,14 @@ public sealed partial class ConversationListViewModel : ObservableObject
             current.UpdateFrom(next);
             return;
         }
+        var selectedIds = _selectedIds.Contains(id) ? _selectedIds.ToArray() : null;
         Items.RemoveAt(existingIdx);
         Items.Insert(0, next);
+        if (selectedIds is not null)
+        {
+            SetSelectedIds(selectedIds);
+            SelectionRestoreRequested?.Invoke(this, selectedIds);
+        }
     }
 
     /// <summary>

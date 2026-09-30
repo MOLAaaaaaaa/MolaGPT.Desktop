@@ -41,6 +41,11 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
     private readonly Dictionary<MessageViewModel, Segment> _segments = new();
     private readonly List<MessageViewModel> _order = new();
     private readonly HashSet<MessageViewModel> _dirty = new();
+    private readonly Dictionary<MessageViewModel, Dictionary<string, ToolRunRow>> _toolRuns = new();
+    private readonly Func<bool> _canAutoCollapse;
+    private readonly DispatcherTimer _toolFoldTimer;
+    private readonly HashSet<ToolRunRow> _changedToolRuns = new();
+    private bool _building;
 
     // Fences the user switched between chip and code, by message and ordinal.
     // Outside the rows because a message's rows are all rebuilt when it is
@@ -49,9 +54,12 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
     private bool _flushQueued;
     private bool _disposed;
 
-    public TranscriptSource(ChatViewModel chat)
+    public TranscriptSource(ChatViewModel chat, Func<bool>? canAutoCollapse = null)
     {
         _chat = chat;
+        _canAutoCollapse = canAutoCollapse ?? (() => true);
+        _toolFoldTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        _toolFoldTimer.Tick += OnToolFoldTick;
         _chat.Messages.CollectionChanged += OnMessagesChanged;
         _chat.PropertyChanged += OnChatPropertyChanged;
         Reset();
@@ -61,6 +69,9 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
     {
         if (_disposed) return;
         _disposed = true;
+        _toolFoldTimer.Stop();
+        _toolFoldTimer.Tick -= OnToolFoldTick;
+        foreach (var message in _toolRuns.Keys.ToArray()) RemoveToolRuns(message);
         _chat.Messages.CollectionChanged -= OnMessagesChanged;
         _chat.PropertyChanged -= OnChatPropertyChanged;
         foreach (var message in _order) Unsubscribe(message);
@@ -118,6 +129,8 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         // A retry resets too, and the turns before it keep their choices.
         foreach (var gone in _fenceChoices.Keys.Where(m => !_chat.Messages.Contains(m)).ToList())
             _fenceChoices.Remove(gone);
+        foreach (var gone in _toolRuns.Keys.Where(m => !_chat.Messages.Contains(m)).ToArray())
+            RemoveToolRuns(gone);
 
         CheckReentrancy();
         Items.Clear();
@@ -168,6 +181,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         _segments.Remove(message);
         _dirty.Remove(message);
         _fenceChoices.Remove(message);
+        RemoveToolRuns(message);
         Unsubscribe(message);
         _chat.ArtifactWorkspace.RemoveMessage(message);
         ShiftFrom(index, -segment.Rows.Count);
@@ -189,12 +203,14 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
     {
         message.PropertyChanged += OnMessagePropertyChanged;
         message.DisplayBlocks.CollectionChanged += OnDisplayBlocksChanged;
+        message.ToolCalls.CollectionChanged += OnToolCallsChanged;
     }
 
     private void Unsubscribe(MessageViewModel message)
     {
         message.PropertyChanged -= OnMessagePropertyChanged;
         message.DisplayBlocks.CollectionChanged -= OnDisplayBlocksChanged;
+        message.ToolCalls.CollectionChanged -= OnToolCallsChanged;
     }
 
     private static readonly string[] RebuildTriggers =
@@ -233,6 +249,71 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
                 return;
             }
         }
+    }
+
+    private void OnToolCallsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        foreach (var message in _order)
+        {
+            if (!ReferenceEquals(message.ToolCalls, sender)) continue;
+            MarkDirty(message);
+            break;
+        }
+    }
+
+    private void RemoveToolRuns(MessageViewModel message)
+    {
+        if (!_toolRuns.Remove(message, out var runs)) return;
+        foreach (var run in runs.Values)
+        {
+            run.Changed -= OnToolRunChanged;
+            _changedToolRuns.Remove(run);
+            run.Dispose();
+        }
+    }
+
+    private void OnToolRunChanged(object? sender, EventArgs e)
+    {
+        if (sender is not ToolRunRow run || _building) return;
+        _changedToolRuns.Add(run);
+        MarkDirty(run.Message);
+    }
+
+    private void OnToolFoldTick(object? sender, EventArgs e)
+    {
+        var pending = _toolRuns.Values.SelectMany(runs => runs.Values)
+            .Where(run => run.NeedsAutoCollapse).ToArray();
+        if (pending.Length == 0)
+        {
+            _toolFoldTimer.Stop();
+            return;
+        }
+        var allowed = _canAutoCollapse();
+        foreach (var run in pending) run.TryAutoCollapse(allowed);
+    }
+
+    private static int CountProseCharacters(RenderDocument document)
+    {
+        var count = 0;
+        foreach (var block in document.Blocks)
+        {
+            var markdown = block switch
+            {
+                ParagraphBlock paragraph => paragraph.Markdown,
+                HeadingBlock heading => heading.Markdown,
+                QuoteBlock quote => quote.Markdown,
+                ListBlock list => list.Markdown,
+                _ => null
+            };
+            // Oversized payload-like paragraphs wait for turn completion rather than a second full parse.
+            if (markdown is null || markdown.Length > 8192) continue;
+            foreach (var character in Markdig.Markdown.ToPlainText(markdown))
+            {
+                if (!char.IsWhiteSpace(character)) count++;
+                if (count >= 240) return count;
+            }
+        }
+        return count;
     }
 
     // ---- chip or code --------------------------------------------------------
@@ -325,16 +406,76 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         // list and the canvas are always looking at the same fences.
         var messageDone = !message.IsStreaming && !message.IsRevealing;
         var fences = new List<FenceSnapshot>();
+        if (!_toolRuns.TryGetValue(message, out var cachedRuns))
+            _toolRuns[message] = cachedRuns = new Dictionary<string, ToolRunRow>();
+        var seenRuns = new HashSet<string>();
+        var followingProse = new Dictionary<ToolRunRow, int>();
+        var pendingTools = new List<IReadOnlyList<ToolCallViewModel>>();
+        ToolRunRow? precedingRun = null;
+
+        void FlushTools()
+        {
+            while (pendingTools.Count > 0)
+            {
+                var firstId = pendingTools[0][0].Id;
+                var initial = !cachedRuns.TryGetValue(firstId, out var run);
+                if (initial)
+                {
+                    run = new ToolRunRow(message, firstId);
+                    run.Changed += OnToolRunChanged;
+                    cachedRuns[firstId] = run;
+                }
+                var owned = new List<IReadOnlyList<ToolCallViewModel>>();
+                var later = new List<IReadOnlyList<ToolCallViewModel>>();
+                var pastBoundary = false;
+                foreach (var group in pendingTools)
+                {
+                    var split = pastBoundary ? 0 : run!.RetiredToolIds is { } retired
+                        ? group.TakeWhile(tool => retired.Contains(tool.Id)).Count() : group.Count;
+                    if (split > 0) owned.Add(split == group.Count ? group : group.Take(split).ToArray());
+                    if (split == group.Count) continue;
+                    pastBoundary = true;
+                    later.Add(group.Skip(split).ToArray());
+                }
+                _building = true;
+                try
+                {
+                    run!.Sync(owned, animateNewEntries: !messageDone);
+                    run.UpdateContext(messageDone, 0);
+                    if (initial && messageDone) run.TryAutoCollapse(allowed: true, initial: true);
+                }
+                finally { _building = false; }
+                seenRuns.Add(firstId);
+                rows.Add(run!);
+                followingProse[run!] = 0;
+                precedingRun = run;
+                pendingTools.Clear();
+                pendingTools.AddRange(later);
+            }
+        }
 
         for (var i = 0; i < message.DisplayBlocks.Count; i++)
         {
             var block = message.DisplayBlocks[i];
+            if (block.Tool is { } tool)
+            {
+                pendingTools.Add([tool]);
+                continue;
+            }
+            if (block.ToolGroup is { } group && group.Items.Count > 0)
+            {
+                pendingTools.Add(group.Items.ToArray());
+                continue;
+            }
+            FlushTools();
 
             if (block.IsText)
             {
                 segment.Documents.TryGetValue(i, out var previous);
                 var document = MessageDocumentParser.ParseIncremental(previous, block.Text);
                 segment.Documents[i] = document;
+                if (precedingRun is { NeedsProseSignal: true } && followingProse[precedingRun] < 240)
+                    followingProse[precedingRun] += CountProseCharacters(document);
 
                 foreach (var renderBlock in document.Blocks)
                 {
@@ -359,18 +500,33 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
                     }
                 }
             }
-            else if (block.Tool is { } tool)
-            {
-                rows.Add(new ToolRow(message, tool, i));
-            }
-            else if (block.ToolGroup is { } group)
-            {
-                rows.Add(new ToolGroupRow(message, group, i));
-            }
             else if (block.Thinking is { } thinking)
             {
                 rows.Add(new ThinkingRow(message, thinking, i));
             }
+        }
+        FlushTools();
+        _building = true;
+        try
+        {
+            foreach (var (run, characters) in followingProse)
+            {
+                run.UpdateContext(messageDone, characters);
+                if (run.NeedsAutoCollapse)
+                {
+                    run.TryAutoCollapse(_canAutoCollapse());
+                    if (run.NeedsAutoCollapse) _toolFoldTimer.Start();
+                }
+            }
+        }
+        finally { _building = false; }
+        foreach (var gone in cachedRuns.Keys.Where(id => !seenRuns.Contains(id)).ToArray())
+        {
+            var removed = cachedRuns[gone];
+            removed.Changed -= OnToolRunChanged;
+            _changedToolRuns.Remove(removed);
+            removed.Dispose();
+            cachedRuns.Remove(gone);
         }
 
         // Drop parses for text blocks that no longer exist, so a retry that
@@ -442,6 +598,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
     /// </summary>
     private void Splice(MessageViewModel message, Segment segment)
     {
+        var toolHeights = segment.Rows.OfType<ToolRunRow>().ToDictionary(run => run, run => run.EstimatedHeight);
         var next = Build(message, segment);
         var previous = segment.Rows;
 
@@ -470,6 +627,9 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
                 ui.Refresh(nextUi);
             if (carried is ProseRow prose && next[i] is ProseRow nextProse && prose.Refresh(nextProse.Block))
                 (grown ??= new List<int>()).Add(i);
+            if (carried is ToolRunRow toolRun && (_changedToolRuns.Contains(toolRun)
+                || toolHeights.TryGetValue(toolRun, out var oldHeight) && Math.Abs(oldHeight - toolRun.EstimatedHeight) > 0.5))
+                (grown ??= new List<int>()).Add(i);
             next[i] = carried;
         }
 
@@ -496,6 +656,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
 
         var delta = next.Count - previous.Count;
         segment.Rows = next;
+        _changedToolRuns.RemoveWhere(run => ReferenceEquals(run.Message, message));
         ShiftFrom(_order.IndexOf(message) + 1, delta);
     }
 }

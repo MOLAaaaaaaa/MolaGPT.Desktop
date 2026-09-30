@@ -50,6 +50,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string WebSearchSecretPrefix = "web_search_api_key:";
     private const string ByokMcpServersKey = "byok_mcp_servers";
     private const string McpServerSecretPrefix = "mcp_server_token:";
+    private const string McpServerEnvironmentPrefix = "mcp_server_env:";
     private const string VisionProxyEnabledKey = "vision_proxy_enabled";
     private const string VisionProxyProviderIdKey = "vision_proxy_provider_id";
     private const string VisionProxyModelIdKey = "vision_proxy_model_id";
@@ -446,11 +447,20 @@ public sealed partial class SettingsViewModel : ObservableObject
             {
                 McpServers.Add(entry with
                 {
-                    Token = _credentialStore?.LoadSecret(McpServerSecretPrefix + entry.Id)
+                    Token = _credentialStore?.LoadSecret(McpServerSecretPrefix + entry.Id),
+                    Environment = LoadMcpEnvironment(entry.Id)
                 });
             }
         }
         catch (JsonException) { }
+    }
+
+    private IReadOnlyDictionary<string, string>? LoadMcpEnvironment(string serverId)
+    {
+        var json = _credentialStore?.LoadSecret(McpServerEnvironmentPrefix + serverId);
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try { return JsonSerializer.Deserialize<Dictionary<string, string>>(json); }
+        catch (JsonException) { return null; }
     }
 
     partial void OnSyncConversationsChanged(bool value)
@@ -984,12 +994,15 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         McpServers.Remove(entry);
         _credentialStore?.RemoveSecret(McpServerSecretPrefix + entry.Id);
+        _credentialStore?.RemoveSecret(McpServerEnvironmentPrefix + entry.Id);
         SaveMcpServers();
     }
 
     public IReadOnlyList<McpServerOptions> BuildMcpServerOptions() =>
         McpServers
-            .Select(s => new McpServerOptions(s.Id, s.Name, s.Url, s.Transport, s.HeaderName, s.Token, s.Enabled))
+            .Select(s => new McpServerOptions(
+                s.Id, s.Name, s.Url, s.Transport, s.HeaderName, s.Token, s.Enabled,
+                s.Command, s.Arguments, s.WorkingDirectory, s.Environment, McpExposures.Normalize(s.Exposure)))
             .ToArray();
 
     public VisionProxyOptions BuildVisionProxyOptions() => new(
@@ -1109,7 +1122,9 @@ public sealed partial class SettingsViewModel : ObservableObject
     private void SaveMcpServers()
     {
         if (_settingsRepo is null) return;
-        var publicEntries = McpServers.Select(s => s with { Token = null }).ToList();
+        // Tokens and environment variables usually hold credentials: they go to the
+        // credential store, never into the settings file.
+        var publicEntries = McpServers.Select(s => s with { Token = null, Environment = null }).ToList();
         _settingsRepo.Set(ByokMcpServersKey, JsonSerializer.Serialize(publicEntries));
         if (_credentialStore is null) return;
         foreach (var server in McpServers)
@@ -1119,6 +1134,12 @@ public sealed partial class SettingsViewModel : ObservableObject
                 _credentialStore.RemoveSecret(key);
             else
                 _credentialStore.SaveSecret(key, server.Token.Trim());
+
+            var environmentKey = McpServerEnvironmentPrefix + server.Id;
+            if (server.Environment is not { Count: > 0 } environment)
+                _credentialStore.RemoveSecret(environmentKey);
+            else
+                _credentialStore.SaveSecret(environmentKey, JsonSerializer.Serialize(environment));
         }
     }
 
@@ -1492,10 +1513,27 @@ public sealed record McpServerEntry(
     string Id,
     string Name,
     string Url,
-    string Transport = "http",
+    string Transport = McpTransports.Http,
     string HeaderName = "Authorization",
     string? Token = null,
-    bool Enabled = true);
+    bool Enabled = true,
+    string? Command = null,
+    IReadOnlyList<string>? Arguments = null,
+    string? WorkingDirectory = null,
+    IReadOnlyDictionary<string, string>? Environment = null,
+    string Exposure = McpExposures.Codemode)
+{
+    public bool IsStdio => string.Equals(Transport, McpTransports.Stdio, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>What the server list shows under the name.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string Endpoint => IsStdio
+        ? string.Join(" ", new[] { Command ?? string.Empty }.Concat(Arguments ?? []).Select(QuoteIfNeeded))
+        : Url;
+
+    private static string QuoteIfNeeded(string value) =>
+        value.Length == 0 || value.Any(char.IsWhiteSpace) ? "\"" + value + "\"" : value;
+}
 
 public sealed record VisionProviderModelOption(
     string ProviderId,

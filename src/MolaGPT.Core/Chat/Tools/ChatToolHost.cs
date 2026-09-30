@@ -101,19 +101,60 @@ public sealed class ChatToolHost : IChatToolHost
         if (_memory is not null && (options.Memory || options.MemoryRecall))
             tools.Add(MemoryTools.BuildRecallDefinition());
 
-        foreach (var server in options.McpServers?.Where(s => s.Enabled) ?? Enumerable.Empty<McpServerOptions>())
+        // An unreachable server leaves its tools out of this turn rather than failing
+        // it; the manager reports the server as unavailable.
+        foreach (var server in EnabledMcpServers(options))
         {
-            try
-            {
-                tools.AddRange(await _mcp.BuildOpenAiToolDefinitionsAsync(server, ct).ConfigureAwait(false));
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                throw new InvalidOperationException($"无法加载 MCP 服务 {server.Name} 的工具：{ex.Message}", ex);
-            }
+            if (await _mcp.TryGetToolsAsync(server, ct).ConfigureAwait(false) is not { } listing) continue;
+            tools.AddRange(listing.Tools.Select(tool => BuildMcpToolDefinition(server, tool)));
         }
 
         return tools;
+    }
+
+    private static IEnumerable<McpServerOptions> EnabledMcpServers(LocalToolOptions options) =>
+        options.McpServers?.Where(s => s.Enabled) ?? Enumerable.Empty<McpServerOptions>();
+
+    private static object BuildMcpToolDefinition(McpServerOptions server, McpToolDescriptor tool) => new
+    {
+        type = "function",
+        function = new
+        {
+            name = McpToolName.Build(server.Id, tool.Name),
+            description = string.IsNullOrWhiteSpace(tool.Description)
+                ? $"MCP tool from {server.Name}: {tool.Name}"
+                : tool.Description,
+            parameters = tool.InputSchema.ValueKind == JsonValueKind.Object
+                ? tool.InputSchema
+                : throw new InvalidDataException($"MCP 工具 {tool.Name} 的参数定义不是对象。")
+        }
+    };
+
+    public Task<IReadOnlyDictionary<string, AgentToolHints>> DescribeAgentToolsAsync(
+        LocalToolOptions options,
+        CancellationToken ct)
+    {
+        var hints = new Dictionary<string, AgentToolHints>(StringComparer.Ordinal);
+        foreach (var server in EnabledMcpServers(options))
+        {
+            // Listed moments ago for this turn's catalogue. A server that was not
+            // has no tools in it, and has already been reported.
+            if (_mcp.ListedTools(server) is not { } listing) continue;
+            var ns = new AgentToolNamespace(
+                McpToolName.Prefix + McpToolName.Slugify(server.Id),
+                string.IsNullOrWhiteSpace(listing.Instructions)
+                    ? $"MCP 服务器「{server.Name}」"
+                    : $"MCP 服务器「{server.Name}」\n{listing.Instructions.Trim()}");
+            foreach (var tool in listing.Tools)
+            {
+                hints[McpToolName.Build(server.Id, tool.Name)] = new AgentToolHints(
+                    McpExposures.Normalize(server.Exposure),
+                    ns,
+                    tool.Hints,
+                    McpClientManager.ResultSchema(tool.OutputSchema));
+            }
+        }
+        return Task.FromResult<IReadOnlyDictionary<string, AgentToolHints>>(hints);
     }
 
     public async Task<string> ExecuteAsync(
@@ -218,7 +259,7 @@ public sealed class ChatToolHost : IChatToolHost
             if (_tasks is null || string.IsNullOrWhiteSpace(conversation))
                 return ToolError("后台任务不可用。");
             return toolName == TaskTools.StatusToolName
-                ? TaskTools.ExecuteStatus(_tasks, conversation!, argumentsJson)
+                ? await TaskTools.ExecuteStatusAsync(_tasks, conversation!, argumentsJson, ct).ConfigureAwait(false)
                 : TaskTools.ExecuteStop(_tasks, conversation!, argumentsJson);
         }
 
@@ -367,7 +408,7 @@ public sealed class ChatToolHost : IChatToolHost
             if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.McpPermissionMode), options.IsSubagent, ct).ConfigureAwait(false))
                 return PermissionDenied(request.ToolName);
 
-            return await _mcp.CallToolAsync(server, toolSlug, argumentsJson, ct).ConfigureAwait(false);
+            return await _mcp.CallToolAsync(server, descriptor, argumentsJson, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

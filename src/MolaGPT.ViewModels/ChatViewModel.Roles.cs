@@ -167,11 +167,11 @@ public sealed partial class ChatViewModel
         var rows = GetStoredHistory();
         var index = rows.ToList().FindIndex(row => row.Id == userMessage.MessageId);
         if (index < 0) throw new InvalidOperationException("找不到当前消息的历史位置。");
-        return PrepareMessageSnapshot(rows.Take(index).ToList()).Select(CreateMessageViewModel).ToList();
+        return PrepareMessageSnapshot(rows.Take(index).ToList(), ConversationId ?? "").Select(CreateMessageViewModel).ToList();
     }
 
     internal IReadOnlyList<MessageViewModel> ReadWholeHistory() =>
-        PrepareMessageSnapshot(GetStoredHistory()).Select(CreateMessageViewModel).ToList();
+        PrepareMessageSnapshot(GetStoredHistory(), ConversationId ?? "").Select(CreateMessageViewModel).ToList();
 
     internal void MarkConversationHistoryChanged(string conversationId, string? changedMessageId)
     {
@@ -298,7 +298,7 @@ public sealed partial class ChatViewModel
         var meta = source.Meta;
         if (editedContent is not null)
         {
-            var edited = CreateMessageViewModel(PrepareMessageSnapshot([source])[0]);
+            var edited = CreateMessageViewModel(PrepareMessageSnapshot([source], conversationId)[0]);
             try
             {
                 edited.MessageId = id;

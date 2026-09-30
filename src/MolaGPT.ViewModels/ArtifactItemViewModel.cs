@@ -163,9 +163,9 @@ public sealed partial class ArtifactItemViewModel : ObservableObject
         ? $"{Title}\n{FormatSize(_physicalBytes)}\n{FullPath}"
         : $"{Title}\n{FenceArtifactCapture.KindLabel(RenderKind)}{(HasVersions ? $" · {_versions.Count} 个版本" : string.Empty)}";
 
-    internal void UpdatePhysical(MolaGPT.Core.Chat.Tools.PythonExecution.WorkspaceArtifact artifact)
+    internal bool UpdatePhysical(MolaGPT.Core.Chat.Tools.PythonExecution.WorkspaceArtifact artifact)
     {
-        if (_physicalBytes == artifact.Bytes && _physicalLastWriteUtc == artifact.LastWriteUtc) return;
+        if (_physicalBytes == artifact.Bytes && _physicalLastWriteUtc == artifact.LastWriteUtc) return false;
 
         _physicalBytes = artifact.Bytes;
         _physicalLastWriteUtc = artifact.LastWriteUtc;
@@ -174,6 +174,7 @@ public sealed partial class ArtifactItemViewModel : ObservableObject
         OnPropertyChanged(nameof(SizeLabel));
         OnPropertyChanged(nameof(ListSubtitle));
         OnPropertyChanged(nameof(ToolTip));
+        return true;
     }
 
     /// <summary>

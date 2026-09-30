@@ -22,6 +22,36 @@
     the result lays out identically.
   -->
 
+  <UserControl.Resources>
+    <ControlTheme x:Key="ToolExpanderTheme" TargetType="Expander">
+      <Setter Property="Template">
+        <ControlTemplate>
+          <StackPanel>
+            <ToggleButton Name="PART_toggle"
+                          IsChecked="{Binding $parent[Expander].IsExpanded, Mode=TwoWay}"
+                          Background="Transparent" BorderThickness="0" Padding="4,2"
+                          MinHeight="28" HorizontalAlignment="Stretch"
+                          HorizontalContentAlignment="Stretch">
+              <DockPanel>
+                <r:ToolChevron DockPanel.Dock="Right" Margin="8,0,0,0"
+                               Foreground="{DynamicResource Brush.Text.Secondary}"
+                               VerticalAlignment="Center"
+                               IsExpanded="{Binding $parent[Expander].IsExpanded}" />
+                <ContentControl Content="{TemplateBinding Header}"
+                                HorizontalContentAlignment="Stretch" />
+              </DockPanel>
+            </ToggleButton>
+            <r:ToolRevealPresenter IsOpen="{Binding $parent[Expander].IsExpanded}">
+              <ContentPresenter Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"
+                                HorizontalContentAlignment="Stretch" />
+            </r:ToolRevealPresenter>
+          </StackPanel>
+        </ControlTemplate>
+      </Setter>
+    </ControlTheme>
+  </UserControl.Resources>
+
   <!-- ==================== block templates (inner level) ==================== -->
   <UserControl.DataTemplates>
 
@@ -316,18 +346,21 @@
       </Border>
     </DataTemplate>
 
-    <!-- Tool card, matching the MessageItemView original: 32px typed icon tile,
-         title + one-line argument preview, status chip, and a body that varies
-         by what the tool was called with (code / URL / path / search queries /
-         key-value pairs). The body starts collapsed — a run of tool calls should
-         read as a list of steps, not a wall of JSON. -->
+    <DataTemplate DataType="r:ToolRunRow">
+      <Border Classes="assistantcol" MaxWidth="720" Margin="0,4">
+        <r:ToolRunView />
+      </Border>
+    </DataTemplate>
+
     <DataTemplate DataType="r:ToolRow">
-      <Border Classes="assistantcol toolcard"
-              Classes.compact="{Binding !Tool.HasHeaderArgPreview}">
-        <Expander Classes="toolbody" IsExpanded="{Binding IsExpanded, Mode=TwoWay}">
+      <Border Classes="toolrow">
+        <StackPanel>
+        <Expander Classes="toolbody" Theme="{StaticResource ToolExpanderTheme}"
+                  IsExpanded="{Binding IsExpanded, Mode=TwoWay}">
           <Expander.Resources>
             <DataTemplate x:Key="ToolBodyTemplate" x:DataType="r:ToolRow">
-              <Grid>
+              <StackPanel Margin="24,0,4,8">
+              <Grid IsVisible="{Binding !IsGroup}">
               <StackPanel Spacing="8" Margin="0,10,0,0" IsVisible="{Binding !Tool.IsTaskCard}">
                 <!-- search_web: one chip per query -->
                 <ItemsControl ItemsSource="{Binding Tool.ArgsView.SearchQueries}"
@@ -396,11 +429,11 @@
                      has no typed view for. Both are complete; RawPayloadView bounds
                      the height and offers the rest behind a toggle. -->
                 <Border Classes="rawfold" IsVisible="{Binding Tool.ShowArgumentsFold}">
-                  <r:RawPayloadView Text="{Binding Tool.DisplayArgumentsJson}"
+                  <r:RawPayloadView AnimateChanges="True" Text="{Binding Tool.DisplayArgumentsJson}"
                                     IsExpanded="{Binding IsArgumentsExpanded, Mode=TwoWay}" />
                 </Border>
                 <Border Classes="rawfold" IsVisible="{Binding Tool.HasResultPreview}">
-                  <r:RawPayloadView Text="{Binding Tool.DisplayResultPreviewJson}"
+                  <r:RawPayloadView AnimateChanges="True" Text="{Binding Tool.DisplayResultPreviewJson}"
                                     IsExpanded="{Binding IsResultExpanded, Mode=TwoWay}" />
                 </Border>
               </StackPanel>
@@ -431,44 +464,41 @@
                 </ScrollViewer>
               </StackPanel>
               </Grid>
+              <ItemsControl ItemsSource="{Binding GroupItems}" IsVisible="{Binding IsGroup}"
+                            Margin="0,4,0,0" />
+              </StackPanel>
             </DataTemplate>
           </Expander.Resources>
 
           <Expander.Header>
-            <Grid ColumnDefinitions="Auto,10,*,Auto,Auto">
-              <Border Grid.Column="0" Classes="toolicon"
-                      CornerRadius="{DynamicResource Radius.Sm}"
-                      Background="{DynamicResource Brush.Primary.Tint}"
-                      Classes.compact="{Binding !Tool.HasHeaderArgPreview}"
-                      Classes.errored="{Binding Tool.IsError}">
-                <TextBlock Classes="icon" Text="{Binding Tool.DisplayIconGlyph}"
-                           HorizontalAlignment="Center" VerticalAlignment="Center"
-                           Foreground="{DynamicResource Brush.Primary}" />
-              </Border>
-
-              <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="2">
-                <TextBlock Text="{Binding Tool.DisplayLabel}" FontSize="13" FontWeight="Medium"
-                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-                <TextBlock Text="{Binding Tool.HeaderArgPreview}"
-                           IsVisible="{Binding Tool.HasHeaderArgPreview}"
-                           FontFamily="{DynamicResource Font.Mono}"
-                           FontSize="{DynamicResource Font.Size.XSmall}"
-                           Foreground="{DynamicResource Brush.Text.Muted}"
-                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-              </StackPanel>
-
-              <Border Grid.Column="3" Classes="statuschip"
-                      Classes.errored="{Binding Tool.IsError}"
-                      Classes.done="{Binding Tool.IsCompleted}"
-                      Classes.background="{Binding Tool.IsBackgroundRunning}">
-                <TextBlock Text="{Binding Tool.StatusText}" FontSize="11" FontWeight="SemiBold" />
-              </Border>
-
-              <!-- The call finished when the task began; the task is what can
-                   still be stopped. -->
-              <Button Grid.Column="4" Classes="inlineaction" Width="26" Height="24"
-                      Margin="6,0,0,0" VerticalAlignment="Center"
-                      IsVisible="{Binding Tool.IsBackgroundRunning}"
+            <Grid ColumnDefinitions="Auto,8,Auto,10,*,Auto,Auto,Auto" MinHeight="24">
+              <TextBlock Grid.Column="0" Classes="icon" Text="{Binding IconGlyph}"
+                         FontSize="12" VerticalAlignment="Center"
+                         Foreground="{DynamicResource Brush.Text.Secondary}" />
+              <TextBlock Grid.Column="2" Text="{Binding DisplayLabel}" FontSize="12"
+                         VerticalAlignment="Center" MaxWidth="160"
+                         TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+              <TextBlock Grid.Column="4" Text="{Binding HeaderArgPreview}"
+                         IsVisible="{Binding HasHeaderArgPreview}"
+                         ToolTip.Tip="{Binding HeaderArgPreview}"
+                         FontFamily="{DynamicResource Font.Mono}" FontSize="11"
+                         VerticalAlignment="Center"
+                         Foreground="{DynamicResource Brush.Text.Secondary}"
+                         TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+              <TextBlock Grid.Column="5" Text="{Binding CountText}" IsVisible="{Binding IsGroup}"
+                         FontSize="11" Margin="6,0,0,0" VerticalAlignment="Center"
+                         Foreground="{DynamicResource Brush.Text.Secondary}" />
+              <Panel Grid.Column="6" Margin="10,0,0,0" VerticalAlignment="Center">
+                <TextBlock Classes="icon" Text="&#xE73E;" FontSize="10"
+                           IsVisible="{Binding IsSuccessful}" ToolTip.Tip="{Binding StatusText}"
+                           Foreground="{DynamicResource Brush.Text.Secondary}" />
+                <TextBlock Classes="toolstatus" Text="{Binding StatusText}" FontSize="11"
+                           IsVisible="{Binding HasStatusText}"
+                           Classes.errored="{Binding IsError}"
+                           Classes.background="{Binding IsBackgroundRunning}" />
+              </Panel>
+              <Button Grid.Column="7" Classes="inlineaction" Width="24" Height="24"
+                      Margin="4,0,0,0" IsVisible="{Binding CanStop}"
                       Click="OnStopTask" ToolTip.Tip="停止任务">
                 <TextBlock Classes="icon" Text="&#xE71A;" FontSize="11" />
               </Button>
@@ -478,6 +508,12 @@
           <ContentControl Content="{Binding BodyContent}"
                           ContentTemplate="{StaticResource ToolBodyTemplate}" />
         </Expander>
+        <r:ToolRevealPresenter IsOpen="{Binding HasErrorDetail}">
+          <TextBlock Text="{Binding ErrorDetail}" FontSize="11" Margin="24,0,4,4"
+                     Foreground="{DynamicResource Brush.Error}"
+                     TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+        </r:ToolRevealPresenter>
+        </StackPanel>
       </Border>
     </DataTemplate>
 
@@ -496,77 +532,6 @@
                        TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="560" />
           </StackPanel>
         </Border>
-      </Border>
-    </DataTemplate>
-
-    <!-- A run of consecutive same-kind tools (file reads / searches / fetches),
-         merged into one card. Header reads as a single step ("联网搜索 · 2 次");
-         the fold reveals one row per call with its query/path/URL and status. -->
-    <DataTemplate DataType="r:ToolGroupRow">
-      <Border Classes="assistantcol toolcard">
-        <Expander Classes="toolbody" IsExpanded="{Binding IsExpanded, Mode=TwoWay}">
-          <Expander.Header>
-            <Grid ColumnDefinitions="Auto,10,*,Auto">
-              <Border Grid.Column="0" Classes="toolicon"
-                      CornerRadius="{DynamicResource Radius.Sm}"
-                      Background="{DynamicResource Brush.Primary.Tint}"
-                      Classes.errored="{Binding Group.IsError}">
-                <TextBlock Classes="icon" Text="{Binding Group.IconGlyph}"
-                           HorizontalAlignment="Center" VerticalAlignment="Center"
-                           Foreground="{DynamicResource Brush.Primary}" />
-              </Border>
-
-              <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="2">
-                <TextBlock Text="{Binding Group.Label}" FontSize="13" FontWeight="Medium"
-                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-                <TextBlock Text="{Binding Group.CountText}" Classes="muted"
-                           IsVisible="{Binding Group.HasCountText}"
-                           FontSize="{DynamicResource Font.Size.XSmall}"
-                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-              </StackPanel>
-
-              <Border Grid.Column="3" Classes="statuschip"
-                      Classes.errored="{Binding Group.IsError}"
-                      Classes.done="{Binding Group.IsCompleted}">
-                <TextBlock Text="{Binding Group.StatusText}" FontSize="11" FontWeight="SemiBold" />
-              </Border>
-            </Grid>
-          </Expander.Header>
-
-          <ItemsControl ItemsSource="{Binding Group.Items}" Margin="0,10,0,0">
-            <ItemsControl.ItemTemplate>
-              <DataTemplate x:DataType="vm:ToolCallViewModel">
-                <Grid ColumnDefinitions="*,Auto,Auto" Margin="0,3">
-                  <Panel Grid.Column="0" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding HeaderArgPreview}"
-                               IsVisible="{Binding HasHeaderArgPreview}"
-                               FontFamily="{DynamicResource Font.Mono}"
-                               FontSize="{DynamicResource Font.Size.XSmall}"
-                               Foreground="{DynamicResource Brush.Text.Secondary}"
-                               TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-                    <TextBlock Text="{Binding DisplayLabel}"
-                               IsVisible="{Binding !HasHeaderArgPreview}"
-                               FontSize="{DynamicResource Font.Size.XSmall}"
-                               Foreground="{DynamicResource Brush.Text.Secondary}"
-                               TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-                  </Panel>
-                  <Border Grid.Column="1" Classes="statuschip"
-                           Classes.errored="{Binding GroupIsError}"
-                           Classes.done="{Binding GroupIsCompleted}"
-                           Classes.background="{Binding IsBackgroundRunning}">
-                    <TextBlock Text="{Binding GroupStatusText}" FontSize="11" FontWeight="SemiBold" />
-                  </Border>
-                  <Button Grid.Column="2" Classes="inlineaction" Width="26" Height="24"
-                          Margin="6,0,0,0" VerticalAlignment="Center"
-                          IsVisible="{Binding IsBackgroundRunning}"
-                          Click="OnStopTask" ToolTip.Tip="停止任务">
-                    <TextBlock Classes="icon" Text="&#xE71A;" FontSize="11" />
-                  </Button>
-                </Grid>
-              </DataTemplate>
-            </ItemsControl.ItemTemplate>
-          </ItemsControl>
-        </Expander>
       </Border>
     </DataTemplate>
 
@@ -1010,45 +975,31 @@
       <Setter Property="LineHeight" Value="20" />
       <Setter Property="TextWrapping" Value="NoWrap" />
     </Style>
-    <!-- Tool card: Bg.Primary + Radius.Md + Padding 16,14, capped at 720 as in
-         the original (narrower than the prose column on purpose — a tool card is
-         an aside, not the answer). -->
-    <Style Selector="Border.toolcard">
-      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Primary}" />
-      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
-      <Setter Property="Padding" Value="16,14" />
-      <Setter Property="Margin" Value="0,8,0,8" />
-      <Setter Property="MaxWidth" Value="720" />
-      <Setter Property="HorizontalAlignment" Value="Left" />
+    <Style Selector="Border.toolrow">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Margin" Value="0,1" />
+    </Style>
+    <Style Selector="Expander.toolbody /template/ ToggleButton#PART_toggle:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Button.toolsummary">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    </Style>
+    <Style Selector="Button.toolsummary:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="TextBlock.toolstatus">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <Style Selector="TextBlock.toolstatus.background">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+    <Style Selector="TextBlock.toolstatus.errored">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
     </Style>
 
-    <!-- A card with no argument preview under the title is one line of text: the
-         32px tile and 14px padding were sized for two, so it read as a mostly
-         empty box in a run of steps. -->
-    <Style Selector="Border.toolcard.compact">
-      <Setter Property="Padding" Value="12,8" />
-    </Style>
-    <Style Selector="Border.toolicon">
-      <Setter Property="Width" Value="32" />
-      <Setter Property="Height" Value="32" />
-      <Setter Property="VerticalAlignment" Value="Top" />
-    </Style>
-    <Style Selector="Border.toolicon TextBlock.icon">
-      <Setter Property="FontSize" Value="14" />
-    </Style>
-    <Style Selector="Border.toolicon.compact">
-      <Setter Property="Width" Value="22" />
-      <Setter Property="Height" Value="22" />
-      <Setter Property="VerticalAlignment" Value="Center" />
-    </Style>
-    <Style Selector="Border.toolicon.compact TextBlock.icon">
-      <Setter Property="FontSize" Value="12" />
-    </Style>
-
-    <!-- The card's own chrome is the Border above, so the Expander contributes
-         only the fold: no background, no border, no header padding of its own. -->
     <Style Selector="Expander.toolbody">
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
@@ -1056,34 +1007,6 @@
       <Setter Property="MinHeight" Value="0" />
       <Setter Property="HorizontalAlignment" Value="Stretch" />
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-    </Style>
-
-    <Style Selector="Border.statuschip">
-      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
-      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
-      <Setter Property="Padding" Value="8,2" />
-      <Setter Property="Margin" Value="10,0,0,0" />
-      <Setter Property="VerticalAlignment" Value="Center" />
-    </Style>
-    <Style Selector="Border.statuschip TextBlock">
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
-    </Style>
-    <Style Selector="Border.statuschip.done">
-      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
-    </Style>
-    <Style Selector="Border.statuschip.done TextBlock">
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
-    </Style>
-    <Style Selector="Border.statuschip.errored">
-      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
-    </Style>
-    <Style Selector="Border.statuschip.errored TextBlock">
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
-    </Style>
-    <!-- Still running after its call returned: brand text on the neutral chip,
-         between 运行中 and 已完成. -->
-    <Style Selector="Border.statuschip.background TextBlock">
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
     </Style>
 
     <Style Selector="Border.tasknotice">

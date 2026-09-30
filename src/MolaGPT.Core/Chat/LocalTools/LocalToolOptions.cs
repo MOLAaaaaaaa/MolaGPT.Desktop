@@ -182,18 +182,27 @@ public sealed record LocalToolOptions(
     private static McpServerOptions? ReadMcpServer(object? raw)
     {
         if (raw is null) return null;
+        if (raw is McpServerOptions options) return options;
         var id = ReadString(raw, "id") ?? Guid.NewGuid().ToString("N");
         var name = ReadString(raw, "name") ?? id;
-        var url = ReadString(raw, "url");
-        if (string.IsNullOrWhiteSpace(url)) return null;
+        var transport = ReadString(raw, "transport") ?? McpTransports.Http;
+        var url = ReadString(raw, "url") ?? string.Empty;
+        var command = ReadString(raw, "command");
+        var stdio = string.Equals(transport, McpTransports.Stdio, StringComparison.OrdinalIgnoreCase);
+        if (stdio ? string.IsNullOrWhiteSpace(command) : string.IsNullOrWhiteSpace(url)) return null;
         return new McpServerOptions(
             id,
             name,
             url,
-            ReadString(raw, "transport") ?? "http",
+            transport,
             ReadString(raw, "headerName") ?? "Authorization",
             ReadString(raw, "token"),
-            ReadNullableBool(raw, "enabled") ?? true);
+            ReadNullableBool(raw, "enabled") ?? true,
+            command,
+            ReadStringList(raw, "arguments"),
+            ReadString(raw, "workingDirectory"),
+            ReadStringMap(raw, "environment"),
+            McpExposures.Normalize(ReadString(raw, "exposure")));
     }
 
     private static VisionProxyOptions? ReadVision(object raw)
@@ -313,6 +322,27 @@ public sealed record LocalToolOptions(
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase);
         return propInfo?.GetValue(raw) as string;
     }
+
+    private static IReadOnlyList<string>? ReadStringList(object raw, string name) =>
+        ReadValue(raw, name) switch
+        {
+            IEnumerable<string> list => list.ToArray(),
+            JsonElement { ValueKind: JsonValueKind.Array } array => array.EnumerateArray()
+                .Where(item => item.ValueKind == JsonValueKind.String)
+                .Select(item => item.GetString()!)
+                .ToArray(),
+            _ => null
+        };
+
+    private static IReadOnlyDictionary<string, string>? ReadStringMap(object raw, string name) =>
+        ReadValue(raw, name) switch
+        {
+            IReadOnlyDictionary<string, string> map => map,
+            JsonElement { ValueKind: JsonValueKind.Object } obj => obj.EnumerateObject()
+                .Where(item => item.Value.ValueKind == JsonValueKind.String)
+                .ToDictionary(item => item.Name, item => item.Value.GetString()!, StringComparer.Ordinal),
+            _ => null
+        };
 
     private static object? ReadValue(object raw, string name)
     {
@@ -434,14 +464,53 @@ public sealed record LocalToolOptions(
     }
 }
 
+/// <summary>One configured MCP server.</summary>
+/// <param name="Transport"><see cref="McpTransports.Http"/> connects to
+/// <see cref="Url"/>; <see cref="McpTransports.Stdio"/> starts <see cref="Command"/>.</param>
+/// <param name="Exposure">How the local agent reaches the server's tools; see
+/// <see cref="McpExposures"/>. Other providers always declare every tool.</param>
 public sealed record McpServerOptions(
     string Id,
     string Name,
     string Url,
-    string Transport = "http",
+    string Transport = McpTransports.Http,
     string HeaderName = "Authorization",
     string? Token = null,
-    bool Enabled = true);
+    bool Enabled = true,
+    string? Command = null,
+    IReadOnlyList<string>? Arguments = null,
+    string? WorkingDirectory = null,
+    IReadOnlyDictionary<string, string>? Environment = null,
+    string Exposure = McpExposures.Codemode)
+{
+    public bool IsStdio => string.Equals(Transport, McpTransports.Stdio, StringComparison.OrdinalIgnoreCase);
+}
+
+public static class McpTransports
+{
+    public const string Http = "http";
+    public const string Stdio = "stdio";
+}
+
+/// <summary>Pi's tool exposures, as used for MCP servers.</summary>
+public static class McpExposures
+{
+    /// <summary>Called from codemode scripts; not declared to the model.</summary>
+    public const string Codemode = "codemode";
+
+    /// <summary>Declared once <c>tool_search</c> finds them.</summary>
+    public const string Deferred = "deferred";
+
+    /// <summary>Declared to the model like any other tool.</summary>
+    public const string Direct = "direct";
+
+    public static string Normalize(string? value) => value switch
+    {
+        Deferred => Deferred,
+        Direct => Direct,
+        _ => Codemode,
+    };
+}
 
 public sealed record VisionProxyOptions(
     bool Enabled = false,

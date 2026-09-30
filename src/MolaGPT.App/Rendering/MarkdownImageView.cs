@@ -6,12 +6,13 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 
 namespace MolaGPT.App.Rendering;
 
 /// <summary>
-/// A standalone markdown image, rendered as the fixed-ratio card the WPF build
-/// used rather than as a naked <see cref="Image"/>.
+/// A markdown image shared by standalone blocks and inline layouts, rendered
+/// as a fixed-ratio card rather than as a naked <see cref="Image"/>.
 ///
 /// The card exists because the image's dimensions are unknown until it has been
 /// fetched. Letting the row size itself to the decoded bitmap means every image
@@ -19,9 +20,8 @@ namespace MolaGPT.App.Rendering;
 /// worst thing a streaming answer can do. Reserving the space up front costs a
 /// letterbox on unusually-shaped images and buys a layout that never jumps.
 ///
-/// Geometry is carried over verbatim: 16:9 clamped to 240–640 for ordinary
-/// images, square clamped to 240–480 for MolaGPT's own generated ones, radius 12,
-/// Bg.Tertiary behind, left-aligned.
+/// Ordinary images reserve 16:9 space; generated ones reserve a square.
+/// The preferred minimum width yields to narrow inline and table layouts.
 /// </summary>
 public sealed class MarkdownImageView : TemplatedControl
 {
@@ -53,6 +53,7 @@ public sealed class MarkdownImageView : TemplatedControl
     private readonly Border _card;
     private CancellationTokenSource? _load;
     private Bitmap? _bitmap;
+    private Point? _pressedPosition;
 
     public MarkdownImageView()
     {
@@ -62,16 +63,7 @@ public sealed class MarkdownImageView : TemplatedControl
             StretchDirection = StretchDirection.Both,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
-            IsVisible = false,
-            Opacity = 0,
-            Transitions =
-            [
-                new Avalonia.Animation.DoubleTransition
-                {
-                    Property = OpacityProperty,
-                    Duration = TimeSpan.FromMilliseconds(180)
-                }
-            ]
+            IsVisible = false
         };
         RenderOptions.SetBitmapInterpolationMode(_image, BitmapInterpolationMode.HighQuality);
 
@@ -99,6 +91,14 @@ public sealed class MarkdownImageView : TemplatedControl
         LogicalChildren.Add(_card);
         VisualChildren.Add(_card);
 
+        _card.PointerPressed += (_, e) =>
+        {
+            if (!e.GetCurrentPoint(_card).Properties.IsLeftButtonPressed) return;
+            _pressedPosition = e.GetPosition(_card);
+            // An inline image must own the press before SelectableTextBlock captures it.
+            e.Handled = true;
+        };
+        _card.PointerExited += (_, _) => _pressedPosition = null;
         _card.PointerReleased += OnCardReleased;
     }
 
@@ -112,6 +112,25 @@ public sealed class MarkdownImageView : TemplatedControl
             x._card.BorderBrush = e.NewValue as IBrush);
         ForegroundProperty.Changed.AddClassHandler<MarkdownImageView>((x, e) =>
             x._fallback.Foreground = e.NewValue as IBrush);
+    }
+
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        var scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1;
+        if (Url is { Length: > 0 }
+            && (_bitmap is null && _load is null
+                || scale > 1.5 && (_bitmap?.PixelSize.Width ?? 0) < CardSize(Bounds.Width).Width * scale))
+            Reload();
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        _load?.Cancel();
+        _load?.Dispose();
+        _load = null;
+        _pressedPosition = null;
+        base.OnDetachedFromVisualTree(e);
     }
 
     protected override Size MeasureOverride(Size availableSize)
@@ -137,11 +156,11 @@ public sealed class MarkdownImageView : TemplatedControl
 
         if (IsGenerated(Url))
         {
-            var size = Math.Max(CardMinWidth, Math.Min(AiMaxSize, available - 8));
+            var size = Math.Min(available, Math.Max(CardMinWidth, Math.Min(AiMaxSize, available - 8)));
             return (size, size);
         }
 
-        var width = Math.Max(CardMinWidth, Math.Min(CardMaxWidth, available - 8));
+        var width = Math.Min(available, Math.Max(CardMinWidth, Math.Min(CardMaxWidth, available - 8)));
         return (width, width / AspectRatio);
     }
 
@@ -162,7 +181,6 @@ public sealed class MarkdownImageView : TemplatedControl
         _load = null;
 
         _image.IsVisible = false;
-        _image.Opacity = 0;
         _image.Source = null;
         _fallback.IsVisible = true;
         _bitmap = null;
@@ -176,9 +194,8 @@ public sealed class MarkdownImageView : TemplatedControl
 
         try
         {
-            // 1.5× the layout width so the card still looks sharp on a 150% DPI
-            // display, which is the common Windows default.
-            var decodeWidth = (int)Math.Ceiling(CardSize(Bounds.Width).Width * 1.5);
+            var scale = Math.Max(1.5, TopLevel.GetTopLevel(this)?.RenderScaling ?? 1);
+            var decodeWidth = (int)Math.Ceiling(CardSize(Bounds.Width).Width * scale);
             var bitmap = await ImageSourceLoader.LoadAsync(url, decodeWidth, cts.Token);
             if (cts.IsCancellationRequested) return;
 
@@ -191,7 +208,6 @@ public sealed class MarkdownImageView : TemplatedControl
                 _image.Source = bitmap;
                 _image.IsVisible = true;
                 _fallback.IsVisible = false;
-                _image.Opacity = 1;
             });
         }
         catch (OperationCanceledException)
@@ -204,27 +220,22 @@ public sealed class MarkdownImageView : TemplatedControl
     /// Click opens the image full size, in the same preview window the composer
     /// and the image workbench use.
     ///
-    /// The already-decoded bitmap is handed over rather than the URL: it is
-    /// on screen, so re-fetching it would only add a delay and a second copy.
-    /// The URL still goes along, because saving from the preview wants the
-    /// original encoded bytes and the decoded surface cannot supply them.
+    /// The card uses a smaller bitmap; the preview reloads the original image.
     /// </summary>
     private void OnCardReleased(object? sender, PointerReleasedEventArgs e)
     {
         if (e.InitialPressMouseButton != MouseButton.Left) return;
+        var pressed = _pressedPosition;
+        _pressedPosition = null;
+        if (pressed is null) return;
+        e.Handled = true;
+        var released = e.GetPosition(_card);
+        if (Math.Abs(released.X - pressed.Value.X) > 4 || Math.Abs(released.Y - pressed.Value.Y) > 4) return;
         if (_bitmap is null) return;
         if (TopLevel.GetTopLevel(this) is not Window owner) return;
 
-        byte[]? bytes = null;
-        string? fileName = null;
-        if (Url is { Length: > 0 } url && ImageSourceLoader.TryResolveLocalPath(url, out var path))
-        {
-            fileName = System.IO.Path.GetFileName(path);
-            try { bytes = System.IO.File.ReadAllBytes(path); }
-            catch { /* Deleted between render and click; the preview still works. */ }
-        }
-
-        var caption = Alt is { Length: > 0 } alt ? alt : fileName;
-        _ = Views.ImagePreviewWindow.ShowAsync(owner, _bitmap, caption, bytes);
+        if (Url is not { Length: > 0 } url) return;
+        var caption = Alt is { Length: > 0 } alt ? alt : null;
+        _ = Views.ImagePreviewWindow.ShowAsync(owner, url, caption, _bitmap);
     }
 }

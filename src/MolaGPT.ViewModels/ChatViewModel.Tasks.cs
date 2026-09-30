@@ -112,8 +112,8 @@ public sealed partial class ChatViewModel
         if (task.ConversationId == ConversationId)
         {
             RefreshConversationTasks();
-            if (!task.IsRunning && task.Kind == AgentTaskKinds.Agent)
-                RefreshArtifacts();
+            if (!task.IsRunning && task.Kind is AgentTaskKinds.Agent or AgentTaskKinds.Python)
+                RefreshArtifacts(autoOpenNewFiles: true);
         }
         TaskChanged?.Invoke(task);
     }

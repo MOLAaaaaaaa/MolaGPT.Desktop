@@ -111,6 +111,15 @@ internal static partial class PythonArtifactMarkdownRewriter
         return contexts;
     }
 
+    public static ArtifactContext? CreateWorkspaceContext(string? conversationId)
+    {
+        if (string.IsNullOrWhiteSpace(conversationId)) return null;
+        var directory = PythonExecutionTool.GetSessionDirectory(conversationId);
+        return Directory.Exists(directory)
+            ? new ArtifactContext(new Dictionary<string, string>(), [directory])
+            : null;
+    }
+
     /// <summary>Build a rewrite context from image attachment chips (BYOK
     /// <c>generate_image</c>). Maps each chip's display file name (and its
     /// content-hash local name) to the real on-disk AttachmentStore path, so an
@@ -150,7 +159,8 @@ internal static partial class PythonArtifactMarkdownRewriter
 
     public static string Rewrite(string content, IReadOnlyList<ArtifactContext>? contexts)
     {
-        if (string.IsNullOrWhiteSpace(content) || contexts is not { Count: > 0 })
+        if (string.IsNullOrWhiteSpace(content) || contexts is not { Count: > 0 }
+            || !content.Contains("![", StringComparison.Ordinal))
             return content;
 
         return MarkdownImageRegex().Replace(content, match =>

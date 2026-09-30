@@ -30,13 +30,14 @@ public static class TaskTools
         function = new
         {
             name = StatusToolName,
-            description = "查看本对话后台任务的状态与最近输出。任务结束时会自动通知你，不要反复查询或等待。",
+            description = "查看本对话后台任务的状态与最近输出。只有当前回答必须依赖任务结果时才按 ID 限时等待；到期仍在运行就继续独立工作，无事可做时回复用户并结束本轮，不要连续等待。任务结束时会自动通知。",
             parameters = new
             {
                 type = "object",
                 properties = new
                 {
-                    task_id = new { type = "string", description = "任务 ID；省略则列出本对话全部任务。" }
+                    task_id = new { type = "string", description = "任务 ID；省略则列出本对话全部任务。" },
+                    wait_seconds = new { type = "integer", description = "按任务 ID 最长等待的秒数，0 到 60；默认 0，立即返回。等待到期时返回当前状态，不会停止任务。" }
                 }
             }
         }
@@ -61,22 +62,51 @@ public static class TaskTools
         }
     };
 
-    public static string ExecuteStatus(AgentTaskRegistry registry, string conversationId, string argumentsJson)
+    public static async Task<string> ExecuteStatusAsync(
+        AgentTaskRegistry registry, string conversationId, string argumentsJson, CancellationToken ct)
     {
-        var id = ReadTaskId(argumentsJson);
-        if (!string.IsNullOrWhiteSpace(id))
+        string? id;
+        int waitSeconds;
+        try
         {
-            var task = registry.Find(conversationId, id);
-            if (task is null) return Error($"本对话没有任务 {id}。");
-            if (!task.IsRunning) registry.MarkDelivered(task);
-            return JsonSerializer.Serialize(Describe(registry, task, includeTail: true), JsonOptions);
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(argumentsJson) ? "{}" : argumentsJson);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return Error("查询参数无效。");
+            id = root.TryGetProperty("task_id", out var taskId) && taskId.ValueKind == JsonValueKind.String
+                ? taskId.GetString()?.Trim() : null;
+            waitSeconds = root.TryGetProperty("wait_seconds", out var wait)
+                          && wait.ValueKind == JsonValueKind.Number && wait.TryGetInt32(out var seconds)
+                ? Math.Clamp(seconds, 0, 60) : 0;
+        }
+        catch (JsonException) { return Error("查询参数无效。"); }
+
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            if (waitSeconds > 0) return Error("等待任务时需要 task_id。");
+            var tasks = registry.List(conversationId);
+            return JsonSerializer.Serialize(new
+            {
+                tasks = tasks.Select(t => Describe(registry, t, includeTail: false)).ToArray()
+            }, JsonOptions);
         }
 
-        var tasks = registry.List(conversationId);
-        return JsonSerializer.Serialize(new
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(waitSeconds);
+        while (true)
         {
-            tasks = tasks.Select(t => Describe(registry, t, includeTail: false)).ToArray()
-        }, JsonOptions);
+            var signal = registry.CaptureChangeSignal();
+            var task = registry.Find(conversationId, id);
+            if (task is null) return Error($"本对话没有任务 {id}。");
+            if (!task.IsRunning)
+            {
+                registry.MarkDelivered(task);
+                return JsonSerializer.Serialize(Describe(registry, task, includeTail: true), JsonOptions);
+            }
+
+            var remaining = deadline - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+                return JsonSerializer.Serialize(Describe(registry, task, includeTail: true), JsonOptions);
+            await AgentTaskRegistry.WaitForChangeAsync(signal, remaining, ct).ConfigureAwait(false);
+        }
     }
 
     public static string ExecuteStop(AgentTaskRegistry registry, string conversationId, string argumentsJson)
@@ -178,7 +208,10 @@ public static class TaskTools
             status = StatusName(task.Status),
             elapsed = task.IsRestored ? null : FormatElapsed(task.Elapsed),
             recent_output = string.IsNullOrWhiteSpace(tail) ? null : tail,
-            report = includeTail && !task.IsRunning ? task.Report : null
+            report = includeTail && !task.IsRunning ? task.Report : null,
+            note = includeTail && task.IsRunning
+                ? "任务仍在运行。先推进独立工作；无事可做时答复已有结果或告知进展并结束本轮，不要连续等待。"
+                : null
         };
     }
 

@@ -13,6 +13,7 @@ public sealed class PythonExecutionTool
     private const string UserScriptFileName = "main.py";
     internal const string RuntimeScriptPrefix = ".molagpt-run-";
     private const string RunnerScriptFileName = "runner.py";
+    private static readonly TimeSpan ForegroundWaitBeforeBackground = TimeSpan.FromSeconds(13);
 
     /// <summary>Where a run's complete output goes when the inline copy had to be
     /// cut. Named so the model can find it, and excluded from artifact reporting so
@@ -131,17 +132,17 @@ public sealed class PythonExecutionTool
         var node = JsonSerializer.SerializeToNode(definition)!;
         var function = node["function"]!;
         function["description"] = (string)function["description"]!
-            + " Long runs can continue in the background (run_in_background); a foreground run that outlasts its timeout moves there instead of being killed.";
+            + " When background execution is available, use run_in_background for work likely to take longer than 13 seconds. A foreground run still active after 13 seconds then moves to the background and returns a task id.";
         var properties = function["parameters"]!["properties"]!.AsObject();
         properties["timeout_seconds"] = new System.Text.Json.Nodes.JsonObject
         {
             ["type"] = "integer",
-            ["description"] = "Seconds before this run moves to the background (optional). The host clamps it to a safe range."
+            ["description"] = "Timeout for foreground-only execution (optional). When background tasks are available, this does not extend the 13-second foreground execution window."
         };
         properties["run_in_background"] = new System.Text.Json.Nodes.JsonObject
         {
             ["type"] = "boolean",
-            ["description"] = "Return a task id at once and keep running in the background. Use it when the code may run longer than about a minute. You are notified when the process exits, so make it end when its work is done and print a summary last."
+            ["description"] = "Return a task id at once and keep running in the background. Use it when the code may run longer than 13 seconds. You are notified when the process exits, so make it end when its work is done and print a summary last."
         };
         return node;
     }
@@ -205,13 +206,12 @@ public sealed class PythonExecutionTool
                 permission: BuildPermissionMeta(effectiveOptions, risk, "denied"));
         }
 
-        // A per-call request wins over the configured default, but is clamped to the
-        // same range: the model can ask for longer when it knows the job is slow,
-        // and cannot ask for unbounded.
-        var timeout = TimeSpan.FromSeconds(Math.Clamp(requestedTimeout ?? options.TimeoutSeconds, 5, 300));
         var maxOutput = Math.Clamp(options.MaxOutputCharacters, 2000, 100000);
         var sessionDir = workspaceRoot;
         var canBackground = run is { AllowBackground: true, Owner: not null, Unattended: false } && _tasks is not null;
+        var timeout = canBackground
+            ? ForegroundWaitBeforeBackground
+            : TimeSpan.FromSeconds(Math.Clamp(requestedTimeout ?? options.TimeoutSeconds, 5, 300));
         var label = TaskLabel(description, code!);
 
         // Asked for the background, but there is no room: say so rather than
@@ -859,8 +859,8 @@ public sealed class PythonExecutionTool
             partial_stdout = moved ? task.Tail() : null,
             note = moved
                 ? $"运行超过 {(int)timeout.TotalSeconds} 秒，已转入后台继续运行。"
-                  + "结束时会自动通知你，不要轮询；可以先做别的，或告诉用户它在后台运行并结束本轮回答。"
-                : "已在后台运行。结束时会自动通知你，不要轮询；可以先做别的，或告诉用户它在后台运行并结束本轮回答。"
+                  + "结束时会自动通知你；先推进独立工作。已有足够信息时先回答并结束本轮，完成后再补充；确需当前结果时才用 task_status 按 ID 限时等待。到期仍在运行就告知进展并结束本轮，不要连续等待或重复启动。"
+                : "已在后台运行。结束时会自动通知你；先推进独立工作。已有足够信息时先回答并结束本轮，完成后再补充；确需当前结果时才用 task_status 按 ID 限时等待。到期仍在运行就告知进展并结束本轮，不要连续等待或重复启动。"
         }, ReportJsonOptions);
     }
 

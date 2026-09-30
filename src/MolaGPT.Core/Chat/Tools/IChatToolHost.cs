@@ -16,6 +16,14 @@ public interface IChatToolHost
         ChatToolContext context,
         LocalToolOptions options,
         CancellationToken ct);
+
+    /// <summary>Presentation hints for the local agent, keyed by tool name. Tools
+    /// without an entry are declared to the model directly.</summary>
+    Task<IReadOnlyDictionary<string, AgentToolHints>> DescribeAgentToolsAsync(
+        LocalToolOptions options,
+        CancellationToken ct) =>
+        Task.FromResult<IReadOnlyDictionary<string, AgentToolHints>>(
+            new Dictionary<string, AgentToolHints>(StringComparer.Ordinal));
 }
 
 public sealed record ChatToolContext(

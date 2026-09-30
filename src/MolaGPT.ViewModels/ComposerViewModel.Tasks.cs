@@ -9,7 +9,14 @@ using MolaGPT.ViewModels.Services;
 
 namespace MolaGPT.ViewModels;
 
-/// <summary>A message typed while the turn runs, waiting for the agent to take it in.</summary>
+/// <summary>
+/// A message typed while the turn runs, sent into it and not yet taken in.
+///
+/// Only two things remove one: the agent taking in its text, or the user taking it
+/// back. Pi's queue snapshots do not: one sent before the message arrived, or the
+/// empty one a withdrawal's clear sends, would drop a message the run may never
+/// receive, and whatever is left when the turn ends is sent as the next message.
+/// </summary>
 public sealed class PendingInjectionViewModel
 {
     public PendingInjectionViewModel(string text, bool followUp)
@@ -20,6 +27,7 @@ public sealed class PendingInjectionViewModel
 
     public string Text { get; }
     public bool IsFollowUp { get; }
+
     public string ModeLabel => IsFollowUp ? "排队" : "插队";
 
     public string Preview
@@ -91,20 +99,26 @@ public sealed partial class ComposerViewModel
     public void SendDuringTask() => Inject(followUp: QueueDuringTaskByDefault);
 
     [RelayCommand]
-    private void WithdrawInjection(PendingInjectionViewModel? item)
+    private async Task WithdrawInjectionAsync(PendingInjectionViewModel? item)
     {
         if (item is null || _activeTask is not { } stream) return;
         if (TemplateProvider(stream.ConversationId) is not { } agent) return;
 
-        // Pi's queue has no "remove one": empty it and put the rest back, in order.
-        var keep = PendingInjections.Where(p => !ReferenceEquals(p, item)).ToList();
-        if (!agent.TryClearQueue(stream.ConversationId)) return;
-        foreach (var pending in keep)
-            agent.TryEnqueue(stream.ConversationId, pending.Text, pending.IsFollowUp);
-        // Internal messages may already have left Pi's queue. Keep their receipt
-        // tracking; any not consumed are offered again after this turn ends.
-        PendingInjections.Remove(item);
-        Text = string.IsNullOrWhiteSpace(Text) ? item.Text : item.Text + "\n\n" + Text;
+        RemoveInjection(stream, item);
+        PiWithdrawal result;
+        try
+        {
+            result = await agent.TryWithdrawAsync(stream.ConversationId, item.Text, item.IsFollowUp);
+        }
+        catch (Exception)
+        {
+            // The sidecar is gone, and the turn with it.
+            result = PiWithdrawal.TurnEnded;
+        }
+
+        // Read before the withdrawal reached Pi: the transcript already shows it as sent.
+        if (result == PiWithdrawal.AlreadyTaken) return;
+        RestoreToInput(item.Text);
         FocusRequested?.Invoke();
     }
 
@@ -116,22 +130,32 @@ public sealed partial class ComposerViewModel
         if (TemplateProvider(stream.ConversationId) is not { } agent) return;
 
         Text = string.Empty;
-        PendingInjections.Add(new PendingInjectionViewModel(text, followUp));
+        var item = new PendingInjectionViewModel(text, followUp);
+        stream.Injections.Add(item);
+        PendingInjections.Add(item);
         // A refusal means the turn is settling. The chip stays, and whatever is
         // still waiting when the stream ends is sent as the next message.
         agent.TryEnqueue(stream.ConversationId, text, followUp);
     }
 
-    /// <summary>Mirror Pi's queue. Notifications ride the same queue but are not the
-    /// user's, so they get no chip.</summary>
-    private void ApplyQueueState(BackgroundStreamTask stream, QueueStateDelta queue)
+    private void RemoveInjection(BackgroundStreamTask stream, PendingInjectionViewModel item)
     {
-        if (!ReferenceEquals(stream, _activeTask)) return;
+        stream.Injections.Remove(item);
+        if (ReferenceEquals(stream, _activeTask)) PendingInjections.Remove(item);
+    }
+
+    /// <summary>Show the chips of the stream now on screen.</summary>
+    private void ShowInjections(BackgroundStreamTask stream)
+    {
         PendingInjections.Clear();
-        foreach (var text in queue.Steering.Where(IsUserText))
-            PendingInjections.Add(new PendingInjectionViewModel(text, followUp: false));
-        foreach (var text in queue.FollowUp.Where(IsUserText))
-            PendingInjections.Add(new PendingInjectionViewModel(text, followUp: true));
+        foreach (var item in stream.Injections) PendingInjections.Add(item);
+    }
+
+    private static string TakeInjections(BackgroundStreamTask stream)
+    {
+        var text = string.Join("\n\n", stream.Injections.Select(p => p.Text));
+        stream.Injections.Clear();
+        return text;
     }
 
     private static bool IsUserText(string text) =>
@@ -174,11 +198,12 @@ public sealed partial class ComposerViewModel
 
         stream.AssistantMessage = next;
         stream.RunningTools.Clear();
+        // Identical texts are interchangeable; the oldest goes, as Pi delivers in order.
+        var match = stream.Injections.FirstOrDefault(p => p.Text == text.Trim());
+        if (match is not null) RemoveInjection(stream, match);
         if (ReferenceEquals(_activeTask, stream))
         {
             _activeAssistantMsg = next;
-            var match = PendingInjections.FirstOrDefault(p => p.Text == text.Trim());
-            if (match is not null) PendingInjections.Remove(match);
             MessageSubmitted?.Invoke();
         }
         return next;
@@ -192,21 +217,43 @@ public sealed partial class ComposerViewModel
 
     /// <summary>
     /// What was typed but never taken in, once the turn is over: back into the input
-    /// box when the user stopped the turn, sent as the next message otherwise.
+    /// box when the user stopped the turn, sent as the next message otherwise. A turn
+    /// that ended in the background keeps it until its conversation is opened.
     /// </summary>
     private void FlushPendingInjections(BackgroundStreamTask stream, bool cancelled)
     {
-        if (!ReferenceEquals(stream, _activeTask) || PendingInjections.Count == 0) return;
-        var leftover = string.Join("\n\n", PendingInjections.Select(p => p.Text));
+        if (stream.Injections.Count == 0) return;
+        var leftover = TakeInjections(stream);
+        if (!ReferenceEquals(stream, _activeTask))
+        {
+            _unsentInjections[stream.ConversationId] =
+                _unsentInjections.TryGetValue(stream.ConversationId, out var earlier)
+                    ? earlier + "\n\n" + leftover
+                    : leftover;
+            return;
+        }
         PendingInjections.Clear();
 
         if (cancelled)
         {
-            Text = string.IsNullOrWhiteSpace(Text) ? leftover : leftover + "\n\n" + Text;
+            RestoreToInput(leftover);
             return;
         }
         _ = SendLeftoverAsync(leftover);
     }
+
+    /// <summary>Messages a turn in the background never took in.</summary>
+    private readonly Dictionary<string, string> _unsentInjections = new(StringComparer.Ordinal);
+
+    /// <summary>Put back into the input box what a background turn of
+    /// <paramref name="conversationId"/> never took in.</summary>
+    public void RestoreUnsentInjections(string conversationId)
+    {
+        if (_unsentInjections.Remove(conversationId, out var leftover)) RestoreToInput(leftover);
+    }
+
+    private void RestoreToInput(string text) =>
+        Text = string.IsNullOrWhiteSpace(Text) ? text : text + "\n\n" + Text;
 
     private async Task SendLeftoverAsync(string text)
     {
@@ -214,7 +261,7 @@ public sealed partial class ComposerViewModel
         await Task.Yield();
         if (IsSending)
         {
-            Text = string.IsNullOrWhiteSpace(Text) ? text : text + "\n\n" + Text;
+            RestoreToInput(text);
             return;
         }
         var draft = Text;
