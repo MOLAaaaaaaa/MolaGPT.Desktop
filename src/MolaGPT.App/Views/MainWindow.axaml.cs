@@ -863,7 +863,7 @@ public partial class MainWindow : MolaWindow
         RefreshAccountState();
         if (!_settings.IsLoggedIn) return;
 
-        _ = _main.RefreshQuotaAsync();
+        _ = _main.RefreshUsageAsync(force: true);
         _ = SyncAfterLoginAsync();
     }
 

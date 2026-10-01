@@ -594,7 +594,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         "medium" => "中",
         "high" => "高",
         "xhigh" => "极高",
-        "max" => "最大",
+        "max" => "最高",
         "ultra" => "Ultra",
         // Empty/null: blank so the button doesn't lie about an unset value.
         null or "" => string.Empty,

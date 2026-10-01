@@ -636,6 +636,29 @@
     <Setter Property="ArcBrush" Value="{DynamicResource Brush.Error}" />
   </Style>
 
+  <!-- Plan usage under the gauge: same colours as the ring, keyed to what is
+       left rather than what is used. -->
+  <Style Selector="ProgressBar.planusage">
+    <Setter Property="Height" Value="4" />
+    <Setter Property="MinHeight" Value="4" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="CornerRadius" Value="2" />
+    <Setter Property="Background" Value="{DynamicResource Brush.Border}" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+  </Style>
+  <Style Selector="ProgressBar.planusage.low">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Warning}" />
+  </Style>
+  <Style Selector="ProgressBar.planusage.empty">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
+  </Style>
+  <Style Selector="TextBlock.planusage.low">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Warning.Foreground}" />
+  </Style>
+  <Style Selector="TextBlock.planusage.empty">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
+  </Style>
+
   <!-- ============================== TextLink ============================ -->
   <!-- The other class three windows each defined privately and the image
        workbench used without any rule in scope, so its 「收起结果」 came out as

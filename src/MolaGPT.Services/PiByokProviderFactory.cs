@@ -1,4 +1,5 @@
 ﻿using System.Net.Http;
+using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Tools;
@@ -50,7 +51,26 @@ public sealed class PiByokProviderFactory
                 PiWorkLlmShim.AuthStyle.GoogleApiKey,
                 AuthHeader: false,
                 PathMode: PiWorkLlmShim.TargetPathMode.AppendInboundSuffix),
+
+            // A ChatGPT plan, through either sign-in (see ChatGptAccount). No base URL
+            // or key of its own — both come from the signed-in account, per turn.
+            ["chatgpt"] = new("openai-responses", "responses", PiWorkLlmShim.AuthStyle.Bearer),
         };
+
+    /// <summary>
+    /// Fields a ChatGPT plan request must not carry; OpenAI rejects the request
+    /// over any of them. Pi's own OpenAI provider omits the same set when it sees a
+    /// ChatGPT token, but behind the shim it cannot see one. The list is the
+    /// official flow's; the Codex backend was checked against it and refuses
+    /// <c>max_output_tokens</c>, <c>temperature</c> and <c>prompt_cache_retention</c>
+    /// the same way.
+    /// </summary>
+    private static readonly string[] ChatGptPlanDrops =
+    [
+        "background", "conversation", "max_output_tokens", "max_tool_calls", "metadata", "moderation",
+        "multi_agent", "prompt", "prompt_cache_retention", "prompt_cache_options", "safety_identifier",
+        "temperature", "top_logprobs", "top_p", "truncation", "user"
+    ];
 
     /// <summary>Wire defaults for rows that leave the api path blank.</summary>
     private const string DefaultChatPath = "v1/chat/completions";
@@ -66,6 +86,10 @@ public sealed class PiByokProviderFactory
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly PiRuntime _runtime;
     private readonly Action<string>? _log;
+    private readonly ChatGptAccount? _chatGpt;
+
+    /// <summary>The account ChatGPT rows draw on; the settings page signs it in.</summary>
+    public ChatGptAccount? ChatGpt => _chatGpt;
 
     /// <summary>Live Pi providers by provider id, so re-registering one (a settings
     /// save) tears down the sidecars belonging to the copy it replaces.</summary>
@@ -76,8 +100,10 @@ public sealed class PiByokProviderFactory
         IChatToolHost toolHost,
         IHttpClientFactory httpClientFactory,
         PiRuntime runtime,
-        Action<string>? log = null)
+        Action<string>? log = null,
+        ChatGptAccount? chatGpt = null)
     {
+        _chatGpt = chatGpt;
         _locator = locator;
         _toolHost = toolHost;
         _httpClientFactory = httpClientFactory;
@@ -120,7 +146,18 @@ public sealed class PiByokProviderFactory
         IReadOnlyList<KeyValuePair<string, string>>? headers = null)
     {
         if (!Eligible.TryGetValue(type, out var shape)) return null;
-        if (type.Equals("gemini", StringComparison.Ordinal))
+        var chatGpt = type.Equals("chatgpt", StringComparison.Ordinal);
+        if (chatGpt)
+        {
+            // Registered whether or not anyone is signed in right now: the row is
+            // the user's choice, and a turn on it says how to sign in rather than
+            // the model silently vanishing from the picker.
+            if (_chatGpt is null) return null;
+            baseUrl = ChatGptAccount.ApiBase;
+            apiPath = null;
+            apiKey = "-";
+        }
+        else if (type.Equals("gemini", StringComparison.Ordinal))
         {
             // Saved Gemini rows use Google's OpenAI-compatible root so the settings
             // page can list models. Pi speaks the native protocol and must never
@@ -167,6 +204,12 @@ public sealed class PiByokProviderFactory
         }
 
         var key = apiKey!;
+        var account = chatGpt ? _chatGpt : null;
+        Func<CancellationToken, Task<string?>> token = account is null
+            ? _ => Task.FromResult<string?>(key)
+            : async ct => await account.GetAccessTokenAsync(ct).ConfigureAwait(false)
+                          ?? throw new PiWorkLlmShim.CredentialUnavailableException(
+                              account.LastError ?? "未登录 ChatGPT，请在「设置 → 模型服务」中登录。");
         var config = new PiWorkProviderConfig(
             id,
             displayName,
@@ -182,18 +225,27 @@ public sealed class PiByokProviderFactory
                 models[0].Id,
                 shape.Api,
                 shape.AuthHeader),
+            // A ChatGPT row follows whichever sign-in the account holds at the
+            // start of the turn: the two reach different endpoints.
             request => new PiProviderCreds(
-                endpoint,
-                _ => Task.FromResult<string?>(key),
+                account?.Endpoint ?? endpoint,
+                token,
                 request.ModelId,
                 Api: shape.Api,
+                // OpenAI refusing the token means the grant is gone; the next turn
+                // should ask for a sign-in, not fail the same way.
+                OnUnauthorized: account is null ? null : () => account.Expire("ChatGPT 登录已失效，请重新登录。"),
                 Auth: shape.Auth,
-                Headers: headers,
+                Headers: account?.RequestHeaders() ?? headers,
                 // Custom parameters are per model, so they are resolved per turn
                 // rather than baked in when the provider is built.
                 ExtraBody: models.FirstOrDefault(m =>
                     m.Id.Equals(request.ModelId, StringComparison.OrdinalIgnoreCase))?.CustomBody,
-                PathMode: shape.PathMode));
+                DropBodyKeys: account is null ? null : ChatGptPlanDrops,
+                PathMode: shape.PathMode,
+                StreamOnly: account is not null,
+                AdaptBody: account?.Kind is { } kind ? body => ChatGptAccount.AdaptBody(body, kind) : null,
+                ResponseReceived: account is null ? null : account.ReadUsage));
 
         var provider = new PiWorkProvider(
             config,

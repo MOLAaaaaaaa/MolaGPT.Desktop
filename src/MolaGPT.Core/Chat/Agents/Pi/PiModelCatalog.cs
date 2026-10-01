@@ -60,7 +60,7 @@ public static class PiModelCatalog
                 ["contextWindow"] = ModelContextWindows.ResolveOrDefault(model.Id, model.ContextWindow),
                 ["maxTokens"] = model.MaxOutputTokens is > 0 ? model.MaxOutputTokens.Value : DefaultMaxTokens,
             };
-            if (BuildThinkingLevelMap(api) is { } levelMap) entry["thinkingLevelMap"] = levelMap;
+            if (BuildThinkingLevelMap(model, api) is { } levelMap) entry["thinkingLevelMap"] = levelMap;
             if (compat is not null) entry["compat"] = compat;
             return entry;
         }).ToArray();
@@ -75,8 +75,14 @@ public static class PiModelCatalog
     /// Responses keeps the existing mapping because its default off expression is
     /// effort: none, which some endpoints reject.
     /// </summary>
-    private static Dictionary<string, object?>? BuildThinkingLevelMap(string api) =>
-        api == "openai-responses" ? new Dictionary<string, object?>(StringComparer.Ordinal) { ["off"] = null } : null;
+    private static Dictionary<string, object?>? BuildThinkingLevelMap(ProviderModel model, string api)
+    {
+        if (api != "openai-responses") return null;
+        var map = new Dictionary<string, object?>(StringComparer.Ordinal) { ["off"] = null };
+        foreach (var level in ThinkingEffortLevels.Normalize(model.ThinkingConfig?.EffortLevels))
+            if (level is "xhigh" or "max") map[level] = level;
+        return map;
+    }
 
     /// <summary>Pi reads all four rates unconditionally, so a missing cache price
     /// falls back to the matching base rate rather than to zero — charging nothing

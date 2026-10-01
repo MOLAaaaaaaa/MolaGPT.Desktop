@@ -23,13 +23,18 @@ public enum OneShotWireApi
 /// </summary>
 /// <param name="TokenProvider">Resolved per call rather than captured, because the
 /// MolaGPT account JWT rotates.</param>
+/// <param name="DropBodyKeys">Fields the endpoint rejects.</param>
+/// <param name="StreamOnly">The endpoint answers streamed requests only (Sign in
+/// with ChatGPT), so the answer is read from the event stream.</param>
 public sealed record OneShotTarget(
     string Endpoint,
     Func<CancellationToken, Task<string?>> TokenProvider,
     string DisplayName,
     OneShotWireApi Api = OneShotWireApi.OpenAiCompletions,
     IReadOnlyList<KeyValuePair<string, string>>? Headers = null,
-    IReadOnlyDictionary<string, JsonElement>? ExtraBody = null);
+    IReadOnlyDictionary<string, JsonElement>? ExtraBody = null,
+    IReadOnlyList<string>? DropBodyKeys = null,
+    bool StreamOnly = false);
 
 /// <summary>
 /// A provider that can describe how to reach its upstream endpoint for a single
@@ -110,6 +115,12 @@ public sealed class OneShotCompletionClient
         };
         ApplyThinking(body, target.Api, modelId, useThinking, thinkingKind, target.Endpoint);
         CustomRequestParams.ApplyBody(body, target.ExtraBody);
+        foreach (var key in target.DropBodyKeys ?? []) body.Remove(key);
+        if (target.StreamOnly)
+        {
+            body["stream"] = true;
+            body["store"] = false;
+        }
 
         using var req = new HttpRequestMessage(HttpMethod.Post, target.Endpoint)
         {
@@ -139,6 +150,9 @@ public sealed class OneShotCompletionClient
         using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct)
             .ConfigureAwait(false);
         await ChatApiErrorHelper.EnsureSuccessAsync(resp, target.DisplayName, ct).ConfigureAwait(false);
+
+        if (target.StreamOnly)
+            return await ReadResponsesStreamAsync(resp, target.DisplayName, ct).ConfigureAwait(false);
 
         await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
@@ -380,6 +394,47 @@ public sealed class OneShotCompletionClient
         root.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Array
             ? ConcatTextParts(content, "text", "text").Trim()
             : string.Empty;
+
+    /// <summary>
+    /// The answer from a Responses event stream. A stream that ends without
+    /// <c>response.completed</c> did not finish, whatever text it had produced.
+    ///
+    /// The text is collected from the deltas as well, because the final response
+    /// object is not always complete: the Codex backend sends it with an empty
+    /// <c>output</c>, having streamed every item already.
+    /// </summary>
+    private static async Task<string> ReadResponsesStreamAsync(
+        HttpResponseMessage response, string displayName, CancellationToken ct)
+    {
+        await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var reader = new StreamReader(stream);
+        var streamed = new System.Text.StringBuilder();
+        while (await reader.ReadLineAsync(ct).ConfigureAwait(false) is { } line)
+        {
+            if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
+            var data = line[5..].Trim();
+            if (data.Length == 0 || data == "[DONE]") continue;
+            using var doc = JsonDocument.Parse(data);
+            var root = doc.RootElement;
+            var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
+            if (type == "response.output_text.delta"
+                && root.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.String)
+                streamed.Append(delta.GetString());
+            if (type == "response.completed" && root.TryGetProperty("response", out var completed))
+            {
+                var text = ReadResponsesText(completed);
+                return text.Length > 0 ? text : streamed.ToString().Trim();
+            }
+            if (type is "response.failed" or "error")
+            {
+                var error = root.TryGetProperty("response", out var failed) && failed.TryGetProperty("error", out var e) ? e
+                    : root.TryGetProperty("error", out var direct) ? direct : root;
+                var message = error.TryGetProperty("message", out var m) ? m.GetString() : null;
+                throw new InvalidOperationException($"{displayName}失败：{message ?? data}");
+            }
+        }
+        throw new InvalidOperationException($"{displayName}的回答没有结束就中断了。");
+    }
 
     private static string ReadResponsesText(JsonElement root)
     {

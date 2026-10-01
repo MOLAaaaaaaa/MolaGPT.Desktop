@@ -193,7 +193,9 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             creds.DropBodyKeys ?? PiEndpointQuirks.DropBodyKeysFor(creds.Endpoint),
             creds.PathMode,
             new PiWorkLlmShim.GenerationOptions(creds.Api, request.Temperature, request.TopP, request.MaxTokens),
-            request.RolePrompt is null ? null : body => Interlocked.Exchange(ref promptTrace, RolePromptTrace.Read(creds.Api, body)));
+            request.RolePrompt is null ? null : body => Interlocked.Exchange(ref promptTrace, RolePromptTrace.Read(creds.Api, body)),
+            creds.AdaptBody,
+            creds.ResponseReceived);
 
         // Waits when every slot is busy, which is the point: three turns really are
         // in flight and a fourth process costs more than the wait.
@@ -366,7 +368,9 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             creds.ExtraBody,
             creds.Auth,
             creds.DropBodyKeys ?? PiEndpointQuirks.DropBodyKeysFor(creds.Endpoint),
-            creds.PathMode);
+            creds.PathMode,
+            AdaptBody: creds.AdaptBody,
+            ResponseReceived: creds.ResponseReceived);
 
         return await _runtime.AcquireAsync(
             _config.Spec,
@@ -441,7 +445,9 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                 _ => OneShotWireApi.OpenAiCompletions,
             },
             creds.Headers,
-            creds.ExtraBody);
+            creds.ExtraBody,
+            creds.DropBodyKeys,
+            creds.StreamOnly);
     }
 
     /// <summary>Restore the selected history before an explicit session operation.</summary>
@@ -958,12 +964,10 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     /// The turn's reasoning setting as one of Pi's thinking levels, which is what
     /// Pi's own loop reads.
     ///
-    /// MolaGPT offers two levels Pi does not — <c>xhigh</c> and <c>max</c> — and Pi
-    /// only accepts those from a model that declares a <c>thinkingLevelMap</c>,
-    /// which ours do not. They are folded into <c>high</c> here rather than sent
-    /// and silently clamped somewhere further down. Google's level-only Gemini
-    /// models reject Pi's <c>off</c>/<c>minimal</c> value, so <c>low</c> is their
-    /// supported floor.
+    /// Responses models declare their higher levels in <c>thinkingLevelMap</c>,
+    /// so Pi can send them unchanged. Other dialects keep their existing mapping.
+    /// Google's level-only Gemini models reject Pi's <c>off</c>/<c>minimal</c>
+    /// value, so <c>low</c> is their supported floor.
     /// </summary>
     internal static string ResolveThinkingLevel(ChatRequest request, string api)
     {
@@ -975,6 +979,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         {
             "minimal" when google => "low",
             "minimal" or "low" or "medium" or "high" => effort,
+            "xhigh" or "max" when api == "openai-responses" => effort,
             "xhigh" or "max" => "high",
             // Thinking on without a chosen effort, or a level from a vocabulary Pi
             // does not share: take its middle rather than guessing at an extreme.
@@ -1343,6 +1348,12 @@ public sealed record PiWorkProviderConfig(
 /// <param name="DropBodyKeys">Request-body keys this endpoint rejects outright.
 /// See <see cref="PiEndpointQuirks"/> for why the sidecar cannot work these out
 /// for itself.</param>
+/// <param name="StreamOnly">The endpoint answers streamed requests only, so a
+/// one-shot call has to stream too.</param>
+/// <param name="AdaptBody">Last change to an agent request before it leaves, for
+/// an endpoint that takes a different shape of the same API.</param>
+/// <param name="ResponseReceived">Sees each upstream response, for figures the
+/// endpoint reports in headers.</param>
 public sealed record PiProviderCreds(
     string Endpoint,
     Func<CancellationToken, Task<string?>> TokenProvider,
@@ -1354,7 +1365,10 @@ public sealed record PiProviderCreds(
     IReadOnlyDictionary<string, JsonElement>? ExtraBody = null,
     PiWorkLlmShim.AuthStyle Auth = PiWorkLlmShim.AuthStyle.Bearer,
     IReadOnlyList<string>? DropBodyKeys = null,
-    PiWorkLlmShim.TargetPathMode PathMode = PiWorkLlmShim.TargetPathMode.Fixed);
+    PiWorkLlmShim.TargetPathMode PathMode = PiWorkLlmShim.TargetPathMode.Fixed,
+    bool StreamOnly = false,
+    Action<System.Text.Json.Nodes.JsonObject>? AdaptBody = null,
+    Action<HttpResponseMessage>? ResponseReceived = null);
 
 /// <summary>What became of a message taken back out of a running turn.</summary>
 public enum PiWithdrawal

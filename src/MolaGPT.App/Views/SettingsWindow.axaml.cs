@@ -249,6 +249,9 @@ public partial class SettingsWindow : MolaContentWindow
         PART_TestProvider.Click += OnTestProvider;
         PART_ProviderPreset.SelectionChanged += OnProviderPresetChanged;
         PART_ProviderType.SelectionChanged += OnProviderTypeChanged;
+        PART_ProviderApiSource.IsCheckedChanged += OnProviderSourceChanged;
+        PART_ProviderChatGptSource.IsCheckedChanged += OnProviderSourceChanged;
+        InitializeChatGpt();
         PART_ProviderImageFormat.SelectionChanged += OnProviderImageFormatChanged;
         PART_ProviderBaseUrl.TextChanged += OnProviderEndpointChanged;
         PART_ProviderHttps.IsCheckedChanged += OnProviderHttpsChanged;
@@ -302,6 +305,7 @@ public partial class SettingsWindow : MolaContentWindow
         Activated += (_, _) =>
         {
             _settings.RefreshSubagentProviderModels();
+            _settings.RefreshReviewProviderModels();
             _ = RefreshRuntimeStatusAsync();
         };
 
@@ -803,6 +807,7 @@ public partial class SettingsWindow : MolaContentWindow
         // be a guess, and "inactive" is the one that would worry people wrongly.
         if (_providerRegistry is null) return null;
         if (!entry.Enabled) return "已停用";
+        if (entry.Type == ChatGptType && ChatGpt is { IsSignedIn: false }) return "未登录";
         if (_providerRegistry.Providers.Any(provider =>
                 string.Equals(provider.Id, entry.Id, StringComparison.Ordinal)))
             return null;
@@ -828,6 +833,8 @@ public partial class SettingsWindow : MolaContentWindow
         _loadingProviderForm = true;
         try
         {
+            PART_ProviderChatGptSource.IsChecked = existing?.Type == ChatGptType && _editingProviderPurpose != "image";
+            PART_ProviderApiSource.IsChecked = !EditingChatGpt;
             SetProviderPresetItems();
             if (existing is null)
             {
@@ -877,6 +884,8 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void CloseProviderEditor()
     {
+        _chatGptSignIn?.Cancel();
+        PART_ChatGptError.IsVisible = false;
         CloseDetectedModels();
         PART_ProviderEditor.IsVisible = false;
         PART_ProviderOverview.IsVisible = true;
@@ -990,6 +999,7 @@ public partial class SettingsWindow : MolaContentWindow
 
         _settings.RefreshTitleProviderModels();
         _settings.RefreshSubagentProviderModels();
+        _settings.RefreshReviewProviderModels();
         _settings.RefreshMemoryProviderModels();
         _settings.RefreshVisionProviderModels();
         _settings.RefreshImageGenerationProviderModels();
@@ -1075,6 +1085,9 @@ public partial class SettingsWindow : MolaContentWindow
             entry = default!;
             return false;
         }
+        // A ChatGPT row has no address of its own; the account decides where it goes.
+        if (EditingChatGpt)
+            baseUrl = OpenAiBaseUrl;
         if (baseUrl.Length == 0)
         {
             FailProviderEdit("接入地址不能为空。");
@@ -1107,23 +1120,26 @@ public partial class SettingsWindow : MolaContentWindow
             ? ImageApiFormat.OpenAiChatImage
             : image ? ImageApiFormat.OpenAiImages : null;
 
+        // The hidden fields of a ChatGPT row may still hold what was typed before
+        // the connection method was switched; none of it applies.
+        var chatGpt = EditingChatGpt;
         entry = new ProviderEntry(
             _editingProvider?.Id ?? Guid.NewGuid().ToString("N"),
-            ProviderTypes[Math.Max(0, PART_ProviderType.SelectedIndex)],
+            EditingProviderType,
             name,
             normalizedBaseUrl,
-            string.IsNullOrEmpty(PART_ProviderApiKey.Text) ? null : PART_ProviderApiKey.Text,
+            chatGpt || string.IsNullOrEmpty(PART_ProviderApiKey.Text) ? null : PART_ProviderApiKey.Text,
             models,
             Enabled: true,
             SortOrder: _editingProvider?.SortOrder ?? _settings.Providers.Count,
             Purpose: _editingProviderPurpose,
-            ApiPath: string.IsNullOrWhiteSpace(PART_ProviderApiPath.Text) ? null : PART_ProviderApiPath.Text.Trim(),
+            ApiPath: chatGpt || string.IsNullOrWhiteSpace(PART_ProviderApiPath.Text) ? null : PART_ProviderApiPath.Text.Trim(),
             ImageEditPath: image && !ImageApiFormat.IsChatImage(imageFormat)
                 && !string.IsNullOrWhiteSpace(PART_ProviderImageEditPath.Text)
                     ? PART_ProviderImageEditPath.Text.Trim()
                     : null,
             ImageFormat: imageFormat,
-            CustomHeaders: headers.Count > 0 ? headers : null);
+            CustomHeaders: !chatGpt && headers.Count > 0 ? headers : null);
         return true;
     }
 
@@ -1173,6 +1189,7 @@ public partial class SettingsWindow : MolaContentWindow
         if (_providerRegistry is not null)
             ProviderRestorer.RemoveEntry(entry.Id, _providerRegistry, _piByokProviderFactory);
         _settings.RefreshSubagentProviderModels();
+        _settings.RefreshReviewProviderModels();
         RefreshProviders();
         RefreshSpecializedModelChoices();
     }
@@ -1214,7 +1231,7 @@ public partial class SettingsWindow : MolaContentWindow
     /// provider type instead, matching the preset a new provider of the same
     /// type would get.</summary>
     private string DefaultThinkingKindForProvider() =>
-        (_editingProvider?.Type ?? ProviderTypes[Math.Max(0, PART_ProviderType.SelectedIndex)]) switch
+        EditingProviderType switch
         {
             "anthropic" => nameof(ThinkingParamKind.AnthropicAdaptive),
             "gemini" => nameof(ThinkingParamKind.GeminiThinkingLevel),
@@ -1302,9 +1319,39 @@ public partial class SettingsWindow : MolaContentWindow
         return Math.Max(0, index);
     }
 
+    private string EditingProviderType => EditingChatGpt
+        ? ChatGptType
+        : ProviderTypes[Math.Max(0, PART_ProviderType.SelectedIndex)];
+
+    private void OnProviderSourceChanged(object? sender, RoutedEventArgs e)
+    {
+        if (_loadingProviderForm || sender is not RadioButton { IsChecked: true }) return;
+
+        if (sender == PART_ProviderApiSource) PART_ProviderChatGptSource.IsChecked = false;
+
+        _chatGptSignIn?.Cancel();
+        PART_ChatGptError.IsVisible = false;
+        PART_ProviderError.IsVisible = false;
+        PART_ProviderStatus.IsVisible = false;
+        CloseDetectedModels();
+        _providerModels.Clear();
+
+        if (PART_ProviderPreset.SelectedItem is ProviderPresetRow preset)
+        {
+            var name = PART_ProviderName.Text?.Trim();
+            if (EditingChatGpt && (string.IsNullOrEmpty(name) || name == preset.Name))
+                PART_ProviderName.Text = "ChatGPT";
+            else if (!EditingChatGpt && name == "ChatGPT")
+                PART_ProviderName.Text = preset.Name;
+        }
+        UpdateProviderPurposeUi();
+        UpdateProviderEndpointPreview();
+    }
+
     private void UpdateProviderPurposeUi()
     {
         var image = _editingProviderPurpose == "image";
+        PART_ProviderSourceField.IsVisible = !image;
         PART_ProviderPurpose.Text = image ? "图像服务" : "对话服务";
         PART_ProviderImageFields.IsVisible = image;
         PART_ProviderApiPathLabel.Text = image ? "生成路径" : "对话路径";
@@ -1319,9 +1366,10 @@ public partial class SettingsWindow : MolaContentWindow
 
         var chatImage = image && PART_ProviderImageFormat.SelectedIndex == 1;
         PART_ProviderImageEditPathField.IsVisible = image && !chatImage;
-        PART_FetchEditingProviderPricing.IsVisible = !image;
-        PART_AddDetectedModels.Content = image ? "添加选中模型" : "添加并获取价格";
+        PART_FetchEditingProviderPricing.IsVisible = !image && !EditingChatGpt;
+        PART_AddDetectedModels.Content = image || EditingChatGpt ? "添加选中模型" : "添加并获取价格";
         foreach (var model in _providerModels) model.IsImageProvider = image;
+        UpdateChatGptUi();
     }
 
     private static string DefaultProviderApiPath(string? purpose, string? imageFormat, string? type)
@@ -1345,7 +1393,7 @@ public partial class SettingsWindow : MolaContentWindow
             PART_ProviderApiPath.Text = DefaultProviderApiPath(
                 _editingProviderPurpose,
                 PART_ProviderImageFormat.SelectedIndex == 1 ? ImageApiFormat.OpenAiChatImage : ImageApiFormat.OpenAiImages,
-                ProviderTypes[Math.Max(0, PART_ProviderType.SelectedIndex)]);
+                EditingProviderType);
         UpdateProviderPurposeUi();
         UpdateProviderEndpointPreview();
     }
@@ -1389,6 +1437,7 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void UpdateProviderEndpointPreview()
     {
+        if (EditingChatGpt) return;
         var baseUrl = PART_ProviderBaseUrl.Text?.Trim() ?? string.Empty;
         if (baseUrl.Length == 0)
         {
@@ -1402,7 +1451,7 @@ public partial class SettingsWindow : MolaContentWindow
         if (_editingProviderPurpose != "image")
         {
             var fallback = DefaultProviderApiPath(
-                "chat", null, ProviderTypes[Math.Max(0, PART_ProviderType.SelectedIndex)]);
+                "chat", null, EditingProviderType);
             PART_ProviderEndpointPreview.Text = "实际请求地址：" + Join(PART_ProviderApiPath.Text, fallback);
             return;
         }
@@ -1419,6 +1468,7 @@ public partial class SettingsWindow : MolaContentWindow
         if (_byokHttpFactory is null || !TryCollectProvider(out var entry)) return;
 
         PART_DetectProviderModels.IsEnabled = false;
+        PART_ProviderSourceField.IsEnabled = false;
         PART_DetectProviderModels.Content = "获取中...";
         ShowProviderStatus("正在获取模型列表...");
         try
@@ -1428,6 +1478,12 @@ public partial class SettingsWindow : MolaContentWindow
             var existing = _providerModels.Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (var model in models)
             {
+                if (entry.Type == ChatGptType && model.EffortLevels is { Count: > 0 }
+                    && _providerModels.FirstOrDefault(row => row.Id.Equals(model.Id, StringComparison.OrdinalIgnoreCase)) is { } row)
+                {
+                    row.EffortLevelsText = string.Join(", ", model.EffortLevels);
+                    row.RefreshEffortLevelOptions();
+                }
                 var alreadyExists = existing.Contains(model.Id);
                 _detectedModels.Add(new DetectedModelRow(model, false, !alreadyExists,
                     alreadyExists ? "已存在" : string.Empty));
@@ -1448,6 +1504,7 @@ public partial class SettingsWindow : MolaContentWindow
         {
             PART_DetectProviderModels.Content = "自动获取";
             PART_DetectProviderModels.IsEnabled = true;
+            PART_ProviderSourceField.IsEnabled = true;
         }
     }
 
@@ -1585,7 +1642,7 @@ public partial class SettingsWindow : MolaContentWindow
             }
 
             var targets = _settings.Providers
-                .Where(provider => !SettingsViewModel.IsImagePurpose(provider.Purpose))
+                .Where(provider => !SettingsViewModel.IsImagePurpose(provider.Purpose) && provider.Type != ChatGptType)
                 .ToList();
             var match = ModelsDevCatalog.Match(catalogProviders,
                 targets.SelectMany(provider => provider.Models).Select(model => model.Id));
@@ -1791,7 +1848,7 @@ public partial class SettingsWindow : MolaContentWindow
         foreach (var row in added) _providerModels.Add(row);
 
         var priced = 0;
-        if (_editingProviderPurpose != "image" && added.Count > 0)
+        if (_editingProviderPurpose != "image" && !EditingChatGpt && added.Count > 0)
         {
             PART_AddDetectedModels.IsEnabled = false;
             PART_AddDetectedModels.Content = "获取价格中...";
@@ -1815,7 +1872,7 @@ public partial class SettingsWindow : MolaContentWindow
         CloseDetectedModels();
         ShowProviderStatus(selected.Count == 0
             ? "未选择模型。"
-            : _editingProviderPurpose == "image"
+            : _editingProviderPurpose == "image" || EditingChatGpt
                 ? $"已添加 {selected.Count} 个模型，保存后生效。"
             : priced > 0
                 ? $"已添加 {selected.Count} 个模型，并获取 {priced} 个模型的价格，保存后生效。"
@@ -1894,6 +1951,7 @@ public partial class SettingsWindow : MolaContentWindow
 
     private async Task<List<ProviderModelEntry>> FetchProviderModelsAsync(ProviderEntry entry)
     {
+        if (entry.Type == ChatGptType) return await FetchChatGptModelsAsync();
         var preset = FindProviderPreset(entry);
         var baseUrl = NetworkSecurity.RequireHttpOrHttpsBaseUrl(entry.BaseUrl ?? DefaultProviderBaseUrl(entry.Type), $"{entry.Name} 接入地址");
         var modelsPath = preset?.ModelsPath ?? (entry.Type == "gemini" ? "models" : "v1/models");
@@ -3241,7 +3299,7 @@ public sealed record ProviderCardRow(ProviderEntry Entry, string? InactiveReason
 {
     public string Id => Entry.Id;
     public string Name => Entry.Name;
-    public string? BaseUrl => Entry.BaseUrl;
+    public string? BaseUrl => Entry.Type == "chatgpt" ? "ChatGPT 套餐" : Entry.BaseUrl;
     public int ModelCount => Entry.Models.Count;
     public bool IsInactive => InactiveReason is not null;
 }

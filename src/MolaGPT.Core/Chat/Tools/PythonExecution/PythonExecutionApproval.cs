@@ -15,13 +15,16 @@ public interface IPythonExecutionApprovalService
 /// shows the folder that will actually be granted rather than the "~/Desktop"
 /// the model wrote. Empty when the code declared nothing new, which is the
 /// common case.</param>
+/// <param name="ReviewNote">Why automatic review handed this to the user, when it
+/// ran.</param>
 public sealed record PythonExecutionApprovalRequest(
     string Code,
     string? Description,
     PythonExecutionOptions Options,
     PythonExecutionRiskAnalysis Risk,
     ToolCapability Capabilities,
-    IReadOnlyList<string>? RequestedPaths = null);
+    IReadOnlyList<string>? RequestedPaths = null,
+    string? ReviewNote = null);
 
 public enum PythonExecutionApprovalDecision
 {

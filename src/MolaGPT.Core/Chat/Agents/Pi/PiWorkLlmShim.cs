@@ -44,6 +44,8 @@ public sealed class PiWorkLlmShim : IDisposable
     /// from its compatibility detection; see <see cref="PiEndpointQuirks"/>.</param>
     /// <param name="PathMode">How <paramref name="Endpoint"/> relates to the path Pi
     /// asked for. See <see cref="TargetPathMode"/>.</param>
+    /// <param name="ResponseReceived">Sees each upstream response before its body
+    /// is relayed, for figures an endpoint reports in headers.</param>
     public sealed record ForwardTarget(
         string Endpoint,
         Func<CancellationToken, Task<string?>> TokenProvider,
@@ -54,9 +56,17 @@ public sealed class PiWorkLlmShim : IDisposable
         IReadOnlyList<string>? DropBodyKeys = null,
         TargetPathMode PathMode = TargetPathMode.Fixed,
         GenerationOptions? Generation = null,
-        Action<string>? PromptPrepared = null);
+        Action<string>? PromptPrepared = null,
+        Action<System.Text.Json.Nodes.JsonObject>? AdaptBody = null,
+        Action<HttpResponseMessage>? ResponseReceived = null);
 
     public sealed record GenerationOptions(string Api, double? Temperature, double? TopP, int? MaxTokens);
+
+    /// <summary>Thrown by a <see cref="ForwardTarget.TokenProvider"/> that has no
+    /// credential to give — signed out, or a session that has lapsed. The message
+    /// is what the user reads, so it goes back as is rather than as a relay
+    /// failure.</summary>
+    public sealed class CredentialUnavailableException(string message) : Exception(message);
 
     public enum TargetPathMode
     {
@@ -190,6 +200,12 @@ public sealed class PiWorkLlmShim : IDisposable
             using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
             var body = await reader.ReadToEndAsync().ConfigureAwait(false);
             var preparedBody = RewriteBody(body, target.ExtraBody, target.DropBodyKeys, target.Generation);
+            if (target.AdaptBody is { } adapt
+                && System.Text.Json.Nodes.JsonNode.Parse(preparedBody) is System.Text.Json.Nodes.JsonObject adapted)
+            {
+                adapt(adapted);
+                preparedBody = adapted.ToJsonString(RelaxedJson);
+            }
             for (var attempt = 0; attempt < 2; attempt++)
             {
                 target.PromptPrepared?.Invoke(preparedBody);
@@ -226,6 +242,11 @@ public sealed class PiWorkLlmShim : IDisposable
                 {
                     try { target.OnUnauthorized?.Invoke(); }
                     catch (Exception ex) { _log?.Invoke("[llm-shim] unauthorized handler: " + ex.Message); }
+                }
+                if (target.ResponseReceived is { } observe)
+                {
+                    try { observe(resp); }
+                    catch (Exception ex) { _log?.Invoke("[llm-shim] response observer: " + ex.Message); }
                 }
 
                 await using var upstreamStream = await resp.Content.ReadAsStreamAsync(_cts.Token).ConfigureAwait(false);
@@ -264,6 +285,11 @@ public sealed class PiWorkLlmShim : IDisposable
                 while (!chunk.IsEmpty);
                 return;
             }
+        }
+        catch (CredentialUnavailableException ex)
+        {
+            try { await WriteError(ctx, 401, ex.Message).ConfigureAwait(false); }
+            catch { /* client gone */ }
         }
         catch (Exception ex)
         {

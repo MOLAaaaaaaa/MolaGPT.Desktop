@@ -55,6 +55,19 @@ public sealed partial class ContextGaugeViewModel : ObservableObject
     /// from the model — see <see cref="CompactionSizes"/>.</summary>
     [ObservableProperty] private int _lastCompactionTokensAfter;
 
+    public ContextGaugeViewModel()
+    {
+        Usage.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(PlanUsageViewModel.IsVisible) or nameof(PlanUsageViewModel.Tooltip))
+                Refresh();
+        };
+    }
+
+    /// <summary>What the plan behind the model has left. Provider-scoped, so
+    /// <see cref="Reset"/> leaves it alone.</summary>
+    public PlanUsageViewModel Usage { get; } = new();
+
     /// <summary>
     /// True once there is a real reading to show. The gauge stays out of the
     /// composer entirely until then rather than sitting at 0% — an empty ring reads
@@ -65,9 +78,10 @@ public sealed partial class ContextGaugeViewModel : ObservableObject
     /// <summary>
     /// Whether the gauge belongs in the composer at all. A conversation that has
     /// compacted still warrants the ring even while the reading is unknown — that is
-    /// precisely when the user has a reason to look at it.
+    /// precisely when the user has a reason to look at it. So does a plan reading,
+    /// which exists before the first reply.
     /// </summary>
-    public bool IsVisible => IsKnown || HasCompacted || IsCompacting;
+    public bool IsVisible => IsKnown || HasCompacted || IsCompacting || Usage.IsVisible;
 
     /// <summary>0–100 for the ring geometry. 0 when unknown, which only ever reaches
     /// the view while <see cref="IsKnown"/> is false and the ring is hidden.</summary>
@@ -147,11 +161,12 @@ public sealed partial class ContextGaugeViewModel : ObservableObject
     {
         get
         {
-            if (IsCompacting) return "正在压缩";
-            if (!IsKnown) return "上下文 · " + UnknownReason;
+            var usage = Usage.IsVisible ? "\n" + Usage.Tooltip : string.Empty;
+            if (IsCompacting) return "正在压缩" + usage;
+            if (!IsKnown) return "上下文 · " + UnknownReason + usage;
 
             var third = HasCompacted ? $"\n{CompactedText}" : string.Empty;
-            return $"上下文 {SummaryText}\n{HeadroomText}{third}";
+            return $"上下文 {SummaryText}\n{HeadroomText}{third}{usage}";
         }
     }
 

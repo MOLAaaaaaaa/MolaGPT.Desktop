@@ -6,6 +6,9 @@ namespace MolaGPT.Core.Chat;
 /// Provider-agnostic chat request. Concrete IChatProvider implementations
 /// translate this into the upstream wire format (OpenAI / Anthropic / etc).
 /// </summary>
+/// <param name="Parent">The turn that delegated this one, for a sub-agent. Its
+/// messages are the user's; this request's own user message was written by the
+/// parent agent.</param>
 public sealed record ChatRequest(
     string ModelId,
     IReadOnlyList<ChatMessage> Messages,
@@ -23,7 +26,8 @@ public sealed record ChatRequest(
     IReadOnlyList<ChatMessage>? HistorySeed = null,
     string? HistoryRevision = null,
     RolePromptPlan? RolePrompt = null,
-    bool IsSubagent = false);
+    bool IsSubagent = false,
+    ChatRequest? Parent = null);
 
 /// <summary>
 /// Keys the app packs into <see cref="ChatRequest.ExtraBody"/> for its own

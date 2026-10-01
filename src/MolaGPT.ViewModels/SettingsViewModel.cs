@@ -299,6 +299,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
         RefreshTitleProviderModels();
         RefreshSubagentProviderModels();
+        RefreshReviewProviderModels();
         RefreshMemoryProviderModels();
         RefreshVisionProviderModels();
         RefreshImageGenerationProviderModels();
@@ -341,6 +342,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 SubagentMaxPerConversation = Math.Clamp(perConversation, 1, 4);
             LoadResponsePostProcessing();
             LoadMemorySettings();
+            LoadAutoReviewSettings();
             if (bool.TryParse(_settingsRepo.Get(TracksEnabledKey), out var tracksEnabled))
                 TracksEnabled = tracksEnabled;
             if (bool.TryParse(_settingsRepo.Get(CompletionNotificationKey), out var completionNotification))
@@ -956,6 +958,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         RefreshVisionProviderModels();
         RefreshTitleProviderModels();
         RefreshSubagentProviderModels();
+        RefreshReviewProviderModels();
         RefreshMemoryProviderModels();
         RefreshImageGenerationProviderModels();
 
@@ -1321,6 +1324,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         if (existing is not null) Providers.Remove(existing);
         RefreshTitleProviderModels();
         RefreshSubagentProviderModels();
+        RefreshReviewProviderModels();
         RefreshMemoryProviderModels();
         RefreshImageGenerationProviderModels();
 

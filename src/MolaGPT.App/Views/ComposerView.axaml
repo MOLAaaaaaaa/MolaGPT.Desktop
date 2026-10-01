@@ -486,6 +486,7 @@
                 Classes="contextgauge"
                 IsVisible="{Binding ContextGauge.IsVisible}"
                 ToolTip.Tip="{Binding ContextGauge.Tooltip}"
+                Command="{Binding ContextGauge.Usage.RefreshCommand}"
                 VerticalAlignment="Center"
                 Margin="0,0,8,0">
           <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -553,6 +554,48 @@
                                FontSize="{DynamicResource Font.Size.XSmall}"
                                Foreground="{DynamicResource Brush.Error}"
                                IsVisible="{Binding ContextGauge.HasCompactionError}" />
+                  </StackPanel>
+
+                  <!-- The plan behind the model. Follows the provider, not the
+                       conversation — see PlanUsageViewModel. -->
+                  <StackPanel Spacing="9" IsVisible="{Binding ContextGauge.Usage.IsVisible}">
+                    <Border Height="1" Background="{DynamicResource Brush.Border.Subtle}" />
+                    <TextBlock Text="{Binding ContextGauge.Usage.Title}" Classes="muted"
+                               FontSize="{DynamicResource Font.Size.XSmall}" />
+                    <ItemsControl ItemsSource="{Binding ContextGauge.Usage.Rows}">
+                      <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                          <StackPanel Spacing="10" />
+                        </ItemsPanelTemplate>
+                      </ItemsControl.ItemsPanel>
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:PlanUsageRow">
+                          <StackPanel Spacing="4">
+                            <Grid ColumnDefinitions="*,Auto">
+                              <TextBlock Text="{Binding Label}"
+                                         FontSize="{DynamicResource Font.Size.Small}" />
+                              <TextBlock Grid.Column="1" Classes="planusage"
+                                         Classes.low="{Binding IsLow}"
+                                         Classes.empty="{Binding IsEmpty}"
+                                         Text="{Binding ValueText}"
+                                         FontSize="{DynamicResource Font.Size.Small}" />
+                            </Grid>
+                            <ProgressBar Classes="planusage"
+                                         Classes.low="{Binding IsLow}"
+                                         Classes.empty="{Binding IsEmpty}"
+                                         Minimum="0" Maximum="1"
+                                         Value="{Binding UsedFraction}" />
+                            <TextBlock Text="{Binding Detail}" Classes="muted"
+                                       FontSize="{DynamicResource Font.Size.XSmall}"
+                                       IsVisible="{Binding HasDetail}" />
+                          </StackPanel>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{Binding ContextGauge.Usage.Note}"
+                               TextWrapping="Wrap"
+                               FontSize="{DynamicResource Font.Size.XSmall}"
+                               IsVisible="{Binding ContextGauge.Usage.HasNote}" />
                   </StackPanel>
                 </StackPanel>
               </Border>

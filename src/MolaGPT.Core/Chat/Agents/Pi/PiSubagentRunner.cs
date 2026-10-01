@@ -117,7 +117,8 @@ public sealed class PiSubagentRunner : ISubagentRunner
                 HistorySeed = null,
                 HistoryRevision = null,
                 RolePrompt = null,
-                IsSubagent = true
+                IsSubagent = true,
+                Parent = parent.Request
             };
 
             // The answer is what the child wrote after its last tool call; text

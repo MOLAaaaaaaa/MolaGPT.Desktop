@@ -16,7 +16,7 @@ public sealed class EffortLabelConverter : IValueConverter
             "medium" => "中",
             "high" => "高",
             "xhigh" => "极高",
-            "max" => "最大",
+            "max" => "最高",
             "ultra" => "Ultra",
             { Length: > 0 } other => other,
             _ => string.Empty

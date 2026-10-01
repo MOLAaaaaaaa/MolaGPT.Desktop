@@ -648,7 +648,7 @@
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
                         <TextBlock Classes="rowtitle" Text="启用子 Agent" />
                         <TextBlock Classes="hint" TextWrapping="Wrap"
-                                   Text="允许模型把可独立完成的任务交给子 Agent。子 Agent 不能操作浏览器，也不能执行需要授权的操作。" />
+                                   Text="允许模型把可独立完成的任务交给子 Agent。子 Agent 不能操作浏览器，也不能执行需要你确认的操作（自动审批放行的 Python 除外）。" />
                       </StackPanel>
                       <ToggleButton Grid.Column="1" Classes="settingtoggle"
                                     IsChecked="{Binding SubagentsEnabled, Mode=TwoWay}"
@@ -737,7 +737,7 @@
                                 VerticalAlignment="Top">
                       <Button Name="PART_FetchAllPricing" Classes="outline"
                               Content="获取模型价格" Padding="14,8"
-                              ToolTip.Tip="从 models.dev 为所有对话服务的模型获取单价" />
+                              ToolTip.Tip="从 models.dev 为 API 服务的模型获取单价" />
                       <Button Name="PART_AddProvider" Classes="pillprimary"
                               Content="+ 对话服务" Padding="14,8" />
                       <Button Name="PART_AddImageProvider" Classes="outline"
@@ -784,8 +784,6 @@
                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
                       <TextBlock Name="PART_ProviderEditorTitle" Classes="pagetitle"
                                  FontSize="{DynamicResource Font.Size.Heading}" />
-                      <TextBlock Classes="hint" Margin="0,2,0,0"
-                                 Text="配置服务地址、凭据和可用模型。" />
                     </StackPanel>
                     <Border Grid.Column="2" Classes="countpill" VerticalAlignment="Center">
                       <TextBlock Name="PART_ProviderPurpose" FontSize="{DynamicResource Font.Size.XSmall}"
@@ -796,25 +794,36 @@
                   <TextBlock Classes="section" Text="服务信息" Margin="2,0,2,8" />
                   <Border Classes="settingscard" Padding="16">
                     <StackPanel Spacing="14">
-                      <StackPanel>
-                        <TextBlock Classes="label" Text="快速填充" />
-                        <ComboBox Name="PART_ProviderPreset" Classes="settingsinput">
-                          <ComboBox.ItemTemplate>
-                            <DataTemplate x:DataType="v:ProviderPresetRow">
-                              <TextBlock Text="{Binding Name}" />
-                            </DataTemplate>
-                          </ComboBox.ItemTemplate>
-                        </ComboBox>
+                      <StackPanel Name="PART_ProviderSourceField" Spacing="8">
+                        <TextBlock Classes="label" Text="接入方式" />
+                        <StackPanel Orientation="Horizontal" Spacing="24">
+                          <RadioButton Name="PART_ProviderApiSource" Content="API 服务"
+                                       GroupName="providerSource" IsChecked="True" />
+                          <RadioButton Name="PART_ProviderChatGptSource" Content="ChatGPT 套餐"
+                                       GroupName="providerSource" />
+                        </StackPanel>
                       </StackPanel>
 
-                      <StackPanel>
-                        <TextBlock Classes="label" Text="协议" />
-                        <ComboBox Name="PART_ProviderType" Classes="settingsinput">
-                          <ComboBoxItem Content="OpenAI 兼容" />
-                          <ComboBoxItem Content="Anthropic" />
-                          <ComboBoxItem Content="Gemini" />
-                          <ComboBoxItem Content="OpenAI Responses" />
-                        </ComboBox>
+                      <StackPanel Name="PART_ProviderApiOptions" Spacing="14">
+                        <StackPanel>
+                          <TextBlock Classes="label" Text="快速填充" />
+                          <ComboBox Name="PART_ProviderPreset" Classes="settingsinput">
+                            <ComboBox.ItemTemplate>
+                              <DataTemplate x:DataType="v:ProviderPresetRow">
+                                <TextBlock Text="{Binding Name}" />
+                              </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                          </ComboBox>
+                        </StackPanel>
+                        <StackPanel>
+                          <TextBlock Classes="label" Text="协议" />
+                          <ComboBox Name="PART_ProviderType" Classes="settingsinput">
+                            <ComboBoxItem Content="OpenAI 兼容" />
+                            <ComboBoxItem Content="Anthropic" />
+                            <ComboBoxItem Content="Gemini" />
+                            <ComboBoxItem Content="OpenAI Responses" />
+                          </ComboBox>
+                        </StackPanel>
                       </StackPanel>
 
                       <StackPanel>
@@ -823,20 +832,41 @@
                                  PlaceholderText="例如 我的 DeepSeek" />
                       </StackPanel>
 
-                      <Grid ColumnDefinitions="*,Auto">
+                      <StackPanel Name="PART_ChatGptPanel" IsVisible="False" Spacing="10">
+                        <TextBlock Classes="label" Text="ChatGPT 账号" />
+                        <Grid ColumnDefinitions="*,Auto">
+                          <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock Name="PART_ChatGptStatus" Classes="rowtitle" TextWrapping="Wrap" />
+                            <TextBlock Name="PART_ChatGptDetail" Classes="hint" TextWrapping="Wrap" />
+                          </StackPanel>
+                          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"
+                                      VerticalAlignment="Center">
+                            <Button Name="PART_ChatGptSignOut" Classes="outline"
+                                    Content="退出登录" Padding="12,6" />
+                            <Button Name="PART_ChatGptSignIn" Classes="pillprimary"
+                                    Content="使用 ChatGPT 登录" Padding="14,7" />
+                          </StackPanel>
+                        </Grid>
+                        <TextBlock Name="PART_ChatGptError" Classes="hint" IsVisible="False"
+                                   TextWrapping="Wrap" Foreground="{DynamicResource Brush.Error}" />
+                        <Button Name="PART_ChatGptUsage" Classes="textlink" Content="管理用量"
+                                HorizontalAlignment="Left" />
+                      </StackPanel>
+
+                      <Grid Name="PART_ProviderHttpsRow" ColumnDefinitions="*,Auto">
                         <TextBlock Grid.Column="0" Text="使用 HTTPS 传输" VerticalAlignment="Center" />
                         <ToggleButton Grid.Column="1" Name="PART_ProviderHttps"
                                       Classes="settingtoggle" IsChecked="True"
                                       VerticalAlignment="Center" />
                       </Grid>
 
-                      <StackPanel>
+                      <StackPanel Name="PART_ProviderBaseUrlField">
                         <TextBlock Classes="label" Text="接口地址" />
                         <TextBox Name="PART_ProviderBaseUrl" Classes="settingsinput"
                                  PlaceholderText="https://api.example.com/" />
                       </StackPanel>
 
-                      <StackPanel>
+                      <StackPanel Name="PART_ProviderApiPathField">
                         <TextBlock Name="PART_ProviderApiPathLabel" Classes="label" Text="对话路径" />
                         <TextBox Name="PART_ProviderApiPath" Classes="settingsinput"
                                  PlaceholderText="v1/chat/completions" />
@@ -859,7 +889,7 @@
 
                       <TextBlock Name="PART_ProviderEndpointPreview" Classes="hint" Margin="0" />
 
-                      <StackPanel>
+                      <StackPanel Name="PART_ProviderApiKeyField">
                         <TextBlock Classes="label" Text="API Key" />
                         <Border Classes="input">
                           <Grid ColumnDefinitions="*,Auto">
@@ -874,7 +904,7 @@
                         <TextBlock Classes="hint" Text="API Key 将保存在本机加密凭据库中。" />
                       </StackPanel>
 
-                      <Expander Header="自定义请求头（高级）">
+                      <Expander Name="PART_ProviderHeadersField" Header="自定义请求头（高级）">
                         <StackPanel Spacing="8" Margin="0,10,0,0">
                           <ItemsControl Name="PART_ProviderHeaders">
                             <ItemsControl.ItemTemplate>
@@ -2135,6 +2165,41 @@
                     </Grid>
                     <TextBlock Classes="hint" Margin="16,0,16,14" TextWrapping="Wrap"
                                Text="完全权限跳过普通审批；破坏性操作除外；全局设为完全权限时此处设置不生效。" />
+                  </StackPanel>
+                </Border>
+
+                <TextBlock Classes="section" Text="自动审批" />
+                <Border Classes="settingscard">
+                  <StackPanel>
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="自动审批 Python 执行" />
+                        <TextBlock Classes="hint" TextWrapping="Wrap"
+                                   Text="需要确认的代码先由审批模型判断，未通过的仍由你确认。" />
+                      </StackPanel>
+                      <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                    IsChecked="{Binding PythonAutoReviewEnabled, Mode=TwoWay}"
+                                    VerticalAlignment="Center" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="220,*"
+                          IsEnabled="{Binding PythonAutoReviewEnabled}">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                        <TextBlock Classes="rowtitle" Text="审批模型" />
+                        <TextBlock Classes="hint" Text="需单独选择，不随当前对话切换。" />
+                      </StackPanel>
+                      <ComboBox Grid.Column="1" Classes="settingsinput"
+                                HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                PlaceholderText="选择模型"
+                                ItemsSource="{Binding ReviewProviderModels}"
+                                SelectedItem="{Binding SelectedReviewProviderModel, Mode=TwoWay}">
+                        <ComboBox.ItemTemplate>
+                          <DataTemplate x:DataType="vm:TitleProviderModelOption">
+                            <TextBlock Text="{Binding Label}" />
+                          </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                      </ComboBox>
+                    </Grid>
                   </StackPanel>
                 </Border>
 

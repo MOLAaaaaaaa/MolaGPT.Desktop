@@ -49,17 +49,20 @@ public sealed class PythonExecutionTool
     private readonly IPythonSessionAllowList? _sessionAllowList;
     private readonly IToolGrantStore? _grants;
     private readonly AgentTaskRegistry? _tasks;
+    private readonly IPythonAutoReviewer? _reviewer;
 
     public PythonExecutionTool(
         IPythonExecutionApprovalService? approval = null,
         IPythonSessionAllowList? sessionAllowList = null,
         IToolGrantStore? grants = null,
-        AgentTaskRegistry? tasks = null)
+        AgentTaskRegistry? tasks = null,
+        IPythonAutoReviewer? reviewer = null)
     {
         _approval = approval;
         _sessionAllowList = sessionAllowList;
         _grants = grants;
         _tasks = tasks;
+        _reviewer = reviewer;
     }
 
     /// <param name="allowBackground">Offer <c>run_in_background</c>, describe the
@@ -198,13 +201,15 @@ public sealed class PythonExecutionTool
                 .ToArray();
 
         var permission = await ResolvePermissionAsync(
-            code!, description, effectiveOptions, risk, newScopeRequests, run?.Unattended == true, ct).ConfigureAwait(false);
+            code!, description, effectiveOptions, risk, newScopeRequests, workspaceRoot,
+            run?.Unattended == true, run?.Review, ct).ConfigureAwait(false);
         if (!permission.Approved)
         {
             return Error(
                 "本次执行未通过权限策略：" + permission.Reason,
-                permission: BuildPermissionMeta(effectiveOptions, risk, "denied"));
+                permission: BuildPermissionMeta(effectiveOptions, risk, "denied", permission.Review));
         }
+        var permissionMeta = BuildPermissionMeta(effectiveOptions, risk, "approved", permission.Review);
 
         var maxOutput = Math.Clamp(options.MaxOutputCharacters, 2000, 100000);
         var sessionDir = workspaceRoot;
@@ -291,7 +296,7 @@ public sealed class PythonExecutionTool
                     process.Dispose();
                     throw;
                 }
-                return BackgroundStarted(task, description, sessionDir, files, moved: false);
+                return BackgroundStarted(task, description, sessionDir, files, permissionMeta, moved: false);
             }
 
             PythonRunResult outcome;
@@ -338,7 +343,7 @@ public sealed class PythonExecutionTool
                         }
 
                         handedOff = true;
-                        return BackgroundStarted(task, description, sessionDir, files, moved: true, timeout);
+                        return BackgroundStarted(task, description, sessionDir, files, permissionMeta, moved: true, timeout);
                     }
                 }
 
@@ -378,7 +383,7 @@ public sealed class PythonExecutionTool
                 description,
                 python = python.DisplayName,
                 working_directory = sessionDir,
-                permission = BuildPermissionMeta(effectiveOptions, risk, "approved"),
+                permission = permissionMeta,
                 artifacts,
                 display_instructions = BuildDisplayInstructions(scannedArtifacts),
                 stdout = runOutcome.Stdout,
@@ -433,13 +438,16 @@ public sealed class PythonExecutionTool
         PythonExecutionOptions options,
         PythonExecutionRiskAnalysis risk,
         IReadOnlyList<string> newScopeRequests,
+        string workspaceRoot,
         bool unattended,
+        PythonReviewContext? review,
         CancellationToken ct)
     {
         // Layered permission filter (deny -> full-access -> auto-allow -> ask),
         // the model the industry converged on (Claude Code / Cursor / Windsurf).
         // The rules are no longer a separate mode; they are a filter that always
-        // sits on top of the approval flow.
+        // sits on top of the approval flow. Where a call would be asked about,
+        // automatic review, when on, answers first.
 
         // [1] Deny layer: hard-denied code is rejected even under full access.
         if (risk.HardDenied)
@@ -450,34 +458,18 @@ public sealed class PythonExecutionTool
         // must not be hidden by FullAccess or a remembered import/path rule.
         if (risk.Flags.Any(flag => string.Equals(flag.Code, "package_install", StringComparison.Ordinal)))
         {
-            if (unattended)
-                return new PermissionDecision(false, UnattendedReason);
-            if (_approval is null)
-                return new PermissionDecision(false, "包安装需要审批，但审批服务不可用");
-
-            var installDecision = await _approval.RequestApprovalAsync(
-                new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk), newScopeRequests),
-                ct).ConfigureAwait(false);
-            return installDecision == PythonExecutionApprovalDecision.Approved
-                ? new PermissionDecision(true, "用户已批准包安装")
-                : new PermissionDecision(false, "用户拒绝了包安装");
+            return await AskAsync(
+                code, description, options, risk, newScopeRequests, workspaceRoot, unattended, review,
+                "用户已批准包安装", "用户拒绝了包安装", "包安装需要审批，但审批服务不可用", ct).ConfigureAwait(false);
         }
 
         // Destructive filesystem operations stay reviewable even when the user
         // selected FullAccess, matching the global tool policy.
         if (risk.Flags.Any(flag => string.Equals(flag.Code, "destructive_file", StringComparison.Ordinal)))
         {
-            if (unattended)
-                return new PermissionDecision(false, UnattendedReason);
-            if (_approval is null)
-                return new PermissionDecision(false, "该文件操作需要审批，但审批服务不可用");
-
-            var destructiveDecision = await _approval.RequestApprovalAsync(
-                new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk), newScopeRequests),
-                ct).ConfigureAwait(false);
-            return destructiveDecision == PythonExecutionApprovalDecision.Approved
-                ? new PermissionDecision(true, "用户已批准该文件操作")
-                : new PermissionDecision(false, "用户拒绝了该文件操作");
+            return await AskAsync(
+                code, description, options, risk, newScopeRequests, workspaceRoot, unattended, review,
+                "用户已批准该文件操作", "用户拒绝了该文件操作", "该文件操作需要审批，但审批服务不可用", ct).ConfigureAwait(false);
         }
 
         // [2] Full access: trust everything that survived the deny layer.
@@ -490,18 +482,52 @@ public sealed class PythonExecutionTool
         if (risk.AutoApprovable && newScopeRequests.Count == 0)
             return new PermissionDecision(true, "未发现需要审批的操作，已自动放行");
 
-        // [4] Everything else needs an explicit user decision.
+        // [4] Everything else needs an explicit decision.
+        return await AskAsync(
+            code, description, options, risk, newScopeRequests, workspaceRoot, unattended, review,
+            "用户已批准本次执行", "用户拒绝了本次执行", "需要审批，但审批服务不可用", ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// One decision: the reviewer if it is on, then the user for whatever it did
+    /// not approve. A sub-agent has no user to fall back on, so there the
+    /// reviewer's refusal is final — and is passed on, so the agent can say why
+    /// rather than only that it could not.
+    /// </summary>
+    private async Task<PermissionDecision> AskAsync(
+        string code,
+        string? description,
+        PythonExecutionOptions options,
+        PythonExecutionRiskAnalysis risk,
+        IReadOnlyList<string> newScopeRequests,
+        string workspaceRoot,
+        bool unattended,
+        PythonReviewContext? review,
+        string approvedReason,
+        string deniedReason,
+        string unavailableReason,
+        CancellationToken ct)
+    {
+        var verdict = review is null || _reviewer is null
+            ? null
+            : await _reviewer.ReviewAsync(
+                new PythonReviewRequest(code, description, risk, newScopeRequests, workspaceRoot, options.AllowNetwork, review),
+                ct).ConfigureAwait(false);
+        if (verdict is { Approved: true })
+            return new PermissionDecision(true, "自动审批已放行", verdict);
+
         if (unattended)
-            return new PermissionDecision(false, UnattendedReason);
+            return new PermissionDecision(false, verdict is null ? UnattendedReason : verdict.Describe() + "。" + UnattendedReason, verdict);
         if (_approval is null)
-            return new PermissionDecision(false, "需要审批，但审批服务不可用");
+            return new PermissionDecision(false, unavailableReason, verdict);
 
         var decision = await _approval.RequestApprovalAsync(
-            new PythonExecutionApprovalRequest(code, description, options, risk, BuildCapabilities(options, risk), newScopeRequests),
+            new PythonExecutionApprovalRequest(
+                code, description, options, risk, BuildCapabilities(options, risk), newScopeRequests, verdict?.Describe()),
             ct).ConfigureAwait(false);
         return decision == PythonExecutionApprovalDecision.Approved
-            ? new PermissionDecision(true, "用户已批准本次执行")
-            : new PermissionDecision(false, "用户拒绝了本次执行");
+            ? new PermissionDecision(true, approvedReason, verdict)
+            : new PermissionDecision(false, deniedReason, verdict);
     }
 
     /// <summary>
@@ -842,6 +868,7 @@ public sealed class PythonExecutionTool
         string? description,
         string sessionDir,
         PythonRunFiles files,
+        object permission,
         bool moved,
         TimeSpan timeout = default)
     {
@@ -854,6 +881,7 @@ public sealed class PythonExecutionTool
             status = "running",
             description,
             working_directory = sessionDir,
+            permission,
             stdout_file = files.Mirror ? files.StdoutRelative : null,
             stderr_file = files.Mirror ? files.StderrRelative : null,
             partial_stdout = moved ? task.Tail() : null,
@@ -1593,10 +1621,23 @@ public sealed class PythonExecutionTool
         }
     }
 
-    private static object BuildPermissionMeta(PythonExecutionOptions options, PythonExecutionRiskAnalysis risk, string decision) => new
+    private static object BuildPermissionMeta(
+        PythonExecutionOptions options,
+        PythonExecutionRiskAnalysis risk,
+        string decision,
+        PythonReviewVerdict? review) => new
     {
         mode = options.PermissionMode.ToString(),
         decision,
+        review = review is null ? null : new
+        {
+            approved = review.Approved,
+            failed = review.Failed,
+            model = review.Model,
+            risk = review.Risk,
+            authorization = review.Authorization,
+            reason = review.Reason
+        },
         risk_level = risk.Level.ToString(),
         requires_approval = risk.RequiresApproval,
         blocked = risk.Blocked,
@@ -1756,7 +1797,7 @@ public sealed class PythonExecutionTool
         string? StdoutFullFile = null,
         string? StderrFullFile = null);
 
-    private sealed record PermissionDecision(bool Approved, string Reason);
+    private sealed record PermissionDecision(bool Approved, string Reason, PythonReviewVerdict? Review = null);
 
     private sealed record PythonArtifact(
         string Name,
@@ -1772,4 +1813,10 @@ public sealed class PythonExecutionTool
 /// <param name="AllowBackground">May run in, or time out into, the background.</param>
 /// <param name="Unattended">Nobody is there to approve anything — a sub-agent. A
 /// run that would need a decision is refused instead of asked.</param>
-public sealed record PythonRunContext(AgentTaskOwner? Owner, bool AllowBackground, bool Unattended);
+/// <param name="Review">What automatic review is shown of the turn. Null leaves
+/// every decision to the user.</param>
+public sealed record PythonRunContext(
+    AgentTaskOwner? Owner,
+    bool AllowBackground,
+    bool Unattended,
+    PythonReviewContext? Review = null);

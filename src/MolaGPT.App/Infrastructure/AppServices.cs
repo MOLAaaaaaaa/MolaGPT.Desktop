@@ -135,12 +135,16 @@ internal static class AppServices
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
             line => DiagnosticLog.Write("pi-runtime", line)));
         services.AddSingleton<MolaGptLocalToolsRegistrar>();
+        services.AddSingleton(sp => new ChatGptAccount(
+            sp.GetRequiredService<CredentialStore>(),
+            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok)));
         services.AddSingleton(sp => new PiByokProviderFactory(
             sp.GetRequiredService<PiWorkSidecarLocator>(),
             sp.GetRequiredService<IChatToolHost>(),
             sp.GetRequiredService<IHttpClientFactory>(),
             sp.GetRequiredService<PiRuntime>(),
-            line => DiagnosticLog.Write("pi-byok", line)));
+            line => DiagnosticLog.Write("pi-byok", line),
+            sp.GetRequiredService<ChatGptAccount>()));
 
         services.AddSingleton<BackgroundStreamService>();
         services.AddSingleton(sp => new McpClientManager(
@@ -232,6 +236,19 @@ internal static class AppServices
             sp.GetRequiredService<ProviderRegistry>(),
             sp.GetRequiredService<Func<SubagentRuntimeOptions>>(),
             sp.GetRequiredService<AgentTaskRegistry>()));
+        services.AddSingleton<IPythonAutoReviewer>(sp =>
+        {
+            var settings = sp.GetRequiredService<SettingsRepository>();
+            var providers = sp.GetRequiredService<ProviderRegistry>();
+            var http = sp.GetRequiredService<IHttpClientFactory>();
+            return new PythonAutoReviewer(
+                () => bool.TryParse(settings.Get(SettingsViewModel.PythonAutoReviewKey), out var on) && on,
+                () => PythonAutoReviewer.ResolveTarget(
+                    providers,
+                    settings.Get(SettingsViewModel.PythonReviewProviderIdKey),
+                    settings.Get(SettingsViewModel.PythonReviewModelIdKey)),
+                () => new OneShotCompletionClient(http.CreateClient(HttpClientNames.Byok)));
+        });
         services.AddSingleton<PythonExecutionTool>();
         services.AddSingleton(sp => new BrowserControlTool(
             new WebBridgeClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok))));
@@ -343,7 +360,8 @@ internal static class AppServices
             sp.GetRequiredService<SettingsViewModel>(),
             sp.GetRequiredService<PersonaListViewModel>(),
             sp.GetRequiredService<BackgroundStreamService>(),
-            sp.GetRequiredService<MolaGptProxyProvider>()));
+            sp.GetRequiredService<MolaGptProxyProvider>(),
+            sp.GetRequiredService<ChatGptAccount>()));
         services.AddSingleton<AccountSessionCoordinator>();
         services.AddSingleton(sp => new AppNotificationService(
             conversationId =>

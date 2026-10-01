@@ -707,6 +707,17 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
     {
         var banners = new List<Border>();
 
+        // Why automatic review handed this over. First, because it is the reason
+        // the dialog is open at all.
+        if (request.ReviewNote is { Length: > 0 } note)
+        {
+            banners.Add(Banner("warning", new SelectableTextBlock
+            {
+                Text = note,
+                TextWrapping = TextWrapping.Wrap
+            }));
+        }
+
         if (request.Risk.Flags.Any(f => string.Equals(f.Code, "destructive_file", StringComparison.Ordinal)))
         {
             banners.Add(Banner("danger", new TextBlock

@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Tasks;
@@ -24,6 +25,10 @@ public sealed class ChatToolHost : IChatToolHost
     private readonly IMemoryToolBackend? _memory;
     private readonly AgentTaskRegistry? _tasks;
     private readonly ISubagentRunner? _subagents;
+
+    /// <summary>Each turn's tool calls so far, which automatic review reads as
+    /// background. Keyed by the turn's request, so a record goes with its turn.</summary>
+    private readonly ConditionalWeakTable<ChatRequest, TurnCalls> _turnCalls = new();
 
     public ChatToolHost(
         McpClientManager mcp,
@@ -165,6 +170,7 @@ public sealed class ChatToolHost : IChatToolHost
         CancellationToken ct)
     {
         options = WithConversationWorkspace(options, context);
+        var earlierCalls = _turnCalls.GetValue(context.Request, _ => new TurnCalls()).Add(toolName, argumentsJson);
 
         // A sub-agent sees its parent's whole tool list, so these arrive as ordinary
         // calls and are turned away here.
@@ -249,7 +255,8 @@ public sealed class ChatToolHost : IChatToolHost
                     ? null
                     : new AgentTaskOwner(workspaceConversation!, context.Request.SessionId),
                 AllowBackground: options.BackgroundTasks && !options.IsSubagent,
-                Unattended: options.IsSubagent);
+                Unattended: options.IsSubagent,
+                Review: PythonReviewContext.From(context.Request, earlierCalls));
             return await _python.ExecuteAsync(argumentsJson, options.Python, workspaceConversation, run, ct).ConfigureAwait(false);
         }
 
@@ -810,4 +817,26 @@ public sealed class ChatToolHost : IChatToolHost
         global == ToolPermissionMode.FullAccess || perTool == ToolPermissionMode.FullAccess
             ? ToolPermissionMode.FullAccess
             : ToolPermissionMode.Approval;
+
+    /// <summary>The latest calls of one turn, arguments clipped, oldest dropped.
+    /// Parallel calls arrive on different threads.</summary>
+    private sealed class TurnCalls
+    {
+        private const int Max = 12;
+        private const int MaxArgumentChars = 2000;
+        private readonly List<ReviewedToolCall> _calls = [];
+
+        /// <summary>Records a call and returns the ones before it.</summary>
+        public IReadOnlyList<ReviewedToolCall> Add(string tool, string arguments)
+        {
+            lock (_calls)
+            {
+                var earlier = _calls.ToArray();
+                _calls.Add(new ReviewedToolCall(tool,
+                    arguments.Length <= MaxArgumentChars ? arguments : arguments[..MaxArgumentChars] + "…"));
+                if (_calls.Count > Max) _calls.RemoveAt(0);
+                return earlier;
+            }
+        }
+    }
 }

@@ -207,17 +207,29 @@ public static class ToolDeltaBuilder
             using var doc = JsonDocument.Parse(resultJson);
             var root = doc.RootElement;
             var parts = new List<string>();
+            string? reviewReason = null;
             if (root.TryGetProperty("permission", out var permission)
                 && permission.ValueKind == JsonValueKind.Object
                 && ReadString(permission, "mode") is { Length: > 0 } mode)
             {
-                parts.Add(mode switch
+                if (permission.TryGetProperty("review", out var review)
+                    && review.ValueKind == JsonValueKind.Object
+                    && review.TryGetProperty("approved", out var approved)
+                    && approved.ValueKind == JsonValueKind.True)
                 {
-                    "Approval" => "审批权限",
-                    "FullAccess" => "完全权限",
-                    "Rules" => "规则模式",
-                    _ => mode
-                });
+                    parts.Add("自动批准");
+                    reviewReason = ReadString(review, "reason");
+                }
+                else
+                {
+                    parts.Add(mode switch
+                    {
+                        "Approval" => "审批权限",
+                        "FullAccess" => "完全权限",
+                        "Rules" => "规则模式",
+                        _ => mode
+                    });
+                }
             }
             if (root.TryGetProperty("duration_ms", out var duration)
                 && duration.ValueKind == JsonValueKind.Number
@@ -237,7 +249,9 @@ public static class ToolDeltaBuilder
                 var count = artifacts.GetArrayLength();
                 if (count > 0) parts.Add($"{count} 个文件");
             }
-            return parts.Count == 0 ? null : string.Join(" · ", parts);
+            if (parts.Count == 0) return null;
+            var line = string.Join(" · ", parts);
+            return reviewReason is { Length: > 0 } ? line + "\n" + reviewReason : line;
         }
         catch (JsonException)
         {

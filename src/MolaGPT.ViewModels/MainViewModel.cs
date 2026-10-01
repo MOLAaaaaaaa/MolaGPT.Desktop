@@ -38,7 +38,6 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty] private string _updateState = "Available";
     [ObservableProperty] private string _updateChipLabel = "发现更新";
     [ObservableProperty] private string _updateChipDetail = string.Empty;
-    [ObservableProperty] private string _quotaText = "账号额度";
     private string? _updateNotes;
 
     /// <summary>Hooked at app startup; opens the LoginDialog. Set by App.xaml.cs to avoid View dependency here.</summary>
@@ -73,7 +72,10 @@ public sealed partial class MainViewModel : ObservableObject
 
     private readonly BackgroundStreamService? _backgroundStreams;
     private readonly MolaGptProxyProvider? _molaGptProxy;
-    private int _quotaRefreshVersion;
+    private readonly ChatGptAccount? _chatGpt;
+    private int _usageRefreshVersion;
+    private UsageSource _usageSource;
+    private (MolaGptStatus Status, DateTimeOffset ReadAt)? _molaGptStatus;
 
     public MainViewModel(
         ConversationListViewModel conversationList,
@@ -82,7 +84,8 @@ public sealed partial class MainViewModel : ObservableObject
         SettingsViewModel settings,
         PersonaListViewModel personas,
         BackgroundStreamService? backgroundStreams = null,
-        MolaGptProxyProvider? molaGptProxy = null)
+        MolaGptProxyProvider? molaGptProxy = null,
+        ChatGptAccount? chatGpt = null)
     {
         _conversationList = conversationList;
         _chat = chat;
@@ -91,6 +94,7 @@ public sealed partial class MainViewModel : ObservableObject
         _personas = personas;
         _backgroundStreams = backgroundStreams;
         _molaGptProxy = molaGptProxy;
+        _chatGpt = chatGpt;
         _chat.AutoCollapseThinking = _settings.AutoCollapseThinking;
         _chat.CodeFenceKinds = _settings.CodeFenceKinds;
 
@@ -168,20 +172,17 @@ public sealed partial class MainViewModel : ObservableObject
 
         WireArtifacts();
 
-        // Quota chip visibility follows the active mode (Chat/Work = MolaGPT
-        // account, BYOK never) and the account login state. Refresh whenever
-        // either moves. The text is pulled from status.php and scoped to the
-        // active model so Chat and Work show the same shared account quota.
+        // The plan under the context gauge follows the active model: Work draws
+        // on the MolaGPT account's credits, a ChatGPT row on that plan's limits.
         _chat.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(ChatViewModel.CurrentMode)
                 or nameof(ChatViewModel.ActiveModel)
                 or nameof(ChatViewModel.ActiveProvider))
             {
-                OnPropertyChanged(nameof(IsQuotaChipVisible));
                 OnPropertyChanged(nameof(IsCloudSyncChipVisible));
                 OnPropertyChanged(nameof(IsSpendChipVisible));
-                _ = RefreshQuotaAsync();
+                _ = RefreshUsageAsync();
             }
             if (e.PropertyName is nameof(ChatViewModel.Spend))
             {
@@ -198,31 +199,39 @@ public sealed partial class MainViewModel : ObservableObject
                 _chat.CodeFenceKinds = _settings.CodeFenceKinds;
             if (e.PropertyName is nameof(SettingsViewModel.IsLoggedIn))
             {
-                OnPropertyChanged(nameof(IsQuotaChipVisible));
-                _ = RefreshQuotaAsync();
+                _molaGptStatus = null;
+                _ = RefreshUsageAsync();
             }
         };
+        // A turn spends credits; a ChatGPT turn reports its own figures instead.
         _composer.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(ComposerViewModel.IsSending) && !Composer.IsSending)
-                _ = RefreshQuotaAsync();
+                _ = RefreshUsageAsync(force: true);
         };
+        _chat.ContextGauge.Usage.RefreshRequested = () => RefreshUsageAsync();
+        if (_chatGpt is not null)
+        {
+            // Raised wherever the reading came in, the agent's relay included.
+            var sync = SynchronizationContext.Current;
+            void OnUi(Action action)
+            {
+                if (sync is null) action();
+                else sync.Post(_ => action(), null);
+            }
+            _chatGpt.UsageChanged += (_, _) => OnUi(ShowChatGptUsage);
+            _chatGpt.Changed += (_, _) => OnUi(() => _ = RefreshUsageAsync());
+        }
 
         RefreshActivePromptState();
-        _ = RefreshQuotaAsync();
+        _ = RefreshUsageAsync();
     }
-
-    /// <summary>Quota chip shows only for MolaGPT-account modes (Chat / Work) and
-    /// only after the user has signed in. BYOK uses the user's own key and has no
-    /// shared quota to display.</summary>
-    public bool IsQuotaChipVisible =>
-        Chat.CurrentMode.IsMolaGptAccount() && Settings.IsLoggedIn;
 
     public bool IsCloudSyncChipVisible =>
         CloudSyncStatusVisible && Chat.CurrentMode == AppMode.Chat;
 
     /// <summary>Only where the money is the user's: the official proxy bills in
-    /// credits, which the quota chip already shows and which must not be added
+    /// credits, which the context gauge already shows and which must not be added
     /// to a dollar figure.</summary>
     public bool IsSpendChipVisible =>
         Chat.Spend.HasSpend && Chat.CurrentMode.IsLocalAgent();
@@ -267,112 +276,96 @@ public sealed partial class MainViewModel : ObservableObject
         if (!string.IsNullOrWhiteSpace(branch.Draft)) Composer.Text = branch.Draft!;
     }
 
-    public async Task RefreshQuotaAsync(CancellationToken ct = default)
+    /// <summary>Which plan the active model draws on.</summary>
+    private enum UsageSource { None, MolaGpt, ChatGpt }
+
+    /// <summary>Re-reading sooner than this only repeats what is on screen.</summary>
+    private static readonly TimeSpan UsageFreshFor = TimeSpan.FromSeconds(30);
+
+    private UsageSource ActiveUsageSource
     {
-        var version = ++_quotaRefreshVersion;
-        if (!IsQuotaChipVisible || _molaGptProxy is null || Chat.ActiveModel is null)
+        get
         {
-            QuotaText = "账号额度";
-            return;
+            // Chat has no context gauge to sit under, so only the agent modes.
+            if (Chat.CurrentMode == AppMode.Work)
+                return Settings.IsLoggedIn && _molaGptProxy is not null ? UsageSource.MolaGpt : UsageSource.None;
+            if (Chat.CurrentMode == AppMode.Byok
+                && _chatGpt is not null
+                && Chat.ActiveProvider?.Id is { } id
+                && Settings.Providers.Any(p => p.Id == id && p.Type == "chatgpt"))
+                return UsageSource.ChatGpt;
+            return UsageSource.None;
         }
-
-        try
-        {
-            var status = await _molaGptProxy.FetchStatusAsync(ct);
-            if (version != _quotaRefreshVersion) return;
-            if (status is null)
-            {
-                Settings.IsLoggedIn = false;
-                QuotaText = "账号额度";
-                return;
-            }
-            QuotaText = BuildQuotaText(status, Chat.ActiveModel.Id);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (MolaGptAuthExpiredException)
-        {
-            if (version == _quotaRefreshVersion)
-            {
-                Settings.IsLoggedIn = false;
-                QuotaText = "账号额度";
-            }
-        }
-        catch
-        {
-            if (version == _quotaRefreshVersion)
-                QuotaText = "账号额度 · 暂不可用";
-        }
-    }
-
-    private static string BuildQuotaText(MolaGptStatus? status, string modelId)
-    {
-        if (status is null || string.IsNullOrWhiteSpace(modelId))
-            return "账号额度";
-
-        var used = status.Usage.GetValueOrDefault(modelId, 0);
-        status.Limits.TryGetValue(modelId, out var limit);
-        status.ModelStatus.TryGetValue(modelId, out var modelStatus);
-
-        // Credit pool takes precedence: once the server switches it on, every
-        // model's daily_limit is -1 and the legacy branch below would claim
-        // "无限" while the user is one turn away from being blocked.
-        if (status.Credits is { } credits && !status.Unlimited)
-            return BuildCreditQuotaText(credits, modelStatus);
-
-        var unlimited = status.Unlimited
-            || limit?.DailyRequests == -1
-            || modelStatus?.Remaining == -1;
-        if (unlimited)
-            return $"今日 {used}/无限 · 账号共用";
-
-        var effectiveLimit = EffectiveLimit(limit?.DailyRequests, modelStatus?.Remaining, used);
-        if (effectiveLimit > 0)
-            return $"今日 {used}/{effectiveLimit} · 账号共用";
-
-        if (modelStatus?.Remaining is { } remaining)
-            return $"剩余 {remaining} · 账号共用";
-
-        return "账号额度";
     }
 
     /// <summary>
-    /// Chip text for the shared credit pool. Leads with "还能用几次" rather than
-    /// a percentage — the chip is next to the composer, where the actionable
-    /// question is whether this next turn will go through.
+    /// Brings the plan usage under the context gauge up to date with the active
+    /// model. A failed read keeps the last figures rather than blanking them; a
+    /// different plan replaces them straight away.
     /// </summary>
-    private static string BuildCreditQuotaText(MolaGptCredits credits, MolaGptModelStatus? modelStatus)
+    /// <param name="force">Read again even if the last reading is recent, because
+    /// something has just been spent.</param>
+    public async Task RefreshUsageAsync(bool force = false, CancellationToken ct = default)
     {
-        if (modelStatus?.CreditMultiplier is null)
-            return modelStatus is null
-                ? $"额度剩余 {credits.RemainingPercent}% · 账号共用"
-                : "该模型暂不可用";
-
-        var uses = credits.EstimatedUses(modelStatus.CreditMultiplier) ?? 0;
-        if (uses == int.MaxValue)
-            return "不消耗额度 · 账号共用";
-
-        if (credits.Exhausted)
-            return $"额度已耗尽 · {credits.RecoveryLabel}";
-
-        // 峰谷计价的模型，次数随时段变化，标出当前时段免得用户以为额度被偷偷扣了
-        var period = modelStatus.PricingPeriodLabel is { } label ? $"（{label}）" : string.Empty;
-        return uses switch
+        var version = ++_usageRefreshVersion;
+        var source = ActiveUsageSource;
+        var usage = Chat.ContextGauge.Usage;
+        if (source != _usageSource)
         {
-            <= 0 => "剩余额度不足以再发一次",
-            _ => $"约 {uses} 次{period} · 账号共用"
-        };
+            _usageSource = source;
+            usage.Clear();
+        }
+
+        switch (source)
+        {
+            case UsageSource.ChatGpt:
+                // Not forced after a turn: the turn's own response brought new figures.
+                ShowChatGptUsage();
+                var now = DateTimeOffset.UtcNow;
+                if (_chatGpt!.UsageReadAt is { } read && now - read < UsageFreshFor
+                    && _chatGpt.Usage is { } chatGptUsage
+                    && !chatGptUsage.Windows.Any(window => window.ResetsAt is { } at && read < at && at <= now)) return;
+                try { await _chatGpt!.RefreshUsageAsync(ct); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception) { /* Shown from UsageChanged when it works; the last figures stand otherwise. */ }
+                return;
+
+            case UsageSource.MolaGpt:
+                var modelId = Chat.ActiveModel?.Id ?? string.Empty;
+                if (!force && _molaGptStatus is { } cached && DateTimeOffset.UtcNow - cached.ReadAt < UsageFreshFor)
+                {
+                    usage.ShowCredits(cached.Status, modelId);
+                    return;
+                }
+                try
+                {
+                    var status = await _molaGptProxy!.FetchStatusAsync(ct);
+                    if (version != _usageRefreshVersion) return;
+                    if (status is null)
+                    {
+                        Settings.IsLoggedIn = false;
+                        return;
+                    }
+                    _molaGptStatus = (status, DateTimeOffset.UtcNow);
+                    usage.ShowCredits(status, Chat.ActiveModel?.Id ?? string.Empty);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (MolaGptAuthExpiredException)
+                {
+                    if (version == _usageRefreshVersion) Settings.IsLoggedIn = false;
+                }
+                catch (Exception) { }
+                return;
+
+            default:
+                return;
+        }
     }
 
-    private static int EffectiveLimit(int? declaredLimit, int? remaining, int used)
+    private void ShowChatGptUsage()
     {
-        if (declaredLimit is -1 or null)
-            return remaining is null ? 0 : Math.Max(0, remaining.Value + used);
-        if (remaining is null)
-            return declaredLimit.Value;
-        return Math.Min(declaredLimit.Value, remaining.Value + used);
+        if (_usageSource != UsageSource.ChatGpt || _chatGpt is null) return;
+        Chat.ContextGauge.Usage.ShowChatGpt(_chatGpt.Usage, _chatGpt.PlanType, DateTimeOffset.UtcNow);
     }
 
     /// <summary>The drawer is offered whenever the conversation has anything in
