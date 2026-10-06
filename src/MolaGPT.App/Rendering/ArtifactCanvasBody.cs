@@ -671,11 +671,10 @@ public sealed class ArtifactCanvasBody : UserControl
                 image = new Border
                 {
                     Background = Brushes.White,
-                    CornerRadius = new CornerRadius(8),
                     Padding = new Thickness(16),
                     HorizontalAlignment = HorizontalAlignment.Center,
                     Child = image,
-                };
+                }.WithRadius("Radius.Md");
             }
 
             Content = new ScrollViewer

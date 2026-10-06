@@ -80,13 +80,12 @@ public sealed class MarkdownImageView : TemplatedControl
 
         _card = new Border
         {
-            CornerRadius = new CornerRadius(10),
             BorderThickness = new Thickness(1),
             ClipToBounds = true,
             HorizontalAlignment = HorizontalAlignment.Left,
             Cursor = new Cursor(StandardCursorType.Hand),
             Child = new Panel { Children = { _image, _fallback } }
-        };
+        }.WithRadius("Radius.Md");
 
         LogicalChildren.Add(_card);
         VisualChildren.Add(_card);

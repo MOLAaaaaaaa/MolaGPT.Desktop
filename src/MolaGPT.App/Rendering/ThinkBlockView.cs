@@ -109,6 +109,7 @@ public sealed class ThinkBlockView : TemplatedControl
         _status = new TextBlock
         {
             FontSize = 12,
+            HorizontalAlignment = HorizontalAlignment.Left,
             VerticalAlignment = VerticalAlignment.Center,
             TextWrapping = TextWrapping.NoWrap
         };
@@ -162,11 +163,9 @@ public sealed class ThinkBlockView : TemplatedControl
         column.Children.Add(_header);
         column.Children.Add(_reveal);
 
-        _stripe = new Border
-        {
-            Width = 4,
-            CornerRadius = new CornerRadius(2, 0, 0, 2)
-        };
+        // Square: the shell's clip rounds its outer corners at whatever radius
+        // the shell has.
+        _stripe = new Border { Width = 4 };
 
         var layout = new Grid { ColumnDefinitions = new ColumnDefinitions("4,*") };
         layout.Children.Add(_stripe);
@@ -175,10 +174,9 @@ public sealed class ThinkBlockView : TemplatedControl
 
         _shell = new Border
         {
-            CornerRadius = new CornerRadius(6),
             ClipToBounds = true,
             Child = layout
-        };
+        }.WithRadius("Radius.Sm");
 
         LogicalChildren.Add(_shell);
         VisualChildren.Add(_shell);
@@ -262,7 +260,7 @@ public sealed class ThinkBlockView : TemplatedControl
                 ? $"思考已完成 · 用时 {ElapsedSeconds:0.0} 秒"
                 : "思考已完成";
 
-        _dot.Classes.Set("pulsing", IsThinking);
+        Shimmer.SetIsActive(_status, IsThinking);
         _dot.Fill = Brush(IsThinking ? "Brush.Primary" : "Brush.Success");
     }
 

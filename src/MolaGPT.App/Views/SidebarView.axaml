@@ -20,6 +20,8 @@
 
     The BYOK list is capped at 240px so a heavy BYOK user cannot push the
     MolaGPT group off the bottom; the MolaGPT list takes the remaining height.
+    With no MolaGPT group to protect (signed out, or collapsed) the code-behind
+    lifts the cap and gives BYOK the remaining height instead.
   -->
 
   <DockPanel LastChildFill="True">
@@ -161,9 +163,12 @@
               Tag="byok"
               Classes="groupheader"
               IsVisible="{Binding HasByokConversations}"
+              IsHitTestVisible="{Binding CanCollapseGroups}"
+              Focusable="{Binding CanCollapseGroups}"
               Command="{Binding ToggleByokGroupCommand}">
         <Grid ColumnDefinitions="Auto,*,Auto">
           <TextBlock Grid.Column="0" Classes="icon"
+                     IsVisible="{Binding CanCollapseGroups}"
                      Text="{Binding ByokGroupChevron}"
                      FontSize="9" Opacity="0.7"
                      VerticalAlignment="Center"
@@ -184,7 +189,7 @@
                Name="PART_ByokList"
                ItemsSource="{Binding ByokItems}"
                SelectionMode="Multiple"
-               IsVisible="{Binding IsByokGroupExpanded}"
+               IsVisible="{Binding IsByokListVisible}"
                MaxHeight="240"
                Background="Transparent"
                BorderThickness="0"
@@ -199,10 +204,13 @@
               Name="PART_MolaGptHeader"
               Tag="molagpt"
               Classes="groupheader"
-              IsVisible="{Binding HasMolaGptConversationItems}"
+              IsVisible="{Binding ShowMolaGptGroup}"
+              IsHitTestVisible="{Binding CanCollapseGroups}"
+              Focusable="{Binding CanCollapseGroups}"
               Command="{Binding ToggleMolaGptGroupCommand}">
         <Grid ColumnDefinitions="Auto,*,Auto">
           <TextBlock Grid.Column="0" Classes="icon"
+                     IsVisible="{Binding CanCollapseGroups}"
                      Text="{Binding MolaGptGroupChevron}"
                      FontSize="9" Opacity="0.7"
                      VerticalAlignment="Center"
@@ -223,7 +231,7 @@
                Name="PART_MolaGptList"
                ItemsSource="{Binding MolaGptConversationItems}"
                SelectionMode="Multiple"
-               IsVisible="{Binding IsMolaGptGroupExpanded}"
+               IsVisible="{Binding IsMolaGptListVisible}"
                Background="Transparent"
                BorderThickness="0"
                Padding="0"
@@ -231,6 +239,28 @@
                ItemTemplate="{StaticResource ConversationRowTemplate}"
                ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                ScrollViewer.VerticalScrollBarVisibility="Auto" />
+
+      <!-- Nothing to list. Both group headers hide when their group is empty,
+           so a first launch (or a search that matches nothing) would otherwise
+           leave a blank column. Spans every row so it is centred in the whole
+           list area whichever row currently holds the star. Flat on purpose:
+           no card or tint, the same weight as the other empty lines in the app.
+           Sits above centre by its bottom margin, where the eye lands first in
+           a tall, mostly empty column. -->
+      <StackPanel Grid.Row="0" Grid.RowSpan="4"
+                  IsVisible="{Binding IsSidebarEmpty}"
+                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                  Margin="12,0,12,96" Spacing="6">
+        <TextBlock Classes="icon" Text="{Binding EmptyStateGlyph}" FontSize="26"
+                   HorizontalAlignment="Center" Margin="0,0,0,4"
+                   Foreground="{DynamicResource Brush.Text.Muted}" />
+        <TextBlock Text="{Binding EmptyStateTitle}" FontSize="13" FontWeight="SemiBold"
+                   HorizontalAlignment="Center"
+                   Foreground="{DynamicResource Brush.Text.Secondary}" />
+        <TextBlock Text="{Binding EmptyStateHint}" FontSize="{DynamicResource Font.Size.XSmall}"
+                   HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap"
+                   Foreground="{DynamicResource Brush.Text.Muted}" />
+      </StackPanel>
     </Grid>
   </DockPanel>
 

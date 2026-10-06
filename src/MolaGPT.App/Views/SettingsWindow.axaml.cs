@@ -12,6 +12,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using Avalonia.VisualTree;
+using MolaGPT.App.Infrastructure;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Providers;
@@ -44,6 +45,7 @@ public partial class SettingsWindow : MolaContentWindow
     private readonly McpClientManager? _mcp;
     private readonly ImageGenerationTool? _imageGenerationTool;
     private readonly PythonRuntimeManager? _pythonRuntime;
+    private readonly PythonRuntimeSetup? _pythonSetup;
     private readonly PiSidecarRuntimeManager? _piSidecar;
     private readonly NotificationCenter? _notifications;
 
@@ -154,7 +156,8 @@ public partial class SettingsWindow : MolaContentWindow
         Action? agentRuntimeRemoving = null,
         PersonalizationViewModel? personalization = null,
         MemoryPageViewModel? memoryPage = null,
-        MolaGptProxyProvider? proxy = null)
+        MolaGptProxyProvider? proxy = null,
+        PythonRuntimeSetup? pythonSetup = null)
     {
         _settings = settings;
         _auth = auth;
@@ -165,6 +168,10 @@ public partial class SettingsWindow : MolaContentWindow
         _mcp = mcp;
         _imageGenerationTool = imageGenerationTool;
         _pythonRuntime = pythonRuntime;
+        _pythonSetup = pythonSetup
+                       ?? (pythonRuntime is not null && notifications is not null
+                           ? new PythonRuntimeSetup(pythonRuntime, settings, notifications)
+                           : null);
         _piSidecar = piSidecar;
         _notifications = notifications;
         _skills = skills ?? new SkillsViewModel();
@@ -209,8 +216,10 @@ public partial class SettingsWindow : MolaContentWindow
         };
 
         PART_Nav.SelectionChanged += (_, _) => ShowSelectedPage();
-        PART_Nav.SelectedItem = PART_AccountNav;
+        PART_Nav.SelectedItem = _settings.ShowAccountFeatures ? PART_AccountNav : PART_AppearanceNav;
+        ApplyAccountFeatureVisibility();
         BuildThemeChoices();
+        BuildCornerStyleChoices();
         BuildSearchProviderChoices();
         BuildPermissionChoices();
         BuildFontScaleChoices();
@@ -329,6 +338,8 @@ public partial class SettingsWindow : MolaContentWindow
             if (args.PropertyName is nameof(SettingsViewModel.PythonToolEnabled)
                 or nameof(SettingsViewModel.FileToolsEnabled))
                 PART_SkillsUnreachable.IsVisible = !CanReachSkills();
+            else if (args.PropertyName == nameof(SettingsViewModel.ShowAccountFeatures))
+                ApplyAccountFeatureVisibility();
             else if (args.PropertyName == nameof(SettingsViewModel.PythonToolExecutablePath))
                 RefreshPythonBrowseButton();
         };
@@ -567,6 +578,17 @@ public partial class SettingsWindow : MolaContentWindow
         PART_Theme.SelectionChanged += (_, _) =>
         {
             if (PART_Theme.SelectedIndex >= 0) _settings.ThemeMode = order[PART_Theme.SelectedIndex];
+        };
+    }
+
+    private void BuildCornerStyleChoices()
+    {
+        var order = new[] { CornerStyle.Standard, CornerStyle.Small, CornerStyle.Square };
+
+        PART_CornerStyle.SelectedIndex = Math.Max(0, Array.IndexOf(order, _settings.CornerStyle));
+        PART_CornerStyle.SelectionChanged += (_, _) =>
+        {
+            if (PART_CornerStyle.SelectedIndex >= 0) _settings.CornerStyle = order[PART_CornerStyle.SelectedIndex];
         };
     }
 
@@ -2699,37 +2721,16 @@ public partial class SettingsWindow : MolaContentWindow
 
     private async Task ConfigurePythonRuntimeAsync()
     {
-        if (_pythonRuntime is null) return;
+        if (_pythonSetup is null) return;
 
         PART_PythonRuntimeStatus.Text = "正在准备 MolaGPT 专用 Python 环境...";
-
-        // The banner is what makes this survive closing the settings window:
-        // the row below only exists while this page is open, and a 200 MB
-        // download outlives it.
-        _notifications?.Progress(PythonRuntimeNotificationKey, "正在配置 Python 环境", "获取清单…");
-        try
-        {
-            var progress = new Progress<PythonRuntimeProgress>(item =>
-            {
-                PART_PythonRuntimeStatus.Text = string.IsNullOrWhiteSpace(item.Message)
-                    ? $"正在配置 Python 运行时 {item.Progress:P0}"
-                    : item.Message;
-                _notifications?.Progress(
-                    PythonRuntimeNotificationKey,
-                    string.IsNullOrWhiteSpace(item.Message) ? "正在配置 Python 环境" : item.Message,
-                    string.IsNullOrWhiteSpace(item.Stage) ? null : item.Stage,
-                    item.Progress > 0 ? item.Progress : null);
-            });
-            var runtime = await _pythonRuntime.DownloadAndInstallAsync(progress, CancellationToken.None);
-            _settings.PythonToolEnabled = true;
-            _settings.PythonToolExecutablePath = runtime.PythonExecutablePath;
-            _notifications?.Success("Python 环境已就绪", $"Python {runtime.Version}", PythonRuntimeNotificationKey);
-        }
-        catch (Exception ex)
-        {
-            PART_PythonRuntimeStatus.Text = "配置失败：" + ex.Message;
-            _notifications?.Error("Python 环境配置失败", ex.Message, PythonRuntimeNotificationKey);
-        }
+        var progress = new Progress<PythonRuntimeProgress>(item =>
+            PART_PythonRuntimeStatus.Text = string.IsNullOrWhiteSpace(item.Message)
+                ? $"正在配置 Python 运行时 {item.Progress:P0}"
+                : item.Message);
+        var result = await _pythonSetup.InstallAsync(progress);
+        if (result.Error is not null)
+            PART_PythonRuntimeStatus.Text = "配置失败：" + result.Error;
     }
 
     private async Task ConfigurePiSidecarAsync()

@@ -165,6 +165,18 @@ public partial class TitleBar : UserControl
         }
     ];
 
+    /// <summary>
+    /// 隐藏 MolaGPT 账号功能, signed out. The switcher goes as a whole rather than
+    /// losing its Chat half: a one-segment switch has nothing to switch to. The
+    /// Agent 状态 button opens 远程控制, which relays through the account.
+    /// </summary>
+    public void SetAccountFeaturesVisible(bool visible)
+    {
+        PART_ModeSwitch.IsVisible = visible;
+        PART_AgentStatus.IsVisible = visible;
+        PART_Login.IsVisible = visible;
+    }
+
     public void SetAccountState(bool loggedIn, string? username)
     {
         var tip = loggedIn

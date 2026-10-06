@@ -26,7 +26,7 @@ public partial class SettingsWindow
     private static readonly Dictionary<string, string> PageKeywords = new()
     {
         ["PAGE_Account"] = "账号 账户 登录 退出 用量 额度 点数 次数 同步 云同步 Tracks 个性化 记忆",
-        ["PAGE_Appearance"] = "主题 深色 浅色 暗色 夜间 暗黑 外观 字体 字号 文字大小 缩放 动画 红点",
+        ["PAGE_Appearance"] = "主题 深色 浅色 暗色 夜间 暗黑 外观 字体 字号 文字大小 缩放 圆角 直角 方角 边角 动画 红点 隐藏 账号 登录 网页版 简洁",
         ["PAGE_Chat"] = "Enter 回车 发送 换行 快捷键 输入 思考 推理 折叠 标题 画布 可视化 图表 HTML SVG Mermaid CSV",
         ["PAGE_Tasks"] = "任务 后台 子 Agent 并发 插队 引导 排队 运行 唤醒 默认模型",
         ["PAGE_System"] = "通知 提醒 托盘 最小化 关闭 后台 系统",
@@ -162,7 +162,11 @@ public partial class SettingsWindow
         }
 
         var tokens = query.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        // A page taken out of the rail (隐藏 MolaGPT 账号功能) stays out of search
+        // too: a result that opens a page the rail no longer lists is a way back
+        // into what the user asked to hide.
         var results = _searchIndex
+            .Where(entry => entry.Nav.IsVisible)
             .Select(entry => (Entry: entry, Score: Score(entry, query, tokens)))
             .Where(hit => hit.Score >= 0)
             .OrderBy(hit => hit.Score)

@@ -32,4 +32,5 @@ public sealed record ChatToolContext(
     string ModelId,
     bool ModelSupportsVision,
     IReadOnlyList<ProviderModel> ProviderModels,
-    HttpClient? LocalHttpClient = null);
+    HttpClient? LocalHttpClient = null,
+    Action<string>? ReportActivity = null);

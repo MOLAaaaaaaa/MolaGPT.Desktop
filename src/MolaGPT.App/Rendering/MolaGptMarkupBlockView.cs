@@ -347,7 +347,6 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         {
             Width = 32,
             Height = 32,
-            CornerRadius = new CornerRadius(6),
             VerticalAlignment = VerticalAlignment.Top,
             Background = error ? Brush("Brush.Bg.Tertiary") : Brush("Brush.Primary.Tint"),
             Child = new TextBlock
@@ -359,7 +358,7 @@ public sealed class MolaGptMarkupBlockView : ContentControl
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center
             }
-        };
+        }.WithRadius("Radius.Sm");
         grid.Children.Add(iconTile);
 
         var titles = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
@@ -451,29 +450,27 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         return Chip(row);
     }
 
-    private Border Chip(Control child) => new()
+    private Border Chip(Control child) => new Border
     {
         Background = Brush("Brush.Bg.Elevated"),
         BorderBrush = Brush("Brush.Border.Subtle"),
         BorderThickness = new Thickness(1),
-        CornerRadius = new CornerRadius(6),
         Padding = new Thickness(8, 4),
         Margin = new Thickness(0, 0, 6, 6),
         Child = child
-    };
+    }.WithRadius("Radius.Sm");
 
-    private Border Card(Control child, double maxWidth = 720) => new()
+    private Border Card(Control child, double maxWidth = 720) => new Border
     {
         Background = Brush("Brush.Bg.Primary"),
         BorderBrush = Brush("Brush.Border"),
         BorderThickness = new Thickness(1),
-        CornerRadius = new CornerRadius(8),
         Padding = new Thickness(16, 14),
         Margin = new Thickness(0, 8),
         MaxWidth = maxWidth,
         HorizontalAlignment = HorizontalAlignment.Left,
         Child = child
-    };
+    }.WithRadius("Radius.Md");
 
     private static bool ShouldRenderAnalysis(MolaGptMarkupSplitter.MarkupUnit unit) =>
         unit.Tag?.ToLowerInvariant() is "python" or "mcp" or "image-action";

@@ -24,6 +24,8 @@ internal sealed class TrayIconHost : IDisposable
 {
     private readonly SettingsViewModel _settings;
     private readonly TrayIcon _icon = new();
+    private readonly NativeMenu _menu = new();
+    private readonly NativeMenuItem _agentStatusItem;
     private Window? _window;
     private bool _allowExit;
     private bool _closePromptOpen;
@@ -39,17 +41,21 @@ internal sealed class TrayIconHost : IDisposable
         _icon.Icon = LoadIcon();
         _icon.Clicked += (_, _) => ShowWindow();
 
-        var menu = new NativeMenu();
-        menu.Add(Item("打开 MolaGPT", ShowWindow));
-        menu.Add(Item("设置", () =>
+        _agentStatusItem = Item("Agent 状态…", () =>
+        {
+            ShowWindow();
+            AgentStatusRequested?.Invoke(this, EventArgs.Empty);
+        });
+        _menu.Add(Item("打开 MolaGPT", ShowWindow));
+        _menu.Add(Item("设置", () =>
         {
             ShowWindow();
             SettingsRequested?.Invoke(this, EventArgs.Empty);
         }));
-        menu.Add(Item("Agent 状态…", () => AgentStatusRequested?.Invoke(this, EventArgs.Empty)));
-        menu.Add(new NativeMenuItemSeparator());
-        menu.Add(Item("退出", Exit));
-        _icon.Menu = menu;
+        _menu.Add(_agentStatusItem);
+        _menu.Add(new NativeMenuItemSeparator());
+        _menu.Add(Item("退出", Exit));
+        _icon.Menu = _menu;
     }
 
     private static NativeMenuItem Item(string header, Action action)
@@ -65,13 +71,34 @@ internal sealed class TrayIconHost : IDisposable
         window.Closing += OnClosing;
         _settings.PropertyChanged += OnSettingsChanged;
         UpdateVisibility();
+        SyncAccountItems();
     }
 
     private void OnSettingsChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(SettingsViewModel.ShowAccountFeatures))
+        {
+            SyncAccountItems();
+            return;
+        }
         if (e.PropertyName != nameof(SettingsViewModel.EnableTrayIcon)) return;
         UpdateVisibility();
         if (!_settings.EnableTrayIcon && _window?.IsVisible == false) ShowWindow();
+    }
+
+    /// <summary>
+    /// Agent 状态 opens 远程控制, which relays through the account, so under
+    /// 隐藏 MolaGPT 账号功能 it leaves the tray just as it leaves the title bar.
+    /// Removed rather than hidden: whether the Win32 tray menu honours
+    /// <see cref="NativeMenuItem.IsVisible"/> is up to the exporter, and an entry
+    /// that is not in the menu cannot show up by accident.
+    /// </summary>
+    private void SyncAccountItems()
+    {
+        var show = _settings.ShowAccountFeatures;
+        var present = _menu.Items.Contains(_agentStatusItem);
+        if (show && !present) _menu.Items.Insert(2, _agentStatusItem);
+        else if (!show && present) _menu.Items.Remove(_agentStatusItem);
     }
 
     private void UpdateVisibility() => _icon.IsVisible = _settings.EnableTrayIcon && !_allowExit;

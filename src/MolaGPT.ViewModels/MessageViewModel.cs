@@ -1816,6 +1816,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
     public bool IsCompleted => Status.Equals("completed", StringComparison.OrdinalIgnoreCase) && !_resultFailed;
     public bool IsError => Status.Equals("error", StringComparison.OrdinalIgnoreCase)
                            || Status.Equals("failed", StringComparison.OrdinalIgnoreCase) || _resultFailed;
+    public bool IsInFlight => Status is "preparing" or "running";
     public bool IsSearch => Name.Equals("search_web", StringComparison.OrdinalIgnoreCase)
                             || Name.Equals("web_search", StringComparison.OrdinalIgnoreCase);
     public bool IsMemoryTool => Name is MemoryTools.RecallToolName or MemoryTools.WriteToolName;
@@ -2044,7 +2045,12 @@ public sealed partial class ToolCallViewModel : ObservableObject
         TaskTools.StopToolName => "\uE71A",
         _ => "\uE90F"
     };
-    public string StatusText => IsError ? "失败" : Name == "send_agent_message" && IsCompleted
+    private string? _activity;
+    public bool IsReviewing => Status == "running" && _activity is "reviewing" or "reviewing_extended";
+
+    public string StatusText => Status == "running" && _activity == "reviewing" ? "正在审视代码安全性"
+        : Status == "running" && _activity == "reviewing_extended" ? "正在进一步审视代码安全性"
+        : IsError ? "失败" : Name == "send_agent_message" && IsCompleted
         ? "已入队" : Status switch
         {
             "preparing" => "准备调用",
@@ -2188,6 +2194,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
     public void Apply(ToolCallDelta delta)
     {
         Status = delta.Status;
+        if (delta.Activity is not null || Status != "running") _activity = delta.Activity;
 
         if (IsPlaceholderToolName(Name) && !IsPlaceholderToolName(delta.Name))
             Name = delta.Name;
@@ -2292,6 +2299,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(IsCompleted));
         OnPropertyChanged(nameof(IsError));
+        OnPropertyChanged(nameof(IsInFlight));
         OnPropertyChanged(nameof(GroupStatusText));
         OnPropertyChanged(nameof(GroupIsCompleted));
         OnPropertyChanged(nameof(GroupIsError));

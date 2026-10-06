@@ -21,6 +21,8 @@ public sealed partial class SubagentViewModel : ObservableObject, IDisposable
     public string Label => _agent.Label;
     public string Model => _agent.ModelId;
     public bool IsRunning => _task?.IsRunning == true;
+    public bool IsCompleted => _task?.Status == AgentTaskStatus.Completed;
+    public bool IsFailed => _task?.Status == AgentTaskStatus.Failed;
     public string StatusText => _task?.Status switch
     {
         AgentTaskStatus.Running => "运行中",
@@ -45,7 +47,10 @@ public sealed partial class SubagentViewModel : ObservableObject, IDisposable
             Activity.LastOrDefault()?.ResumeStreaming();
         }
         else Activity.LastOrDefault()?.FinishStreaming();
+        foreach (var activity in Activity) activity.SetOwnerRunning(IsRunning);
         OnPropertyChanged(nameof(IsRunning));
+        OnPropertyChanged(nameof(IsCompleted));
+        OnPropertyChanged(nameof(IsFailed));
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(ElapsedText));
         OnPropertyChanged(nameof(FailureText));
@@ -112,6 +117,7 @@ public sealed class SubagentActivityViewModel : ObservableObject
             foreach (var tool in tools) Tool.Apply(tool);
         }
         _revision = activity.Revision;
+        _ownerRunning = running;
     }
 
     public string Id { get; }
@@ -124,6 +130,17 @@ public sealed class SubagentActivityViewModel : ObservableObject
     public MessageViewModel? Message { get; }
     public ToolCallViewModel? Tool { get; }
     public string? RenderedMarkdown => Message?.IsStreaming == true ? null : Message?.Content;
+
+    // A stopped sub-agent can leave its last call marked running.
+    private bool _ownerRunning;
+    public bool ShowsSpinner => _ownerRunning && Tool?.IsInFlight == true;
+
+    public void SetOwnerRunning(bool running)
+    {
+        if (_ownerRunning == running) return;
+        _ownerRunning = running;
+        OnPropertyChanged(nameof(ShowsSpinner));
+    }
 
     public void Apply(AgentActivity activity)
     {
@@ -140,7 +157,10 @@ public sealed class SubagentActivityViewModel : ObservableObject
             if (!Message.IsStreaming) OnPropertyChanged(nameof(RenderedMarkdown));
         }
         if (activity.ToolDeltas is { } tools)
+        {
             foreach (var tool in tools) Tool?.Apply(tool);
+            OnPropertyChanged(nameof(ShowsSpinner));
+        }
     }
 
     public void FinishStreaming()

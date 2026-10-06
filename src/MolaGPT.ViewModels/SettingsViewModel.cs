@@ -30,6 +30,8 @@ public sealed partial class SettingsViewModel : ObservableObject
     public const string AutoCollapseThinkingKey = "auto_collapse_thinking";
     private const string StreamFadeKey = "stream_tail_fade";
     private const string StatusDotsKey = "status_dots";
+    private const string HideAccountFeaturesKey = "hide_account_features";
+    private const string PythonSetupOfferedKey = "python_setup_offered";
     private const string AutoCompactionKey = "auto_compaction";
     private const string BackgroundTaskWakeKey = "background_task_wake";
     private const string RunningTaskSendModeKey = "running_task_send_mode";
@@ -41,6 +43,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string CompletionNotificationKey = "completion_notification";
     private const string ThemeModeKey = "theme_mode";
     private const string FontScaleKey = "font_scale";
+    private const string CornerStyleKey = "corner_style";
     private const string TrayIconEnabledKey = "tray_icon_enabled";
     private const string TrayCloseBehaviorKey = "tray_close_behavior";
     private const string WebSearchProviderKey = "web_search_provider";
@@ -99,7 +102,26 @@ public sealed partial class SettingsViewModel : ObservableObject
     public event EventHandler<ThemeMode>? ThemeModeChanged;
 
     [ObservableProperty] private string? _molaGptUsername;
-    [ObservableProperty] private bool _isLoggedIn;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowAccountFeatures))]
+    private bool _isLoggedIn;
+
+    /// <summary>
+    /// 外观 → 隐藏 MolaGPT 账号功能. Only takes effect while signed out: signing in
+    /// is itself a request for those features, so it brings them back without the
+    /// user having to find this switch again.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowAccountFeatures))]
+    private bool _hideAccountFeatures;
+
+    /// <summary>Whether account-only entry points (the Chat segment, remote
+    /// control, the account page) should be on screen at all.</summary>
+    public bool ShowAccountFeatures => IsLoggedIn || !HideAccountFeatures;
+
+    /// <summary>The one-time "install Python?" offer after the agent runtime
+    /// first lands has been shown. Persisted so a reinstall does not ask again.</summary>
+    [ObservableProperty] private bool _pythonSetupOffered;
     [ObservableProperty] private ThemeMode _themeMode = ThemeMode.System;
     [ObservableProperty] private bool _enterToSend = true;
 
@@ -176,6 +198,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     public const double MinFontScale = 0.8;
     public const double MaxFontScale = 1.4;
     [ObservableProperty] private double _fontScale = 1.0;
+
+    /// <summary>外观 → 圆角. Rescales the whole radius ladder at once rather than
+    /// exposing numbers, so outer surfaces stay rounder than what sits inside them.</summary>
+    [ObservableProperty] private CornerStyle _cornerStyle = CornerStyle.Standard;
     [ObservableProperty] private bool _syncConversations = true;
     [ObservableProperty] private bool _tracksEnabled = true;
     [ObservableProperty] private bool _enableCompletionNotification = true;
@@ -329,6 +355,10 @@ public sealed partial class SettingsViewModel : ObservableObject
                 StreamFadeEnabled = streamFade;
             if (bool.TryParse(_settingsRepo.Get(StatusDotsKey), out var statusDots))
                 ShowStatusDots = statusDots;
+            if (bool.TryParse(_settingsRepo.Get(HideAccountFeaturesKey), out var hideAccount))
+                HideAccountFeatures = hideAccount;
+            if (bool.TryParse(_settingsRepo.Get(PythonSetupOfferedKey), out var pythonOffered))
+                PythonSetupOffered = pythonOffered;
             if (bool.TryParse(_settingsRepo.Get(AutoCompactionKey), out var autoCompaction))
                 AutoCompactionEnabled = autoCompaction;
             if (bool.TryParse(_settingsRepo.Get(BackgroundTaskWakeKey), out var taskWake))
@@ -363,6 +393,11 @@ public sealed partial class SettingsViewModel : ObservableObject
             {
                 FontScale = NormalizeFontScale(fontScale);
             }
+            if (Enum.TryParse<CornerStyle>(_settingsRepo.Get(CornerStyleKey), true, out var cornerStyle)
+                && Enum.IsDefined(cornerStyle))
+            {
+                CornerStyle = cornerStyle;
+            }
             WebSearchProvider = _settingsRepo.Get(WebSearchProviderKey) ?? "duckduckgo";
             WebSearchBaseUrl = _settingsRepo.Get(WebSearchBaseUrlKey) ?? DefaultWebSearchBaseUrl(WebSearchProvider);
             if (int.TryParse(_settingsRepo.Get(WebSearchMaxResultsKey), out var maxResults))
@@ -392,7 +427,12 @@ public sealed partial class SettingsViewModel : ObservableObject
                 ? Math.Clamp(batch, 1, ImageGenerationTool.MaxBatchSize)
                 : 1;
             PythonToolEnabled = bool.TryParse(_settingsRepo.Get(PythonToolEnabledKey), out var pythonEnabled) && pythonEnabled;
-            FileToolsEnabled = bool.TryParse(_settingsRepo.Get(FileToolsEnabledKey), out var fileToolsEnabled) && fileToolsEnabled;
+            // On unless the user turned it off. Read-only inside the conversation's
+            // workspace and approval-gated outside it, and without it skills and the
+            // tail of a truncated attachment are unreachable. Only an explicit "False"
+            // is kept: the key is written on change, so an absent row means the user
+            // never chose, and that covers existing installs too.
+            FileToolsEnabled = !bool.TryParse(_settingsRepo.Get(FileToolsEnabledKey), out var fileToolsEnabled) || fileToolsEnabled;
             PythonToolExecutablePath = _settingsRepo.Get(PythonToolExecutablePathKey);
             if (int.TryParse(_settingsRepo.Get(PythonToolTimeoutSecondsKey), out var pythonTimeout))
                 PythonToolTimeoutSeconds = Math.Clamp(pythonTimeout, 5, 300);
@@ -521,6 +561,18 @@ public sealed partial class SettingsViewModel : ObservableObject
         _settingsRepo.Set(StatusDotsKey, value.ToString());
     }
 
+    partial void OnHideAccountFeaturesChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(HideAccountFeaturesKey, value.ToString());
+    }
+
+    partial void OnPythonSetupOfferedChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(PythonSetupOfferedKey, value.ToString());
+    }
+
     partial void OnAutoCompactionEnabledChanged(bool value)
     {
         if (_loadingSettings || _settingsRepo is null) return;
@@ -570,6 +622,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     public static double NormalizeFontScale(double value) =>
         Math.Round(Math.Clamp(value, MinFontScale, MaxFontScale) * 5,
             MidpointRounding.AwayFromZero) / 5;
+
+    partial void OnCornerStyleChanged(CornerStyle value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(CornerStyleKey, value.ToString());
+    }
 
     partial void OnTracksEnabledChanged(bool value)
     {
@@ -1395,6 +1453,8 @@ public sealed partial class SettingsViewModel : ObservableObject
 }
 
 public enum ThemeMode { System, Light, Dark }
+
+public enum CornerStyle { Standard, Small, Square }
 
 public enum TrayCloseBehavior
 {

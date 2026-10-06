@@ -197,6 +197,9 @@ public sealed class AgentRelayClient
     public async Task StopAsync(CancellationToken ct = default)
     {
         Stop();
+        // Stopped by sign-out: the credential is already gone, so there is
+        // nothing to send the offline mark with.
+        if (!_producer.IsAuthAvailable) return;
         try { await _producer.MarkMachineOfflineAsync(ct).ConfigureAwait(false); }
         catch { /* best-effort shutdown path */ }
     }

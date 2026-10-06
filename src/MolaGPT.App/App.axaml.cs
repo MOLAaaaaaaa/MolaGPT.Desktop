@@ -89,6 +89,12 @@ public partial class App : Application
 
             ApplyTheme(settings.ThemeMode);
             settings.ThemeModeChanged += (_, mode) => ApplyTheme(mode);
+            CornerStyles.Apply(this, settings.CornerStyle);
+            settings.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(SettingsViewModel.CornerStyle))
+                    CornerStyles.Apply(this, settings.CornerStyle);
+            };
 
             // DiagnosticLog, not Debug.WriteLine: the previous sink was compiled out
             // of release builds, so on the machines where rows silently vanish from
@@ -207,16 +213,29 @@ public partial class App : Application
             };
 
             agentBridge.Start();
-            agentStatus.InitializeBridgeEnabled(agentConfig.BridgeEnabled);
+            agentStatus.InitializeBridgeEnabled(agentConfig.BridgeEnabled, settings.IsLoggedIn);
             agentStatus.ConfirmEnableAsync = async () =>
                 await new BridgePrivacyWindow().ShowDialog<bool>(window);
             agentStatus.ApplyBridgeEnabled = enabled =>
             {
                 agentConfig.BridgeEnabled = enabled;
-                if (enabled) StartAgentRelay();
-                else _ = StopAgentRelayAsync();
+                SyncAgentRelay();
             };
-            if (agentConfig.BridgeEnabled) StartAgentRelay();
+            // The relay authenticates as the MolaGPT account. Run signed out, every
+            // heartbeat and meta post it made threw and was retried on a timer.
+            settings.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName != nameof(SettingsViewModel.IsLoggedIn)) return;
+                agentStatus.SetSignedIn(settings.IsLoggedIn);
+                SyncAgentRelay();
+            };
+            SyncAgentRelay();
+
+            void SyncAgentRelay()
+            {
+                if (agentConfig.BridgeEnabled && settings.IsLoggedIn) StartAgentRelay();
+                else _ = StopAgentRelayAsync();
+            }
 
             // Tray close behavior may hide the main window, so shutdown stays
             // explicit and the tray host owns the final decision.
@@ -224,6 +243,7 @@ public partial class App : Application
             _tray = new TrayIconHost(settings);
             _tray.Attach(window);
             _tray.SettingsRequested += (_, _) => window.OpenSettings();
+            _tray.AgentStatusRequested += (_, _) => window.OpenAgentSettings();
             window.PropertyChanged += OnMainWindowPropertyChanged;
 
             SingleInstanceHost.Attach(deepLink => Dispatcher.UIThread.Post(() =>

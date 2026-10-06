@@ -38,6 +38,23 @@ public partial class SettingsWindow
         ShowSelectedPage();
     }
 
+    /// <summary>
+    /// 外观 → 隐藏 MolaGPT 账号功能 takes the account page and 远程控制 (which
+    /// relays through the account) out of the rail while signed out. A page that
+    /// leaves while open hands over to 外观, where the switch that hid it lives.
+    /// </summary>
+    private void ApplyAccountFeatureVisibility()
+    {
+        var show = _settings.ShowAccountFeatures;
+        PART_AccountNav.IsVisible = show;
+        PART_AgentNav.IsVisible = show;
+        PART_MemorySubtitle.Text = show
+            ? "从 Work 与 BYOK 对话中学习你的偏好，让后续回复更贴合你。MolaGPT Chat 的记忆请前往「MolaGPT 账号」设置中管理。"
+            : "从 Work 与 BYOK 对话中学习你的偏好，让后续回复更贴合你。";
+        if (PART_Nav.SelectedItem is ListBoxItem { IsVisible: false })
+            PART_Nav.SelectedItem = PART_AppearanceNav;
+    }
+
     internal void RefreshAccountUi()
     {
         var loggedIn = _auth is null ? _settings.IsLoggedIn : !string.IsNullOrEmpty(_auth.CurrentJwt);

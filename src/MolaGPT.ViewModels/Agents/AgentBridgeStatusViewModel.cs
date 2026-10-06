@@ -47,6 +47,10 @@ public sealed partial class AgentBridgeStatusViewModel : ObservableObject
     [ObservableProperty] private string _statusText = "就绪";
     [ObservableProperty] private string _bridgeStatusText = "已停用";
 
+    // Read off the bridge's thread by RefreshRelayStatusAsync; a stale read
+    // costs one skipped or one extra device query.
+    private volatile bool _isSignedIn;
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(BridgeToggleLabel))]
     private bool _isBridgeEnabled;
@@ -109,7 +113,7 @@ public sealed partial class AgentBridgeStatusViewModel : ObservableObject
             _sync.Post(_ =>
             {
                 Replace(snap);
-                BridgeStatusText = IsBridgeEnabled ? "运行中" : "已停用";
+                BridgeStatusText = DescribeBridge();
             }, null);
             await RefreshRelayStatusAsync().ConfigureAwait(false);
         }
@@ -123,11 +127,25 @@ public sealed partial class AgentBridgeStatusViewModel : ObservableObject
     public async Task RefreshAsync() => await LoadAsync().ConfigureAwait(false);
 
     /// <summary>Seed the toggle from the persisted setting (Desktop layer, at startup).</summary>
-    public void InitializeBridgeEnabled(bool enabled)
+    public void InitializeBridgeEnabled(bool enabled, bool signedIn)
     {
         IsBridgeEnabled = enabled;
-        BridgeStatusText = enabled ? "运行中" : "已停用";
+        _isSignedIn = signedIn;
+        BridgeStatusText = DescribeBridge();
     }
+
+    /// <summary>The relay only runs signed in, so an enabled bridge is not
+    /// necessarily a running one.</summary>
+    public void SetSignedIn(bool signedIn)
+    {
+        if (_isSignedIn == signedIn) return;
+        _isSignedIn = signedIn;
+        BridgeStatusText = DescribeBridge();
+        _ = RefreshRelayStatusAsync();
+    }
+
+    private string DescribeBridge() =>
+        !IsBridgeEnabled ? "已停用" : _isSignedIn ? "运行中" : "未登录";
 
     /// <summary>Enable/disable the cloud relay bridge. Enabling requires explicit
     /// consent via <see cref="ConfirmEnableAsync"/> (privacy disclosure); the actual
@@ -140,13 +158,13 @@ public sealed partial class AgentBridgeStatusViewModel : ObservableObject
             var consent = ConfirmEnableAsync is null || await ConfirmEnableAsync().ConfigureAwait(true);
             if (!consent) return;
             IsBridgeEnabled = true;
-            BridgeStatusText = "运行中";
+            BridgeStatusText = DescribeBridge();
             ApplyBridgeEnabled?.Invoke(true);
         }
         else
         {
             IsBridgeEnabled = false;
-            BridgeStatusText = "已停用";
+            BridgeStatusText = DescribeBridge();
             ApplyBridgeEnabled?.Invoke(false);
             await RefreshRelayStatusAsync().ConfigureAwait(true);
         }
@@ -154,10 +172,10 @@ public sealed partial class AgentBridgeStatusViewModel : ObservableObject
 
     private async Task RefreshRelayStatusAsync()
     {
-        if (!IsBridgeEnabled)
+        if (!IsBridgeEnabled || !_isSignedIn)
         {
-            // Disabled: don't query the relay; surface zeroed counts so the UI doesn't
-            // imply an active connection.
+            // Not running: don't query the relay; surface zeroed counts so the UI
+            // doesn't imply an active connection.
             _sync.Post(_ =>
             {
                 ProjectedSessionCount = 0;

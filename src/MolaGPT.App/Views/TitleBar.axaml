@@ -29,6 +29,7 @@
 
       <!-- Centre: MolaGPT Chat / MolaGPT Work -->
       <Border Grid.Column="1"
+              Name="PART_ModeSwitch"
               VerticalAlignment="Center"
               RenderTransform="translate(0, 2.5px)"
               Background="{DynamicResource Brush.Bg.Tertiary}"

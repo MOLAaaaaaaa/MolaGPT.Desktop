@@ -23,7 +23,7 @@
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Primary}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Divider}" />
       <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
       <Setter Property="ClipToBounds" Value="True" />
     </Style>
     <Style Selector="Border.mockchrome">
@@ -34,7 +34,7 @@
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Primary}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Divider}" />
       <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="9" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
       <Setter Property="Padding" Value="9,3" />
     </Style>
     <Style Selector="Ellipse.mockdot">
@@ -43,7 +43,7 @@
       <Setter Property="Fill" Value="{DynamicResource Brush.Divider}" />
     </Style>
     <Style Selector="Border.mockcta">
-      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
       <Setter Property="Padding" Value="14,6" />
       <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
@@ -52,7 +52,8 @@
       <Setter Property="FontSize" Value="11" />
       <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
-    <!-- Kimi 的方块标：底色跟着主题反色，右上角那个蓝点是品牌标识，不反色。 -->
+    <!-- Kimi 的方块标：底色跟着主题反色，右上角那个蓝点是品牌标识，不反色。
+         圆角是标志本身的形状，不跟随外观里的圆角设置。 -->
     <Style Selector="Border.mocklogo">
       <Setter Property="Width" Value="40" />
       <Setter Property="Height" Value="40" />
@@ -81,7 +82,7 @@
     <Style Selector="Border.stepnum">
       <Setter Property="Width" Value="21" />
       <Setter Property="Height" Value="21" />
-      <Setter Property="CornerRadius" Value="11" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
       <Setter Property="Background" Value="{DynamicResource Brush.Primary}" />
       <Setter Property="VerticalAlignment" Value="Top" />
       <Setter Property="Margin" Value="0,1,0,0" />
@@ -97,7 +98,7 @@
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Divider}" />
       <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
       <Setter Property="Padding" Value="12,9" />
     </Style>
   </views:MolaContentWindow.Styles>

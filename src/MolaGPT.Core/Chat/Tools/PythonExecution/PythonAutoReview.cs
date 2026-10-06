@@ -28,6 +28,8 @@ public sealed partial record PythonReviewContext(
     string? Delegation,
     IReadOnlyList<ReviewedToolCall> EarlierCalls)
 {
+    public Action<string>? ReportActivity { get; init; }
+
     public static PythonReviewContext From(ChatRequest request, IReadOnlyList<ReviewedToolCall> earlierCalls)
     {
         var root = request;
@@ -160,6 +162,9 @@ public sealed class PythonAutoReviewer : IPythonAutoReviewer
 
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
         limit.CancelAfter(Timeout);
+        using var activityStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        request.Context.ReportActivity?.Invoke("reviewing");
+        var activity = ReportExtendedReviewAsync(request.Context.ReportActivity, activityStop.Token);
         string answer;
         try
         {
@@ -181,7 +186,25 @@ public sealed class PythonAutoReviewer : IPythonAutoReviewer
             return new PythonReviewVerdict(false, ex.Message, target.Label, Failed: true);
         }
 
+        finally
+        {
+            activityStop.Cancel();
+            await activity.ConfigureAwait(false);
+            request.Context.ReportActivity?.Invoke(string.Empty);
+        }
+
         return Parse(answer, target.Label);
+    }
+
+    private static async Task ReportExtendedReviewAsync(Action<string>? report, CancellationToken ct)
+    {
+        if (report is null) return;
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+            report("reviewing_extended");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
     }
 
     /// <summary>

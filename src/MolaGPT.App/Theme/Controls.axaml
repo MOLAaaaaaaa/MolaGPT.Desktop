@@ -636,13 +636,43 @@
     <Setter Property="ArcBrush" Value="{DynamicResource Brush.Error}" />
   </Style>
 
+  <Style Selector="r|RingSpinner">
+    <Setter Property="TrackBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    <Setter Property="ArcBrush" Value="{DynamicResource Brush.Primary}" />
+  </Style>
+
+  <!-- Status of a call or task. Done is a green check, quiet enough for a column
+       of them; only a failure gets a fill, so it is the one that stands out. -->
+  <Style Selector="Border.taskstatus">
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Border.taskstatus TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Border.taskstatus.background TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+  </Style>
+  <Style Selector="Border.taskstatus.done TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Success.Foreground}" />
+  </Style>
+  <Style Selector="Border.taskstatus.failed">
+    <Setter Property="Background" Value="{DynamicResource Brush.Danger.Surface}" />
+    <Setter Property="Padding" Value="6,1" />
+  </Style>
+  <Style Selector="Border.taskstatus.failed TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Danger.Foreground}" />
+  </Style>
+
   <!-- Plan usage under the gauge: same colours as the ring, keyed to what is
        left rather than what is used. -->
   <Style Selector="ProgressBar.planusage">
     <Setter Property="Height" Value="4" />
     <Setter Property="MinHeight" Value="4" />
     <Setter Property="MinWidth" Value="0" />
-    <Setter Property="CornerRadius" Value="2" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
     <Setter Property="Background" Value="{DynamicResource Brush.Border}" />
     <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
   </Style>

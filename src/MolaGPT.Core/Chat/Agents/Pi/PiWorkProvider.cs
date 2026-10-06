@@ -164,24 +164,24 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // one call. The model gets the numbers and the rule; the transcript gets
         // the same list as a ChatChunk below.
         var citations = new SearchCitations();
+        async Task<string> ExecuteToolAsync(string name, string argsJson, CancellationToken toolCt, Action<string>? report = null)
+        {
+            using var call = CancellationTokenSource.CreateLinkedTokenSource(toolCt, ct);
+            var result = await _toolHost
+                .ExecuteAsync(name, argsJson, toolContext with { ReportActivity = report }, options, call.Token)
+                .ConfigureAwait(false);
+            return string.Equals(name, "search_web", StringComparison.Ordinal)
+                ? citations.Number(result)
+                : result;
+        }
+
         var binding = new PiWorkToolBridge.TurnBinding(
-            async (name, argsJson, toolCt) =>
-            {
-                // Stop cancels the tool as well as the stream. The bridge would get
-                // there once the lease is released; linking here does not wait for
-                // the stream to unwind first.
-                using var call = CancellationTokenSource.CreateLinkedTokenSource(toolCt, ct);
-                var result = await _toolHost
-                    .ExecuteAsync(name, argsJson, toolContext, options, call.Token)
-                    .ConfigureAwait(false);
-                return string.Equals(name, "search_web", StringComparison.Ordinal)
-                    ? citations.Number(result)
-                    : result;
-            },
+            (name, argsJson, toolCt) => ExecuteToolAsync(name, argsJson, toolCt),
             () => toolCatalogJson,
             () => systemPrompt,
             request.RolePrompt,
-            message => Volatile.Write(ref promptError, message));
+            message => Volatile.Write(ref promptError, message),
+            (name, argsJson, report, toolCt) => ExecuteToolAsync(name, argsJson, toolCt, report));
 
         var target = new PiWorkLlmShim.ForwardTarget(
             creds.Endpoint,
@@ -737,6 +737,18 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                     pendingArgs[startId] = startArgs;
                     return new ChatChunk(Tool: ToolDeltaBuilder.BuildToolDelta(
                         preview.CardIdFor(startId), Str(root, "toolName"), startArgs, options, "running"));
+                }
+
+                case "tool_execution_update":
+                {
+                    if (!root.TryGetProperty("partialResult", out var partial)
+                        || !partial.TryGetProperty("details", out var details)
+                        || !details.TryGetProperty("molaActivity", out var activity)
+                        || activity.ValueKind != JsonValueKind.String) return null;
+                    var updateId = Str(root, "toolCallId");
+                    if (!pendingArgs.ContainsKey(updateId)) return null;
+                    return new ChatChunk(Tool: new ToolCallDelta(
+                        preview.CardIdFor(updateId), Str(root, "toolName"), "running", Activity: activity.GetString()));
                 }
 
                 case "tool_execution_end":

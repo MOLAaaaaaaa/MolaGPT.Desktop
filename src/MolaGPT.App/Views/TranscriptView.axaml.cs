@@ -86,6 +86,7 @@ public partial class TranscriptView : UserControl
 
         _scroll = PART_Scroll;
         _scroll.ScrollChanged += OnScrollChanged;
+        InitializeTurnRail();
     }
 
 
@@ -104,6 +105,7 @@ public partial class TranscriptView : UserControl
         if (Math.Abs(PART_Scroll.Margin.Bottom - reserve) < 0.5) return;
         PART_Scroll.Margin = new Thickness(0, 0, 0, reserve);
         PART_JumpLatest.Margin = new Thickness(0, 0, 0, reserve + JumpLatestLift);
+        PART_TurnRail.Margin = new Thickness(TurnRailEdge, TurnRailTop, 0, reserve + TurnRailBottomGap);
     }
 
     // ---- wiring ------------------------------------------------------------
@@ -115,10 +117,12 @@ public partial class TranscriptView : UserControl
         _rows?.Dispose();
         _rows = null;
 
+        var previous = _chat;
         _chat = chat;
         if (_chat is null)
         {
             PART_Rows.ItemsSource = null;
+            AttachTurns(previous, null);
             return;
         }
 
@@ -127,6 +131,7 @@ public partial class TranscriptView : UserControl
         _rows.CollectionChanged += (_, _) => OnRowsChanged();
         PART_Rows.ItemsSource = _rows;
         PART_Hints.ItemsSource = _chat.HintChips;
+        AttachTurns(previous, _chat);
 
         UpdateWelcome();
         RequestScrollToEnd(force: true);
@@ -140,6 +145,7 @@ public partial class TranscriptView : UserControl
             case nameof(ChatViewModel.ConversationId):
                 // A different conversation always starts pinned to the newest
                 // message, whatever the user was doing in the previous one.
+                ReleaseTurnJump();
                 _followBottom = true;
                 RequestScrollToEnd(force: true);
                 break;
@@ -190,6 +196,8 @@ public partial class TranscriptView : UserControl
         PART_PersonaPick.IsVisible = offer;
         PART_Personas.ItemsSource = offer ? personas : null;
 
+        UpdateTurnRail();
+
     }
 
     private void OnPersonaCard(object? sender, RoutedEventArgs e)
@@ -215,6 +223,7 @@ public partial class TranscriptView : UserControl
     {
         if (_scroll is null || e.Delta.Y == 0) return;
 
+        ReleaseTurnJump();
         if (_jumping) CancelWheelAnimation();
 
         var scrollable = Math.Max(0, _scroll.Extent.Height - _scroll.Viewport.Height);
@@ -233,6 +242,7 @@ public partial class TranscriptView : UserControl
         if (IsScrollBarPart(e.Source))
         {
             CancelWheelAnimation();
+            ReleaseTurnJump();
             _followBottom = false;
             return;
         }
@@ -256,7 +266,13 @@ public partial class TranscriptView : UserControl
             case Key.PageUp:
             case Key.Home:
                 CancelWheelAnimation();
+                ReleaseTurnJump();
                 _followBottom = false;
+                break;
+            case Key.Down:
+            case Key.PageDown:
+            case Key.End:
+                ReleaseTurnJump();
                 break;
         }
     }
@@ -266,6 +282,7 @@ public partial class TranscriptView : UserControl
         if (_scroll is null) return;
 
         FollowSelectionThroughScroll();
+        UpdateTurnRail();
 
         var atBottom = IsNearBottom();
         // The affordance means "you have scrolled away from the newest message",
@@ -546,6 +563,8 @@ public partial class TranscriptView : UserControl
         // finish without any ScrollChanged at all.
         PART_JumpLatest.IsVisible = false;
         CancelWheelAnimation();
+        ReleaseTurnJump();
+        _jumpTarget = null;
 
         var bottom = Math.Max(0, _scroll.Extent.Height - _scroll.Viewport.Height);
         if (bottom - _scroll.Offset.Y <= 1)
@@ -573,7 +592,7 @@ public partial class TranscriptView : UserControl
         topLevel.RequestAnimationFrame(AnimateJumpFrame);
     }
 
-    private void AnimateJumpFrame(TimeSpan _)
+    private void AnimateJumpFrame(TimeSpan frameTime)
     {
         _jumpFrameRequested = false;
         if (!_jumping || _scroll is null) return;
@@ -581,16 +600,32 @@ public partial class TranscriptView : UserControl
         // The virtualizing panel revises its estimated extent while rows are
         // realized. Re-read the destination every frame, but keep a fixed time
         // curve so a moving target cannot make the animation settle early.
-        var bottom = Math.Max(0, _scroll.Extent.Height - _scroll.Viewport.Height);
+        var destination = Math.Max(0, _scroll.Extent.Height - _scroll.Viewport.Height);
+        if (_jumpTarget is { } turn)
+        {
+            if (OffsetOf(turn) is not { } offset)
+            {
+                _jumping = false;
+                _jumpTarget = null;
+                return;
+            }
+            destination = offset;
+        }
         var progress = Math.Clamp(
             (DateTime.UtcNow - _jumpStart).TotalSeconds / JumpSeconds, 0, 1);
         var eased = 1 - Math.Pow(1 - progress, 3);
 
-        SetScrollOffset(_jumpFrom + ((bottom - _jumpFrom) * eased));
+        SetScrollOffset(_jumpFrom + ((destination - _jumpFrom) * eased));
 
         if (progress >= 1)
         {
             _jumping = false;
+            if (_jumpTarget is { } landed)
+            {
+                _jumpTarget = null;
+                _ = SettleOnMessageAsync(landed);
+                return;
+            }
             _followBottom = true;
             RequestScrollToEnd(force: true);
             return;

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
 
@@ -44,7 +45,8 @@ public sealed class PiWorkToolBridge : IDisposable
         ToolCatalog Catalog,
         SystemPrompt SystemPrompt,
         RolePromptPlan? RolePlan = null,
-        Action<string>? PromptError = null);
+        Action<string>? PromptError = null,
+        Func<string, string, Action<string>, CancellationToken, Task<string>>? ProgressDispatcher = null);
 
     /// <summary>A binding and the signal that its turn is over. Tool calls run
     /// against <see cref="Ended"/>, so whatever a turn still has in flight when it
@@ -187,8 +189,9 @@ public sealed class PiWorkToolBridge : IDisposable
     ///
     /// The response is committed before the tool runs — status 200, chunked, a
     /// single space — and a space follows every <see cref="HeartbeatInterval"/>
-    /// until the result is written. JSON allows the leading whitespace, so the
-    /// extension reads the body exactly as before. The price is that a failure can
+    /// until the result is written. Clients opting into x-mola-progress receive
+    /// newline-delimited activity records followed by the result; older clients
+    /// still receive one JSON object with leading whitespace. A failure can
     /// no longer be a 500; it travels as <c>error: true</c> beside the output.
     /// A tool that ran and reported failure in its own result — a refused approval,
     /// an MCP error — is marked <c>failed: true</c>, so Pi records it as failed too.
@@ -207,18 +210,41 @@ public sealed class PiWorkToolBridge : IDisposable
     {
         using var call = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, bound.Ended.Token);
         var response = ctx.Response;
+        var progressEnabled = ctx.Request.Headers["x-mola-progress"] == "1";
         response.StatusCode = 200;
-        response.ContentType = "application/json";
+        response.ContentType = progressEnabled ? "application/x-ndjson" : "application/json";
         response.SendChunked = true;
         var stream = response.OutputStream;
         using var writes = new SemaphoreSlim(1, 1);
         using var stopHeartbeat = new CancellationTokenSource();
         var heartbeat = HeartbeatAsync(stream, writes, call, stopHeartbeat.Token);
+        var updates = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
+        var progress = WriteProgressAsync();
+
+        async Task WriteProgressAsync()
+        {
+            try
+            {
+                await foreach (var activity in updates.Reader.ReadAllAsync(call.Token).ConfigureAwait(false))
+                {
+                    var line = JsonSerializer.Serialize(new { activity }) + "\n";
+                    await WriteAsync(stream, writes, Encoding.UTF8.GetBytes(line)).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (call.IsCancellationRequested) { }
+            catch (Exception)
+            {
+                try { call.Cancel(); }
+                catch (AggregateException) { }
+            }
+        }
 
         string json;
         try
         {
-            var output = await bound.Binding.Dispatcher(name, argsJson, call.Token).ConfigureAwait(false);
+            var output = progressEnabled && bound.Binding.ProgressDispatcher is { } dispatch
+                ? await dispatch(name, argsJson, activity => updates.Writer.TryWrite(activity), call.Token).ConfigureAwait(false)
+                : await bound.Binding.Dispatcher(name, argsJson, call.Token).ConfigureAwait(false);
             json = JsonSerializer.Serialize(new { output, failed = ToolDeltaBuilder.IsToolError(output) });
         }
         // The dispatcher may be cancelled through its own turn's token before this
@@ -234,10 +260,12 @@ public sealed class PiWorkToolBridge : IDisposable
             json = JsonSerializer.Serialize(new { output = "工具执行失败：" + ex.Message, error = true });
         }
 
+        updates.Writer.TryComplete();
+        await progress.ConfigureAwait(false);
         stopHeartbeat.Cancel();
         await heartbeat.ConfigureAwait(false);
 
-        try { await WriteAsync(stream, writes, Encoding.UTF8.GetBytes(json)).ConfigureAwait(false); }
+        try { await WriteAsync(stream, writes, Encoding.UTF8.GetBytes(json + (progressEnabled ? "\n" : ""))).ConfigureAwait(false); }
         catch { /* client gone */ }
         finally { try { response.Close(); } catch { /* ignore */ } }
     }

@@ -190,6 +190,10 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
     private int SegmentEnd(MessageViewModel message) =>
         _segments.TryGetValue(message, out var s) ? s.Start + s.Rows.Count : 0;
 
+    /// <summary>Index of the first row <paramref name="message"/> owns, or -1.</summary>
+    public int FirstRowOf(MessageViewModel message) =>
+        _segments.TryGetValue(message, out var s) && s.Rows.Count > 0 ? s.Start : -1;
+
     private void ShiftFrom(int orderIndex, int delta)
     {
         if (delta == 0) return;

@@ -103,7 +103,7 @@
               PointerPressed="OnArtifactResizePressed"
               PointerMoved="OnArtifactResizeMoved"
               PointerReleased="OnArtifactResizeReleased">
-        <Border Width="2" Height="44" CornerRadius="1"
+        <Border Width="2" Height="44" CornerRadius="{DynamicResource Radius.Pill}"
                 Background="{DynamicResource Brush.Border.Strong}"
                 HorizontalAlignment="Center" VerticalAlignment="Center"
                 IsVisible="{Binding ArtifactCanvasVisible}" />
@@ -300,8 +300,16 @@
                         <Grid ColumnDefinitions="*,Auto">
                           <TextBlock Text="{Binding Label}" FontSize="13" FontWeight="SemiBold"
                                      TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
-                          <TextBlock Grid.Column="1" Text="{Binding StatusText}"
-                                     Classes="muted" FontSize="11" Margin="8,0,0,0" />
+                          <Border Grid.Column="1" Classes="taskstatus" Margin="8,0,0,0"
+                                  Classes.done="{Binding IsCompleted}" Classes.failed="{Binding IsFailed}">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                              <r:RingSpinner Width="12" Height="12" VerticalAlignment="Center"
+                                             IsVisible="{Binding IsRunning}" />
+                              <TextBlock Classes="icon" Text="&#xE73E;" FontSize="12" IsVisible="{Binding IsCompleted}" />
+                              <TextBlock Classes="icon" Text="&#xEA39;" FontSize="12" IsVisible="{Binding IsFailed}" />
+                              <TextBlock Text="{Binding StatusText}" />
+                            </StackPanel>
+                          </Border>
                         </Grid>
                         <TextBlock Text="{Binding Model}" Classes="muted" FontSize="11"
                                    TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
@@ -325,8 +333,20 @@
                   <TextBlock Text="{Binding SelectedSubagent.Label}" FontSize="13" FontWeight="SemiBold"
                              TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                   <StackPanel Orientation="Horizontal" Spacing="6">
-                    <TextBlock Text="{Binding SelectedSubagent.StatusText}" Classes="muted" FontSize="11" />
-                    <TextBlock Text="{Binding SelectedSubagent.ElapsedText}" Classes="muted" FontSize="11" />
+                    <Border Classes="taskstatus" Classes.done="{Binding SelectedSubagent.IsCompleted}"
+                            Classes.failed="{Binding SelectedSubagent.IsFailed}">
+                      <StackPanel Orientation="Horizontal" Spacing="5">
+                        <r:RingSpinner Width="12" Height="12" VerticalAlignment="Center"
+                                       IsVisible="{Binding SelectedSubagent.IsRunning}" />
+                        <TextBlock Classes="icon" Text="&#xE73E;" FontSize="12"
+                                   IsVisible="{Binding SelectedSubagent.IsCompleted}" />
+                        <TextBlock Classes="icon" Text="&#xEA39;" FontSize="12"
+                                   IsVisible="{Binding SelectedSubagent.IsFailed}" />
+                        <TextBlock Text="{Binding SelectedSubagent.StatusText}" />
+                      </StackPanel>
+                    </Border>
+                    <TextBlock Text="{Binding SelectedSubagent.ElapsedText}" Classes="muted" FontSize="11"
+                               VerticalAlignment="Center" />
                   </StackPanel>
                 </StackPanel>
                 <Button Grid.Column="2" Classes="toolchip" Content="停止"
@@ -341,7 +361,7 @@
                   <ItemsControl.ItemTemplate>
                     <DataTemplate x:DataType="vm:SubagentActivityViewModel">
                       <StackPanel Margin="0,0,0,12">
-                        <Border Classes="artifactbadge" CornerRadius="6" Padding="9"
+                        <Border Classes="artifactbadge" CornerRadius="{DynamicResource Radius.Sm}" Padding="9"
                                 IsVisible="{Binding IsTask}">
                           <StackPanel Spacing="4">
                             <TextBlock Text="任务" FontSize="11" FontWeight="SemiBold" />
@@ -371,8 +391,18 @@
                                            TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
                                            IsVisible="{Binding Tool.HasHeaderArgPreview}" />
                               </StackPanel>
-                              <TextBlock Grid.Column="1" Text="{Binding Tool.StatusText}"
-                                         Classes="muted" FontSize="11" Margin="8,0,0,0" />
+                              <Border Grid.Column="1" Classes="taskstatus" Margin="8,0,0,0"
+                                      Classes.done="{Binding Tool.IsCompleted}" Classes.failed="{Binding Tool.IsError}">
+                                <StackPanel Orientation="Horizontal" Spacing="5">
+                                  <r:RingSpinner Width="12" Height="12" VerticalAlignment="Center"
+                                                 IsVisible="{Binding ShowsSpinner}" />
+                                  <TextBlock Classes="icon" Text="&#xE73E;" FontSize="12"
+                                             IsVisible="{Binding Tool.IsCompleted}" />
+                                  <TextBlock Classes="icon" Text="&#xEA39;" FontSize="12"
+                                             IsVisible="{Binding Tool.IsError}" />
+                                  <TextBlock Text="{Binding Tool.StatusText}" />
+                                </StackPanel>
+                              </Border>
                             </Grid>
                           </Expander.Header>
                           <StackPanel Spacing="6" Margin="0,8,0,0">

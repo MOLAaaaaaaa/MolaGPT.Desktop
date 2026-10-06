@@ -155,7 +155,7 @@
                 <ListBoxItem Name="PART_AccountNav" Classes="navaccount" Tag="PAGE_Account"
                              AutomationProperties.Name="MolaGPT 账号">
                   <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
-                    <Border Width="30" Height="30" CornerRadius="15"
+                    <Border Width="30" Height="30" CornerRadius="{DynamicResource Radius.Pill}"
                             Background="{DynamicResource Brush.Primary}" VerticalAlignment="Center">
                       <TextBlock Classes="icon" Text="&#xE77B;" FontSize="13" Foreground="White"
                                  HorizontalAlignment="Center" VerticalAlignment="Center" />
@@ -169,7 +169,7 @@
                   </Grid>
                 </ListBoxItem>
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="常规" />
-                <ListBoxItem Content="外观" Tag="PAGE_Appearance" />
+                <ListBoxItem Name="PART_AppearanceNav" Content="外观" Tag="PAGE_Appearance" />
                 <ListBoxItem Content="对话" Tag="PAGE_Chat" />
                 <ListBoxItem Content="任务与子 Agent" Tag="PAGE_Tasks" />
                 <ListBoxItem Content="通知与托盘" Tag="PAGE_System" />
@@ -218,7 +218,7 @@
                    在设置里，同一个账号的事要去两处找。 -->
               <StackPanel Name="PAGE_Account">
                 <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,18">
-                  <Border Width="48" Height="48" CornerRadius="24"
+                  <Border Width="48" Height="48" CornerRadius="{DynamicResource Radius.Pill}"
                           Background="{DynamicResource Brush.Primary}" VerticalAlignment="Center">
                     <TextBlock Classes="icon" Text="&#xE77B;" FontSize="20" Foreground="White"
                                HorizontalAlignment="Center" VerticalAlignment="Center" />
@@ -436,9 +436,9 @@
 
               <StackPanel Name="PAGE_Appearance" IsVisible="False">
                 <TextBlock Classes="pagetitle" Text="外观" />
-                <TextBlock Classes="pagesubtitle" Text="调整主题、文字大小和界面动效。" />
+                <TextBlock Classes="pagesubtitle" Text="调整主题、文字大小、圆角和界面动效。" />
 
-                <TextBlock Classes="section" Text="主题与文字" Margin="2,4,2,8" />
+                <TextBlock Classes="section" Text="显示" Margin="2,4,2,8" />
                 <Border Classes="settingscard">
                   <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
@@ -469,6 +469,20 @@
                         <ComboBoxItem Content="140%" />
                       </ComboBox>
                     </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="圆角" />
+                        <TextBlock Classes="hint" Text="调整面板、卡片和按钮的圆角大小。" />
+                      </StackPanel>
+                      <ComboBox Grid.Column="1" Name="PART_CornerStyle"
+                                Classes="settingsinput"
+                                MinWidth="150" VerticalAlignment="Center">
+                        <ComboBoxItem Content="标准" />
+                        <ComboBoxItem Content="小" />
+                        <ComboBoxItem Content="直角" />
+                      </ComboBox>
+                    </Grid>
                   </StackPanel>
                 </Border>
 
@@ -497,6 +511,22 @@
                                     VerticalAlignment="Center" />
                     </Grid>
                   </StackPanel>
+                </Border>
+
+                <!-- 只用 BYOK 的人从不需要网页版对话、远程控制和登录入口。开关在这里
+                     而不在账号页：打开它之后账号页就不在导航里了，回头路得留在别处。 -->
+                <TextBlock Classes="section" Text="账号入口" />
+                <Border Classes="settingscard">
+                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                    <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                      <TextBlock Classes="rowtitle" Text="隐藏 MolaGPT 账号功能" />
+                      <TextBlock Classes="hint" Text="未登录时隐藏网页版对话、远程控制和登录入口。" />
+                    </StackPanel>
+                    <ToggleButton Grid.Column="1" Name="PART_HideAccountFeatures"
+                                  Classes="settingtoggle"
+                                  IsChecked="{Binding HideAccountFeatures, Mode=TwoWay}"
+                                  VerticalAlignment="Center" />
+                  </Grid>
                 </Border>
               </StackPanel>
 
@@ -2598,7 +2628,7 @@
                     <Grid ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0">
                         <TextBlock Classes="pagetitle" Text="记忆" />
-                        <TextBlock Classes="pagesubtitle"
+                        <TextBlock Name="PART_MemorySubtitle" Classes="pagesubtitle"
                                    Text="从 Work 与 BYOK 对话中学习你的偏好，让后续回复更贴合你。MolaGPT Chat 的记忆请前往「MolaGPT 账号」设置中管理。" />
                       </StackPanel>
                       <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Top">

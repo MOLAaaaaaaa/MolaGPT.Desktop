@@ -102,8 +102,19 @@ public partial class SidebarView : UserControl
         }, DispatcherPriority.Input);
     }
 
+    /// <summary>
+    /// Both lists are on screen and competing for height. Only then is there
+    /// anything for wheel-focus to trade; otherwise its restore step would also
+    /// re-expand a group the user collapsed, just because they scrolled.
+    /// </summary>
+    private bool ConversationGroupsShareSpace =>
+        _vm is { CanCollapseGroups: true, IsByokListVisible: true, IsMolaGptListVisible: true };
+
     private void FocusConversationGroupLayout(bool byok)
     {
+        if (!_conversationGroupLayoutFocused && !ConversationGroupsShareSpace)
+            return;
+
         _conversationGroupLayoutRestoreTimer.Stop();
         _conversationGroupLayoutFocused = true;
 
@@ -135,16 +146,32 @@ public partial class SidebarView : UserControl
 
     private void RestoreConversationGroupLayout()
     {
+        _conversationGroupLayoutFocused = false;
         if (_vm is not null)
         {
             _vm.IsByokGroupExpanded = true;
             _vm.IsMolaGptGroupExpanded = true;
         }
 
-        PART_ByokList.MaxHeight = ConversationGroupDefaultByokMaxHeight;
-        PART_ConversationGroupsHost.RowDefinitions[1].Height = GridLength.Auto;
-        PART_ConversationGroupsHost.RowDefinitions[3].Height = new GridLength(1, GridUnitType.Star);
-        _conversationGroupLayoutFocused = false;
+        ApplyRestingConversationGroupLayout();
+    }
+
+    /// <summary>
+    /// The 240px BYOK cap exists only to keep the MolaGPT group on screen. With
+    /// no MolaGPT group below it — signed out, or that group collapsed — the cap
+    /// just leaves the lower half of the sidebar empty, so BYOK takes the space.
+    /// </summary>
+    private void ApplyRestingConversationGroupLayout()
+    {
+        if (_conversationGroupLayoutFocused) return;
+
+        var byokFills = _vm is { IsByokListVisible: true } vm
+                        && !(vm.ShowMolaGptGroup && vm.IsMolaGptListVisible);
+        var rows = PART_ConversationGroupsHost.RowDefinitions;
+
+        PART_ByokList.MaxHeight = byokFills ? double.PositiveInfinity : ConversationGroupDefaultByokMaxHeight;
+        rows[1].Height = byokFills ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
+        rows[3].Height = byokFills ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
     }
 
     /// <summary>
@@ -162,6 +189,7 @@ public partial class SidebarView : UserControl
             _vm.SelectionRestoreRequested -= OnSelectionRestoreRequested;
         }
         _vm = vm;
+        ApplyRestingConversationGroupLayout();
         if (_vm is null) return;
 
         _vm.PropertyChanged += OnVmPropertyChanged;
@@ -171,8 +199,17 @@ public partial class SidebarView : UserControl
 
     private void OnVmPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(ConversationListViewModel.SelectedId))
-            SyncSelectionFromViewModel();
+        switch (e.PropertyName)
+        {
+            case nameof(ConversationListViewModel.SelectedId):
+                SyncSelectionFromViewModel();
+                break;
+            case nameof(ConversationListViewModel.ShowMolaGptGroup):
+            case nameof(ConversationListViewModel.IsMolaGptListVisible):
+            case nameof(ConversationListViewModel.IsByokListVisible):
+                ApplyRestingConversationGroupLayout();
+                break;
+        }
     }
 
     /// <summary>

@@ -50,6 +50,17 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
     public void KeepRealized(object? first, object? last) =>
         _kept = first is null || last is null ? null : (first, last);
 
+    /// <summary>
+    /// Top of row <paramref name="index"/> in panel coordinates: measured where the
+    /// row has been realized, estimated where it has not. A caller scrolling to a
+    /// distant row re-reads this as rows on the way are measured.
+    /// </summary>
+    public double TopOf(int index)
+    {
+        BuildPositions();
+        return _positions[Math.Clamp(index, 0, _positions.Length - 1)];
+    }
+
     public StableVirtualizingStackPanel()
     {
         EffectiveViewportChanged += OnEffectiveViewportChanged;

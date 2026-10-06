@@ -95,4 +95,5 @@ public sealed record ToolCallDelta(
     int? ContentOffset = null,
     int? TimelineIndex = null,
     string? BackgroundTaskId = null,
-    string? TaskState = null);
+    string? TaskState = null,
+    string? Activity = null);

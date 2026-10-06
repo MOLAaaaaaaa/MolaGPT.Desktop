@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Net.Http;
 using Avalonia;
@@ -48,6 +49,7 @@ public partial class MainWindow : MolaWindow
     private readonly ConversationRepository _conversationRepository;
     private readonly MessageRepository _messageRepository;
     private readonly PythonRuntimeManager _pythonRuntime;
+    private readonly PythonRuntimeSetup _pythonSetup;
     private readonly PiSidecarRuntimeManager _piSidecar;
     private readonly PiWorkSidecarLocator _piSidecarLocator;
     private readonly NotificationCenter _notifications;
@@ -149,6 +151,7 @@ public partial class MainWindow : MolaWindow
         _piByokProviderFactory = piByokProviderFactory;
         _personalization = personalization;
         _memoryPage = memoryPage;
+        _pythonSetup = new PythonRuntimeSetup(pythonRuntime, settings, notifications);
         _composer.EnsureAgentRuntimeAsync = EnsureAgentRuntimeForSendAsync;
 
         InitializeComponent();
@@ -321,8 +324,10 @@ public partial class MainWindow : MolaWindow
         // popup nobody has open at the time.
         _chat.ContextGauge.PropertyChanged += OnContextGaugePropertyChanged;
         _auth.LoggedOut += OnLoggedOut;
+        _composer.Attachments.CollectionChanged += OnComposerAttachmentsChanged;
         SyncChrome();
         RefreshAccountState();
+        ApplyAccountFeatureVisibility();
 
         PART_TitleBar.CloseRequested += (_, _) => Close();
 
@@ -341,7 +346,32 @@ public partial class MainWindow : MolaWindow
             _chat.ContextGauge.PropertyChanged -= OnContextGaugePropertyChanged;
             _main.PropertyChanged -= OnMainPropertyChanged;
             _main.CopyTextRequested -= OnCopyTextRequested;
+            _composer.Attachments.CollectionChanged -= OnComposerAttachmentsChanged;
         };
+    }
+
+    /// <summary>
+    /// A spreadsheet, PDF or Office file just went into the composer and nothing
+    /// can run code over its original. MolaGPT Chat opens files on the server, a
+    /// persona that switched Python off has already decided, and without the agent
+    /// runtime there is no local side for Python to serve yet.
+    /// </summary>
+    private void OnComposerAttachmentsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.Action != NotifyCollectionChangedAction.Add || e.NewItems is null) return;
+        if (_chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy) return;
+        if (_chat.ActivePersona?.Profile.EnablePython == false) return;
+        if (!HasCompatibleAgentRuntime()) return;
+        _pythonSetup.OfferForAttachments(e.NewItems.OfType<Attachment>());
+    }
+
+    /// <summary>外观 → 隐藏 MolaGPT 账号功能. Re-read whenever it or the sign-in
+    /// state changes; <see cref="SettingsViewModel.ShowAccountFeatures"/> folds both.</summary>
+    private void ApplyAccountFeatureVisibility()
+    {
+        var show = _settings.ShowAccountFeatures;
+        PART_TitleBar.SetAccountFeaturesVisible(show);
+        _conversations.ShowAccountConversations = show;
     }
 
     /// <summary>
@@ -396,6 +426,8 @@ public partial class MainWindow : MolaWindow
             ApplyFontScale(_settings.FontScale);
         if (e.PropertyName == nameof(SettingsViewModel.StreamFadeEnabled))
             StreamTailFade.Configure(_settings.StreamFadeEnabled);
+        if (e.PropertyName == nameof(SettingsViewModel.ShowAccountFeatures))
+            ApplyAccountFeatureVisibility();
     }
 
     internal void ApplyFontScale(double value)
@@ -609,22 +641,34 @@ public partial class MainWindow : MolaWindow
         if (target == AppMode.Work && !await EnsureAgentRuntimeUsableAsync())
             AnnounceAgentRuntimeUpdate();
 
-        // Clicking "Work" while already in an agent mode is a no-op, matching
-        // MainViewModel.SwitchMode.
-        if (target == AppMode.Work && _chat.CurrentMode.IsLocalAgent()) return;
+        // Clicking "Work" while already in an agent mode switches nothing,
+        // matching MainViewModel.SwitchMode — but over the image workbench both
+        // segments are unlit precisely so they read as the way back, so the
+        // click still has to close it.
+        if (target == AppMode.Work && _chat.CurrentMode.IsLocalAgent())
+        {
+            if (_main.IsImageWorkbenchVisible) LeaveImageWorkbench();
+            return;
+        }
 
         if (!_chat.SwitchToMode(target, out var needsLogin))
         {
+            // Work with nothing to run on is a missing model service, not a missing
+            // login: the account is one of the wallets Work can draw on, and a
+            // signed-out user who only brought their own key should land where keys
+            // are added. Without a runtime the gap is the runtime instead, and the
+            // banner above already says so.
+            if (target == AppMode.Work)
+            {
+                if (HasCompatibleAgentRuntime()) OpenProviderSettings();
+                return;
+            }
+
             if (!needsLogin)
             {
                 OpenSettings();
                 return;
             }
-
-            // No agent providers and no compatible runtime: the gap is the
-            // runtime (banner already announced above), not the login.
-            if (target == AppMode.Work && !HasCompatibleAgentRuntime())
-                return;
 
             if (!await OpenLoginAsync(this)) return;
             if (!_chat.SwitchToMode(target, out _)) return;
@@ -635,6 +679,11 @@ public partial class MainWindow : MolaWindow
             _conversations.ClearSelection();
             _chat.StartDraftConversation();
         }
+        LeaveImageWorkbench();
+    }
+
+    private void LeaveImageWorkbench()
+    {
         _imageWorkbench?.NotifyHiddenWhileGenerating();
         _main.IsImageWorkbenchVisible = false;
         SyncChrome();
@@ -774,7 +823,10 @@ public partial class MainWindow : MolaWindow
         }
         if (_chat.ActiveProvider is not null && _chat.ActiveModel is not null) return true;
 
-        OpenSettings();
+        // The runtime is there and still nothing to send with: no model service.
+        // Plain OpenSettings would land on the account page, which is the one page
+        // that cannot help a signed-out user here.
+        OpenProviderSettings();
         return false;
     }
 
@@ -791,7 +843,8 @@ public partial class MainWindow : MolaWindow
                     item.Fraction > 0 ? item.Fraction : null));
             var installed = await _piSidecar.DownloadAndInstallAsync(progress);
             await ActivateAgentRuntimeAsync();
-            _notifications.Success("Agent 运行环境已就绪", installed.Version, AgentRuntimeNotificationKey);
+            AnnounceAgentRuntimeReady(installed.Version);
+            _pythonSetup.OfferAfterAgentRuntime();
             return _piSidecarLocator.TryResolve() is not null;
         }
         catch (Exception ex)
@@ -799,6 +852,26 @@ public partial class MainWindow : MolaWindow
             _notifications.Error("Agent 运行环境下载失败", ex.Message, AgentRuntimeNotificationKey);
             return false;
         }
+    }
+
+    /// <summary>
+    /// With no model to run on, being ready is half the story, so the banner
+    /// carries the other half and stays until it is used or closed. Otherwise
+    /// it is plain news and leaves on its own.
+    /// </summary>
+    private void AnnounceAgentRuntimeReady(string version)
+    {
+        var hasModel = _providers.Providers.Any(provider => provider.Kind != ProviderKind.MolaGptProxy);
+        _notifications.Notify(new AppNotification
+        {
+            Key = AgentRuntimeNotificationKey,
+            Kind = NotifyKind.Success,
+            Title = "Agent 运行环境已就绪",
+            Body = hasModel ? version : "添加模型服务后即可开始对话。",
+            ActionText = hasModel ? null : "添加模型服务",
+            Action = hasModel ? null : OpenProviderSettings,
+            Sticky = !hasModel
+        });
     }
 
     private async Task ActivateAgentRuntimeAsync()
@@ -983,7 +1056,7 @@ public partial class MainWindow : MolaWindow
         PART_Header.RefreshSecondaryUi();
     }
 
-    private void OpenAgentSettings()
+    internal void OpenAgentSettings()
     {
         OpenSettings(openAgent: true);
     }
@@ -1008,7 +1081,8 @@ public partial class MainWindow : MolaWindow
             _settings, _auth, _cloudSync, _conversations, _agentStatus, _main.Personas, _mcp,
             _imageGenerationTool, _pythonRuntime, _piSidecar, _notifications, _skills, _browserActivity,
             () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory,
-            ActivateAgentRuntimeAsync, DeactivateAgentRuntime, _personalization, _memoryPage, _proxy);
+            ActivateAgentRuntimeAsync, DeactivateAgentRuntime, _personalization, _memoryPage, _proxy,
+            _pythonSetup);
         window.AccountRequested += async (_, _) =>
         {
             if (await OpenLoginAsync(window)) window.RefreshAccountUi();

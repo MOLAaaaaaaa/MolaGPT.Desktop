@@ -225,12 +225,11 @@ internal static class CitationPill
         {
             Width = 15,
             Height = 15,
-            CornerRadius = new CornerRadius(3),
             ClipToBounds = true,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 6, 0),
             Child = icon
-        };
+        }.WithRadius("Radius.Xs");
         Grid.SetColumn(iconHost, 0);
         Grid.SetColumn(site, 1);
         Grid.SetColumn(nav, 2);
@@ -242,13 +241,12 @@ internal static class CitationPill
         {
             Width = 300,
             Padding = new Thickness(14, 12, 14, 13),
-            CornerRadius = new CornerRadius(12),
             BorderThickness = new Thickness(1),
             BorderBrush = Brush(owner, "Brush.Border"),
             Background = Brush(owner, "Brush.Bg.Elevated") ?? Brush(owner, "Brush.Bg.Canvas"),
             BoxShadow = BoxShadows.Parse("0 8 24 0 #22000000"),
             Child = new StackPanel { Children = { header, title, meta } }
-        };
+        }.WithRadius("Radius.Md");
 
         var popup = new Popup
         {
@@ -355,12 +353,11 @@ internal static class CitationPill
         {
             Width = 16,
             Height = 16,
-            CornerRadius = new CornerRadius(3),
             ClipToBounds = true,
             VerticalAlignment = VerticalAlignment.Top,
             Margin = new Thickness(0, 2, 10, 0),
             Child = icon
-        };
+        }.WithRadius("Radius.Xs");
         LoadFavicon(icon, citation.Url);
 
         var text = new StackPanel { Spacing = 2 };
@@ -398,9 +395,9 @@ internal static class CitationPill
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
             Background = Brushes.Transparent,
             BorderThickness = new Thickness(0),
-            CornerRadius = new CornerRadius(8),
             Cursor = new Cursor(StandardCursorType.Hand)
         };
+        button.Bind(Button.CornerRadiusProperty, button.GetResourceObservable("Radius.Sm"));
         button.Click += (_, _) =>
         {
             close();

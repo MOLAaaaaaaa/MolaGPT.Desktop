@@ -256,7 +256,7 @@ public sealed class ChatToolHost : IChatToolHost
                     : new AgentTaskOwner(workspaceConversation!, context.Request.SessionId),
                 AllowBackground: options.BackgroundTasks && !options.IsSubagent,
                 Unattended: options.IsSubagent,
-                Review: PythonReviewContext.From(context.Request, earlierCalls));
+                Review: PythonReviewContext.From(context.Request, earlierCalls) with { ReportActivity = context.ReportActivity });
             return await _python.ExecuteAsync(argumentsJson, options.Python, workspaceConversation, run, ct).ConfigureAwait(false);
         }
 

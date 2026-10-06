@@ -55,6 +55,8 @@
 
       <!-- Semantic -->
       <Color x:Key="Color.Success">#FF2E7D32</Color>
+      <Color x:Key="Color.Success.Surface">#FFEDF6F0</Color>
+      <Color x:Key="Color.Success.Foreground">#FF347052</Color>
       <Color x:Key="Color.Warning">#FFF57C00</Color>
       <Color x:Key="Color.Error">#FFC62828</Color>
       <Color x:Key="Color.Info">#FF1976D2</Color>
@@ -104,6 +106,7 @@
       <SolidColorBrush x:Key="Brush.Border.Subtle" Color="{StaticResource Color.Border.Subtle}" />
       <SolidColorBrush x:Key="Brush.Divider" Color="{StaticResource Color.Divider}" />
       <SolidColorBrush x:Key="Brush.Success" Color="{StaticResource Color.Success}" />
+      <SolidColorBrush x:Key="Brush.Success.Foreground" Color="{StaticResource Color.Success.Foreground}" />
       <SolidColorBrush x:Key="Brush.Warning" Color="{StaticResource Color.Warning}" />
       <SolidColorBrush x:Key="Brush.Error" Color="{StaticResource Color.Error}" />
       <SolidColorBrush x:Key="Brush.Info" Color="{StaticResource Color.Info}" />
@@ -146,6 +149,8 @@
       <Color x:Key="Color.Divider">#FF333333</Color>
 
       <Color x:Key="Color.Success">#FF4CAF50</Color>
+      <Color x:Key="Color.Success.Surface">#FF253A2E</Color>
+      <Color x:Key="Color.Success.Foreground">#FFA1D1B5</Color>
       <Color x:Key="Color.Warning">#FFFFB74D</Color>
       <Color x:Key="Color.Error">#FFF44336</Color>
       <Color x:Key="Color.Info">#FF64B5F6</Color>
@@ -190,6 +195,7 @@
       <SolidColorBrush x:Key="Brush.Border.Subtle" Color="{StaticResource Color.Border.Subtle}" />
       <SolidColorBrush x:Key="Brush.Divider" Color="{StaticResource Color.Divider}" />
       <SolidColorBrush x:Key="Brush.Success" Color="{StaticResource Color.Success}" />
+      <SolidColorBrush x:Key="Brush.Success.Foreground" Color="{StaticResource Color.Success.Foreground}" />
       <SolidColorBrush x:Key="Brush.Warning" Color="{StaticResource Color.Warning}" />
       <SolidColorBrush x:Key="Brush.Error" Color="{StaticResource Color.Error}" />
       <SolidColorBrush x:Key="Brush.Info" Color="{StaticResource Color.Info}" />
@@ -228,6 +234,13 @@
     CornerRadius names one of these, because thirteen distinct values were in
     use (3, 7, 8, 9, 11, 12, 22 among them) and adjacent surfaces disagreed by
     a pixel or two in ways that read as sloppiness rather than as intent.
+    Always through DynamicResource (WithRadius in code): 外观 → 圆角 swaps this
+    ladder at runtime (Infrastructure/CornerStyles.cs), and a literal or a
+    StaticResource keeps the old corner after the swap.
+
+    The only literals left are not degrees of rounding: code-built pills (999),
+    sub-Xs softening on favicons, formula boxes and chart marks, and another
+    brand's logo.
 
     Which step to reach for:
       Xs    thumbnails inside a chip (24–36px squares)

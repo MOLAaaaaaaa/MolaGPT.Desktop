@@ -13,10 +13,15 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
     private HeaderState? _header;
 
     private sealed record HeaderState(string Label, string Preview, string Count, string Status,
-        bool Successful, bool Error, bool Background, bool Stop, string Glyph, bool Group, string ErrorDetail);
+        bool Successful, bool Error, bool Background, bool Stop, string Glyph, bool Group, string ErrorDetail,
+        bool Shimmer, bool Spinner);
 
     public ToolRow(MessageViewModel message, ToolCallViewModel tool, int segment)
-        : base(message, $"{message.RowKey()}:tool:{tool.Id}") => SyncTools([tool]);
+        : base(message, $"{message.RowKey()}:tool:{tool.Id}")
+    {
+        message.PropertyChanged += OnMessageChanged;
+        SyncTools([tool]);
+    }
 
     public ToolCallViewModel Tool => _tools[0];
     public int CallCount => _tools.Count;
@@ -31,7 +36,20 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
     public bool IsError => _tools.Any(IsToolError);
     public bool IsBackgroundRunning => _tools.Any(tool => tool.IsBackgroundRunning);
     public bool CanStop => !IsGroup && Tool.IsBackgroundRunning;
-    public bool HasStatusText => !IsSuccessful;
+
+    /// <summary>When the work went from running to done in front of the user, on
+    /// the <see cref="FrameLoop.Now"/> clock; NaN for anything that arrived done.</summary>
+    public double CompletedAt { get; private set; } = double.NaN;
+
+    // A call still executing in the live turn. Gated on the message so a call left
+    // "running" by an interrupted turn does not animate in the history forever.
+    private bool IsInFlight => (Message.IsStreaming || Message.IsPending) && _tools.Any(tool => tool.IsInFlight);
+
+    /// <summary>The ring means the work went to the background and the reply is
+    /// not waiting on it; whatever the reply is waiting on sweeps its row instead.
+    /// Never both on one header.</summary>
+    public bool ShowsSpinner => IsBackgroundRunning;
+    public bool IsShimmering => IsInFlight && !ShowsSpinner;
     public string ErrorDetail
     {
         get
@@ -54,6 +72,7 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
             if (IsError) return IsGroup ? $"{_tools.Count(IsToolError)} 失败" : "失败";
             if (IsBackgroundRunning) return "后台运行";
             if (IsSuccessful) return IsGroup ? $"{CallCount} 步完成" : Tool.StatusText;
+            if (_tools.FirstOrDefault(tool => tool.IsReviewing) is { } reviewing) return reviewing.StatusText;
             if (IsGroup) return $"{_tools.Count(IsToolSuccessful)}/{CallCount}";
             if (Tool.BackgroundTaskId is not null) return Tool.TaskState switch
             {
@@ -162,16 +181,29 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
         Refresh();
     }
 
+    private void OnMessageChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(MessageViewModel.IsStreaming) or nameof(MessageViewModel.IsPending))
+            Refresh();
+    }
+
     private void Refresh()
     {
         var next = new HeaderState(DisplayLabel, HeaderArgPreview, CountText, StatusText,
-            IsSuccessful, IsError, IsBackgroundRunning, CanStop, IconGlyph, IsGroup, ErrorDetail);
+            IsSuccessful, IsError, IsBackgroundRunning, CanStop, IconGlyph, IsGroup, ErrorDetail,
+            IsShimmering, ShowsSpinner);
         if (next == _header) return;
+        if (_header is { } previous && (previous.Shimmer || previous.Spinner) && next.Successful)
+        {
+            CompletedAt = FrameLoop.Now;
+            Notify(nameof(CompletedAt));
+        }
         _header = next;
         foreach (var name in new[] { nameof(DisplayLabel), nameof(HeaderArgPreview), nameof(HasHeaderArgPreview),
                      nameof(CountText), nameof(StatusText), nameof(IsSuccessful), nameof(IsError),
-                     nameof(IsBackgroundRunning), nameof(CanStop), nameof(HasStatusText), nameof(IconGlyph),
-                     nameof(IsGroup), nameof(CallCount), nameof(ErrorDetail), nameof(HasErrorDetail) })
+                     nameof(IsBackgroundRunning), nameof(CanStop), nameof(IconGlyph),
+                     nameof(IsGroup), nameof(CallCount), nameof(ErrorDetail), nameof(HasErrorDetail),
+                     nameof(IsShimmering), nameof(ShowsSpinner) })
             Notify(name);
     }
 
@@ -181,6 +213,7 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
 
     public void Dispose()
     {
+        Message.PropertyChanged -= OnMessageChanged;
         foreach (var tool in _tools) tool.PropertyChanged -= OnToolChanged;
         foreach (var child in GroupItems) child.Dispose();
     }

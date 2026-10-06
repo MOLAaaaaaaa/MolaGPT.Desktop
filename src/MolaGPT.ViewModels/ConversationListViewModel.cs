@@ -70,6 +70,16 @@ public sealed partial class ConversationListViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(MolaGptGroupChevron))]
     private bool _isMolaGptGroupExpanded = true;
+
+    /// <summary>
+    /// False under 隐藏 MolaGPT 账号功能 while signed out. Signing out keeps the
+    /// account chats already downloaded, and they cannot be continued without the
+    /// account, so the group goes with the rest of the account surface. Hidden,
+    /// not filtered: the rows come back the moment the switch or a sign-in does.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowMolaGptGroup))]
+    private bool _showAccountConversations = true;
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(WorkGroupChevron))]
     private bool _isWorkGroupExpanded = true;
@@ -93,6 +103,58 @@ public sealed partial class ConversationListViewModel : ObservableObject
     public bool HasMolaGptConversations => MolaGptItems.Count > 0;
     public bool HasWorkConversations => WorkItems.Count > 0;
     public bool HasMolaGptConversationItems => MolaGptConversationItems.Count > 0;
+
+    /// <summary>The MolaGPT group has rows and is allowed on screen.</summary>
+    public bool ShowMolaGptGroup => HasMolaGptConversationItems && ShowAccountConversations;
+
+    /// <summary>
+    /// Both groups are on screen, so a header has something to make room for.
+    /// With one group, collapsing it would only leave an empty column under its
+    /// own header, so the headers stop being toggles and the lone group is shown
+    /// open. The stored expansion is left alone and applies again once the other
+    /// group returns.
+    /// </summary>
+    public bool CanCollapseGroups => HasByokConversations && ShowMolaGptGroup;
+
+    public bool IsByokListVisible => IsByokGroupExpanded || !ShowMolaGptGroup;
+    public bool IsMolaGptListVisible =>
+        ShowAccountConversations && (IsMolaGptGroupExpanded || !HasByokConversations);
+
+    private void RaiseGroupVisibilityChanged()
+    {
+        OnPropertyChanged(nameof(CanCollapseGroups));
+        OnPropertyChanged(nameof(IsByokListVisible));
+        OnPropertyChanged(nameof(IsMolaGptListVisible));
+    }
+
+    /// <summary>
+    /// Nothing for the sidebar to list: no BYOK rows and no account group on
+    /// screen. Both groups hide their headers when empty, so without a word here
+    /// a first launch is a blank column. Counts what is shown rather than what is
+    /// stored, so account chats hidden by 隐藏 MolaGPT 账号功能 do not count.
+    /// </summary>
+    public bool IsSidebarEmpty => !HasByokConversations && !ShowMolaGptGroup;
+
+    // Read off the query the list was last filtered by, not the box: while the
+    // debounce runs, the rows on screen still answer the previous query.
+    private bool IsSearchEmpty => IsSidebarEmpty && _appliedSearchQuery.Trim().Length > 0;
+    public string EmptyStateGlyph => IsSearchEmpty ? "\uE721" : "\uE8BD";
+    public string EmptyStateTitle => IsSearchEmpty ? "没有匹配的对话" : "还没有对话";
+    public string EmptyStateHint => IsSearchEmpty ? "只搜索对话标题" : "对话记录会保存在这里";
+
+    private void RaiseEmptyStateChanged()
+    {
+        OnPropertyChanged(nameof(IsSidebarEmpty));
+        OnPropertyChanged(nameof(EmptyStateGlyph));
+        OnPropertyChanged(nameof(EmptyStateTitle));
+        OnPropertyChanged(nameof(EmptyStateHint));
+    }
+
+    partial void OnShowAccountConversationsChanged(bool value)
+    {
+        RaiseGroupVisibilityChanged();
+        RaiseEmptyStateChanged();
+    }
 
     private readonly ConversationRepository? _repository;
     private readonly PersonaListViewModel? _personas;
@@ -128,10 +190,16 @@ public sealed partial class ConversationListViewModel : ObservableObject
     /// <summary>Toggle the BYOK group's expansion. Bound from the group
     /// header click handler.</summary>
     [RelayCommand]
-    private void ToggleByokGroup() => IsByokGroupExpanded = !IsByokGroupExpanded;
+    private void ToggleByokGroup()
+    {
+        if (CanCollapseGroups) IsByokGroupExpanded = !IsByokGroupExpanded;
+    }
 
     [RelayCommand]
-    private void ToggleMolaGptGroup() => IsMolaGptGroupExpanded = !IsMolaGptGroupExpanded;
+    private void ToggleMolaGptGroup()
+    {
+        if (CanCollapseGroups) IsMolaGptGroupExpanded = !IsMolaGptGroupExpanded;
+    }
 
     [RelayCommand]
     private void ToggleWorkGroup() => IsWorkGroupExpanded = !IsWorkGroupExpanded;
@@ -197,12 +265,14 @@ public sealed partial class ConversationListViewModel : ObservableObject
 
     partial void OnIsByokGroupExpandedChanged(bool value)
     {
+        RaiseGroupVisibilityChanged();
         if (_suspendExpansionPersist || _settingsRepo is null) return;
         _settingsRepo.Set(SettingByokExpandedKey, value.ToString());
     }
 
     partial void OnIsMolaGptGroupExpandedChanged(bool value)
     {
+        RaiseGroupVisibilityChanged();
         if (_suspendExpansionPersist || _settingsRepo is null) return;
         _settingsRepo.Set(SettingMolaGptExpandedKey, value.ToString());
     }
@@ -278,6 +348,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
         OnPropertyChanged(nameof(HasMolaGptConversations));
         OnPropertyChanged(nameof(HasWorkConversations));
         OnPropertyChanged(nameof(HasMolaGptConversationItems));
+        OnPropertyChanged(nameof(ShowMolaGptGroup));
+        RaiseGroupVisibilityChanged();
+        RaiseEmptyStateChanged();
     }
 
     private void RefreshMolaGptConversationItems() =>
@@ -406,6 +479,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
     {
         var visibleRows = rows.Where(row => RowMatchesQuery(row, query)).ToList();
         _appliedSearchQuery = query;
+        // An empty list can stay empty while the reason changes (no rows at all →
+        // no rows matching), and the early return below would skip the repaint.
+        RaiseEmptyStateChanged();
         if (RowsMatchCurrentItems(visibleRows)) return;
 
         var existingById = Items.ToDictionary(item => item.Id, StringComparer.Ordinal);

@@ -353,7 +353,7 @@
     </DataTemplate>
 
     <DataTemplate DataType="r:ToolRow">
-      <Border Classes="toolrow">
+      <Border Classes="toolrow" r:CompletionFlash.Since="{Binding CompletedAt}">
         <StackPanel>
         <Expander Classes="toolbody" Theme="{StaticResource ToolExpanderTheme}"
                   IsExpanded="{Binding IsExpanded, Mode=TwoWay}">
@@ -471,33 +471,39 @@
           </Expander.Resources>
 
           <Expander.Header>
-            <Grid ColumnDefinitions="Auto,8,Auto,10,*,Auto,Auto,Auto" MinHeight="24">
-              <TextBlock Grid.Column="0" Classes="icon" Text="{Binding IconGlyph}"
-                         FontSize="12" VerticalAlignment="Center"
-                         Foreground="{DynamicResource Brush.Text.Secondary}" />
-              <TextBlock Grid.Column="2" Text="{Binding DisplayLabel}" FontSize="12"
-                         VerticalAlignment="Center" MaxWidth="160"
-                         TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-              <TextBlock Grid.Column="4" Text="{Binding HeaderArgPreview}"
-                         IsVisible="{Binding HasHeaderArgPreview}"
-                         ToolTip.Tip="{Binding HeaderArgPreview}"
-                         FontFamily="{DynamicResource Font.Mono}" FontSize="11"
-                         VerticalAlignment="Center"
-                         Foreground="{DynamicResource Brush.Text.Secondary}"
-                         TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-              <TextBlock Grid.Column="5" Text="{Binding CountText}" IsVisible="{Binding IsGroup}"
+            <Grid ColumnDefinitions="*,Auto,Auto,Auto" MinHeight="24"
+                  r:Shimmer.IsActive="{Binding IsShimmering}">
+              <Grid Grid.Column="0" ColumnDefinitions="Auto,8,Auto,10,*" HorizontalAlignment="Left">
+                <TextBlock Grid.Column="0" Classes="icon" Text="{Binding IconGlyph}"
+                           FontSize="12" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Brush.Text.Secondary}" />
+                <TextBlock Grid.Column="2" Text="{Binding DisplayLabel}" FontSize="12"
+                           VerticalAlignment="Center" MaxWidth="160"
+                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                <TextBlock Grid.Column="4" Text="{Binding HeaderArgPreview}"
+                           IsVisible="{Binding HasHeaderArgPreview}"
+                           ToolTip.Tip="{Binding HeaderArgPreview}"
+                           FontFamily="{DynamicResource Font.Mono}" FontSize="11"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource Brush.Text.Secondary}"
+                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+              </Grid>
+              <TextBlock Grid.Column="1" Text="{Binding CountText}" IsVisible="{Binding IsGroup}"
                          FontSize="11" Margin="6,0,0,0" VerticalAlignment="Center"
                          Foreground="{DynamicResource Brush.Text.Secondary}" />
-              <Panel Grid.Column="6" Margin="10,0,0,0" VerticalAlignment="Center">
-                <TextBlock Classes="icon" Text="&#xE73E;" FontSize="10"
-                           IsVisible="{Binding IsSuccessful}" ToolTip.Tip="{Binding StatusText}"
-                           Foreground="{DynamicResource Brush.Text.Secondary}" />
-                <TextBlock Classes="toolstatus" Text="{Binding StatusText}" FontSize="11"
-                           IsVisible="{Binding HasStatusText}"
-                           Classes.errored="{Binding IsError}"
-                           Classes.background="{Binding IsBackgroundRunning}" />
-              </Panel>
-              <Button Grid.Column="7" Classes="inlineaction" Width="24" Height="24"
+              <!-- Wide enough for "✓ 已完成", so finishing does not widen the run
+                   and shift every chevron in it. -->
+              <Border Grid.Column="2" Classes="taskstatus" Margin="10,0,0,0" MinWidth="50"
+                      Classes.done="{Binding IsSuccessful}" Classes.failed="{Binding IsError}"
+                      Classes.background="{Binding IsBackgroundRunning}">
+                <StackPanel Orientation="Horizontal" Spacing="5" HorizontalAlignment="Right">
+                  <r:RingSpinner Width="12" Height="12" VerticalAlignment="Center" IsVisible="{Binding ShowsSpinner}" />
+                  <TextBlock Classes="icon" Text="&#xE73E;" FontSize="12" IsVisible="{Binding IsSuccessful}" />
+                  <TextBlock Classes="icon" Text="&#xEA39;" FontSize="12" IsVisible="{Binding IsError}" />
+                  <TextBlock Text="{Binding StatusText}" />
+                </StackPanel>
+              </Border>
+              <Button Grid.Column="3" Classes="inlineaction" Width="24" Height="24"
                       Margin="4,0,0,0" IsVisible="{Binding CanStop}"
                       Click="OnStopTask" ToolTip.Tip="停止任务">
                 <TextBlock Classes="icon" Text="&#xE71A;" FontSize="11" />
@@ -780,6 +786,44 @@
                  Foreground="{DynamicResource Brush.Text.Secondary}" />
     </Button>
 
+    <!-- Turn rail: one tick per user turn, shown whenever a conversation scrolls. Sits in the
+         scroller's 40px left padding,
+         clear of the scrollbar; its bottom margin follows the composer
+         (SetBottomReserve). -->
+    <views:TurnRail Name="PART_TurnRail"
+                    Width="20"
+                    HorizontalAlignment="Left" VerticalAlignment="Center"
+                    Margin="10,72,0,176"
+                    IsVisible="False"
+                    TickBrush="{DynamicResource Brush.Text.Muted}"
+                    ActiveBrush="{DynamicResource Brush.Text.Secondary}"
+                    HoverBrush="{DynamicResource Brush.Primary}"
+                    HoverBackground="{DynamicResource Brush.Bg.HoverOverlay}" />
+
+    <!-- The pointed-at turn's prompt, beside its tick. Shown and hidden
+         outright: an Opacity animation here could stop short of opaque. -->
+    <Canvas Name="PART_TurnPreviewLayer" IsHitTestVisible="False">
+      <Border Name="PART_TurnPreview"
+              IsVisible="False"
+              MaxWidth="300"
+              Background="{DynamicResource Brush.Bg.Elevated}"
+              BorderBrush="{DynamicResource Brush.Border}"
+              BorderThickness="1"
+              CornerRadius="{DynamicResource Radius.Md}"
+              BoxShadow="0 4 14 0 #1F16202A"
+              Padding="12,8">
+        <StackPanel Spacing="2">
+          <TextBlock Name="PART_TurnPreviewOrdinal"
+                     FontSize="{DynamicResource Font.Size.XSmall}"
+                     Foreground="{DynamicResource Brush.Text.Muted}" />
+          <TextBlock Name="PART_TurnPreviewText"
+                     FontSize="13"
+                     TextWrapping="Wrap" MaxLines="3" TextTrimming="CharacterEllipsis"
+                     Foreground="{DynamicResource Brush.Text.Primary}" />
+        </StackPanel>
+      </Border>
+    </Canvas>
+
     <!-- Conversation-load indicator. A large conversation takes a moment to
          materialize, and without this the card is simply blank — which reads as
          a hang. No dimming backdrop: it caused a flash on fast loads. -->
@@ -794,10 +838,7 @@
             Padding="22,13"
             BoxShadow="0 3 22 0 #3D000000">
       <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="11">
-        <TextBlock Name="PART_LoadingSpinner"
-                   Classes="icon" Text="&#xF16A;" FontSize="18"
-                   Foreground="{DynamicResource Brush.Primary.Hover}"
-                   RenderTransformOrigin="50%,50%" />
+        <r:RingSpinner Width="18" Height="18" Thickness="2.5" VerticalAlignment="Center" />
         <TextBlock Text="正在打开对话…" FontSize="{DynamicResource Font.Size.Small}"
                    TextWrapping="NoWrap"
                    Foreground="{DynamicResource Brush.Text.Secondary}" />
@@ -977,6 +1018,7 @@
     </Style>
     <Style Selector="Border.toolrow">
       <Setter Property="Background" Value="Transparent" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
       <Setter Property="Margin" Value="0,1" />
     </Style>
     <Style Selector="Expander.toolbody /template/ ToggleButton#PART_toggle:pointerover /template/ Border#PART_Root">
@@ -989,15 +1031,6 @@
     </Style>
     <Style Selector="Button.toolsummary:pointerover /template/ Border#PART_Root">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
-    </Style>
-    <Style Selector="TextBlock.toolstatus">
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
-    </Style>
-    <Style Selector="TextBlock.toolstatus.background">
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
-    </Style>
-    <Style Selector="TextBlock.toolstatus.errored">
-      <Setter Property="Foreground" Value="{DynamicResource Brush.Error}" />
     </Style>
 
     <Style Selector="Expander.toolbody">
@@ -1277,15 +1310,6 @@
       <Setter Property="LineHeight" Value="21" />
       <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
     </Style>
-    <Style Selector="Ellipse.pulsing">
-      <Style.Animations>
-        <Animation Duration="0:0:1.2" IterationCount="Infinite" Easing="SineEaseInOut">
-          <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.4" /></KeyFrame>
-          <KeyFrame Cue="50%"><Setter Property="Opacity" Value="1" /></KeyFrame>
-          <KeyFrame Cue="100%"><Setter Property="Opacity" Value="0.4" /></KeyFrame>
-        </Animation>
-      </Style.Animations>
-    </Style>
 
     <!-- pending pill: three dots, staggered, as in the WPF storyboard -->
     <Style Selector="Border.pendingpill">
@@ -1380,21 +1404,6 @@
       </Style.Animations>
     </Style>
 
-    <!-- Scoped to the pill actually being up, so the spinner is not turning
-         invisibly for the whole session.
-
-         RotateTransform.Angle, not RenderTransform: the keyframe animators are
-         registered per property type, and RenderTransform has none — a
-         TransformOperations value animates fine as a *transition* but throws
-         "No animator registered" the moment a keyframe animation starts. -->
-    <Style Selector="Border#PART_LoadingPill[IsVisible=True] TextBlock#PART_LoadingSpinner">
-      <Style.Animations>
-        <Animation Duration="0:0:0.9" IterationCount="Infinite">
-          <KeyFrame Cue="0%"><Setter Property="RotateTransform.Angle" Value="0.0" /></KeyFrame>
-          <KeyFrame Cue="100%"><Setter Property="RotateTransform.Angle" Value="360.0" /></KeyFrame>
-        </Animation>
-      </Style.Animations>
-    </Style>
     <!-- The pill deliberately has no fade or scale of its own — not a keyframe
          animation, not an Opacity transition.
 
@@ -1405,8 +1414,8 @@
          there for the whole stall the pill exists to explain — so the pill
          vanishes and the card just sits blank, which is exactly the symptom it
          was added to prevent. It has to be fully painted on the first frame it
-         exists. The spinner above is the exception only because it starts at a
-         legible angle and a frozen glyph still reads as "busy". -->
+         exists. The spinner inside is the exception only because it starts at a
+         legible angle and a frozen ring still reads as "busy". -->
 
     <!-- Nothing inside PART_Rows gets an entry animation, however tempting the
          pending pill is. Containers there are recycled, so a style animation
