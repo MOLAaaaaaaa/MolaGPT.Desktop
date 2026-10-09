@@ -52,6 +52,7 @@ internal static class AppServices
         services.AddSingleton(_ => new CredentialStore(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "MolaGPT", "creds.json")));
+        services.AddSingleton<PersonalDataService>();
 
         // ---- http ----------------------------------------------------------
         // One CookieContainer shared by the molagpt client so Cloudflare's

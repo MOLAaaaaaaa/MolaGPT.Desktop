@@ -162,6 +162,8 @@ public partial class ImagePreviewWindow : MolaWindow
 
     private void OnPointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        if (e.Source is Visual notificationSource
+            && notificationSource.FindAncestorOfType<NotificationHost>(includeSelf: true) is not null) return;
         // Anything with its own meaning — the buttons — keeps its click.
         if (e.Source is Control source
             && source.FindAncestorOfType<Button>(includeSelf: true) is not null)
@@ -175,6 +177,8 @@ public partial class ImagePreviewWindow : MolaWindow
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
     {
+        if (e.Source is Visual source
+            && source.FindAncestorOfType<NotificationHost>(includeSelf: true) is not null) return;
         if (e.Key is not (Key.Escape or Key.Enter or Key.Space)) return;
         Close();
         e.Handled = true;

@@ -451,8 +451,13 @@
                       <StackPanel Spacing="2" Margin="0,2">
                         <TextBlock Text="{Binding Label}" FontSize="12" FontWeight="SemiBold" />
                         <TextBlock Text="{Binding Status}" Classes="muted" FontSize="11" />
-                        <TextBlock Text="{Binding Detail}" TextWrapping="Wrap"
-                                   FontSize="11" IsVisible="{Binding HasDetail}" />
+                        <Expander Header="查看输出" Theme="{StaticResource ToolExpanderTheme}"
+                                  FontSize="11" IsVisible="{Binding HasDetail}">
+                          <ScrollViewer MaxHeight="260" VerticalScrollBarVisibility="Auto">
+                            <TextBlock Text="{Binding Detail}" TextWrapping="Wrap"
+                                       FontFamily="{DynamicResource Font.Mono}" FontSize="11" />
+                          </ScrollViewer>
+                        </Expander>
                       </StackPanel>
                     </DataTemplate>
                   </ItemsControl.ItemTemplate>

@@ -60,6 +60,7 @@ public partial class MainWindow : MolaWindow
     private readonly PiByokProviderFactory _piByokProviderFactory;
     private readonly PersonalizationViewModel _personalization;
     private readonly MemoryPageViewModel _memoryPage;
+    private readonly PersonalDataService _personalData;
 
     private bool _sidebarCollapsed;
     private SettingsWindow? _settingsWindow;
@@ -120,7 +121,8 @@ public partial class MainWindow : MolaWindow
         IChatToolHost toolHost,
         PiByokProviderFactory piByokProviderFactory,
         PersonalizationViewModel personalization,
-        MemoryPageViewModel memoryPage)
+        MemoryPageViewModel memoryPage,
+        PersonalDataService personalData)
     {
         _main = main;
         _main.CopyTextRequested += OnCopyTextRequested;
@@ -151,6 +153,7 @@ public partial class MainWindow : MolaWindow
         _piByokProviderFactory = piByokProviderFactory;
         _personalization = personalization;
         _memoryPage = memoryPage;
+        _personalData = personalData;
         _pythonSetup = new PythonRuntimeSetup(pythonRuntime, settings, notifications);
         _composer.EnsureAgentRuntimeAsync = EnsureAgentRuntimeForSendAsync;
 
@@ -167,6 +170,7 @@ public partial class MainWindow : MolaWindow
         ApplyFontScale(_settings.FontScale);
         StreamTailFade.Configure(_settings.StreamFadeEnabled);
         _settings.PropertyChanged += OnSettingsPropertyChanged;
+        PART_TitleBar.SetSettingsNoticeVisible(_settings.AccountEntryIsNew);
 
         PART_Header.AttachProviders(providers);
         PART_Header.AttachMain(_main);
@@ -365,8 +369,7 @@ public partial class MainWindow : MolaWindow
         _pythonSetup.OfferForAttachments(e.NewItems.OfType<Attachment>());
     }
 
-    /// <summary>外观 → 隐藏 MolaGPT 账号功能. Re-read whenever it or the sign-in
-    /// state changes; <see cref="SettingsViewModel.ShowAccountFeatures"/> folds both.</summary>
+    /// <summary>Apply the account entry visibility preference.</summary>
     private void ApplyAccountFeatureVisibility()
     {
         var show = _settings.ShowAccountFeatures;
@@ -428,6 +431,8 @@ public partial class MainWindow : MolaWindow
             StreamTailFade.Configure(_settings.StreamFadeEnabled);
         if (e.PropertyName == nameof(SettingsViewModel.ShowAccountFeatures))
             ApplyAccountFeatureVisibility();
+        if (e.PropertyName == nameof(SettingsViewModel.AccountEntryIsNew))
+            PART_TitleBar.SetSettingsNoticeVisible(_settings.AccountEntryIsNew);
     }
 
     internal void ApplyFontScale(double value)
@@ -561,7 +566,7 @@ public partial class MainWindow : MolaWindow
         // The canvas hosts a native web view, and a native window paints over
         // everything Avalonia draws in its rectangle — banners included. Keep
         // them to the left of it while it is open.
-        PART_Notifications.Margin = canvas && !maximized
+        PART_NotificationPresenter.Margin = canvas && !maximized
             ? new Thickness(0, 58, 16 + width + ArtifactPanelGap + 14, 0)
             : NotificationsMargin;
     }
@@ -1082,7 +1087,7 @@ public partial class MainWindow : MolaWindow
             _imageGenerationTool, _pythonRuntime, _piSidecar, _notifications, _skills, _browserActivity,
             () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory,
             ActivateAgentRuntimeAsync, DeactivateAgentRuntime, _personalization, _memoryPage, _proxy,
-            _pythonSetup);
+            _pythonSetup, _personalData);
         window.AccountRequested += async (_, _) =>
         {
             if (await OpenLoginAsync(window)) window.RefreshAccountUi();

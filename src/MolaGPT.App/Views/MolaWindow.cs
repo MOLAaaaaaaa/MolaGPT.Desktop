@@ -10,6 +10,15 @@ namespace MolaGPT.App.Views;
 /// </summary>
 public class MolaWindow : Window
 {
+    public static readonly StyledProperty<NotificationHost?> NotificationContentProperty =
+        AvaloniaProperty.Register<MolaWindow, NotificationHost?>(nameof(NotificationContent));
+
+    public NotificationHost? NotificationContent
+    {
+        get => GetValue(NotificationContentProperty);
+        set => SetValue(NotificationContentProperty, value);
+    }
+
     private const double HighDensityRenderScaling = 2d;
     private const uint WmNcCalcSize = 0x0083;
     private const uint WmNcPaint = 0x0085;

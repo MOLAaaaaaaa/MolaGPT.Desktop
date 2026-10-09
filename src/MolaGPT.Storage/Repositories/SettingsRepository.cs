@@ -49,6 +49,16 @@ public sealed class SettingsRepository
 
 public sealed class ProviderRepository
 {
+    private const string UpsertSql =
+        @"INSERT INTO providers (id, type, name, base_url, api_key_enc, models, enabled, sort_order, purpose, api_path, image_edit_path, image_format, custom_headers)
+          VALUES (@Id, @Type, @Name, @BaseUrl, @ApiKeyEnc, @Models, @Enabled, @SortOrder, @Purpose, @ApiPath, @ImageEditPath, @ImageFormat, @CustomHeaders)
+          ON CONFLICT(id) DO UPDATE SET
+            type=excluded.type, name=excluded.name, base_url=excluded.base_url,
+            api_key_enc=excluded.api_key_enc, models=excluded.models,
+            enabled=excluded.enabled, sort_order=excluded.sort_order, purpose=excluded.purpose,
+            api_path=excluded.api_path, image_edit_path=excluded.image_edit_path, image_format=excluded.image_format,
+            custom_headers=excluded.custom_headers";
+
     private readonly MolaGptDatabase _db;
     public ProviderRepository(MolaGptDatabase db) => _db = db;
 
@@ -66,16 +76,15 @@ public sealed class ProviderRepository
     public void Upsert(ProviderRow row)
     {
         using var conn = _db.Open();
-        conn.Execute(
-            @"INSERT INTO providers (id, type, name, base_url, api_key_enc, models, enabled, sort_order, purpose, api_path, image_edit_path, image_format, custom_headers)
-              VALUES (@Id, @Type, @Name, @BaseUrl, @ApiKeyEnc, @Models, @Enabled, @SortOrder, @Purpose, @ApiPath, @ImageEditPath, @ImageFormat, @CustomHeaders)
-              ON CONFLICT(id) DO UPDATE SET
-                type=excluded.type, name=excluded.name, base_url=excluded.base_url,
-                api_key_enc=excluded.api_key_enc, models=excluded.models,
-                enabled=excluded.enabled, sort_order=excluded.sort_order, purpose=excluded.purpose,
-                api_path=excluded.api_path, image_edit_path=excluded.image_edit_path, image_format=excluded.image_format,
-                custom_headers=excluded.custom_headers",
-            row);
+        conn.Execute(UpsertSql, row);
+    }
+
+    public void UpsertMany(IReadOnlyList<ProviderRow> rows)
+    {
+        using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
+        conn.Execute(UpsertSql, rows, tx);
+        tx.Commit();
     }
 
     public void Delete(string id)

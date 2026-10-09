@@ -1,5 +1,6 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:views="clr-namespace:MolaGPT.App.Views"
              x:Class="MolaGPT.App.Views.NotificationBanner"
              Width="344">
 
@@ -14,28 +15,24 @@
     is a second emphasis for something the icon already says.
   -->
   <Border Name="PART_Card"
-          Background="{DynamicResource Brush.Bg.Elevated}"
-          BorderBrush="{DynamicResource Brush.Border.Strong}"
           BorderThickness="1"
-          CornerRadius="{DynamicResource Radius.Md}"
-          BoxShadow="0 10 30 0 #3D16202A"
           ClipToBounds="True">
     <Panel>
-      <Grid Margin="14,12,12,12" ColumnDefinitions="20,*,Auto">
+      <Grid Name="PART_Layout" ColumnDefinitions="20,*,Auto">
 
         <TextBlock Grid.Column="0" Name="PART_Icon" Classes="icon"
                    FontSize="15" HorizontalAlignment="Center"
                    VerticalAlignment="Top" Margin="0,1,0,0" />
 
-        <StackPanel Grid.Column="1" Margin="10,0,0,0">
+        <StackPanel Grid.Column="1" Name="PART_Text" Margin="10,0,0,0">
           <TextBlock Name="PART_Title"
                      FontSize="13" FontWeight="SemiBold"
-                     TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                     TextTrimming="CharacterEllipsis"
                      Foreground="{DynamicResource Brush.Text.Primary}" />
 
           <TextBlock Name="PART_Body"
-                     FontSize="12" Margin="0,3,0,0" MaxLines="2"
-                     TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
+                     FontSize="12" Margin="0,3,0,0"
+                     TextTrimming="CharacterEllipsis"
                      Foreground="{DynamicResource Brush.Text.Secondary}" />
 
           <ProgressBar Name="PART_Progress"
@@ -51,12 +48,14 @@
 
         <!-- Kept invisible until the pointer is over the banner: three stacked
              cards each showing a close glyph outweigh the content itself. -->
-        <Button Grid.Column="2" Name="PART_Close" Classes="inlineaction"
+        <StackPanel Grid.Column="2" Name="PART_Actions" Orientation="Horizontal" VerticalAlignment="Top">
+        <Button Name="PART_Close" Classes="inlineaction"
                 Width="22" Height="22" Padding="0" FontSize="10"
                 VerticalAlignment="Top" Opacity="0"
                 ToolTip.Tip="关闭">
           <TextBlock Classes="icon" Text="&#xE8BB;" FontSize="10" />
         </Button>
+        </StackPanel>
       </Grid>
 
       <!-- Auto-dismiss countdown. Without it a banner vanishing on its own
@@ -66,4 +65,51 @@
               Opacity="0.28" IsVisible="False" />
     </Panel>
   </Border>
+
+  <UserControl.Styles>
+    <Style Selector="Border#PART_Card">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Strong}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="BoxShadow" Value="0 10 30 0 #3D16202A" />
+    </Style>
+    <Style Selector="Grid#PART_Layout">
+      <Setter Property="Margin" Value="14,12,12,12" />
+    </Style>
+    <Style Selector="TextBlock#PART_Title">
+      <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+    <Style Selector="TextBlock#PART_Body">
+      <Setter Property="TextWrapping" Value="Wrap" />
+      <Setter Property="MaxLines" Value="2" />
+    </Style>
+    <Style Selector="views|NotificationBanner.secondarywindow Border#PART_Card">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Strong}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="BoxShadow" Value="0 6 18 0 #2616202A" />
+    </Style>
+    <Style Selector="views|NotificationBanner.secondarywindow Grid#PART_Layout">
+      <Setter Property="Margin" Value="12,10" />
+    </Style>
+    <Style Selector="views|NotificationBanner.secondarywindow TextBlock#PART_Title">
+      <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+    <Style Selector="views|NotificationBanner.secondarywindow TextBlock#PART_Body">
+      <Setter Property="TextWrapping" Value="NoWrap" />
+      <Setter Property="MaxLines" Value="1" />
+    </Style>
+    <Style Selector="views|NotificationBanner.secondarywindow.details TextBlock#PART_Title">
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style Selector="views|NotificationBanner.secondarywindow.details Border#PART_Card">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BoxShadow" Value="none" />
+    </Style>
+    <Style Selector="views|NotificationBanner.secondarywindow.details TextBlock#PART_Body">
+      <Setter Property="TextWrapping" Value="Wrap" />
+      <Setter Property="MaxLines" Value="0" />
+    </Style>
+  </UserControl.Styles>
 </UserControl>

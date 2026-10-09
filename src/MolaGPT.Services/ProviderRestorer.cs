@@ -100,7 +100,8 @@ public static class ProviderRestorer
                         : string.Empty;
 
                     var models = TryDeserializeModels(row.Models);
-                    var headers = CustomParamConverter.ToHeaderListFromJson(row.CustomHeaders);
+                    var headers = CustomParamConverter.ToHeaderListFromJson(row.CustomHeaders is { } storedHeaders
+                        ? creds.DecryptText(storedHeaders) : null);
 
                     // The agent runtime is the only chat engine. A row that cannot be
                     // carried is left unregistered rather than quietly downgraded —

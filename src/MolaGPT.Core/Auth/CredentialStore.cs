@@ -4,16 +4,14 @@ using System.Text;
 namespace MolaGPT.Core.Auth;
 
 /// <summary>
-/// Encrypted local credential storage using Windows DPAPI (CurrentUser scope).
-/// Used for: MolaGPT JWT, BYOK API keys.
-///
-/// On non-Windows hosts (e.g. running a unit test on Linux), the store falls
-/// back to plain bytes so tests can run; the production desktop host is always
-/// on Windows.
+/// RSA-based local credential storage. Windows DPAPI protects the private key.
+/// Legacy DPAPI credentials remain readable until the startup migration runs.
 /// </summary>
-public sealed class CredentialStore
+public sealed class CredentialStore : IDisposable
 {
     private readonly string _filePath;
+    private RSA? _rsa;
+    private const string TextPrefix = "molaenc1:";
     private static readonly byte[] s_entropy = Encoding.UTF8.GetBytes("MolaGPT.Desktop.v1.entropy");
 
     // LoadSecret sits on request hot paths (JWT per chat request, MCP server
@@ -36,25 +34,93 @@ public sealed class CredentialStore
     public byte[] Encrypt(string plaintext)
     {
         var bytes = Encoding.UTF8.GetBytes(plaintext);
-        return OperatingSystem.IsWindows()
-            ? ProtectedData.Protect(bytes, s_entropy, DataProtectionScope.CurrentUser)
-            : bytes; // non-Windows fallback (tests only)
+        try
+        {
+            lock (_gate) return AsymmetricEncryption.Encrypt(bytes, GetRsaLocked());
+        }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
     public string? Decrypt(byte[] cipher)
     {
         if (cipher.Length == 0) return null;
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("本地凭据存储需要 Windows 用户密钥保护。");
+        byte[] bytes;
+        lock (_gate)
+            bytes = AsymmetricEncryption.IsEncrypted(cipher)
+                ? AsymmetricEncryption.Decrypt(cipher, GetRsaLocked())
+                : ProtectedData.Unprotect(cipher, s_entropy, DataProtectionScope.CurrentUser);
+        try { return Encoding.UTF8.GetString(bytes); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    public static bool IsEncryptedText(string value) => value.StartsWith(TextPrefix, StringComparison.Ordinal);
+
+    public string EncryptText(string plaintext) => TextPrefix + Convert.ToBase64String(Encrypt(plaintext));
+
+    public string DecryptText(string value) => IsEncryptedText(value)
+        ? Decrypt(Convert.FromBase64String(value[TextPrefix.Length..]))
+            ?? throw new CryptographicException("加密内容为空。")
+        : value;
+
+    public void UpgradeEncryption()
+    {
+        lock (_gate)
+        {
+            var current = LoadMapLocked();
+            var next = new Dictionary<string, string>(current, current.Comparer);
+            foreach (var (key, value) in current)
+            {
+                var cipher = Convert.FromBase64String(value);
+                if (AsymmetricEncryption.IsEncrypted(cipher)) continue;
+                next[key] = Convert.ToBase64String(Encrypt(Decrypt(cipher)
+                    ?? throw new CryptographicException("凭据内容为空。")));
+            }
+            if (next.Any(pair => pair.Value != current[pair.Key])) CommitMapLocked(next);
+        }
+    }
+
+    private RSA GetRsaLocked()
+    {
+        if (_rsa is not null) return _rsa;
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("本地凭据存储需要 Windows 用户密钥保护。");
+
+        var keyPath = _filePath + ".rsa";
+        var rsa = RSA.Create();
         try
         {
-            var bytes = OperatingSystem.IsWindows()
-                ? ProtectedData.Unprotect(cipher, s_entropy, DataProtectionScope.CurrentUser)
-                : cipher;
-            return Encoding.UTF8.GetString(bytes);
+            if (File.Exists(keyPath))
+            {
+                var privateKey = ProtectedData.Unprotect(File.ReadAllBytes(keyPath), s_entropy, DataProtectionScope.CurrentUser);
+                try { rsa.ImportPkcs8PrivateKey(privateKey, out _); }
+                finally { CryptographicOperations.ZeroMemory(privateKey); }
+            }
+            else
+            {
+                rsa.KeySize = 3072;
+                var privateKey = rsa.ExportPkcs8PrivateKey();
+                try
+                {
+                    File.WriteAllBytes(keyPath + ".tmp", ProtectedData.Protect(privateKey, s_entropy, DataProtectionScope.CurrentUser));
+                    File.Move(keyPath + ".tmp", keyPath);
+                }
+                finally { CryptographicOperations.ZeroMemory(privateKey); }
+            }
+            _rsa = rsa;
+            return rsa;
         }
         catch
         {
-            return null;
+            rsa.Dispose();
+            throw;
         }
+    }
+
+    public void Dispose()
+    {
+        lock (_gate) _rsa?.Dispose();
     }
 
     public void SaveSecret(string key, string plaintext)
@@ -98,23 +164,17 @@ public sealed class CredentialStore
         var lastWrite = File.Exists(_filePath) ? File.GetLastWriteTimeUtc(_filePath) : DateTime.MinValue;
         if (_map is not null && _mapFileWriteTimeUtc == lastWrite)
             return _map;
-        _mapFileWriteTimeUtc = lastWrite;
         _map = ReadMap();
+        _mapFileWriteTimeUtc = lastWrite;
         return _map;
     }
 
     private Dictionary<string, string> ReadMap()
     {
         if (!File.Exists(_filePath)) return new();
-        try
-        {
-            var json = File.ReadAllText(_filePath);
-            return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(json) ?? new();
-        }
-        catch
-        {
-            return new();
-        }
+        var json = File.ReadAllText(_filePath);
+        return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(json)
+            ?? throw new InvalidDataException("凭据文件内容无效。");
     }
 
     private void CommitMapLocked(Dictionary<string, string> map)
@@ -140,6 +200,7 @@ public sealed class CredentialStore
     private void WriteMap(Dictionary<string, string> map)
     {
         var json = System.Text.Json.JsonSerializer.Serialize(map);
-        File.WriteAllText(_filePath, json);
+        File.WriteAllText(_filePath + ".tmp", json);
+        File.Move(_filePath + ".tmp", _filePath, overwrite: true);
     }
 }

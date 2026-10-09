@@ -169,10 +169,17 @@
                   </Grid>
                 </ListBoxItem>
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="常规" />
-                <ListBoxItem Name="PART_AppearanceNav" Content="外观" Tag="PAGE_Appearance" />
+                <ListBoxItem Name="PART_AppearanceNav" Tag="PAGE_Appearance" AutomationProperties.Name="外观">
+                  <StackPanel Orientation="Horizontal" Spacing="7">
+                    <TextBlock Text="外观" VerticalAlignment="Center" />
+                    <Ellipse Width="7" Height="7" Fill="{DynamicResource Brush.Error}"
+                             VerticalAlignment="Center" IsVisible="{Binding AccountEntryIsNew}" />
+                  </StackPanel>
+                </ListBoxItem>
                 <ListBoxItem Content="对话" Tag="PAGE_Chat" />
                 <ListBoxItem Content="任务与子 Agent" Tag="PAGE_Tasks" />
                 <ListBoxItem Content="通知与托盘" Tag="PAGE_System" />
+                <ListBoxItem Content="个人数据管理" Tag="PAGE_PersonalData" />
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="个性化" />
                 <ListBoxItem Name="PART_PersonasNav" Content="角色" Tag="PAGE_Personas" />
                 <ListBoxItem Name="PART_MemoryNav" Tag="PAGE_Memory" AutomationProperties.Name="记忆">
@@ -503,7 +510,7 @@
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
                         <TextBlock Classes="rowtitle" Text="状态提示点" />
-                        <TextBlock Classes="hint" Text="在尚未配置完成的设置项旁显示红点。" />
+                        <TextBlock Classes="hint" Text="提示尚未配置的设置项和未查看的新功能。" />
                       </StackPanel>
                       <ToggleButton Grid.Column="1" Name="PART_StatusDots"
                                     Classes="settingtoggle"
@@ -513,18 +520,23 @@
                   </StackPanel>
                 </Border>
 
-                <!-- 只用 BYOK 的人从不需要网页版对话、远程控制和登录入口。开关在这里
-                     而不在账号页：打开它之后账号页就不在导航里了，回头路得留在别处。 -->
                 <TextBlock Classes="section" Text="账号入口" />
-                <Border Classes="settingscard">
+                <Border Name="PART_AccountEntryCard" Classes="settingscard">
                   <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                     <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                      <TextBlock Classes="rowtitle" Text="隐藏 MolaGPT 账号功能" />
-                      <TextBlock Classes="hint" Text="未登录时隐藏网页版对话、远程控制和登录入口。" />
+                      <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Classes="rowtitle" Text="显示 MolaGPT 账号入口" />
+                        <Border Name="PART_AccountEntryNewBadge" IsVisible="False" Padding="5,1"
+                                CornerRadius="{DynamicResource Radius.Sm}"
+                                Background="{DynamicResource Brush.Primary.Soft}" VerticalAlignment="Center">
+                          <TextBlock Text="新增" FontSize="10" Foreground="{DynamicResource Brush.Primary}" />
+                        </Border>
+                      </StackPanel>
+                      <TextBlock Classes="hint" Text="在主界面显示网页版对话、远程控制和账号入口。" />
                     </StackPanel>
                     <ToggleButton Grid.Column="1" Name="PART_HideAccountFeatures"
                                   Classes="settingtoggle"
-                                  IsChecked="{Binding HideAccountFeatures, Mode=TwoWay}"
+                                  IsChecked="{Binding ShowAccountFeatures, Mode=TwoWay}"
                                   VerticalAlignment="Center" />
                   </Grid>
                 </Border>
@@ -752,6 +764,57 @@
                       </StackPanel>
                     </StackPanel>
                   </StackPanel>
+                </Border>
+              </StackPanel>
+
+              <StackPanel Name="PAGE_PersonalData" IsVisible="False">
+                <TextBlock Classes="pagetitle" Text="个人数据管理" />
+                <TextBlock Classes="pagesubtitle" Text="保存聊天记录，或将模型配置迁移到另一环境。" />
+
+                <TextBlock Classes="section" Text="聊天记录" Margin="2,4,2,8" />
+                <Border Classes="settingscard">
+                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                    <StackPanel Margin="0,0,20,0">
+                      <TextBlock Classes="rowtitle" Text="导出聊天记录" />
+                      <TextBlock Classes="hint" Text="将所有本地对话、分支和消息导出并保存为一个 JSON 文件。" />
+                    </StackPanel>
+                    <Button Grid.Column="1" Classes="outline" Content="导出…"
+                            Click="OnExportConversations" VerticalAlignment="Center" />
+                  </Grid>
+                </Border>
+
+                <TextBlock Classes="section" Text="模型配置" />
+                <Border Classes="settingscard">
+                  <StackPanel>
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="导出模型配置" />
+                        <TextBlock Classes="hint" Text="包含模型服务、模型参数和 API Key 配置。" />
+                      </StackPanel>
+                      <Button Grid.Column="1" Classes="outline" Content="导出…"
+                              Click="OnExportModelConfigurations" VerticalAlignment="Center" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Margin="0,0,20,0">
+                        <TextBlock Classes="rowtitle" Text="导入模型配置" />
+                        <TextBlock Classes="hint" Text="使用导出时设置的密码恢复模型服务和 API Key 配置。" />
+                      </StackPanel>
+                      <Button Grid.Column="1" Classes="outline" Content="导入…"
+                              Click="OnImportModelConfigurations" VerticalAlignment="Center" />
+                    </Grid>
+                  </StackPanel>
+                </Border>
+
+                <TextBlock Classes="section" Text="凭据" />
+                <Border Classes="settingscard">
+                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                    <StackPanel Margin="0,0,20,0">
+                      <TextBlock Classes="rowtitle" Text="API Key 存储" />
+                      <TextBlock Classes="hint" Text="本地凭据受当前可用的 Windows 安全机制保护。" />
+                    </StackPanel>
+                    <TextBlock Grid.Column="1" Classes="hint" Text="已加密" VerticalAlignment="Center" Margin="0" />
+                  </Grid>
                 </Border>
               </StackPanel>
 

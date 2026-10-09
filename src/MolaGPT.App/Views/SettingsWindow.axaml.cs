@@ -63,6 +63,8 @@ public partial class SettingsWindow : MolaContentWindow
     /// <summary>Nav item → page, read from each item's <c>Tag</c> (the page's
     /// name). Group headings carry no tag and so never resolve to a page.</summary>
     private readonly Dictionary<ListBoxItem, StackPanel> _navPages = [];
+    private readonly bool _accountEntryWasNew;
+    private Rect _accountEntryViewport;
     private readonly ObservableCollection<ModelRow> _providerModels = [];
     private readonly ObservableCollection<HeaderRow> _providerHeaders = [];
     /// <summary>Built on first use and kept for the window's life, so editing
@@ -157,9 +159,11 @@ public partial class SettingsWindow : MolaContentWindow
         PersonalizationViewModel? personalization = null,
         MemoryPageViewModel? memoryPage = null,
         MolaGptProxyProvider? proxy = null,
-        PythonRuntimeSetup? pythonSetup = null)
+        PythonRuntimeSetup? pythonSetup = null,
+        PersonalDataService? personalData = null)
     {
         _settings = settings;
+        _accountEntryWasNew = !settings.AccountEntrySeen;
         _auth = auth;
         _cloudSync = cloudSync;
         _conversations = conversations;
@@ -183,8 +187,10 @@ public partial class SettingsWindow : MolaContentWindow
         _agentRuntimeInstalled = agentRuntimeInstalled;
         _agentRuntimeRemoving = agentRuntimeRemoving;
         _personalization = personalization;
+        _personalData = personalData;
 
         InitializeComponent();
+        PAGE_PersonalData.IsEnabled = personalData is not null;
         // Before DataContext: the search index reads the text the XAML spells
         // out, and bound text is still empty at this point.
         InitializeSearch();
@@ -205,6 +211,12 @@ public partial class SettingsWindow : MolaContentWindow
             new WebBridgeClient(_byokHttpFactory?.Invoke() ?? new HttpClient()));
         PART_BrowserBridgeCard.DataContext = _browserBridge;
         DataContext = _settings;
+        PART_AccountEntryNewBadge.IsVisible = _accountEntryWasNew && _settings.ShowStatusDots;
+        PART_AccountEntryCard.EffectiveViewportChanged += (_, e) =>
+        {
+            _accountEntryViewport = e.EffectiveViewport;
+            MarkAccountEntrySeen();
+        };
         InitializeAccountPage(proxy);
         PART_ContentScroll.SizeChanged += (_, _) => UpdatePersonaViewport();
         PART_PersonaPageHeader.SizeChanged += (_, _) => UpdatePersonaViewport();
@@ -217,7 +229,6 @@ public partial class SettingsWindow : MolaContentWindow
 
         PART_Nav.SelectionChanged += (_, _) => ShowSelectedPage();
         PART_Nav.SelectedItem = _settings.ShowAccountFeatures ? PART_AccountNav : PART_AppearanceNav;
-        ApplyAccountFeatureVisibility();
         BuildThemeChoices();
         BuildCornerStyleChoices();
         BuildSearchProviderChoices();
@@ -313,6 +324,7 @@ public partial class SettingsWindow : MolaContentWindow
         };
         Activated += (_, _) =>
         {
+            MarkAccountEntrySeen();
             _settings.RefreshSubagentProviderModels();
             _settings.RefreshReviewProviderModels();
             _ = RefreshRuntimeStatusAsync();
@@ -338,8 +350,10 @@ public partial class SettingsWindow : MolaContentWindow
             if (args.PropertyName is nameof(SettingsViewModel.PythonToolEnabled)
                 or nameof(SettingsViewModel.FileToolsEnabled))
                 PART_SkillsUnreachable.IsVisible = !CanReachSkills();
-            else if (args.PropertyName == nameof(SettingsViewModel.ShowAccountFeatures))
-                ApplyAccountFeatureVisibility();
+            else if (args.PropertyName == nameof(SettingsViewModel.ShowStatusDots))
+            {
+                PART_AccountEntryNewBadge.IsVisible = _accountEntryWasNew && _settings.ShowStatusDots;
+            }
             else if (args.PropertyName == nameof(SettingsViewModel.PythonToolExecutablePath))
                 RefreshPythonBrowseButton();
         };
@@ -387,6 +401,14 @@ public partial class SettingsWindow : MolaContentWindow
     }
 
     public event EventHandler? AccountRequested;
+
+    private void MarkAccountEntrySeen()
+    {
+        if (!_settings.AccountEntrySeen && IsActive && PAGE_Appearance.IsVisible
+            && PART_AccountEntryCard.Bounds.Width > 0 && PART_AccountEntryCard.Bounds.Height > 0
+            && _accountEntryViewport.Contains(new Rect(PART_AccountEntryCard.Bounds.Size)))
+            _settings.AccountEntrySeen = true;
+    }
 
     internal void OpenAgentPage()
     {

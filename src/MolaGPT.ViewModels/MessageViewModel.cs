@@ -1758,8 +1758,15 @@ public sealed partial class ThinkingSegmentViewModel : ObservableObject
     }
 }
 
-public sealed record TaskCardItem(string Label, string Status, string? Detail)
+public sealed partial class TaskCardItem(string label, string? taskState, string? detail, string? taskId = null)
+    : ObservableObject
 {
+    public string Label { get; } = label;
+    public string? Detail { get; } = detail;
+    public string? TaskId { get; } = taskId;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(Status))]
+    private string? _taskState = taskState;
+    public string Status => ToolCallViewModel.CardStatus(TaskState);
     public bool HasDetail => !string.IsNullOrWhiteSpace(Detail);
 }
 
@@ -2141,17 +2148,22 @@ public sealed partial class ToolCallViewModel : ObservableObject
                     .Select(item => new TaskCardItem(
                         CardString(item, "label") ?? CardString(item, "agent_id")
                             ?? CardString(item, "task_id") ?? "任务",
-                        CardStatus(CardString(item, "status")),
-                        CardString(item, "recent_output") ?? CardString(item, "report")))
+                        CardString(item, "status"),
+                        CardString(item, "recent_output") ?? CardString(item, "report"),
+                        Name == TaskTools.StatusToolName ? CardString(item, "task_id") : null))
                     .ToArray();
             else if (Name == TaskTools.StatusToolName && CardString(root, "status") is { } status)
+            {
                 _cardItems = [new TaskCardItem(
                     CardString(root, "label") ?? CardString(root, "task_id") ?? "任务",
-                    CardStatus(status),
-                    CardString(root, "recent_output") ?? CardString(root, "report"))];
+                    status,
+                    CardString(root, "recent_output") ?? CardString(root, "report"),
+                    CardString(root, "task_id"))];
+                _cardResultOutput = null;
+            }
             else if (Name == TaskTools.StopToolName && CardString(root, "status") is { } stopStatus)
                 _cardItems = [new TaskCardItem(
-                    CardString(root, "task_id") ?? "任务", CardStatus(stopStatus), null)];
+                    CardString(root, "task_id") ?? "任务", stopStatus, null)];
         }
         catch (JsonException) { }
     }
@@ -2160,7 +2172,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
         root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() : null;
 
-    private static string CardStatus(string? status) => status switch
+    internal static string CardStatus(string? status) => status switch
     {
         "running" => "运行中",
         "completed" => "已完成",

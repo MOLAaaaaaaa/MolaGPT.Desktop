@@ -13,6 +13,10 @@
         Foreground="{DynamicResource Brush.Text.Primary}"
         WindowStartupLocation="CenterScreen">
 
+  <views:MolaWindow.NotificationContent>
+    <views:NotificationHost Name="PART_Notifications" />
+  </views:MolaWindow.NotificationContent>
+
   <!--
     Shell, matching MolaGPT.Desktop/Views/MainWindow.xaml:
 
@@ -433,8 +437,10 @@
     <!-- Notification banners float over the whole shell, anchored just under
          the title bar at the window's right edge. They sit outside the body
          grid so they do not move with the sidebar or the artifact panel. -->
-    <views:NotificationHost Name="PART_Notifications" ZIndex="80"
-                            Margin="0,58,30,0" />
+    <ContentControl Name="PART_NotificationPresenter" ZIndex="80"
+                    Content="{Binding $parent[views:MainWindow].NotificationContent}"
+                    HorizontalAlignment="Right" VerticalAlignment="Top"
+                    Margin="0,58,30,0" />
     </Panel>
   </LayoutTransformControl>
 

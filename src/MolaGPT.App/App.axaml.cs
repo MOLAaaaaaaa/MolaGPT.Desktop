@@ -57,6 +57,7 @@ public partial class App : Application
             UrlSchemeRegistrar.EnsureRegistered();
             _services = AppServices.Build();
             _services.GetRequiredService<MolaGptDatabase>().EnsureSchema();
+            _services.GetRequiredService<PersonalDataService>().UpgradeCredentialStorage();
             _services.GetRequiredService<PersonaListViewModel>().EnsureBuiltinsSeeded();
 
             var main = _services.GetRequiredService<MainViewModel>();
@@ -169,7 +170,8 @@ public partial class App : Application
                  _services.GetRequiredService<IChatToolHost>(),
                  _services.GetRequiredService<PiByokProviderFactory>(),
                  _services.GetRequiredService<PersonalizationViewModel>(),
-                 _services.GetRequiredService<MemoryPageViewModel>());
+                 _services.GetRequiredService<MemoryPageViewModel>(),
+                 _services.GetRequiredService<PersonalDataService>());
             desktop.MainWindow = window;
 
             // One router owns "banner, Windows toast, or wait" for every source.

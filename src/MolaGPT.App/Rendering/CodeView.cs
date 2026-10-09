@@ -6,6 +6,7 @@ using Avalonia.Input.Platform;
 using Avalonia.Media;
 using Avalonia.Media.TextFormatting;
 using Avalonia.Styling;
+using Avalonia.Threading;
 using Avalonia.Utilities;
 using Avalonia.VisualTree;
 
@@ -307,7 +308,7 @@ internal sealed class CodeView : Control
         if (width > _maxWidth + 0.5)
         {
             _maxWidth = width;
-            InvalidateMeasure();
+            Dispatcher.UIThread.Post(InvalidateMeasure, DispatcherPriority.Background);
         }
 
         return layout;

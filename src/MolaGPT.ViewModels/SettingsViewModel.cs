@@ -31,6 +31,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string StreamFadeKey = "stream_tail_fade";
     private const string StatusDotsKey = "status_dots";
     private const string HideAccountFeaturesKey = "hide_account_features";
+    private const string AccountEntrySeenKey = "account_entry_seen";
     private const string PythonSetupOfferedKey = "python_setup_offered";
     private const string AutoCompactionKey = "auto_compaction";
     private const string BackgroundTaskWakeKey = "background_task_wake";
@@ -102,22 +103,26 @@ public sealed partial class SettingsViewModel : ObservableObject
     public event EventHandler<ThemeMode>? ThemeModeChanged;
 
     [ObservableProperty] private string? _molaGptUsername;
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(ShowAccountFeatures))]
-    private bool _isLoggedIn;
+    [ObservableProperty] private bool _isLoggedIn;
 
     /// <summary>
-    /// 外观 → 隐藏 MolaGPT 账号功能. Only takes effect while signed out: signing in
-    /// is itself a request for those features, so it brings them back without the
-    /// user having to find this switch again.
+    /// Visibility of account entry points on the main window.
     /// </summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ShowAccountFeatures))]
     private bool _hideAccountFeatures;
 
-    /// <summary>Whether account-only entry points (the Chat segment, remote
-    /// control, the account page) should be on screen at all.</summary>
-    public bool ShowAccountFeatures => IsLoggedIn || !HideAccountFeatures;
+    public bool ShowAccountFeatures
+    {
+        get => !HideAccountFeatures;
+        set => HideAccountFeatures = !value;
+    }
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AccountEntryIsNew))]
+    private bool _accountEntrySeen;
+
+    public bool AccountEntryIsNew => ShowStatusDots && !AccountEntrySeen;
 
     /// <summary>The one-time "install Python?" offer after the agent runtime
     /// first lands has been shown. Persisted so a reinstall does not ask again.</summary>
@@ -163,14 +168,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// </summary>
     [ObservableProperty] private bool _streamFadeEnabled = true;
 
-    /// <summary>
-    /// The dots that mark a settings entry as unfinished. On by default — an
-    /// unconfigured feature that says nothing is worse than one that admits it —
-    /// but they are a nudge, and a nudge the user has decided to live with should
-    /// be dismissable. Every dot in the window reads this.
-    /// </summary>
+    /// <summary>Show indicators for unfinished settings and unseen features.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(MemoryNeedsModel))]
+    [NotifyPropertyChangedFor(nameof(AccountEntryIsNew))]
     private bool _showStatusDots = true;
 
     /// <summary>
@@ -320,7 +321,8 @@ public sealed partial class SettingsViewModel : ObservableObject
             if (row.ApiKeyEnc is { Length: > 0 } && _credentialStore is not null)
                 plainKey = _credentialStore.Decrypt(row.ApiKeyEnc);
             var models = TryDeserializeModels(row.Models);
-            var customHeaders = TryDeserializeHeaders(row.CustomHeaders);
+            var customHeaders = TryDeserializeHeaders(row.CustomHeaders is { } headers && _credentialStore is not null
+                ? _credentialStore.DecryptText(headers) : row.CustomHeaders);
             Providers.Add(new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat, customHeaders));
         }
         RefreshTitleProviderModels();
@@ -357,6 +359,8 @@ public sealed partial class SettingsViewModel : ObservableObject
                 ShowStatusDots = statusDots;
             if (bool.TryParse(_settingsRepo.Get(HideAccountFeaturesKey), out var hideAccount))
                 HideAccountFeatures = hideAccount;
+            AccountEntrySeen = (bool.TryParse(_settingsRepo.Get(AccountEntrySeenKey), out var accountEntrySeen) && accountEntrySeen)
+                               || _settingsRepo.Get(HideAccountFeaturesKey) is not null;
             if (bool.TryParse(_settingsRepo.Get(PythonSetupOfferedKey), out var pythonOffered))
                 PythonSetupOffered = pythonOffered;
             if (bool.TryParse(_settingsRepo.Get(AutoCompactionKey), out var autoCompaction))
@@ -565,6 +569,13 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(HideAccountFeaturesKey, value.ToString());
+        AccountEntrySeen = true;
+    }
+
+    partial void OnAccountEntrySeenChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(AccountEntrySeenKey, value.ToString());
     }
 
     partial void OnPythonSetupOfferedChanged(bool value)
@@ -1011,7 +1022,8 @@ public sealed partial class SettingsViewModel : ObservableObject
             ImageEditPath: entry.ImageEditPath,
             ImageFormat: entry.ImageFormat,
             CustomHeaders: entry.CustomHeaders is { Count: > 0 }
-                ? JsonSerializer.Serialize(entry.CustomHeaders)
+                ? (_credentialStore ?? throw new InvalidOperationException("凭据存储不可用。"))
+                    .EncryptText(JsonSerializer.Serialize(entry.CustomHeaders))
                 : null));
         RefreshVisionProviderModels();
         RefreshTitleProviderModels();

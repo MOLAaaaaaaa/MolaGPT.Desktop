@@ -525,6 +525,7 @@ public sealed partial class ChatViewModel : ObservableObject
         foreach (var existing in Messages) existing.Dispose();
         Messages.Clear();
         _pendingOlderMessages.Clear();
+        _storedTaskStates.Clear();
         ConversationId = null;
         ConversationTitle = "新对话";
         ConversationSystemPrompt = null;
@@ -586,6 +587,7 @@ public sealed partial class ChatViewModel : ObservableObject
             foreach (var existing in Messages) existing.Dispose();
             Messages.Clear();
             _pendingOlderMessages.Clear();
+            _storedTaskStates.Clear();
 
             ConversationRow? conversationRow = null;
             if (_messageRepo is not null)
@@ -612,6 +614,7 @@ public sealed partial class ChatViewModel : ObservableObject
 
                 conversationRow = snapshot.conversation;
                 var prepared = snapshot.messages;
+                RestoreTaskStates(prepared);
                 RestoreSubagents(conversationId, prepared, conversationRow?.ProviderId);
                 Spend = snapshot.spend;
 

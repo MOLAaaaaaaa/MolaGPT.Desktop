@@ -11,6 +11,7 @@
         FontSize="{DynamicResource Font.Size.Body}"
         Foreground="{DynamicResource Brush.Text.Primary}">
 
+  <Panel>
   <Grid Name="PART_Root" RowDefinitions="*,Auto" Margin="14">
 
         <Border Grid.Row="0"
@@ -58,6 +59,12 @@
                      TextWrapping="NoWrap" />
         </Border>
   </Grid>
+    <Canvas ZIndex="80">
+      <ContentControl Canvas.Top="64" Canvas.Right="24"
+                      Content="{Binding $parent[views:ImagePreviewWindow].NotificationContent}"
+                      HorizontalContentAlignment="Stretch" />
+    </Canvas>
+  </Panel>
 
   <Window.Styles>
     <Style Selector="Button.previewtool">

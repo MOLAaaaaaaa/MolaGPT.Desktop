@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -14,7 +15,6 @@ namespace MolaGPT.App.Views;
 /// </summary>
 public partial class NotificationBanner : UserControl
 {
-    private const double CardWidth = 344;
     private static readonly TimeSpan TickInterval = TimeSpan.FromMilliseconds(80);
     private static readonly Cursor HandCursor = new(StandardCursorType.Hand);
     private static readonly Cursor ArrowCursor = new(StandardCursorType.Arrow);
@@ -37,6 +37,7 @@ public partial class NotificationBanner : UserControl
 
         _timer = new DispatcherTimer { Interval = TickInterval };
         _timer.Tick += OnTick;
+        PART_Card.SizeChanged += (_, _) => UpdateCountdownWidth();
 
         PART_Close.Click += (_, _) => DismissRequested?.Invoke(this, this);
         PART_Action.Click += (_, _) => InvokeAction();
@@ -44,6 +45,31 @@ public partial class NotificationBanner : UserControl
         PointerEntered += (_, _) => SetHovered(true);
         PointerExited += (_, _) => SetHovered(false);
     }
+
+    internal void SetSecondaryWindowLayout(bool secondaryWindow)
+    {
+        Classes.Set("secondarywindow", secondaryWindow);
+        Width = secondaryWindow ? double.NaN : 344;
+        HorizontalAlignment = secondaryWindow ? HorizontalAlignment.Stretch : HorizontalAlignment.Right;
+        PART_Close.Opacity = secondaryWindow || _hovered ? 1 : 0;
+        if (secondaryWindow && PART_Action.Parent == PART_Text)
+        {
+            PART_Text.Children.Remove(PART_Action);
+            PART_Actions.Children.Insert(0, PART_Action);
+            PART_Action.Margin = new Thickness(0, 0, 4, 0);
+            PART_Action.Padding = new Thickness(8, 2);
+        }
+        else if (!secondaryWindow && PART_Action.Parent == PART_Actions)
+        {
+            PART_Actions.Children.Remove(PART_Action);
+            PART_Text.Children.Add(PART_Action);
+            PART_Action.Margin = new Thickness(0, 9, 0, 0);
+            PART_Action.Padding = new Thickness(13, 5);
+        }
+    }
+
+    internal void ReserveOverflowButton(bool reserve) =>
+        PART_Close.Margin = reserve ? new Thickness(32, 0, 0, 0) : default;
 
     /// <summary>
     /// Renders a notification into this card. Called again for every update to
@@ -61,6 +87,8 @@ public partial class NotificationBanner : UserControl
 
         PART_Body.Text = notification.Body ?? string.Empty;
         PART_Body.IsVisible = !string.IsNullOrWhiteSpace(notification.Body);
+        ToolTip.SetTip(PART_Title, notification.Title);
+        ToolTip.SetTip(PART_Body, notification.Body);
 
         var isProgress = notification.Kind == NotifyKind.Progress;
         PART_Progress.IsVisible = isProgress;
@@ -79,6 +107,15 @@ public partial class NotificationBanner : UserControl
         RestartCountdown(notification.EffectiveDuration);
     }
 
+    internal void CopyCountdownTo(NotificationBanner target)
+    {
+        target._timer.Stop();
+        target._total = _total;
+        target._remaining = _remaining;
+        target.UpdateCountdownWidth();
+        if (target._remaining > TimeSpan.Zero && !target._hovered) target._timer.Start();
+    }
+
     private void RestartCountdown(TimeSpan? duration)
     {
         _timer.Stop();
@@ -92,7 +129,7 @@ public partial class NotificationBanner : UserControl
 
         _total = _remaining = duration.Value;
         PART_Timer.Background = AccentFor(Notification.Kind);
-        PART_Timer.Width = CardWidth;
+        UpdateCountdownWidth();
         PART_Timer.IsVisible = true;
 
         // A banner that appears under the pointer should not start draining
@@ -111,13 +148,19 @@ public partial class NotificationBanner : UserControl
             return;
         }
 
-        PART_Timer.Width = CardWidth * (_remaining.TotalMilliseconds / _total.TotalMilliseconds);
+        UpdateCountdownWidth();
+    }
+
+    private void UpdateCountdownWidth()
+    {
+        if (_total > TimeSpan.Zero)
+            PART_Timer.Width = PART_Card.Bounds.Width * (_remaining.TotalMilliseconds / _total.TotalMilliseconds);
     }
 
     private void SetHovered(bool hovered)
     {
         _hovered = hovered;
-        PART_Close.Opacity = hovered ? 1 : 0;
+        PART_Close.Opacity = hovered || Classes.Contains("secondarywindow") ? 1 : 0;
 
         if (hovered) _timer.Stop();
         else if (_remaining > TimeSpan.Zero) _timer.Start();
@@ -146,6 +189,14 @@ public partial class NotificationBanner : UserControl
     {
         _timer.Stop();
         base.OnDetachedFromVisualTree(e);
+    }
+
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        PART_Icon.Foreground = AccentFor(Notification.Kind);
+        PART_Timer.Background = AccentFor(Notification.Kind);
+        SetHovered(false);
     }
 
     private static string IconFor(NotifyKind kind) => kind switch

@@ -9,11 +9,11 @@
     the chat card. No Background is set anywhere: the host sizes to its banners,
     so the rest of the corner stays clickable.
   -->
-  <StackPanel Spacing="10" HorizontalAlignment="Right">
+  <Grid Name="PART_Layout" RowDefinitions="Auto,Auto" HorizontalAlignment="Right">
     <StackPanel Name="PART_Stack" Spacing="10" HorizontalAlignment="Right" />
-    <Button Name="PART_More" Classes="overflowchip"
+    <Button Name="PART_More" Grid.Row="1" Classes="overflowchip" Margin="0,10,0,0"
             HorizontalAlignment="Right" IsVisible="False" />
-  </StackPanel>
+  </Grid>
 
   <UserControl.Styles>
     <!--
@@ -26,7 +26,7 @@
       showing through them. A stalled translate is a couple of stray pixels;
       a stalled fade is a see-through card.
     -->
-    <Style Selector="views|NotificationBanner">
+    <Style Selector="views|NotificationBanner:not(.secondarywindow)">
       <Style.Animations>
         <Animation Duration="0:0:0.24" Easing="CubicEaseOut" FillMode="Forward">
           <KeyFrame Cue="0%">

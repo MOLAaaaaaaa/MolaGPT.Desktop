@@ -85,7 +85,12 @@
             <TextBlock Classes="icon" Text="&#xE756;" />
           </Button>
           <Button Name="PART_Settings" Classes="headericon" ToolTip.Tip="设置">
-            <TextBlock Classes="icon" Text="&#xE713;" />
+            <Panel>
+              <TextBlock Classes="icon" Text="&#xE713;" />
+              <Ellipse Name="PART_SettingsDot" Width="6" Height="6" IsVisible="False"
+                       Fill="{DynamicResource Brush.Error}" IsHitTestVisible="False"
+                       HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-2,-2,0" />
+            </Panel>
           </Button>
           <Button Name="PART_About" Classes="headericon" ToolTip.Tip="关于 MolaGPT">
             <TextBlock Classes="icon" Text="&#xE946;" />

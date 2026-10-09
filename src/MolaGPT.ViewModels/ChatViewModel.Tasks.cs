@@ -53,6 +53,7 @@ public sealed partial class ChatViewModel
     private AgentTaskRegistry? _tasks;
     private Action<Action>? _post;
     private Timer? _taskClock;
+    private readonly Dictionary<string, string> _storedTaskStates = new(StringComparer.Ordinal);
 
     public AgentTaskRegistry? Tasks => _tasks;
 
@@ -176,6 +177,19 @@ public sealed partial class ChatViewModel
             _tasks.RestoreAgent(conversationId, agent, providerId ?? string.Empty, startedAt);
     }
 
+    private void RestoreTaskStates(IReadOnlyList<PreparedMessage> messages)
+    {
+        _storedTaskStates.Clear();
+        foreach (var message in messages)
+        {
+            var tools = (message.RetryAttempts ?? []).SelectMany(attempt => attempt.ToolCalls ?? [])
+                .Concat(message.ToolCalls ?? []);
+            foreach (var tool in tools)
+                if (BackgroundTaskId(tool) is { } id && tool.TaskState is { } state && state != "running")
+                    _storedTaskStates[id] = state;
+        }
+    }
+
     /// <summary>A card that started a task shows the task, not the call — the call
     /// finished the moment the task began.</summary>
     public void ApplyTaskStates()
@@ -194,6 +208,9 @@ public sealed partial class ChatViewModel
         var changed = false;
         foreach (var tool in message.ToolCalls)
         {
+            foreach (var item in tool.TaskCardItems)
+                if (item.TaskId is { } taskId)
+                    item.TaskState = ResolveTaskState(conversationId, taskId, item.TaskState);
             if (tool.BackgroundTaskId is not { } id) continue;
             var state = ResolveTaskState(conversationId, id, tool.TaskState);
             if (tool.TaskState == state) continue;
@@ -227,7 +244,8 @@ public sealed partial class ChatViewModel
     private string? ResolveTaskState(string conversationId, string id, string? storedState) =>
         _tasks?.Find(conversationId, id) is { } task
             ? TaskTools.StatusName(task.Status)
-            : storedState is null or "running" ? "interrupted" : storedState;
+            : _storedTaskStates.TryGetValue(id, out var state) ? state
+                : storedState is null or "running" ? "interrupted" : storedState;
 
     private static string? BackgroundTaskId(ToolCallDelta tool)
     {

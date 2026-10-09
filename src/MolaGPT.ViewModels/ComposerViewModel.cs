@@ -2216,6 +2216,8 @@ public sealed partial class ComposerViewModel : ObservableObject
         {
             assistantMsg.FlushPendingDelta();
             assistantMsg.ApplyToolDelta(tool);
+            if (isCurrentConversation && tool.Name == TaskTools.StatusToolName && tool.Status == "completed")
+                _chat.ApplyTaskStates();
             if (string.Equals(tool.Status, "completed", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(tool.Name, ImageGenerationTool.ToolName, StringComparison.Ordinal))
             {

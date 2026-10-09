@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS providers (
   type        TEXT NOT NULL,            -- openai|anthropic|openai-compat|gemini|molagpt-proxy
   name        TEXT NOT NULL,
   base_url    TEXT,
-  api_key_enc BLOB,                     -- DPAPI-encrypted via CredentialStore
+  api_key_enc BLOB,                     -- encrypted via CredentialStore
   models      TEXT NOT NULL,            -- JSON: [{id, displayName, vision, contextWindow, ...}]
   enabled     INTEGER NOT NULL DEFAULT 1,
   sort_order  INTEGER NOT NULL DEFAULT 0

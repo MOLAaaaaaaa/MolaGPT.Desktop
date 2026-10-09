@@ -21,9 +21,10 @@ internal sealed class NotificationRouter : IDisposable
     private readonly NotificationCenter _center;
     private readonly BackgroundStreamService _backgroundStreams;
     private readonly SettingsViewModel _settings;
-    private readonly NotificationHost _host;
+    private NotificationHost _host;
     private readonly AppNotificationService _system;
-    private readonly Window _window;
+    private readonly MolaWindow _window;
+    private MolaWindow _hostWindow;
     private readonly Func<string?> _currentConversationId;
     private readonly List<AppNotification> _queued = new();
 
@@ -33,7 +34,7 @@ internal sealed class NotificationRouter : IDisposable
         SettingsViewModel settings,
         NotificationHost host,
         AppNotificationService system,
-        Window window,
+        MolaWindow window,
         Func<string?> currentConversationId)
     {
         _center = center;
@@ -42,6 +43,7 @@ internal sealed class NotificationRouter : IDisposable
         _host = host;
         _system = system;
         _window = window;
+        _hostWindow = window;
         _currentConversationId = currentConversationId;
 
         _center.Published += OnPublished;
@@ -67,6 +69,7 @@ internal sealed class NotificationRouter : IDisposable
 
         if (IsForeground())
         {
+            SelectHost(ActiveWindow()!);
             // Returning to the app by way of another window never fires the main
             // window's Activated, so the backlog also drains on the next thing
             // that happens while we are back in front.
@@ -178,7 +181,34 @@ internal sealed class NotificationRouter : IDisposable
         });
     }
 
-    private void OnWindowActivated(object? sender, EventArgs e) => FlushQueue();
+    private void OnWindowActivated(object? sender, EventArgs e)
+    {
+        if (sender is not MolaWindow window) return;
+        SelectHost(window);
+        FlushQueue();
+    }
+
+    private void SelectHost(MolaWindow window)
+    {
+        if (ReferenceEquals(window, _hostWindow)) return;
+        _hostWindow.Closed -= OnHostWindowClosed;
+        var nextHost = window.NotificationContent;
+        if (nextHost is null)
+        {
+            nextHost = new NotificationHost();
+            nextHost.SetSecondaryWindowLayout(!ReferenceEquals(window, _window));
+            window.NotificationContent = nextHost;
+        }
+        // Keep controls in their original window's layout tree. Only the
+        // notification data and countdowns follow the active window.
+        _host.TransferNotificationsTo(nextHost);
+        _host = nextHost;
+        _hostWindow = window;
+        window.Closed += OnHostWindowClosed;
+    }
+
+    private void OnHostWindowClosed(object? sender, EventArgs e) =>
+        SelectHost(ActiveWindow() ?? _hostWindow.Owner as MolaWindow ?? _window);
 
     /// <summary>
     /// Replays what happened while the app was away as one line rather than a
@@ -214,14 +244,13 @@ internal sealed class NotificationRouter : IDisposable
     /// "In the foreground" means the app has the user's attention, not that this
     /// particular window does — settings and dialogs are still the app.
     /// </summary>
-    private bool IsForeground()
-    {
-        if (!_window.IsVisible || _window.WindowState == WindowState.Minimized) return false;
+    private bool IsForeground() => ActiveWindow() is not null;
 
-        return Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop
-            ? desktop.Windows.Any(w => w.IsActive)
-            : _window.IsActive;
-    }
+    private MolaWindow? ActiveWindow() =>
+        Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop
+            ? desktop.Windows.OfType<MolaWindow>().FirstOrDefault(window => window.IsActive && window.IsVisible
+                && window.WindowState != WindowState.Minimized)
+            : _hostWindow.IsActive && _hostWindow.IsVisible ? _hostWindow : null;
 
     public void Dispose()
     {
@@ -230,5 +259,6 @@ internal sealed class NotificationRouter : IDisposable
         _backgroundStreams.TaskCompleted -= OnStreamCompleted;
         _backgroundStreams.TaskFailed -= OnStreamFailed;
         MolaWindow.AnyWindowActivated -= OnWindowActivated;
+        _hostWindow.Closed -= OnHostWindowClosed;
     }
 }
