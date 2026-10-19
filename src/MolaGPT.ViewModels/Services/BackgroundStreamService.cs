@@ -30,12 +30,16 @@ public sealed class BackgroundStreamTask
 
     /// <summary>Started by a background task's notification rather than by the user.</summary>
     public bool IsWakeTurn { get; init; }
+
+    /// <summary>Started by a message sent from a paired phone.</summary>
+    public bool IsRemoteTurn { get; init; }
     public CancellationTokenSource Cts { get; set; } = default!;
     public Task StreamTask { get; set; } = default!;
     public bool IsDetached { get; set; }
     public bool IsCompleted { get; set; }
     public bool GenerateTitleOnCompletion { get; init; }
     public bool CompletedSuccessfully { get; set; }
+    internal bool HasUnsavedChanges { get; set; } = true;
     internal int ResponsePostProcessingStartIndex { get; init; }
     internal bool ResponsePostProcessingApplied { get; set; }
 
@@ -89,6 +93,9 @@ public sealed class BackgroundStreamService
     public event EventHandler<BackgroundStreamCompletedEventArgs>? TaskCompleted;
     public event EventHandler<BackgroundStreamFailedEventArgs>? TaskFailed;
     public event EventHandler<string>? TaskRegistered;
+    /// <summary>A task that finished without announcing itself, e.g. one a phone
+    /// asked for, which is told by the phone instead.</summary>
+    public event EventHandler<string>? TaskEnded;
 
     public bool HasTask(string conversationId) => _tasks.ContainsKey(conversationId);
     public int ActiveTaskCount => _tasks.Values.Count(task => !task.IsCompleted);
@@ -176,6 +183,15 @@ public sealed class BackgroundStreamService
             StopPolling(task);
             task.Cts.Cancel();
         }
+    }
+
+    /// <summary>Finish <paramref name="task"/> with no notification; whoever shows it
+    /// running still hears that it stopped.</summary>
+    public void EndQuietly(BackgroundStreamTask task)
+    {
+        task.IsCompleted = true;
+        _tasks.TryRemove(task.ConversationId, out _);
+        TaskEnded?.Invoke(this, task.ConversationId);
     }
 
     public void Complete(BackgroundStreamTask task)

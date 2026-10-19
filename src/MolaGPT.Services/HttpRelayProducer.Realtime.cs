@@ -17,7 +17,11 @@ public sealed partial class HttpRelayProducer
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, _base + "/api/auth/agent_realtime.php");
-                if (!TryAttachAuth(request)) throw new InvalidOperationException(AuthUnavailable);
+                if (!TryAttachAuth(request))
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+                    continue;
+                }
                 using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
                 response.EnsureSuccessStatusCode();
                 using var ticket = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));

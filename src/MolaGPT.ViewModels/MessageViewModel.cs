@@ -921,14 +921,16 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         if (previous.ThinkingSegments is not null) RestoreThinkingSegments(previous.ThinkingSegments);
     }
 
-    private MessageAttempt CaptureRetryAttempt()
+    internal MessageAttempt CaptureRetryAttempt(bool includePendingThinking = false)
     {
+        var pendingThinking = includePendingThinking ? _pacer.PendingThinking : string.Empty;
         var thinkingSegments = ThinkingSegments.Count == 0
             ? null
             : ThinkingSegments
-                .Where(segment => !string.IsNullOrWhiteSpace(segment.Source))
+                .Where(segment => !string.IsNullOrWhiteSpace(segment.Source)
+                    || pendingThinking.Length > 0 && ReferenceEquals(segment, _activeThinkingSegment))
                 .Select(segment => new ThinkingSegmentDelta(
-                    segment.Source,
+                    ReferenceEquals(segment, _activeThinkingSegment) ? segment.Source + pendingThinking : segment.Source,
                     segment.ContentOffset,
                     segment.ElapsedSeconds,
                     segment.TimelineIndex))
@@ -958,7 +960,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             Usage,
             Sources,
             WasStopped,
-            Thinking,
+            pendingThinking.Length == 0 ? Thinking : Thinking + pendingThinking,
             thinkingSegments,
             toolCalls,
             FirstTokenSeconds,

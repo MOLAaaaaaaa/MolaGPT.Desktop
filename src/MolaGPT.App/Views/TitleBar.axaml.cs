@@ -168,7 +168,7 @@ public partial class TitleBar : UserControl
     /// <summary>
     /// Account entry visibility. The switcher goes as a whole rather than
     /// losing its Chat half: a one-segment switch has nothing to switch to. The
-    /// Agent 状态 button opens 远程控制, which relays through the account.
+    /// 远程控制 button relays through the account.
     /// </summary>
     public void SetAccountFeaturesVisible(bool visible)
     {
@@ -178,6 +178,12 @@ public partial class TitleBar : UserControl
     }
 
     public void SetSettingsNoticeVisible(bool visible) => PART_SettingsDot.IsVisible = visible;
+
+    public void SetRemotePhoneConnected(bool connected)
+    {
+        PART_RemoteDot.IsVisible = connected;
+        ToolTip.SetTip(PART_AgentStatus, connected ? "远程控制 · 手机已连接" : "远程控制");
+    }
 
     public void SetAccountState(bool loggedIn, string? username)
     {

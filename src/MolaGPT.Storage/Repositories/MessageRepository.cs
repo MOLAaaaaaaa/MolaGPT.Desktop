@@ -11,6 +11,24 @@ public sealed class MessageRepository
     private readonly MolaGptDatabase _db;
     public MessageRepository(MolaGptDatabase db) => _db = db;
 
+    /// <summary>A message was inserted or rewritten: (conversationId, messageId).
+    /// Raised on the writing thread, after the write is committed.</summary>
+    public event Action<string, string>? MessageWritten;
+
+    /// <summary>Messages of a conversation were removed or replaced wholesale, so
+    /// anyone mirroring it should read it again.</summary>
+    public event Action<string>? ConversationRewritten;
+
+    public MessageRow? Get(string id)
+    {
+        using var conn = _db.Open();
+        return conn.QueryFirstOrDefault<MessageRow>(
+            @"SELECT id AS Id, conversation_id AS ConversationId, role AS Role, content AS Content,
+                     meta AS Meta, created_at AS CreatedAt, parent_id AS ParentId
+              FROM messages WHERE id = @id",
+            new { id });
+    }
+
     public IReadOnlyList<MessageRow> List(string conversationId)
     {
         using var conn = _db.Open();
@@ -163,6 +181,7 @@ public sealed class MessageRepository
                   WHERE id = @timelineId",
                 new { messageId = row.Id, updatedAt = row.CreatedAt, timelineId }, tx);
         tx.Commit();
+        MessageWritten?.Invoke(row.ConversationId, row.Id);
         return parentId;
     }
 
@@ -171,6 +190,9 @@ public sealed class MessageRepository
         using var conn = _db.Open();
         conn.Execute("UPDATE messages SET content = @content, meta = @meta WHERE id = @id",
             new { id, content, meta });
+        if (MessageWritten is { } written
+            && conn.ExecuteScalar<string?>("SELECT conversation_id FROM messages WHERE id = @id", new { id }) is { } conversationId)
+            written(conversationId, id);
     }
 
     public void UpdateBackgroundTaskState(string conversationId, string taskId, string state)
@@ -233,6 +255,8 @@ public sealed class MessageRepository
     {
         using var conn = _db.Open();
         using var tx = conn.BeginTransaction();
+        var conversationId = conn.ExecuteScalar<string?>(
+            "SELECT conversation_id FROM messages WHERE id = @id", new { id }, tx);
         var parentId = conn.ExecuteScalar<string?>(
             "SELECT parent_id FROM messages WHERE id = @id", new { id }, tx);
         conn.Execute(
@@ -240,6 +264,7 @@ public sealed class MessageRepository
             new { parentId, id }, tx);
         conn.Execute("DELETE FROM messages WHERE id = @id", new { id }, tx);
         tx.Commit();
+        if (conversationId is not null) ConversationRewritten?.Invoke(conversationId);
     }
 
     public void UpdateRoleMessage(string conversationId, string id, string content, string? meta, string roleContext)
@@ -259,6 +284,7 @@ public sealed class MessageRepository
               WHERE id = (SELECT active_timeline_id FROM conversations WHERE id = @conversationId)",
             new { roleContext, conversationId, now }, tx);
         tx.Commit();
+        MessageWritten?.Invoke(conversationId, id);
     }
 
     public void ReplaceConversationMessages(string conversationId, IEnumerable<MessageRow> rows)

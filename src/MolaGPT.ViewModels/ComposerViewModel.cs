@@ -78,8 +78,8 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// true when no settings VM is wired (design-time / tests).</summary>
     public bool EnterToSend => _settings?.EnterToSend ?? true;
 
-    /// <summary>Raised right after a user turn is committed to the transcript, so
-    /// the chat view can re-take bottom-follow even if the user had scrolled up.</summary>
+    /// <summary>Raised right after a new turn is committed to the transcript,
+    /// whether the user sent it or it started on its own.</summary>
     public event Action? MessageSubmitted;
 
     public event Action<string>? ResponsePostProcessingFailed;
@@ -230,6 +230,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsThinkingMandatory));
                 OnPropertyChanged(nameof(IsThinkingVisible));
                 OnPropertyChanged(nameof(IsReasoningEffortVisible));
+                RaiseReasoningGroupChanged();
                 OnPropertyChanged(nameof(IsAttachVisible));
                 OnPropertyChanged(nameof(CanAcceptImageAttachments));
                 OnPropertyChanged(nameof(CanAcceptFileAttachments));
@@ -441,7 +442,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// 写入校验的每一条，拦不住就会变成用户本人的身份事实。想让角色知道该怎么
     /// 称呼你，走身份下拉的「沿用个人资料」——那是一个字段，不是一段记忆。
     /// </summary>
-    private bool MemoryAppliesHere => _memory is not null && !_chat.IsAtmosphereMode;
+    private bool MemoryAppliesHere => _memory is not null && !SubjectAtmosphere;
 
     /// <summary>
     /// This conversation's override. Turning it off turns recall off with it —
@@ -481,6 +482,21 @@ public sealed partial class ComposerViewModel : ObservableObject
     public bool IsReasoningEffortVisible => IsThinkingEnabled
         && (_chat.ActiveModel?.SupportsReasoningEffort == true || IsBudgetSliderVisible);
 
+    // 推理 is drawn as one pill: the toggle, and — only while reasoning is on — the
+    // effort selector split off beside it. The three flags below are what the pill
+    // needs to know about its two halves; they are derived, so every site that moves
+    // one of the inputs calls RaiseReasoningGroupChanged.
+    public bool IsReasoningGroupVisible => IsThinkingVisible || IsReasoningEffortVisible;
+    public bool IsReasoningGroupActive => IsThinkingEnabled;
+    public bool IsReasoningSplit => IsThinkingVisible && IsReasoningEffortVisible;
+
+    private void RaiseReasoningGroupChanged()
+    {
+        OnPropertyChanged(nameof(IsReasoningGroupVisible));
+        OnPropertyChanged(nameof(IsReasoningGroupActive));
+        OnPropertyChanged(nameof(IsReasoningSplit));
+    }
+
     /// <summary>Attach button is always shown; text/document attachments are
     /// validated at send time, while images also require vision support.</summary>
     public bool IsAttachVisible => true;
@@ -500,7 +516,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy
         || CanUseByokPythonTool;
     public bool AreNetworkToolsEnabled =>
-        _chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy || _chat.ActiveModel?.SupportsToolCalling == true;
+        SubjectProvider?.Kind == ProviderKind.MolaGptProxy || SubjectModel?.SupportsToolCalling == true;
     public bool IsPythonToolVisible => CanUseByokPythonTool;
     /// <summary>
     /// 浏览器操作是本地 agent（Work/BYOK）的工具，云端 Chat 代理没有 WebBridge
@@ -513,8 +529,8 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// </summary>
     public bool IsBrowserToolAvailable =>
         _settings?.BrowserToolEnabled == true
-        && _chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy
-        && _chat.ActiveModel?.SupportsToolCalling == true;
+        && SubjectProvider?.Kind != ProviderKind.MolaGptProxy
+        && SubjectModel?.SupportsToolCalling == true;
     // The in-composer image button / aspect-ratio / style options exist only for
     // MolaGPT-account mode. BYOK chats can still call the configured image
     // generation service as a model tool when enabled in settings.
@@ -531,22 +547,22 @@ public sealed partial class ComposerViewModel : ObservableObject
     public bool HasAttachments => Attachments.Count > 0;
 
     private bool CanUseByokImageGenerationTool =>
-        _chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy
-        && _chat.ActiveModel?.SupportsToolCalling == true
+        SubjectProvider?.Kind != ProviderKind.MolaGptProxy
+        && SubjectModel?.SupportsToolCalling == true
         && _settings?.IsImageGenerationConfigured == true
-        && _chat.ActivePersona?.Profile.EnableImageGeneration != false;
+        && SubjectPersona?.Profile.EnableImageGeneration != false;
 
     private bool CanUseByokPythonTool =>
-        _chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy
-        && _chat.ActiveModel?.SupportsToolCalling == true
+        SubjectProvider?.Kind != ProviderKind.MolaGptProxy
+        && SubjectModel?.SupportsToolCalling == true
         && _settings is not null
-        && (_chat.ActivePersona?.Profile.EnablePython ?? _settings.PythonToolEnabled);
+        && (SubjectPersona?.Profile.EnablePython ?? _settings.PythonToolEnabled);
 
     private bool CanUseByokFileTools =>
-        _chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy
-        && _chat.ActiveModel?.SupportsToolCalling == true
+        SubjectProvider?.Kind != ProviderKind.MolaGptProxy
+        && SubjectModel?.SupportsToolCalling == true
         && _settings is not null
-        && (_chat.ActivePersona?.Profile.EnableFileTools ?? _settings.FileToolsEnabled);
+        && (SubjectPersona?.Profile.EnableFileTools ?? _settings.FileToolsEnabled);
 
     /// <summary>
     /// Background Python and sub-agents belong to the agent engine, and stay out of
@@ -555,9 +571,9 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// describes a tool that is not on the wire.
     /// </summary>
     private bool IsAgentWorkTurn =>
-        _chat.ActiveProvider is PiWorkProvider
-        && !_chat.IsAtmosphereMode
-        && _chat.ActiveModel?.SupportsToolCalling == true;
+        SubjectProvider is PiWorkProvider
+        && !SubjectAtmosphere
+        && SubjectModel?.SupportsToolCalling == true;
 
     private bool CanRunPythonInBackground => IsAgentWorkTurn && CanUseByokPythonTool;
 
@@ -605,8 +621,8 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// <summary>Label for the thinking control in the composer toolbar. Budget
     /// models must not present their token count as a qualitative effort level.</summary>
     public string ReasoningControlLabel => IsBudgetSliderVisible
-        ? $"预算: {ThinkingBudgetTokens}"
-        : $"强度: {ReasoningEffortLabel}";
+        ? $"预算 {ThinkingBudgetTokens}"
+        : ReasoningEffortLabel;
 
     public string ReasoningControlTitle => IsBudgetSliderVisible ? "推理预算" : "推理强度";
 
@@ -671,6 +687,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         OnPropertyChanged(nameof(IsEffortComboVisible));
         OnPropertyChanged(nameof(IsBudgetSliderVisible));
         OnPropertyChanged(nameof(IsReasoningEffortVisible));
+        RaiseReasoningGroupChanged();
         OnPropertyChanged(nameof(ReasoningControlLabel));
         OnPropertyChanged(nameof(ReasoningControlTitle));
         OnPropertyChanged(nameof(ReasoningControlToolTip));
@@ -701,6 +718,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     public async Task SendAsync()
     {
         if (string.IsNullOrWhiteSpace(Text) && Attachments.Count == 0 && ArtifactReferences.Count == 0) return;
+        var sentByUser = !_sendingLeftover;
         var artifactReferences = ArtifactReferences.ToList();
         if (_chat.ActiveProvider is null || _chat.ActiveModel is null)
         {
@@ -736,9 +754,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             _memory?.SetConversationOverride(_chat.ConversationId!, memoryEnabled);
         var userMsg = _chat.Messages.LastOrDefault(m => m.Role == ChatMessage.RoleUser);
         var assistantMsg = _chat.BeginAssistantMessage();
-        // Re-take bottom-follow now that a new turn exists, so a user who had
-        // scrolled up still sees their message and the incoming reply.
         MessageSubmitted?.Invoke();
+        if (sentByUser) _chat.RequestScrollToLatest();
         IsSending = true;
         _chat.IsStreaming = true;
         Attachments.Clear();
@@ -1176,28 +1193,70 @@ public sealed partial class ComposerViewModel : ObservableObject
         // 后台续流都走这个入口，且刻意排除附件上传与模型路由的耗时。
         assistantMsg.MarkRequestStarted();
         RememberArtifactContext(assistantMsg, PythonArtifactMarkdownRewriter.CreateWorkspaceContext(req.ConversationId));
-        await foreach (var chunk in provider.StreamChatAsync(req, cts.Token).WithCancellation(cts.Token))
+        using var checkpointCancellation = new CancellationTokenSource();
+        var checkpointTask = trackingTask is null ? Task.CompletedTask
+            : SaveStreamProgressAsync(trackingTask, checkpointCancellation.Token);
+        try
         {
-            if (chunk.PromptTrace is { } trace && trackingTask is not null)
-                _chat.SetRolePromptTrace(trackingTask.ConversationId, trace);
-            if (trackingTask is not null)
+            await foreach (var chunk in provider.StreamChatAsync(req, cts.Token).WithCancellation(cts.Token))
             {
-                if (chunk.Injected is { } injected)
+                if (chunk.PromptTrace is { } trace && trackingTask is not null)
+                    _chat.SetRolePromptTrace(trackingTask.ConversationId, trace);
+                if (trackingTask is not null)
                 {
-                    assistantMsg = SplitAtInjection(trackingTask, assistantMsg, injected.Text);
-                    RememberArtifactContext(assistantMsg, PythonArtifactMarkdownRewriter.CreateWorkspaceContext(req.ConversationId));
-                    continue;
+                    trackingTask.HasUnsavedChanges = true;
+                    if (chunk.Injected is { } injected)
+                    {
+                        assistantMsg = SplitAtInjection(trackingTask, assistantMsg, injected.Text);
+                        RememberArtifactContext(assistantMsg, PythonArtifactMarkdownRewriter.CreateWorkspaceContext(req.ConversationId));
+                        continue;
+                    }
+                    if (chunk.Tool is { } tool) TrackTool(trackingTask, tool);
                 }
-                if (chunk.Tool is { } tool) TrackTool(trackingTask, tool);
+                ApplyStreamChunk(assistantMsg, chunk, req.ConversationId);
+                if (trackingTask is not null && chunk.RawJson is not null)
+                    trackingTask.ReceivedChunkCount++;
+                if (chunk.FinishReason is not null) break;
             }
-            ApplyStreamChunk(assistantMsg, chunk, req.ConversationId);
-            if (trackingTask is not null && chunk.RawJson is not null)
-                trackingTask.ReceivedChunkCount++;
-            if (chunk.FinishReason is not null) break;
-        }
 
-        if (trackingTask is not null && !cts.IsCancellationRequested)
-            trackingTask.CompletedSuccessfully = true;
+            if (trackingTask is not null && !cts.IsCancellationRequested)
+                trackingTask.CompletedSuccessfully = true;
+        }
+        finally
+        {
+            checkpointCancellation.Cancel();
+            await checkpointTask;
+        }
+    }
+
+    private async Task SaveStreamProgressAsync(BackgroundStreamTask stream, CancellationToken ct)
+    {
+        stream.HasUnsavedChanges = false;
+        await _chat.SaveInProgressMessageAsync(stream.ConversationId, stream.AssistantMessage);
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                if (!stream.HasUnsavedChanges) continue;
+                stream.HasUnsavedChanges = false;
+                await _chat.SaveInProgressMessageAsync(stream.ConversationId, stream.AssistantMessage);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+    }
+
+    public void SaveInProgressMessages()
+    {
+        if (_chat.ConversationId is { } conversationId)
+            foreach (var message in _chat.Messages.Where(message => message.IsStreaming))
+                _chat.SaveInProgressMessage(conversationId, message);
+        if (_backgroundStreams is not null)
+            foreach (var stream in _backgroundStreams.ActiveTasks)
+                if (stream.IsCompleted)
+                    CompleteStreamContext(stream, publishNotification: false);
+                else
+                    _chat.SaveInProgressMessage(stream.ConversationId, stream.AssistantMessage);
     }
 
     private async Task RunResumeStreamLoopAsync(
@@ -1212,22 +1271,34 @@ public sealed partial class ComposerViewModel : ObservableObject
         // 幂等：续流重连不会覆盖最初请求的起点。
         assistantMsg.MarkRequestStarted();
         RememberArtifactContext(assistantMsg, PythonArtifactMarkdownRewriter.CreateWorkspaceContext(trackingTask?.ConversationId));
-        await foreach (var chunk in provider.ResumeStreamAsync(sessionId, offset, apiUrl, cts.Token).WithCancellation(cts.Token))
+        using var checkpointCancellation = new CancellationTokenSource();
+        var checkpointTask = trackingTask is null ? Task.CompletedTask
+            : SaveStreamProgressAsync(trackingTask, checkpointCancellation.Token);
+        try
         {
-            ApplyStreamChunk(assistantMsg, chunk, trackingTask?.ConversationId);
-            if (trackingTask is not null && chunk.RawJson is not null)
-                trackingTask.ReceivedChunkCount++;
-            if (chunk.FinishReason is not null) break;
-        }
+            await foreach (var chunk in provider.ResumeStreamAsync(sessionId, offset, apiUrl, cts.Token).WithCancellation(cts.Token))
+            {
+                if (trackingTask is not null) trackingTask.HasUnsavedChanges = true;
+                ApplyStreamChunk(assistantMsg, chunk, trackingTask?.ConversationId);
+                if (trackingTask is not null && chunk.RawJson is not null)
+                    trackingTask.ReceivedChunkCount++;
+                if (chunk.FinishReason is not null) break;
+            }
 
-        if (trackingTask is not null && !cts.IsCancellationRequested)
-            trackingTask.CompletedSuccessfully = true;
+            if (trackingTask is not null && !cts.IsCancellationRequested)
+                trackingTask.CompletedSuccessfully = true;
+        }
+        finally
+        {
+            checkpointCancellation.Cancel();
+            await checkpointTask;
+        }
     }
 
     private Dictionary<string, object> BuildExtras()
     {
         // 一个「网络访问」开关喂两个 wire 键：搜索与读页始终同进同退。
-        var network = EnableNetwork && AreNetworkToolsEnabled;
+        var network = SubjectNetwork && AreNetworkToolsEnabled;
         var enabledTools = new Dictionary<string, object?>
         {
             ["network"] = network,
@@ -1255,14 +1326,14 @@ public sealed partial class ComposerViewModel : ObservableObject
             enabledTools["browserPermissionMode"] = _settings?.BrowserPermissionMode ?? ToolPermissionMode.Approval;
         }
 
-        if (_chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy)
+        if (SubjectProvider?.Kind != ProviderKind.MolaGptProxy)
         {
             enabledTools["searchProvider"] = _settings?.WebSearchProvider;
             enabledTools["searchApiKey"] = _settings?.WebSearchApiKey;
             enabledTools["searchBaseUrl"] = _settings?.WebSearchBaseUrl;
             enabledTools["searchMaxResults"] = _settings?.WebSearchMaxResults ?? 6;
             enabledTools["webPageMaxCharacters"] = _settings?.WebPageMaxCharacters ?? 12000;
-            enabledTools["mcpServers"] = _chat.ActivePersona?.Profile.EnableMcp == false
+            enabledTools["mcpServers"] = SubjectPersona?.Profile.EnableMcp == false
                 ? Array.Empty<MolaGPT.Core.Chat.LocalTools.McpServerOptions>()
                 : _settings?.BuildMcpServerOptions() ?? Array.Empty<MolaGPT.Core.Chat.LocalTools.McpServerOptions>();
             enabledTools["vision"] = _settings?.BuildVisionProxyOptions();
@@ -1314,7 +1385,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 // The memory folder joins them for the same reason — its contents
                 // are already in the system prompt.
                 var readableRoots = skillRoots.ToList();
-                if (MemoryAppliesHere && _memory!.IsMemoryOn(_chat.ConversationId))
+                if (MemoryAppliesHere && _memory!.IsMemoryOn(SubjectConversationId))
                     readableRoots.Add(_memory.Files.Root);
                 if (readableRoots.Count > 0)
                     enabledTools["fileToolsReadableRoots"] = string.Join(",", readableRoots);
@@ -1331,8 +1402,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             // merely lack the instructions — the tool is not on the wire at all.
             if (_memory is not null)
             {
-                enabledTools["memory"] = MemoryAppliesHere && _memory.IsMemoryOn(_chat.ConversationId);
-                enabledTools["memoryRecall"] = MemoryAppliesHere && _memory.IsRecallOn(_chat.ConversationId);
+                enabledTools["memory"] = MemoryAppliesHere && _memory.IsMemoryOn(SubjectConversationId);
+                enabledTools["memoryRecall"] = MemoryAppliesHere && _memory.IsRecallOn(SubjectConversationId);
             }
         }
 
@@ -1706,7 +1777,7 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     private string? ResolveSystemPrompt(string? rolePrompt = null)
     {
-        if (_chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy)
+        if (SubjectProvider?.Kind == ProviderKind.MolaGptProxy)
             return null;
 
         // Three-layer resolution (highest priority first):
@@ -1717,10 +1788,10 @@ public sealed partial class ComposerViewModel : ObservableObject
         // When the conversation override is set together with a persona, the
         // user can choose to "append" the override after the persona prompt
         // instead of replacing it (default: replace).
-        var conversationPrompt = _chat.ConversationSystemPrompt;
-        var personaPrompt = _chat.ActivePersona?.SystemPrompt;
+        var conversationPrompt = SubjectConversationSystemPrompt;
+        var personaPrompt = SubjectPersona?.SystemPrompt;
 
-        var merged = SystemPromptInterpolator.Combine(personaPrompt, conversationPrompt, _chat.SystemPromptMode);
+        var merged = SystemPromptInterpolator.Combine(personaPrompt, conversationPrompt, SubjectSystemPromptMode);
 
         // Appended after whatever the user configured: the environment block says
         // how this machine's workspace behaves, the skill catalog says what is
@@ -1741,12 +1812,12 @@ public sealed partial class ComposerViewModel : ObservableObject
         var vars = new PromptVariables
         {
             Now = DateTimeOffset.Now,
-            ModelDisplayName = _chat.ActiveModel?.DisplayName,
-            ModelId = _chat.ActiveModel?.Id,
-            ProviderDisplayName = _chat.ActiveProvider?.DisplayName,
+            ModelDisplayName = SubjectModel?.DisplayName,
+            ModelId = SubjectModel?.Id,
+            ProviderDisplayName = SubjectProvider?.DisplayName,
             Username = _settings?.MolaGptUsername,
-            UserName = _chat.RoleContext.UserName ?? _chat.ActivePersona?.Profile.UserName,
-            CharacterName = _chat.ActivePersona?.Name
+            UserName = SubjectRoleContext.UserName ?? SubjectPersona?.Profile.UserName,
+            CharacterName = SubjectPersona?.Name
         };
         var interpolated = rolePrompt ?? SystemPromptInterpolator.Interpolate(merged, vars);
         return appendices.Aggregate(interpolated, AppendHiddenSystemHint);
@@ -1770,7 +1841,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// </summary>
     private bool WorkspaceIsEmpty()
     {
-        var conversationId = _chat.ConversationId;
+        var conversationId = SubjectConversationId;
         if (string.IsNullOrWhiteSpace(conversationId)) return true;
 
         try
@@ -1924,7 +1995,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     private string? BuildMemoryHint()
     {
         if (!MemoryAppliesHere || _memory is null) return null;
-        var conversationId = _chat.ConversationId;
+        var conversationId = SubjectConversationId;
         var canWrite = _memory.IsMemoryOn(conversationId);
         var canRecall = _memory.IsRecallOn(conversationId);
         if (!canWrite && !canRecall) return null;
@@ -1971,6 +2042,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             return Task.CompletedTask;
         var assistant = _chat.BeginAssistantMessage();
         MessageSubmitted?.Invoke();
+        _chat.RequestScrollToLatest();
         return GenerateAgainAsync(assistant, false, newReply: true);
     }
 
@@ -2515,7 +2587,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         else if (streamContext.IsDetached)
         {
-            _backgroundStreams?.Detach(streamContext.ConversationId);
+            _backgroundStreams?.EndQuietly(streamContext);
         }
 
         if (streamContext.ProviderKind == ProviderKind.MolaGptProxy)
@@ -2611,6 +2683,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     partial void OnEnableThinkingChanged(bool value)
     {
         OnPropertyChanged(nameof(IsReasoningEffortVisible));
+        RaiseReasoningGroupChanged();
         PersistRoleOptions();
     }
 

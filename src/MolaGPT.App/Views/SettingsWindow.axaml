@@ -7,6 +7,7 @@
         xmlns:agents="clr-namespace:MolaGPT.ViewModels.Agents;assembly=MolaGPT.ViewModels"
         xmlns:dto="clr-namespace:MolaGPT.Core.Chat.Agents;assembly=MolaGPT.Core"
         xmlns:relay="clr-namespace:MolaGPT.Core.Chat.Agents.Relay;assembly=MolaGPT.Core"
+        xmlns:remote="clr-namespace:MolaGPT.Desktop.Services.Remote;assembly=MolaGPT.Services"
         xmlns:repo="clr-namespace:MolaGPT.Storage.Repositories;assembly=MolaGPT.Storage"
         x:Class="MolaGPT.App.Views.SettingsWindow"
         x:DataType="vm:SettingsViewModel"
@@ -169,6 +170,8 @@
                   </Grid>
                 </ListBoxItem>
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="常规" />
+                <!-- 紧跟账号：手机远控走账号配对，是这台电脑之外最常用的入口。 -->
+                <ListBoxItem Name="PART_AgentNav" Content="远程控制" Tag="PAGE_Agent" />
                 <ListBoxItem Name="PART_AppearanceNav" Tag="PAGE_Appearance" AutomationProperties.Name="外观">
                   <StackPanel Orientation="Horizontal" Spacing="7">
                     <TextBlock Text="外观" VerticalAlignment="Center" />
@@ -202,9 +205,8 @@
                 <ListBoxItem Name="PART_BrowserNav" Content="浏览器使用" Tag="PAGE_Browser" />
                 <ListBoxItem Content="MCP 服务器" Tag="PAGE_Mcp" />
                 <ListBoxItem Name="PART_SkillsNav" Content="技能" Tag="PAGE_Skills" />
-                <ListBoxItem Classes="navgroup" IsEnabled="False" Content="安全与远程" />
+                <ListBoxItem Classes="navgroup" IsEnabled="False" Content="安全" />
                 <ListBoxItem Content="权限与审批" Tag="PAGE_Approval" />
-                <ListBoxItem Name="PART_AgentNav" Content="远程控制" Tag="PAGE_Agent" />
               </ListBox>
               </Panel>
             </ScrollViewer>
@@ -913,7 +915,7 @@
                           <ComboBox Name="PART_ProviderType" Classes="settingsinput">
                             <ComboBoxItem Content="OpenAI 兼容" />
                             <ComboBoxItem Content="Anthropic" />
-                            <ComboBoxItem Content="Gemini" />
+                            <ComboBoxItem Content="Gemini 原生" />
                             <ComboBoxItem Content="OpenAI Responses" />
                           </ComboBox>
                         </StackPanel>
@@ -1123,8 +1125,10 @@
                               <WrapPanel>
                                 <CheckBox Content="视觉" IsChecked="{Binding Vision, Mode=TwoWay}" Margin="0,0,14,6" />
                                 <CheckBox Content="工具调用" IsChecked="{Binding Tools, Mode=TwoWay}" Margin="0,0,14,6" />
-                                <CheckBox Content="推理" IsChecked="{Binding Thinking, Mode=TwoWay}" Margin="0,0,14,6" />
-                                <CheckBox Content="推理强度" IsChecked="{Binding ReasoningEffort, Mode=TwoWay}" Margin="0,0,14,6" />
+                                <CheckBox Content="推理" IsChecked="{Binding Thinking, Mode=TwoWay}"
+                                          IsEnabled="{Binding CanEditGenerationParameters}" Margin="0,0,14,6" />
+                                <CheckBox Content="推理强度" IsChecked="{Binding ReasoningEffort, Mode=TwoWay}"
+                                          IsEnabled="{Binding CanEditGenerationParameters}" Margin="0,0,14,6" />
                                 <CheckBox Content="图像编辑" IsChecked="{Binding ImageEdit, Mode=TwoWay}"
                                           IsVisible="{Binding IsImageProvider}" Margin="0,0,14,6" />
                               </WrapPanel>
@@ -1165,7 +1169,8 @@
                                 <StackPanel Spacing="10" Margin="0,10,0,0">
                                   <StackPanel IsEnabled="{Binding Thinking}">
                                     <TextBlock Classes="label" Text="推理参数格式" />
-                                    <ComboBox Classes="settingsinput" SelectedIndex="{Binding ThinkingKindIndex, Mode=TwoWay}">
+                                    <ComboBox Classes="settingsinput" SelectedIndex="{Binding ThinkingKindIndex, Mode=TwoWay}"
+                                              IsEnabled="{Binding CanEditGenerationParameters}">
                                       <ComboBoxItem Content="OpenAI Effort" />
                                       <ComboBoxItem Content="Anthropic Adaptive" />
                                       <ComboBoxItem Content="Anthropic Budget" />
@@ -1206,7 +1211,7 @@
                                           </DataTemplate>
                                         </ItemsControl.ItemTemplate>
                                       </ItemsControl>
-                                      <Grid ColumnDefinitions="*,Auto">
+                                      <Grid ColumnDefinitions="*,Auto" IsVisible="{Binding CanEditGenerationParameters}">
                                         <TextBox Grid.Column="0" Classes="settingsinput"
                                                 Text="{Binding CustomEffortInput, Mode=TwoWay}"
                                                 PlaceholderText="自定义强度名称"
@@ -1254,8 +1259,10 @@
                                   <StackPanel>
                                     <TextBlock Classes="label" Text="生成参数" />
                                     <WrapPanel>
-                                      <CheckBox Content="Temperature" IsChecked="{Binding SupportsTemperature, Mode=TwoWay}" Margin="0,0,14,6" />
-                                      <CheckBox Content="Top-p" IsChecked="{Binding SupportsTopP, Mode=TwoWay}" Margin="0,0,14,6" />
+                                      <CheckBox Content="Temperature" IsChecked="{Binding SupportsTemperature, Mode=TwoWay}"
+                                                IsEnabled="{Binding CanEditGenerationParameters}" Margin="0,0,14,6" />
+                                      <CheckBox Content="Top-p" IsChecked="{Binding SupportsTopP, Mode=TwoWay}"
+                                                IsEnabled="{Binding CanEditGenerationParameters}" Margin="0,0,14,6" />
                                     </WrapPanel>
                                     <TextBlock Classes="hint" Text="勾选后即在请求中使用该参数，可在角色管理中配置。" />
                                   </StackPanel>
@@ -2511,7 +2518,7 @@
                 <Grid ColumnDefinitions="*,Auto">
                   <StackPanel Grid.Column="0">
                     <TextBlock Classes="pagetitle" Text="远程控制" />
-                    <TextBlock Classes="pagesubtitle" Text="把本机的 Agent 会话经云端中转同步到手机，在手机上查看和控制。" />
+                    <TextBlock Classes="pagesubtitle" Text="在手机端查看和控制本机对话及 Agent 会话。" />
                   </StackPanel>
                   <Button Grid.Column="1"
                           Classes="outline"
@@ -2522,106 +2529,194 @@
                           Content="刷新" />
                 </Grid>
 
-                <TextBlock Classes="section" Text="连接" Margin="2,4,2,8" />
-                <Border Classes="settingscard" Margin="0,0,0,10">
-                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
-                    <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                      <TextBlock Classes="rowtitle" Text="允许手机远程连接" />
-                      <TextBlock Classes="hint"
-                                 Text="开启后，本机 Agent 会话经云端中转同步到你的手机以供远程查看与控制。默认关闭。" />
+                <StackPanel Name="PART_RemoteWorkSection"
+                            IsVisible="False"
+                            x:DataType="remote:RemoteWorkSettingsViewModel">
+                  <TextBlock Classes="section" Text="MolaGPT 对话" Margin="2,4,2,8" />
+                  <Border Classes="settingscard" Margin="0,0,0,10">
+                    <StackPanel>
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                          <TextBlock Classes="rowtitle" Text="允许手机控制对话" />
+                          <TextBlock Classes="hint"
+                                     Text="同一 MolaGPT 账号可在手机端一键配对，继续 Work、BYOK 对话并审批工具调用。" />
+                        </StackPanel>
+                        <Button Grid.Column="1"
+                                Classes="outline"
+                                Padding="18,7"
+                                VerticalAlignment="Center"
+                                Command="{Binding ToggleCommand}"
+                                Content="{Binding ToggleLabel}" />
+                      </Grid>
+                      <Border Classes="divider" IsVisible="{Binding IsEnabled}" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto" IsVisible="{Binding IsEnabled}">
+                        <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                          <TextBlock Classes="rowtitle" Text="{Binding StatusText}" />
+                          <TextBlock Classes="hint"
+                                     Text="{Binding PairedMessage}"
+                                     IsVisible="{Binding PairedMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+                        </StackPanel>
+                        <Button Grid.Column="1"
+                                Classes="outline"
+                                Padding="12,6"
+                                VerticalAlignment="Center"
+                                IsEnabled="{Binding CanPair}"
+                                Command="{Binding BeginPairingCommand}"
+                                Content="配对新手机" />
+                      </Grid>
+                      <Border Classes="divider" IsVisible="{Binding IsPairing}" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto" IsVisible="{Binding IsPairing}">
+                        <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                          <TextBlock Classes="hint" Margin="0" Text="配对码" />
+                          <SelectableTextBlock Margin="0,4,0,4"
+                                               FontSize="28"
+                                               FontWeight="SemiBold"
+                                               FontFamily="Consolas, Cascadia Mono, monospace"
+                                               Text="{Binding PairingCode}" />
+                          <TextBlock Classes="hint" Text="{Binding PairingHint}" />
+                        </StackPanel>
+                        <Button Grid.Column="1"
+                                Classes="outline"
+                                Padding="12,6"
+                                VerticalAlignment="Center"
+                                Command="{Binding CancelPairingCommand}"
+                                Content="取消" />
+                      </Grid>
                     </StackPanel>
-                    <Button Grid.Column="1"
-                            Classes="outline"
-                            Padding="18,7"
-                            VerticalAlignment="Center"
-                            Command="{Binding ToggleBridgeCommand}"
-                            Content="{Binding BridgeToggleLabel}" />
-                  </Grid>
-                </Border>
-
-                <Border Classes="settingscard">
-                  <Grid Classes="settingrow" ColumnDefinitions="*,*,*,*">
-                    <StackPanel Grid.Column="0">
-                      <TextBlock Classes="hint" Margin="0" Text="状态" />
-                      <TextBlock Classes="rowtitle" Margin="0,4,0,0" Text="{Binding BridgeStatusText}" />
-                    </StackPanel>
-                    <StackPanel Grid.Column="1">
-                      <TextBlock Classes="hint" Margin="0" Text="本机会话" />
-                      <TextBlock Classes="rowtitle" Margin="0,4,0,0" Text="{Binding SessionCount}" />
-                    </StackPanel>
-                    <StackPanel Grid.Column="2">
-                      <TextBlock Classes="hint" Margin="0" Text="已同步" />
-                      <TextBlock Classes="rowtitle" Margin="0,4,0,0" Text="{Binding ProjectedSessionCount}" />
-                    </StackPanel>
-                    <StackPanel Grid.Column="3">
-                      <TextBlock Classes="hint" Margin="0" Text="同步中" />
-                      <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
-                        <TextBlock Classes="rowtitle" Text="{Binding ActiveProjectionCount}" />
-                        <TextBlock Classes="rowtitle" Text="+" />
-                        <TextBlock Classes="rowtitle" Text="{Binding QueuedProjectionCount}" />
-                      </StackPanel>
-                    </StackPanel>
-                  </Grid>
-                </Border>
-
-                <TextBlock Classes="section" Text="移动端" />
-                <Border Classes="settingscard">
-                  <StackPanel Classes="fieldrow">
-                    <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,8">
-                      <TextBlock Classes="rowtitle" Text="已连接设备" />
-                      <TextBlock Grid.Column="1" Classes="hint" Margin="0" Text="{Binding MobileDeviceCount}" />
-                    </Grid>
-                    <TextBlock Classes="hint" Text="暂无设备" IsVisible="{Binding !HasMobileDevices}" />
-                    <ItemsControl ItemsSource="{Binding MobileDevices}">
-                      <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="relay:RelayMobileDevice">
-                          <Grid ColumnDefinitions="*,Auto" Margin="0,8,0,0">
-                            <TextBlock Classes="rowtitle" Text="{Binding Name, TargetNullValue=移动端}" />
-                            <TextBlock Grid.Column="1" Classes="hint" Margin="12,0,0,0" Text="{Binding Id}" />
-                          </Grid>
-                        </DataTemplate>
-                      </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                  </StackPanel>
-                </Border>
-
-                <TextBlock Classes="section" Text="会话" />
-                <Border Classes="settingscard">
-                  <ScrollViewer MaxHeight="260">
-                    <ItemsControl ItemsSource="{Binding Sessions}" Margin="8">
-                      <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="dto:AgentSessionStateDto">
-                          <Grid ColumnDefinitions="*,Auto" Margin="8,6">
-                            <StackPanel Grid.Column="0">
-                              <Grid ColumnDefinitions="Auto,*">
-                                <TextBlock Grid.Column="0"
-                                           Text="●"
-                                           Foreground="{DynamicResource Brush.Warning}"
-                                           FontSize="11"
-                                           Margin="0,0,7,0"
-                                           VerticalAlignment="Center"
-                                           ToolTip.Tip="待处理"
-                                           IsVisible="{Binding NeedsAttention}" />
-                                <TextBlock Grid.Column="1" Classes="rowtitle" Text="{Binding Title}" />
-                              </Grid>
-                              <StackPanel Orientation="Horizontal">
-                                <TextBlock Classes="hint" Margin="0" Text="{Binding BackendId, Converter={StaticResource AgentSessionLabel}, ConverterParameter=backend}" />
-                                <TextBlock Classes="hint" Margin="0" Text=" · " />
-                                <TextBlock Classes="hint" Margin="0" Text="{Binding ModeLabel}" />
-                                <TextBlock Classes="hint" Margin="0" Text=" · " />
-                                <TextBlock Classes="hint" Margin="0" Text="{Binding WorkingDirectory}" TextTrimming="CharacterEllipsis" />
+                  </Border>
+                  <Border Classes="settingscard" Margin="0,0,0,10" IsVisible="{Binding HasPhones}">
+                    <StackPanel Classes="fieldrow">
+                      <TextBlock Classes="rowtitle" Text="已配对手机" />
+                      <ItemsControl ItemsSource="{Binding Phones}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="remote:PairedPhoneRow">
+                            <Grid ColumnDefinitions="*,Auto" Margin="0,10,0,0">
+                              <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                                <TextBlock Classes="rowtitle" Text="{Binding Name}" />
+                                <TextBlock Classes="hint" Text="{Binding Detail}" />
                               </StackPanel>
-                            </StackPanel>
-                            <TextBlock Grid.Column="1"
-                                       Classes="hint"
-                                       Margin="12,0,0,0"
-                                       Text="{Binding Phase, Converter={StaticResource AgentSessionLabel}}" />
-                          </Grid>
-                        </DataTemplate>
-                      </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                  </ScrollViewer>
-                </Border>
+                              <Button Grid.Column="1"
+                                      Classes="outline"
+                                      Padding="12,5"
+                                      VerticalAlignment="Center"
+                                      Command="{Binding RemoveCommand}"
+                                      Content="取消配对" />
+                            </Grid>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+                  </Border>
+                </StackPanel>
+
+                <!-- External agents stay available but secondary: collapsed by default below the
+                     MolaGPT conversations, which are what most people pair a phone for. -->
+                <Expander Classes="settingssection"
+                          Header="Claude Code / Codex（实验）"
+                          HorizontalAlignment="Stretch"
+                          Margin="0,12,0,0">
+                  <StackPanel Margin="0,8,0,0">
+                    <Border Classes="settingscard" Margin="0,0,0,10">
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                          <TextBlock Classes="rowtitle" Text="允许手机远程连接" />
+                          <TextBlock Classes="hint"
+                                     Text="在手机端查看和控制本机的 Claude Code、Codex 会话。" />
+                        </StackPanel>
+                        <Button Grid.Column="1"
+                                Classes="outline"
+                                Padding="18,7"
+                                VerticalAlignment="Center"
+                                Command="{Binding ToggleBridgeCommand}"
+                                Content="{Binding BridgeToggleLabel}" />
+                      </Grid>
+                    </Border>
+
+                    <Border Classes="settingscard">
+                      <Grid Classes="settingrow" ColumnDefinitions="*,*,*,*">
+                        <StackPanel Grid.Column="0">
+                          <TextBlock Classes="hint" Margin="0" Text="状态" />
+                          <TextBlock Classes="rowtitle" Margin="0,4,0,0" Text="{Binding BridgeStatusText}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1">
+                          <TextBlock Classes="hint" Margin="0" Text="本机会话" />
+                          <TextBlock Classes="rowtitle" Margin="0,4,0,0" Text="{Binding SessionCount}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="2">
+                          <TextBlock Classes="hint" Margin="0" Text="已同步" />
+                          <TextBlock Classes="rowtitle" Margin="0,4,0,0" Text="{Binding ProjectedSessionCount}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="3">
+                          <TextBlock Classes="hint" Margin="0" Text="同步中" />
+                          <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Classes="rowtitle" Text="{Binding ActiveProjectionCount}" />
+                            <TextBlock Classes="rowtitle" Text="+" />
+                            <TextBlock Classes="rowtitle" Text="{Binding QueuedProjectionCount}" />
+                          </StackPanel>
+                        </StackPanel>
+                      </Grid>
+                    </Border>
+
+                    <TextBlock Classes="section" Text="移动端" />
+                    <Border Classes="settingscard">
+                      <StackPanel Classes="fieldrow">
+                        <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+                          <TextBlock Classes="rowtitle" Text="已连接设备" />
+                          <TextBlock Grid.Column="1" Classes="hint" Margin="0" Text="{Binding MobileDeviceCount}" />
+                        </Grid>
+                        <TextBlock Classes="hint" Text="暂无设备" IsVisible="{Binding !HasMobileDevices}" />
+                        <ItemsControl ItemsSource="{Binding MobileDevices}">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="relay:RelayMobileDevice">
+                              <Grid ColumnDefinitions="*,Auto" Margin="0,8,0,0">
+                                <TextBlock Classes="rowtitle" Text="{Binding Name, TargetNullValue=移动端}" />
+                                <TextBlock Grid.Column="1" Classes="hint" Margin="12,0,0,0" Text="{Binding Id}" />
+                              </Grid>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </StackPanel>
+                    </Border>
+
+                    <TextBlock Classes="section" Text="会话" />
+                    <Border Classes="settingscard">
+                      <ScrollViewer MaxHeight="260">
+                        <ItemsControl ItemsSource="{Binding Sessions}" Margin="8">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="dto:AgentSessionStateDto">
+                              <Grid ColumnDefinitions="*,Auto" Margin="8,6">
+                                <StackPanel Grid.Column="0">
+                                  <Grid ColumnDefinitions="Auto,*">
+                                    <TextBlock Grid.Column="0"
+                                               Text="●"
+                                               Foreground="{DynamicResource Brush.Warning}"
+                                               FontSize="11"
+                                               Margin="0,0,7,0"
+                                               VerticalAlignment="Center"
+                                               ToolTip.Tip="待处理"
+                                               IsVisible="{Binding NeedsAttention}" />
+                                    <TextBlock Grid.Column="1" Classes="rowtitle" Text="{Binding Title}" />
+                                  </Grid>
+                                  <StackPanel Orientation="Horizontal">
+                                    <TextBlock Classes="hint" Margin="0" Text="{Binding BackendId, Converter={StaticResource AgentSessionLabel}, ConverterParameter=backend}" />
+                                    <TextBlock Classes="hint" Margin="0" Text=" · " />
+                                    <TextBlock Classes="hint" Margin="0" Text="{Binding ModeLabel}" />
+                                    <TextBlock Classes="hint" Margin="0" Text=" · " />
+                                    <TextBlock Classes="hint" Margin="0" Text="{Binding WorkingDirectory}" TextTrimming="CharacterEllipsis" />
+                                  </StackPanel>
+                                </StackPanel>
+                                <TextBlock Grid.Column="1"
+                                           Classes="hint"
+                                           Margin="12,0,0,0"
+                                           Text="{Binding Phase, Converter={StaticResource AgentSessionLabel}}" />
+                              </Grid>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </ScrollViewer>
+                    </Border>
+                  </StackPanel>
+                </Expander>
               </StackPanel>
 
               <StackPanel Name="PAGE_Skills" IsVisible="False">

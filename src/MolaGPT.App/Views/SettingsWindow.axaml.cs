@@ -114,8 +114,10 @@ public partial class SettingsWindow : MolaContentWindow
             "v1/models", ThinkingParamKind.OpenAiReasoningEffort, ApiPath: "v1/responses"),
         new("anthropic", "Anthropic (Claude)", "anthropic", AnthropicBaseUrl, "v1/models",
             ThinkingParamKind.AnthropicAdaptive),
-        new("gemini", "Google Gemini", "gemini", GeminiCompatBaseUrl, "models",
-            ThinkingParamKind.GeminiThinkingLevel),
+        new("gemini-compat", "Google Gemini（OpenAI 兼容）", "openai-compat", GeminiCompatBaseUrl, "models",
+            ThinkingParamKind.GeminiThinkingLevel, ApiPath: "chat/completions"),
+        new("gemini", "Google Gemini（原生）", "gemini", GeminiNativeBaseUrl, "models",
+            ThinkingParamKind.GeminiThinkingLevel, ApiPath: "models/{model}:streamGenerateContent"),
         new("custom-openai", "自定义（OpenAI 兼容）", "openai-compat", "https://api.openai.com/", "v1/models",
             ThinkingParamKind.OpenAiReasoningEffort),
         new("openrouter-images", "OpenRouter 图像", "openai-compat", "https://openrouter.ai/api/", "v1/models",
@@ -131,10 +133,17 @@ public partial class SettingsWindow : MolaContentWindow
     private const string AnthropicBaseUrl = "https://api.anthropic.com/";
     private const string AnthropicVersion = "2023-06-01";
 
-    /// <summary>Google's OpenAI-compatibility root — right for listing models and
-    /// testing the key from this page. The agent runtime drives the native API
-    /// instead; see <c>PiByokProviderFactory</c> for why.</summary>
+    /// <summary>Google's two API roots. The compatible API uses OpenAI request and
+    /// response shapes; the native API carries Gemini-specific tool-call fields.</summary>
     private const string GeminiCompatBaseUrl = "https://generativelanguage.googleapis.com/v1beta/openai/";
+    private const string GeminiNativeBaseUrl = "https://generativelanguage.googleapis.com/v1beta/";
+
+    /// <summary>Show the card for controlling MolaGPT conversations from a phone.</summary>
+    public void AttachRemoteWork(MolaGPT.Desktop.Services.Remote.RemoteWorkSettingsViewModel remoteWork)
+    {
+        PART_RemoteWorkSection.DataContext = remoteWork;
+        PART_RemoteWorkSection.IsVisible = true;
+    }
 
     public SettingsWindow(
         SettingsViewModel settings,
@@ -889,9 +898,12 @@ public partial class SettingsWindow : MolaContentWindow
                 SelectProviderPreset(FindProviderPreset(existing));
                 PART_ProviderType.SelectedIndex = ProviderTypeIndex(existing.Type);
                 PART_ProviderName.Text = existing.Name;
-                PART_ProviderBaseUrl.Text = existing.BaseUrl ?? string.Empty;
+                var legacyGemini = IsLegacyGeminiCompatPreset(existing);
+                PART_ProviderBaseUrl.Text = legacyGemini ? GeminiNativeBaseUrl : existing.BaseUrl ?? string.Empty;
                 PART_ProviderHttps.IsChecked = !PART_ProviderBaseUrl.Text.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
-                PART_ProviderApiPath.Text = string.IsNullOrWhiteSpace(existing.ApiPath)
+                PART_ProviderApiPath.Text = legacyGemini
+                    ? "models/{model}:streamGenerateContent"
+                    : string.IsNullOrWhiteSpace(existing.ApiPath)
                     ? DefaultProviderApiPath(existing.Purpose, existing.ImageFormat, existing.Type)
                     : existing.ApiPath;
                 PART_ProviderImageFormat.SelectedIndex = ImageApiFormat.IsChatImage(existing.ImageFormat) ? 1 : 0;
@@ -1082,7 +1094,7 @@ public partial class SettingsWindow : MolaContentWindow
         }
     }
 
-    private static ProviderModelEntry ToProviderModel(ModelRow row)
+    private ProviderModelEntry ToProviderModel(ModelRow row)
     {
         var id = row.Id.Trim();
         var displayName = string.IsNullOrWhiteSpace(row.DisplayName) ? id : row.DisplayName.Trim();
@@ -1096,25 +1108,40 @@ public partial class SettingsWindow : MolaContentWindow
             .Select(item => new CustomBodyEntry(item.Key.Trim(), item.Type, item.Value ?? string.Empty))
             .ToList();
 
-        return (row.Source ?? new ProviderModelEntry(id, displayName)) with
+        var source = row.Source ?? new ProviderModelEntry(id, displayName);
+        var googleGemini = IsGoogleGeminiRoute(EditingProviderType, PART_ProviderBaseUrl.Text);
+        var geminiPolicy = googleGemini ? GeminiModelPolicy.ThinkingFor(id) : null;
+        string[]? resolvedGeminiLevels = null;
+        string? resolvedGeminiDefault = null;
+        if (geminiPolicy is not null)
+        {
+            var resolved = GeminiModelPolicy.ResolveEfforts(geminiPolicy, effortLevels, row.DefaultEffort);
+            thinkingKind = nameof(ThinkingParamKind.GeminiThinkingLevel);
+            resolvedGeminiLevels = resolved.Levels;
+            resolvedGeminiDefault = resolved.DefaultEffort;
+            effortLevels = resolved.Levels.ToList();
+        }
+
+        return source with
         {
             Id = id,
             DisplayName = displayName,
             Vision = row.Vision,
-            Thinking = row.Thinking,
-            ReasoningEffort = row.ReasoningEffort,
+            Thinking = geminiPolicy is not null || row.Thinking,
+            ReasoningEffort = geminiPolicy is not null || row.ReasoningEffort,
             Tools = row.Tools,
-            SupportsTemperature = row.SupportsTemperature,
-            SupportsTopP = row.SupportsTopP,
+            SupportsTemperature = geminiPolicy is null && row.SupportsTemperature,
+            SupportsTopP = geminiPolicy is null && row.SupportsTopP,
             ContextWindow = ParseNullableInt(row.ContextWindowText),
             ThinkingParamKind = thinkingKind,
-            ThinkingBudgetMin = row.Thinking ? ParseNullableInt(row.BudgetMinText) : null,
-            ThinkingBudgetMax = row.Thinking ? ParseNullableInt(row.BudgetMaxText) : null,
-            ThinkingBudgetDefault = row.Thinking ? ParseNullableInt(row.BudgetDefaultText) : null,
-            DefaultEffort = row.Thinking && !string.IsNullOrWhiteSpace(row.DefaultEffort) ? row.DefaultEffort.Trim().ToLowerInvariant() : null,
+            ThinkingBudgetMin = geminiPolicy is null && row.Thinking ? ParseNullableInt(row.BudgetMinText) : null,
+            ThinkingBudgetMax = geminiPolicy is null && row.Thinking ? ParseNullableInt(row.BudgetMaxText) : null,
+            ThinkingBudgetDefault = geminiPolicy is null && row.Thinking ? ParseNullableInt(row.BudgetDefaultText) : null,
+            DefaultEffort = resolvedGeminiDefault
+                ?? (row.Thinking && !string.IsNullOrWhiteSpace(row.DefaultEffort) ? row.DefaultEffort.Trim().ToLowerInvariant() : null),
             ImageEdit = row.IsImageProvider && row.ImageEdit,
             CustomBody = customBody.Count > 0 ? customBody : null,
-            EffortLevels = effortLevels.Count > 0 ? effortLevels : null,
+            EffortLevels = resolvedGeminiLevels?.ToList() ?? (effortLevels.Count > 0 ? effortLevels : null),
             Pricing = row.Pricing()
         };
     }
@@ -1167,6 +1194,23 @@ public partial class SettingsWindow : MolaContentWindow
         // The hidden fields of a ChatGPT row may still hold what was typed before
         // the connection method was switched; none of it applies.
         var chatGpt = EditingChatGpt;
+        var apiPath = chatGpt || string.IsNullOrWhiteSpace(PART_ProviderApiPath.Text)
+            ? null
+            : PART_ProviderApiPath.Text.Trim();
+        if (!image && !chatGpt && string.Equals(EditingProviderType, "gemini", StringComparison.OrdinalIgnoreCase))
+        {
+            apiPath = (apiPath ?? DefaultProviderApiPath("chat", null, "gemini"))
+                .Replace(":generateContent", ":streamGenerateContent", StringComparison.Ordinal);
+            if (!apiPath.Contains("{model}", StringComparison.Ordinal)
+                || !apiPath.Split('?', 2)[0].EndsWith(":streamGenerateContent", StringComparison.Ordinal))
+            {
+                FailProviderEdit("Gemini 原生对话路径须包含 {model}，并以 :streamGenerateContent 结尾。");
+                entry = default!;
+                return false;
+            }
+            PART_ProviderApiPath.Text = apiPath;
+        }
+
         entry = new ProviderEntry(
             _editingProvider?.Id ?? Guid.NewGuid().ToString("N"),
             EditingProviderType,
@@ -1177,7 +1221,7 @@ public partial class SettingsWindow : MolaContentWindow
             Enabled: true,
             SortOrder: _editingProvider?.SortOrder ?? _settings.Providers.Count,
             Purpose: _editingProviderPurpose,
-            ApiPath: chatGpt || string.IsNullOrWhiteSpace(PART_ProviderApiPath.Text) ? null : PART_ProviderApiPath.Text.Trim(),
+            ApiPath: apiPath,
             ImageEditPath: image && !ImageApiFormat.IsChatImage(imageFormat)
                 && !string.IsNullOrWhiteSpace(PART_ProviderImageEditPath.Text)
                     ? PART_ProviderImageEditPath.Text.Trim()
@@ -1240,6 +1284,31 @@ public partial class SettingsWindow : MolaContentWindow
 
     private ModelRow CreateModelRow(ProviderModelEntry model)
     {
+        var googleGemini = IsGoogleGeminiRoute(EditingProviderType, PART_ProviderBaseUrl.Text);
+        var geminiPolicy = googleGemini ? GeminiModelPolicy.ThinkingFor(model.Id) : null;
+        string[]? resolvedGeminiLevels = null;
+        string? resolvedGeminiDefault = null;
+        if (geminiPolicy is not null)
+        {
+            var resolved = GeminiModelPolicy.ResolveEfforts(geminiPolicy, model.EffortLevels, model.DefaultEffort);
+            resolvedGeminiLevels = resolved.Levels;
+            resolvedGeminiDefault = resolved.DefaultEffort;
+            model = model with
+            {
+                Thinking = true,
+                ReasoningEffort = true,
+                ThinkingParamKind = nameof(ThinkingParamKind.GeminiThinkingLevel),
+                ThinkingBudgetMin = null,
+                ThinkingBudgetMax = null,
+                ThinkingBudgetDefault = null,
+                EffortLevels = resolved.Levels.ToList(),
+                DefaultEffort = resolved.DefaultEffort,
+                ReasoningMandatory = geminiPolicy.Mandatory,
+                SupportsTemperature = false,
+                SupportsTopP = false
+            };
+        }
+
         var row = new ModelRow
         {
             Id = model.Id,
@@ -1250,19 +1319,28 @@ public partial class SettingsWindow : MolaContentWindow
             Tools = model.Tools,
             SupportsTemperature = model.SupportsTemperature,
             SupportsTopP = model.SupportsTopP,
+            CanEditGenerationParameters = geminiPolicy is null,
             ContextWindowText = model.ContextWindow?.ToString() ?? string.Empty,
             ThinkingKindIndex = ModelRow.ThinkingKindIndexFor(model.ThinkingParamKind ?? DefaultThinkingKindForProvider()),
             BudgetMinText = model.ThinkingBudgetMin?.ToString() ?? string.Empty,
             BudgetMaxText = model.ThinkingBudgetMax?.ToString() ?? string.Empty,
             BudgetDefaultText = model.ThinkingBudgetDefault?.ToString() ?? string.Empty,
-            DefaultEffort = string.IsNullOrWhiteSpace(model.DefaultEffort) ? "high" : model.DefaultEffort,
+            DefaultEffort = resolvedGeminiDefault
+                ?? (string.IsNullOrWhiteSpace(model.DefaultEffort) ? "high" : model.DefaultEffort),
             ImageEdit = model.ImageEdit,
             IsImageProvider = _editingProviderPurpose == "image",
-            EffortLevelsText = string.Join(", ", model.EffortLevels ?? []),
+            EffortLevelsText = string.Join(", ", resolvedGeminiLevels ?? model.EffortLevels?.ToArray() ?? []),
             Source = model,
             LoadedPricing = model.Pricing
         };
         row.RefreshEffortLevelOptions();
+        if (geminiPolicy?.EffortLevels is { } supportedLevels)
+        {
+            var supported = supportedLevels.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var option in row.EffortLevelOptions.Where(option => !supported.Contains(option.Name)).ToArray())
+                row.EffortLevelOptions.Remove(option);
+            row.SyncEffortLevelsFromOptions();
+        }
         row.LoadPricing(model.Pricing);
         foreach (var item in model.CustomBody ?? [])
             row.CustomBodyRows.Add(new BodyRow(row, item.Key, item.Type, item.Value));
@@ -1316,9 +1394,18 @@ public partial class SettingsWindow : MolaContentWindow
         ProviderPresets.FirstOrDefault(preset =>
             SettingsViewModel.IsImagePurpose(preset.Purpose) == SettingsViewModel.IsImagePurpose(entry.Purpose)
             && string.Equals(preset.Type, entry.Type, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(NormalizeUrl(preset.BaseUrl), NormalizeUrl(entry.BaseUrl), StringComparison.OrdinalIgnoreCase));
+            && string.Equals(NormalizeUrl(preset.BaseUrl), NormalizeUrl(entry.BaseUrl), StringComparison.OrdinalIgnoreCase))
+        ?? (IsLegacyGeminiCompatPreset(entry)
+            ? ProviderPresets.FirstOrDefault(preset => preset.Id == "gemini")
+            : null);
 
     private static string NormalizeUrl(string? value) => (value ?? string.Empty).Trim().TrimEnd('/');
+
+    private static bool IsLegacyGeminiCompatPreset(ProviderEntry entry) =>
+        string.Equals(entry.Type, "gemini", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(NormalizeUrl(entry.BaseUrl), NormalizeUrl(GeminiCompatBaseUrl), StringComparison.OrdinalIgnoreCase)
+        && (string.IsNullOrWhiteSpace(entry.ApiPath)
+            || string.Equals(entry.ApiPath.Trim(), "v1/chat/completions", StringComparison.OrdinalIgnoreCase));
 
     private void OnProviderPresetChanged(object? sender, SelectionChangedEventArgs e)
     {
@@ -1423,6 +1510,7 @@ public partial class SettingsWindow : MolaContentWindow
         return type?.Trim().ToLowerInvariant() switch
         {
             "anthropic" => "v1/messages",
+            "gemini" => "models/{model}:streamGenerateContent",
             "openai-response" => "v1/responses",
             _ => "v1/chat/completions"
         };
@@ -1431,7 +1519,11 @@ public partial class SettingsWindow : MolaContentWindow
     private void OnProviderTypeChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (_loadingProviderForm) return;
-        var known = new[] { "v1/chat/completions", "v1/messages", "v1/responses" };
+        var known = new[]
+        {
+            "v1/chat/completions", "chat/completions", "v1/messages", "v1/responses",
+            "models/{model}:streamGenerateContent"
+        };
         var current = PART_ProviderApiPath.Text?.Trim() ?? string.Empty;
         if (current.Length == 0 || known.Contains(current, StringComparer.OrdinalIgnoreCase))
             PART_ProviderApiPath.Text = DefaultProviderApiPath(
@@ -1496,7 +1588,10 @@ public partial class SettingsWindow : MolaContentWindow
         {
             var fallback = DefaultProviderApiPath(
                 "chat", null, EditingProviderType);
-            PART_ProviderEndpointPreview.Text = "实际请求地址：" + Join(PART_ProviderApiPath.Text, fallback);
+            var endpoint = Join(PART_ProviderApiPath.Text, fallback);
+            PART_ProviderEndpointPreview.Text = string.Equals(EditingProviderType, "gemini", StringComparison.OrdinalIgnoreCase)
+                ? "实际请求地址：" + AppendAltSse(endpoint)
+                : "实际请求地址：" + endpoint;
             return;
         }
 
@@ -1963,17 +2058,28 @@ public partial class SettingsWindow : MolaContentWindow
             var path = string.IsNullOrWhiteSpace(entry.ApiPath)
                 ? DefaultProviderApiPath(entry.Purpose, entry.ImageFormat, entry.Type)
                 : entry.ApiPath;
-            var url = NetworkSecurity.CombineEndpoint(baseUrl, path, $"{entry.Name} 接入地址");
-            using var request = new HttpRequestMessage(HttpMethod.Post, url);
             var model = entry.Models.FirstOrDefault()?.Id ?? DefaultTestModel(entry.Type);
-            object body = entry.Type switch
+            var nativeGemini = string.Equals(entry.Type, "gemini", StringComparison.OrdinalIgnoreCase);
+            var requestPath = nativeGemini ? path.Replace("{model}", Uri.EscapeDataString(model), StringComparison.Ordinal) : path;
+            var url = NetworkSecurity.CombineEndpoint(baseUrl, requestPath, $"{entry.Name} 接入地址");
+            if (nativeGemini) url = new Uri(AppendAltSse(url.ToString()));
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, url);
+            object body;
+            if (nativeGemini)
+                body = new { contents = new[] { new { parts = new[] { new { text = "ping" } } } } };
+            else if (IsGeminiOpenAiCompat(entry))
+                body = new { model, messages = new[] { new { role = "user", content = "ping" } }, max_tokens = 4, stream = true };
+            else
+                body = entry.Type switch
             {
                 "anthropic" => new { model, max_tokens = 8, messages = new[] { new { role = "user", content = "ping" } } },
                 "openai-response" => new { model, input = "ping", max_output_tokens = 16 },
-                "gemini" => new { contents = new[] { new { parts = new[] { new { text = "ping" } } } } },
                 _ => new { model, messages = new[] { new { role = "user", content = "ping" } }, max_tokens = 4 }
             };
             request.Content = JsonContent.Create(body);
+            if (nativeGemini || IsGeminiOpenAiCompat(entry))
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
             ApplyProviderAuthentication(request, entry);
             ApplyProviderCustomHeaders(request, entry);
             using var response = await http.SendAsync(request);
@@ -1998,7 +2104,7 @@ public partial class SettingsWindow : MolaContentWindow
         if (entry.Type == ChatGptType) return await FetchChatGptModelsAsync();
         var preset = FindProviderPreset(entry);
         var baseUrl = NetworkSecurity.RequireHttpOrHttpsBaseUrl(entry.BaseUrl ?? DefaultProviderBaseUrl(entry.Type), $"{entry.Name} 接入地址");
-        var modelsPath = preset?.ModelsPath ?? (entry.Type == "gemini" ? "models" : "v1/models");
+        var modelsPath = preset?.ModelsPath ?? (entry.Type == "gemini" || IsGeminiOpenAiCompat(entry) ? "models" : "v1/models");
         var url = NetworkSecurity.CombineEndpoint(baseUrl, modelsPath, $"{entry.Name} 接入地址");
 
         using var http = _byokHttpFactory!();
@@ -2018,6 +2124,9 @@ public partial class SettingsWindow : MolaContentWindow
                 : IsOpenRouter(entry)
                     ? ParseOpenRouterModels(document.RootElement)
                     : ParseCompatibleModels(document.RootElement);
+
+        if (IsGoogleGeminiRoute(entry.Type, entry.BaseUrl))
+            models = models.Select(ApplyGeminiModelPolicy).ToList();
 
         var thinkingKind = preset?.DefaultThinkingKind ?? InferProviderThinkingKind(entry.Type);
         if (thinkingKind == ThinkingParamKind.None) return models;
@@ -2053,10 +2162,63 @@ public partial class SettingsWindow : MolaContentWindow
             if (!string.IsNullOrWhiteSpace(name)) request.Headers.TryAddWithoutValidation(name, value);
     }
 
+    private static bool IsGeminiOpenAiCompat(ProviderEntry entry)
+    {
+        if (!string.Equals(entry.Type, "openai-compat", StringComparison.OrdinalIgnoreCase)
+            || !Uri.TryCreate(entry.BaseUrl, UriKind.Absolute, out var baseUri))
+            return false;
+
+        return baseUri.AbsolutePath.TrimEnd('/').EndsWith("/v1beta/openai", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsGoogleGeminiRoute(string? providerType, string? baseUrl)
+    {
+        if (string.Equals(providerType, "gemini", StringComparison.OrdinalIgnoreCase))
+            return !IsOpenRouterBaseUrl(baseUrl);
+        if (!string.Equals(providerType, "openai-compat", StringComparison.OrdinalIgnoreCase)
+            || !Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)) return false;
+        if (uri.Host.Equals("openrouter.ai", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".openrouter.ai", StringComparison.OrdinalIgnoreCase)) return false;
+
+        return uri.AbsolutePath.TrimEnd('/').EndsWith("/v1beta/openai", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsOpenRouterBaseUrl(string? baseUrl) =>
+        Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)
+        && (uri.Host.Equals("openrouter.ai", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".openrouter.ai", StringComparison.OrdinalIgnoreCase));
+
+    private static ProviderModelEntry ApplyGeminiModelPolicy(ProviderModelEntry model)
+    {
+        var policy = GeminiModelPolicy.ThinkingFor(model.Id);
+        if (policy is null) return model;
+        var resolved = GeminiModelPolicy.ResolveEfforts(policy, model.EffortLevels, model.DefaultEffort);
+
+        return model with
+        {
+            Thinking = true,
+            ReasoningEffort = true,
+            ThinkingParamKind = nameof(ThinkingParamKind.GeminiThinkingLevel),
+            ThinkingBudgetMin = null,
+            ThinkingBudgetMax = null,
+            ThinkingBudgetDefault = null,
+            EffortLevels = resolved.Levels.ToList(),
+            DefaultEffort = resolved.DefaultEffort,
+            ReasoningMandatory = policy.Mandatory,
+            SupportsTemperature = false,
+            SupportsTopP = false
+        };
+    }
+
+    private static string AppendAltSse(string endpoint) =>
+        endpoint.Contains("alt=sse", StringComparison.OrdinalIgnoreCase)
+            ? endpoint
+            : endpoint + (endpoint.Contains('?') ? "&" : "?") + "alt=sse";
+
     private static string DefaultProviderBaseUrl(string type) => type switch
     {
         "anthropic" => AnthropicBaseUrl,
-        "gemini" => GeminiCompatBaseUrl,
+        "gemini" => GeminiNativeBaseUrl,
         _ => OpenAiBaseUrl
     };
 
@@ -2154,12 +2316,15 @@ public partial class SettingsWindow : MolaContentWindow
             if (string.IsNullOrWhiteSpace(name)) continue;
             var id = name.StartsWith("models/", StringComparison.OrdinalIgnoreCase) ? name[7..] : name;
             var methods = ReadStringArray(item, "supportedGenerationMethods");
-            if (methods.Count > 0 && !methods.Any(method => method.Equals("generateContent", StringComparison.OrdinalIgnoreCase)))
+            if (methods.Count > 0 && !methods.Any(method =>
+                    method.Equals("generateContent", StringComparison.OrdinalIgnoreCase)
+                    || method.Equals("streamGenerateContent", StringComparison.OrdinalIgnoreCase)))
                 continue;
             var display = item.TryGetProperty("displayName", out var displayNode) && displayNode.ValueKind == JsonValueKind.String
                 ? displayNode.GetString()
                 : BeautifyModelName(id);
             var reasoning = LooksLikeReasoningModel(id);
+            var kind = ThinkingParamKindInference.InferFromModelId(id);
             models.Add(new ProviderModelEntry(
                 id,
                 string.IsNullOrWhiteSpace(display) ? BeautifyModelName(id) : display!,
@@ -2167,7 +2332,7 @@ public partial class SettingsWindow : MolaContentWindow
                 Thinking: reasoning,
                 ReasoningEffort: reasoning,
                 Tools: LooksLikeToolModel(id),
-                ThinkingParamKind: reasoning ? ThinkingParamKind.GeminiThinkingLevel.ToString() : null));
+                ThinkingParamKind: reasoning && kind != ThinkingParamKind.None ? kind.ToString() : null));
         }
         return models.OrderBy(model => model.Id, StringComparer.OrdinalIgnoreCase).ToList();
     }
@@ -2237,6 +2402,7 @@ public partial class SettingsWindow : MolaContentWindow
     private static bool LooksLikeReasoningModel(string id)
     {
         var value = id.ToLowerInvariant();
+        if (value.Contains("-non-reasoning", StringComparison.Ordinal)) return false;
         return value.StartsWith("o1") || value.StartsWith("o3") || value.StartsWith("o4")
                || value.StartsWith("gpt-5") || value.Contains("reasoning") || value.Contains("deepseek-r1")
                || value.Contains("deepseek-reasoner") || value.Contains("qwq") || value.Contains("qwen3")

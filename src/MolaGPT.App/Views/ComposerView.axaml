@@ -132,8 +132,10 @@
       </Border>
       </StackPanel>
 
-      <!-- Row 1: toolbar. ToolPlainButton / ToolToggleButton, 30 high, radius 10. -->
-      <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
+      <!-- Row 1: toolbar. ToolPlainButton / ToolToggleButton, 30 high, radius 10.
+           Wraps rather than clips: with the canvas panel open the chat column is
+           narrow enough that the last chips ran off the card's edge, unreachable. -->
+      <WrapPanel Grid.Row="1" Classes="toolstrip" Orientation="Horizontal">
         <Button Name="PART_Persona" Classes="toolchip"
                 IsVisible="{Binding IsPersonaPickerVisible}"
                 ToolTip.Tip="切换角色" AutomationProperties.Name="切换角色">
@@ -265,16 +267,72 @@
           </StackPanel>
         </Button>
 
-        <ToggleButton Name="PART_Thinking" Classes="toolchip"
-                      IsChecked="{Binding EnableThinking, Mode=TwoWay}"
-                      IsVisible="{Binding IsThinkingVisible}"
-                      ToolTip.Tip="开启推理：复杂问题先推理后回答">
-          <StackPanel Classes="inlinerow" Orientation="Horizontal">
-            <TextBlock Classes="icon" Text="&#xE82F;" FontSize="12" Margin="0,0,6,0"
-                       VerticalAlignment="Center" />
-            <TextBlock Text="推理" VerticalAlignment="Center" />
+        <!-- 推理 and its effort are one decision, so they are one pill: off, it is a
+             plain chip; on, the effort selector splits off beside the toggle, inside
+             the same outline. The effort half also stands alone on a model that
+             always reasons (no toggle, but effort still adjustable). -->
+        <Border Name="PART_Reasoning" Classes="reasoningpill"
+                Classes.on="{Binding IsReasoningGroupActive}"
+                IsVisible="{Binding IsReasoningGroupVisible}">
+          <StackPanel Orientation="Horizontal">
+            <ToggleButton Name="PART_Thinking" Classes="toolchip"
+                          IsChecked="{Binding EnableThinking, Mode=TwoWay}"
+                          IsVisible="{Binding IsThinkingVisible}"
+                          ToolTip.Tip="开启推理：复杂问题先推理后回答">
+              <StackPanel Classes="inlinerow" Orientation="Horizontal">
+                <TextBlock Classes="icon" Text="&#xE82F;" FontSize="12" Margin="0,0,6,0"
+                           VerticalAlignment="Center" />
+                <TextBlock Text="推理" VerticalAlignment="Center" />
+              </StackPanel>
+            </ToggleButton>
+
+            <Border Classes="reasoningdivider" IsVisible="{Binding IsReasoningSplit}" />
+
+            <Button Name="PART_Effort" Classes="toolchip effortsegment"
+                    IsVisible="{Binding IsReasoningEffortVisible}"
+                    ToolTip.Tip="{Binding ReasoningControlToolTip}">
+              <StackPanel Classes="inlinerow" Orientation="Horizontal">
+                <TextBlock Classes="icon" Text="&#xE82F;" FontSize="12" Margin="0,0,6,0"
+                           IsVisible="{Binding !IsThinkingVisible}" />
+                <TextBlock Text="推理" Margin="0,0,6,0"
+                           IsVisible="{Binding !IsThinkingVisible}" />
+                <TextBlock Text="{Binding ReasoningControlLabel}" />
+                <TextBlock Classes="icon" Text="&#xE70D;" FontSize="8" Margin="5,1,0,0" />
+              </StackPanel>
+              <Button.Flyout>
+                <Flyout Placement="TopEdgeAlignedLeft" FlyoutPresenterClasses="molaflyout">
+                  <Border Classes="flyoutsurface effortpanel">
+                    <StackPanel MinWidth="230">
+                      <TextBlock Text="{Binding ReasoningControlTitle}" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,8" />
+                      <ListBox ItemsSource="{Binding AvailableEffortLevels}"
+                               SelectedItem="{Binding ReasoningEffort, Mode=TwoWay}"
+                               IsVisible="{Binding IsEffortComboVisible}"
+                               Classes="chiplist">
+                        <ListBox.ItemsPanel>
+                          <ItemsPanelTemplate><WrapPanel Orientation="Horizontal" /></ItemsPanelTemplate>
+                        </ListBox.ItemsPanel>
+                        <ListBox.ItemTemplate>
+                          <DataTemplate>
+                            <TextBlock Text="{Binding Converter={x:Static views:EffortLabelConverter.Instance}}" />
+                          </DataTemplate>
+                        </ListBox.ItemTemplate>
+                      </ListBox>
+                      <StackPanel IsVisible="{Binding IsBudgetSliderVisible}">
+                        <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,4">
+                          <TextBlock Text="Token Budget" Classes="muted" FontSize="12" />
+                          <TextBlock Grid.Column="1" Text="{Binding ThinkingBudgetTokens}" FontSize="12" />
+                        </Grid>
+                        <Slider Minimum="{Binding BudgetMin}" Maximum="{Binding BudgetMax}"
+                                Value="{Binding ThinkingBudgetTokens, Mode=TwoWay}"
+                                TickFrequency="1024" />
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+                </Flyout>
+              </Button.Flyout>
+            </Button>
           </StackPanel>
-        </ToggleButton>
+        </Border>
 
         <!-- 只在开口之前存在：话已经说出去、模型已经读过记忆之后再关，
              关掉的只是下一轮，留着开关只会给出一个改不动过去的假选择。 -->
@@ -289,47 +347,6 @@
           </StackPanel>
         </ToggleButton>
 
-        <Button Name="PART_Effort" Classes="toolchip"
-                IsVisible="{Binding IsReasoningEffortVisible}"
-                ToolTip.Tip="{Binding ReasoningControlToolTip}">
-          <StackPanel Classes="inlinerow" Orientation="Horizontal">
-            <TextBlock Classes="icon" Text="&#xF8B0;" FontSize="12" Margin="0,0,6,0"
-                       VerticalAlignment="Center" />
-            <TextBlock Text="{Binding ReasoningControlLabel}" VerticalAlignment="Center" />
-          </StackPanel>
-          <Button.Flyout>
-            <Flyout Placement="TopEdgeAlignedLeft" FlyoutPresenterClasses="molaflyout">
-              <Border Classes="flyoutsurface effortpanel">
-                <StackPanel MinWidth="230">
-                  <TextBlock Text="{Binding ReasoningControlTitle}" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,8" />
-                  <ListBox ItemsSource="{Binding AvailableEffortLevels}"
-                           SelectedItem="{Binding ReasoningEffort, Mode=TwoWay}"
-                           IsVisible="{Binding IsEffortComboVisible}"
-                           Classes="chiplist">
-                    <ListBox.ItemsPanel>
-                      <ItemsPanelTemplate><WrapPanel Orientation="Horizontal" /></ItemsPanelTemplate>
-                    </ListBox.ItemsPanel>
-                    <ListBox.ItemTemplate>
-                      <DataTemplate>
-                        <TextBlock Text="{Binding Converter={x:Static views:EffortLabelConverter.Instance}}" />
-                      </DataTemplate>
-                    </ListBox.ItemTemplate>
-                  </ListBox>
-                  <StackPanel IsVisible="{Binding IsBudgetSliderVisible}">
-                    <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,4">
-                      <TextBlock Text="Token Budget" Classes="muted" FontSize="12" />
-                      <TextBlock Grid.Column="1" Text="{Binding ThinkingBudgetTokens}" FontSize="12" />
-                    </Grid>
-                    <Slider Minimum="{Binding BudgetMin}" Maximum="{Binding BudgetMax}"
-                            Value="{Binding ThinkingBudgetTokens, Mode=TwoWay}"
-                            TickFrequency="1024" />
-                  </StackPanel>
-                </StackPanel>
-              </Border>
-            </Flyout>
-          </Button.Flyout>
-        </Button>
-
         <!-- One switch, not two. 搜索和读页是同一件事的两半——单开搜索，模型拿到
              的只有摘要片段；单开读页，它没有办法找到要读的地址。分开放只是把一个
              决定拆成两个都得答对的问题。 -->
@@ -343,7 +360,7 @@
             <TextBlock Text="网络访问" VerticalAlignment="Center" />
           </StackPanel>
         </ToggleButton>
-      </StackPanel>
+      </WrapPanel>
 
       <Border Grid.Row="2" Classes="imageoptions" IsVisible="{Binding IsImageOptionsVisible}">
         <WrapPanel Orientation="Horizontal">
@@ -769,6 +786,55 @@
           </KeyFrame>
         </Animation>
       </Style.Animations>
+    </Style>
+
+    <!-- Chip strip. The 4px that used to sit under the whole row now sits under
+         each chip, so a wrapped second row keeps the same rhythm as the first. -->
+    <Style Selector="WrapPanel.toolstrip > :is(Button).toolchip">
+      <Setter Property="Margin" Value="0,0,4,4" />
+    </Style>
+
+    <!-- 推理 pill. The outline and tint belong to the pill, not to the two buttons
+         inside it, so the halves share one edge and the radius token still rules
+         the corners (ClipToBounds on a Border clips to its rounded shape). Inner
+         buttons are 28 high: the pill's own 1px border brings it to the 30 of its
+         neighbours. -->
+    <Style Selector="Border.reasoningpill">
+      <Setter Property="Height" Value="30" />
+      <Setter Property="Margin" Value="0,0,4,4" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+    <Style Selector="Border.reasoningpill.on">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+    <Style Selector="Border.reasoningpill :is(Button).toolchip">
+      <Setter Property="Height" Value="28" />
+      <Setter Property="MinHeight" Value="28" />
+      <Setter Property="Margin" Value="0" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="0" />
+    </Style>
+    <Style Selector="Border.reasoningpill.on :is(Button).toolchip">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+    <Style Selector="Button.effortsegment">
+      <Setter Property="Padding" Value="8,0,10,0" />
+    </Style>
+    <Style Selector="Border.reasoningpill ToggleButton.toolchip:checked /template/ Border#PART_Root">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style Selector="Border.reasoningpill ToggleButton.toolchip:checked:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Border.reasoningdivider">
+      <Setter Property="Width" Value="1" />
+      <Setter Property="Height" Value="14" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Border}" />
+      <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
 
     <Style Selector="Border.personapanel, Border.effortpanel, Border.contextpanel">

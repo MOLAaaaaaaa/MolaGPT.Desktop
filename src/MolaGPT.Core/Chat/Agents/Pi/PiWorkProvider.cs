@@ -192,10 +192,12 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             creds.Auth,
             creds.DropBodyKeys ?? PiEndpointQuirks.DropBodyKeysFor(creds.Endpoint),
             creds.PathMode,
-            new PiWorkLlmShim.GenerationOptions(creds.Api, request.Temperature, request.TopP, request.MaxTokens),
+            new PiWorkLlmShim.GenerationOptions(
+                creds.Api, request.Temperature, request.TopP, request.MaxTokens, request.ReasoningEffort, request.UseThinking),
             request.RolePrompt is null ? null : body => Interlocked.Exchange(ref promptTrace, RolePromptTrace.Read(creds.Api, body)),
             creds.AdaptBody,
-            creds.ResponseReceived);
+            creds.ResponseReceived,
+            ModelId: creds.Model);
 
         // Waits when every slot is busy, which is the point: three turns really are
         // in flight and a fourth process costs more than the wait.
@@ -370,7 +372,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             creds.DropBodyKeys ?? PiEndpointQuirks.DropBodyKeysFor(creds.Endpoint),
             creds.PathMode,
             AdaptBody: creds.AdaptBody,
-            ResponseReceived: creds.ResponseReceived);
+            ResponseReceived: creds.ResponseReceived,
+            ModelId: creds.Model);
 
         return await _runtime.AcquireAsync(
             _config.Spec,
@@ -431,7 +434,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
 
         var creds = _config.ResolveCreds(new ChatRequest(modelId, Array.Empty<ChatMessage>()));
         var endpoint = creds.Api == "google-generative-ai"
-            ? $"{creds.Endpoint.TrimEnd('/')}/models/{Uri.EscapeDataString(modelId)}:generateContent"
+            ? creds.Endpoint.Replace("{model}", Uri.EscapeDataString(modelId), StringComparison.Ordinal)
+                .Replace(":streamGenerateContent", ":generateContent", StringComparison.Ordinal)
             : creds.Endpoint;
         return new OneShotTarget(
             endpoint,
@@ -984,6 +988,9 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     internal static string ResolveThinkingLevel(ChatRequest request, string api)
     {
         var google = api == "google-generative-ai";
+        if (google && GeminiModelPolicy.ThinkingFor(request.ModelId) is { } config)
+            return GeminiModelPolicy.NormalizeEffort(request.ModelId,
+                request.UseThinking == false ? "off" : request.ReasoningEffort ?? config.DefaultEffort!);
         if (request.UseThinking == false) return google ? "low" : "off";
 
         var effort = request.ReasoningEffort?.Trim().ToLowerInvariant();

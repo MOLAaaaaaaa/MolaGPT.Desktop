@@ -216,7 +216,9 @@ public sealed class AgentRelayClient
     }
 
     public Task<IReadOnlyList<RelayMobileDevice>> ListMobileDevicesAsync(CancellationToken ct = default)
-        => _producer.ListMobileDevicesAsync(ct);
+        => _producer.IsAuthAvailable
+            ? _producer.ListMobileDevicesAsync(ct)
+            : Task.FromResult<IReadOnlyList<RelayMobileDevice>>(Array.Empty<RelayMobileDevice>());
 
     // ---- bridge → relay (coarse translation) ------------------------------
 
@@ -490,6 +492,8 @@ public sealed class AgentRelayClient
 
     private async Task<IReadOnlyList<AgentSessionStateDto>> PublishMachineSnapshotAsync(CancellationToken ct)
     {
+        if (!_producer.IsAuthAvailable) return Array.Empty<AgentSessionStateDto>();
+
         IReadOnlyList<AgentSessionStateDto> sessions;
         try { sessions = await _bridge.ListSessionsAsync(ct, PollScanStaleness, includeTranscript: false).ConfigureAwait(false); }
         catch { return Array.Empty<AgentSessionStateDto>(); }
@@ -576,6 +580,8 @@ public sealed class AgentRelayClient
 
     private async Task PublishHeartbeatSafeAsync(CancellationToken ct)
     {
+        if (!_producer.IsAuthAvailable) return;
+
         try
         {
             var sessions = await _bridge.ListSessionsAsync(ct, PollScanStaleness, includeTranscript: false).ConfigureAwait(false);
@@ -595,6 +601,8 @@ public sealed class AgentRelayClient
 
     private async Task SeedRelayCursorsAsync(CancellationToken ct)
     {
+        if (!_producer.IsAuthAvailable) return;
+
         try
         {
             var cursors = await _producer.ListSessionCursorsAsync(ct).ConfigureAwait(false);
@@ -893,6 +901,15 @@ public sealed class AgentRelayClient
         var attempt = 0;
         while (true)
         {
+            if (!_producer.IsAuthAvailable)
+            {
+                var stop = _cts;
+                if (stop is null || stop.IsCancellationRequested) return;
+                try { await Task.Delay(ProjectionAuthRecheckInterval, stop.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
+                continue;
+            }
+
             try
             {
                 await _producer.PostEventAsync(envelope, CancellationToken.None).ConfigureAwait(false);
@@ -933,6 +950,8 @@ public sealed class AgentRelayClient
 
     private async Task PostMetaSafeAsync(RelaySessionMeta meta, CancellationToken ct = default)
     {
+        if (!_producer.IsAuthAvailable) return;
+
         try
         {
             await _producer.PostMetaAsync(meta, ct).ConfigureAwait(false);

@@ -17,7 +17,9 @@ using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Tools.Vision;
 using MolaGPT.Core.Memory;
 using MolaGPT.Core.Personalization;
+using MolaGPT.Core.Remote;
 using MolaGPT.Desktop.Services;
+using MolaGPT.Desktop.Services.Remote;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels;
@@ -183,6 +185,29 @@ internal static class AppServices
                 "MolaGPT", "agent-command-journal"))));
         services.AddSingleton<AgentBridgeStatusViewModel>();
 
+        // ---- remote control of MolaGPT conversations ---------------------------
+        services.AddSingleton(sp => new PairedPhoneStore(
+            sp.GetRequiredService<CredentialStore>(),
+            () => sp.GetRequiredService<MolaGptAuthService>().CurrentUsername));
+        services.AddSingleton(sp => new RemoteControlHost(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredService<MolaGptAuthService>(),
+            sp.GetRequiredService<ChatViewModel>(),
+            sp.GetRequiredService<ComposerViewModel>(),
+            sp.GetRequiredService<MessageRepository>(),
+            sp.GetRequiredService<ConversationRepository>(),
+            sp.GetRequiredService<ProviderRegistry>(),
+            sp.GetRequiredService<PairedPhoneStore>(),
+            sp.GetRequiredService<RemoteApprovalRelay>(),
+            onUi: work => Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(work),
+            machineId: sp.GetRequiredService<IAgentConfigProvider>().MachineId,
+            machineName: sp.GetRequiredService<IAgentConfigProvider>().MachineName,
+            log: line => DiagnosticLog.Write("RemoteWork", line)));
+        services.AddSingleton(sp => new RemoteWorkSettingsViewModel(
+            sp.GetRequiredService<RemoteControlHost>(),
+            sp.GetRequiredService<SettingsRepository>(),
+            action => Avalonia.Threading.Dispatcher.UIThread.Post(action)));
+
         // ---- tools ---------------------------------------------------------
         services.AddSingleton(sp => new VisionProxyTool(
             sp.GetRequiredService<ProviderRegistry>(),
@@ -217,6 +242,9 @@ internal static class AppServices
             return store;
         });
 
+        // Remote control plugs into approvals later; the relay is what approvals hold.
+        services.AddSingleton<RemoteApprovalRelay>();
+        services.AddSingleton<IRemoteApprovalChannel>(sp => sp.GetRequiredService<RemoteApprovalRelay>());
         services.AddSingleton<ToolApprovalService>();
         services.AddSingleton<IPythonExecutionApprovalService>(sp => sp.GetRequiredService<ToolApprovalService>());
         services.AddSingleton<IToolApprovalService>(sp => sp.GetRequiredService<ToolApprovalService>());
@@ -312,7 +340,8 @@ internal static class AppServices
                 sp.GetRequiredService<MessageRepository>(),
                 sp.GetRequiredService<ConversationRepository>(),
                 sp.GetRequiredService<PersonaListViewModel>(),
-                sp.GetRequiredService<SettingsRepository>());
+                sp.GetRequiredService<SettingsRepository>(),
+                piSessionRoot: PiWorkSidecarLocator.SessionRoot);
             chat.AttachTaskRegistry(
                 sp.GetRequiredService<AgentTaskRegistry>(),
                 action =>

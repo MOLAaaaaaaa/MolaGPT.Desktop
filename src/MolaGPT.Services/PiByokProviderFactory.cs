@@ -4,6 +4,7 @@ using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
+using MolaGPT.Core.Net;
 
 namespace MolaGPT.Desktop.Services;
 
@@ -25,15 +26,6 @@ public sealed class PiByokProviderFactory
 
     /// <summary>
     /// Provider row types the shim can carry, and how each is reached.
-    ///
-    /// <c>gemini</c> takes Google's <b>native</b> API rather than the
-    /// OpenAI-compatible endpoint its rows are configured against, even though the
-    /// compatible one looks like a free win. That endpoint drops the
-    /// <c>thought_signature</c> Gemini 3 requires echoed back on function-call
-    /// parts: verified end-to-end, the first tool round succeeds and the second is
-    /// rejected with "Function call is missing a thought_signature in functionCall
-    /// parts". Work always sends tools, so every multi-step task would fail on its
-    /// second step. The native API preserves the signature.
     /// </summary>
     private static readonly Dictionary<string, Shape> Eligible =
         new(StringComparer.Ordinal)
@@ -47,10 +39,10 @@ public sealed class PiByokProviderFactory
             // x-goog-api-key — a bearer is read as an OAuth token and refused.
             ["gemini"] = new(
                 "google-generative-ai",
-                "",
+                "models/{model}:streamGenerateContent",
                 PiWorkLlmShim.AuthStyle.GoogleApiKey,
                 AuthHeader: false,
-                PathMode: PiWorkLlmShim.TargetPathMode.AppendInboundSuffix),
+                PathMode: PiWorkLlmShim.TargetPathMode.GeminiModelTemplate),
 
             // A ChatGPT plan, through either sign-in (see ChatGptAccount). No base URL
             // or key of its own — both come from the signed-in account, per turn.
@@ -76,9 +68,7 @@ public sealed class PiByokProviderFactory
     private const string DefaultChatPath = "v1/chat/completions";
     private const string DefaultResponsesPath = "v1/responses";
 
-    /// <summary>Google's native generative-language root. A <c>gemini</c> row's own
-    /// base URL points at the OpenAI-compatibility layer under it, which is not the
-    /// API we drive, so it is deliberately not reused here.</summary>
+    /// <summary>Native root for the legacy Google preset, which saved the compatibility root.</summary>
     private const string GeminiNativeBaseUrl = "https://generativelanguage.googleapis.com/v1beta";
 
     private readonly PiWorkSidecarLocator _locator;
@@ -157,12 +147,12 @@ public sealed class PiByokProviderFactory
             apiPath = null;
             apiKey = "-";
         }
-        else if (type.Equals("gemini", StringComparison.Ordinal))
+        else if (type.Equals("gemini", StringComparison.Ordinal)
+                 && string.Equals(baseUrl?.TrimEnd('/'), GeminiNativeBaseUrl + "/openai", StringComparison.OrdinalIgnoreCase)
+                 && (string.IsNullOrWhiteSpace(apiPath) || apiPath.Trim() == DefaultChatPath))
         {
-            // Saved Gemini rows use Google's OpenAI-compatible root so the settings
-            // page can list models. Pi speaks the native protocol and must never
-            // inherit that address.
             baseUrl = GeminiNativeBaseUrl;
+            apiPath = shape.DefaultPath;
         }
         // No default for a blank base URL: the settings page refuses to save a row
         // without one, so a blank here means the row is corrupt, not unconfigured,
@@ -183,11 +173,11 @@ public sealed class PiByokProviderFactory
         string endpoint;
         try
         {
-            if (shape.PathMode == PiWorkLlmShim.TargetPathMode.AppendInboundSuffix)
+            if (shape.PathMode == PiWorkLlmShim.TargetPathMode.GeminiModelTemplate)
             {
-                // The path is the request here, so the endpoint is only a root and a
-                // configured api path would be meaningless against it.
-                endpoint = baseUrl!.TrimEnd('/');
+                var path = string.IsNullOrWhiteSpace(apiPath) ? shape.DefaultPath : apiPath.Trim();
+                path = path.Replace(":generateContent", ":streamGenerateContent", StringComparison.Ordinal);
+                endpoint = NetworkSecurity.CombineEndpoint(baseUrl!, path, displayName).ToString();
             }
             else
             {

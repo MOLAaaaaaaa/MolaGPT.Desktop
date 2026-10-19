@@ -107,9 +107,14 @@ public sealed partial class ChatViewModel
 
     private void OnTaskChanged(AgentTask task)
     {
-        if (!task.IsRunning)
-            _messageRepo?.UpdateBackgroundTaskState(
-                task.ConversationId, task.Id, TaskTools.StatusName(task.Status));
+        if (!task.IsRunning && _messageRepo is not null)
+        {
+            var conversationId = task.ConversationId;
+            var taskId = task.Id;
+            var state = TaskTools.StatusName(task.Status);
+            QueueMessageWrite(() => _messageRepo.UpdateBackgroundTaskState(
+                conversationId, taskId, state)).GetAwaiter().GetResult();
+        }
         if (task.ConversationId == ConversationId)
         {
             RefreshConversationTasks();
@@ -306,9 +311,15 @@ public sealed partial class ChatViewModel
     /// the conversation on screen: a background turn can take in a queued message,
     /// or be woken by a notification, while the user is reading something else.
     /// </summary>
-    public MessageViewModel AppendMessageTo(string conversationId, string role, string content, string? parentId)
+    public MessageViewModel AppendMessageTo(
+        string conversationId, string role, string content, string? parentId,
+        IReadOnlyList<AttachmentChip>? attachments = null)
     {
-        var vm = new MessageViewModel(role, content, DateTimeOffset.UtcNow) { ParentMessageId = parentId };
+        var vm = new MessageViewModel(role, content, DateTimeOffset.UtcNow)
+        {
+            ParentMessageId = parentId,
+            Attachments = attachments
+        };
         vm.VersionSelected += OnMessageVersionSelected;
         if (ConversationId == conversationId) Messages.Add(vm);
         PersistMessage(vm, conversationId);
@@ -334,6 +345,7 @@ public sealed partial class ChatViewModel
         vm.StartPending(false);
         vm.VersionSelected += OnMessageVersionSelected;
         if (ConversationId == conversationId) Messages.Add(vm);
+        PersistMessage(vm, conversationId);
         return vm;
     }
 

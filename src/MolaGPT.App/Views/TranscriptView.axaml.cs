@@ -113,7 +113,11 @@ public partial class TranscriptView : UserControl
     private void Attach(ChatViewModel? chat)
     {
         CancelWheelAnimation();
-        if (_chat is not null) _chat.PropertyChanged -= OnChatPropertyChanged;
+        if (_chat is not null)
+        {
+            _chat.PropertyChanged -= OnChatPropertyChanged;
+            _chat.ScrollToLatestRequested -= AnimateToBottom;
+        }
         _rows?.Dispose();
         _rows = null;
 
@@ -127,6 +131,7 @@ public partial class TranscriptView : UserControl
         }
 
         _chat.PropertyChanged += OnChatPropertyChanged;
+        _chat.ScrollToLatestRequested += AnimateToBottom;
         _rows = new TranscriptSource(_chat, CanAutoCollapseTools);
         _rows.CollectionChanged += (_, _) => OnRowsChanged();
         PART_Rows.ItemsSource = _rows;

@@ -99,7 +99,7 @@ public static class ProviderRestorer
                         ? creds.Decrypt(row.ApiKeyEnc) ?? string.Empty
                         : string.Empty;
 
-                    var models = TryDeserializeModels(row.Models);
+                    var models = TryDeserializeModels(row.Models, row.Type, row.BaseUrl);
                     var headers = CustomParamConverter.ToHeaderListFromJson(row.CustomHeaders is { } storedHeaders
                         ? creds.DecryptText(storedHeaders) : null);
 
@@ -154,7 +154,7 @@ public static class ProviderRestorer
         if (!entry.Enabled || SettingsViewModel.IsImagePurpose(entry.Purpose))
             return ProviderApplyOutcome.NotApplicable;
 
-        var models = entry.Models.Select(ToProviderModel).ToList();
+        var models = entry.Models.Select(model => ToProviderModel(model, entry.Type, entry.BaseUrl)).ToList();
         var headers = CustomParamConverter.ToHeaderList(entry.CustomHeaders);
         var provider = pi?.TryWrap(
             entry.Type, entry.Id, entry.Name, entry.BaseUrl, entry.ApiPath,
@@ -180,13 +180,13 @@ public static class ProviderRestorer
         pi?.Retire(id);
     }
 
-    public static List<ProviderModel> TryDeserializeModels(string json)
+    public static List<ProviderModel> TryDeserializeModels(string json, string? providerType = null, string? baseUrl = null)
     {
         if (string.IsNullOrWhiteSpace(json)) return new();
         try
         {
             var entries = JsonSerializer.Deserialize<List<ProviderModelEntry>>(json) ?? new();
-            return entries.Select(ToProviderModel).ToList();
+            return entries.Select(entry => ToProviderModel(entry, providerType, baseUrl)).ToList();
         }
         catch (JsonException)
         {
@@ -194,8 +194,10 @@ public static class ProviderRestorer
         }
     }
 
-    public static ProviderModel ToProviderModel(ProviderModelEntry entry)
+    public static ProviderModel ToProviderModel(ProviderModelEntry entry, string? providerType = null, string? baseUrl = null)
     {
+        var googleGemini = IsGoogleGeminiRoute(providerType, baseUrl);
+        var geminiPolicy = googleGemini ? GeminiModelPolicy.ThinkingFor(entry.Id) : null;
         ThinkingConfig? thinkingConfig = null;
         var kindStr = entry.ThinkingParamKind;
 
@@ -210,7 +212,19 @@ public static class ProviderRestorer
             if (inferred != ThinkingParamKind.None) kindStr = inferred.ToString();
         }
 
-        if (kindStr is { } && Enum.TryParse<ThinkingParamKind>(kindStr, true, out var kind))
+        if (geminiPolicy is not null)
+        {
+            var resolved = GeminiModelPolicy.ResolveEfforts(geminiPolicy, entry.EffortLevels, entry.DefaultEffort);
+            thinkingConfig = geminiPolicy with
+            {
+                EffortLevels = resolved.Levels,
+                DefaultEffort = resolved.DefaultEffort
+            };
+            kindStr = nameof(ThinkingParamKind.GeminiThinkingLevel);
+        }
+
+        if (kindStr is { } && Enum.TryParse<ThinkingParamKind>(kindStr, true, out var kind)
+            && thinkingConfig is null)
         {
             thinkingConfig = new ThinkingConfig(
                 kind,
@@ -224,20 +238,40 @@ public static class ProviderRestorer
                 Mandatory: entry.ReasoningMandatory);
         }
 
+        var levelModel = geminiPolicy is not null;
         return new ProviderModel(
             entry.Id,
             NormalizeAutoModelDisplayName(entry.Id, entry.DisplayName),
             SupportsVision: entry.Vision,
-            SupportsThinking: entry.Thinking,
-            SupportsReasoningEffort: entry.ReasoningEffort,
+            SupportsThinking: levelModel || entry.Thinking,
+            SupportsReasoningEffort: levelModel || entry.ReasoningEffort,
             SupportsToolCalling: entry.Tools,
             ContextWindow: entry.ContextWindow,
             ThinkingConfig: thinkingConfig,
             CustomBody: CustomParamConverter.ToBodyDict(entry.CustomBody),
-            SupportsTemperature: entry.SupportsTemperature,
-            SupportsTopP: entry.SupportsTopP,
+            SupportsTemperature: levelModel ? false : entry.SupportsTemperature,
+            SupportsTopP: levelModel ? false : entry.SupportsTopP,
             Pricing: entry.Pricing);
     }
+
+    private static bool IsGoogleGeminiRoute(string? providerType, string? baseUrl)
+    {
+        if (string.Equals(providerType, "gemini", StringComparison.OrdinalIgnoreCase))
+        {
+            return !IsOpenRouter(baseUrl);
+        }
+        if (!string.Equals(providerType, "openai-compat", StringComparison.OrdinalIgnoreCase)
+            || !Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)) return false;
+        if (uri.Host.Equals("openrouter.ai", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".openrouter.ai", StringComparison.OrdinalIgnoreCase)) return false;
+
+        return uri.AbsolutePath.TrimEnd('/').EndsWith("/v1beta/openai", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsOpenRouter(string? baseUrl) =>
+        Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)
+        && (uri.Host.Equals("openrouter.ai", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".openrouter.ai", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Keeps a hand-edited display name, but re-beautifies one that still matches

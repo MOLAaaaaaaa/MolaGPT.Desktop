@@ -161,6 +161,8 @@ public sealed partial class MainViewModel : ObservableObject
             // the row keeps spinning forever on the failure path.
             _backgroundStreams.TaskFailed += (_, e) =>
                 _conversationList.SetGenerating(e.ConversationId, false);
+            _backgroundStreams.TaskEnded += (_, conversationId) =>
+                _conversationList.SetGenerating(conversationId, false);
         }
 
         _chat.PropertyChanged += (_, e) =>

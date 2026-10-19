@@ -41,7 +41,7 @@ internal sealed class TrayIconHost : IDisposable
         _icon.Icon = LoadIcon();
         _icon.Clicked += (_, _) => ShowWindow();
 
-        _agentStatusItem = Item("Agent 状态…", () =>
+        _agentStatusItem = Item("远程控制…", () =>
         {
             ShowWindow();
             AgentStatusRequested?.Invoke(this, EventArgs.Empty);
@@ -87,7 +87,7 @@ internal sealed class TrayIconHost : IDisposable
     }
 
     /// <summary>
-    /// Agent 状态 opens 远程控制, which relays through the account, so under
+    /// 远程控制 relays through the account, so under
     /// 隐藏 MolaGPT 账号功能 it leaves the tray just as it leaves the title bar.
     /// Removed rather than hidden: whether the Win32 tray menu honours
     /// <see cref="NativeMenuItem.IsVisible"/> is up to the exporter, and an entry
@@ -155,7 +155,7 @@ internal sealed class TrayIconHost : IDisposable
         if (Application.Current?.ApplicationLifetime
             is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop)
         {
-            desktop.Shutdown();
+            desktop.TryShutdown();
         }
     }
 

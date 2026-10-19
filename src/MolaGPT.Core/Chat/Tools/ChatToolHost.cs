@@ -170,6 +170,8 @@ public sealed class ChatToolHost : IChatToolHost
         CancellationToken ct)
     {
         options = WithConversationWorkspace(options, context);
+        // Approvals raised anywhere below this call know which conversation asked.
+        using var approvalScope = MolaGPT.Core.Remote.ApprovalScope.Enter(context.Request.ConversationId);
         var earlierCalls = _turnCalls.GetValue(context.Request, _ => new TurnCalls()).Add(toolName, argumentsJson);
 
         // A sub-agent sees its parent's whole tool list, so these arrive as ordinary

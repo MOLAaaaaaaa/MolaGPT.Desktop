@@ -133,6 +133,9 @@ public sealed partial class ComposerViewModel
         var item = new PendingInjectionViewModel(text, followUp);
         stream.Injections.Add(item);
         PendingInjections.Add(item);
+        // Steering talks to the reply being written, so bring it into view.
+        // A queued message only goes out after the turn; nothing to look at yet.
+        if (!followUp) _chat.RequestScrollToLatest();
         // A refusal means the turn is settling. The chip stays, and whatever is
         // still waiting when the stream ends is sent as the next message.
         agent.TryEnqueue(stream.ConversationId, text, followUp);
@@ -268,10 +271,16 @@ public sealed partial class ComposerViewModel
         Text = text;
         // SendAsync reads and clears the input before its first await, so the draft
         // can go back straight away.
-        var sending = SendAsync();
+        _sendingLeftover = true;
+        Task sending;
+        try { sending = SendAsync(); }
+        finally { _sendingLeftover = false; }
         Text = draft;
         await sending;
     }
+
+    /// <summary>Read by <see cref="SendAsync"/> before its first await.</summary>
+    private bool _sendingLeftover;
 
     // ---- background tasks ----------------------------------------------------------
 

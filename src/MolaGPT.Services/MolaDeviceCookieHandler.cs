@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
@@ -5,6 +6,13 @@ using MolaGPT.Core.Auth;
 
 namespace MolaGPT.Desktop.Services;
 
+/// <summary>
+/// Every request through the MolaGPT client passes here, so a cancelled request
+/// (all of them at once on exit) leaves this method into HttpClient. Under Just My
+/// Code the debugger counts that as user-unhandled and stops on each one, though
+/// the caller catches it. Marked as non-user code so the caller's handling decides.
+/// </summary>
+[DebuggerNonUserCode]
 public sealed class MolaDeviceCookieHandler : DelegatingHandler
 {
     private static readonly Uri Origin = new("https://chatgpt.wljay.cn/");

@@ -10,6 +10,7 @@ using Avalonia.Threading;
 using MolaGPT.App.Views;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
+using MolaGPT.Core.Remote;
 using MolaGPT.ViewModels;
 
 namespace MolaGPT.App.Infrastructure;
@@ -19,6 +20,7 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
     private readonly IToolGrantStore _grants;
     private readonly IPythonSessionAllowList _sessionAllowList;
     private readonly SettingsViewModel _settings;
+    private readonly IRemoteApprovalChannel? _remote;
 
     /// <summary>
     /// Parallel tool calls — a codemode script, several sub-agents — would stack one
@@ -31,11 +33,13 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
     public ToolApprovalService(
         IToolGrantStore grants,
         IPythonSessionAllowList sessionAllowList,
-        SettingsViewModel settings)
+        SettingsViewModel settings,
+        IRemoteApprovalChannel? remote = null)
     {
         _grants = grants;
         _sessionAllowList = sessionAllowList;
         _settings = settings;
+        _remote = remote;
     }
 
     public async Task<ToolApprovalDecision> RequestApprovalAsync(
@@ -124,10 +128,18 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
             return await Dispatcher.UIThread.InvokeAsync(async () =>
             {
                 var owner = MainWindow();
+                var visible = owner is { IsVisible: true };
+                var ticket = Offer(PythonPrompt(request), visible);
 
-                // No window means nobody can see the prompt. Deny rather than
-                // run unattended code.
-                if (owner is null || !owner.IsVisible) return PythonExecutionApprovalDecision.Denied;
+                // No window means nobody here can see the prompt: a paired phone
+                // decides, or the code does not run unattended.
+                if (!visible)
+                {
+                    return ticket is not null
+                           && await AwaitPhoneAsync(ticket, ct) == RemoteApprovalDecisions.Once
+                        ? PythonExecutionApprovalDecision.Approved
+                        : PythonExecutionApprovalDecision.Denied;
+                }
 
                 var approved = false;
                 var closed = false;
@@ -161,10 +173,17 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
 
                 await using var registration = ct.Register(() =>
                     Dispatcher.UIThread.Post(() => dialog.Close()));
+                // The phone answering first closes the dialog here.
+                CloseOnPhoneAnswer(ticket, dialog);
 
-                await dialog.ShowDialog(owner);
+                await dialog.ShowDialog(owner!);
                 closed = true;
 
+                if (PhoneAnswered(ticket, ct) is { } phone)
+                    return phone == RemoteApprovalDecisions.Once
+                        ? PythonExecutionApprovalDecision.Approved
+                        : PythonExecutionApprovalDecision.Denied;
+                SettleOnDesktop(ticket, ct, approved ? RemoteApprovalDecisions.Once : RemoteApprovalDecisions.Deny);
                 return approved && !ct.IsCancellationRequested
                     ? PythonExecutionApprovalDecision.Approved
                     : PythonExecutionApprovalDecision.Denied;
@@ -233,6 +252,100 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
     private static string FormatMode(ToolPermissionMode mode) =>
         mode == ToolPermissionMode.FullAccess ? "完全权限" : "审批权限";
 
+    // ---- paired phones ----------------------------------------------------
+    //
+    // When remote control wants a request, the phone and the dialog here both
+    // wait on it and the first answer wins. A phone can allow once, allow until
+    // the app closes, or deny; standing rules and folder grants stay desktop-only.
+
+    private IRemoteApprovalTicket? Offer(RemoteApprovalPrompt? prompt, bool desktopVisible) =>
+        prompt is null ? null : _remote?.Offer(prompt, desktopVisible);
+
+    private static async Task<string> AwaitPhoneAsync(IRemoteApprovalTicket ticket, CancellationToken ct)
+    {
+        var stopped = Task.Delay(Timeout.Infinite, ct);
+        if (await Task.WhenAny(ticket.Answer, stopped) != ticket.Answer)
+        {
+            ticket.Abandon();
+            return RemoteApprovalDecisions.Deny;
+        }
+        return await ticket.Answer;
+    }
+
+    private static void CloseOnPhoneAnswer(IRemoteApprovalTicket? ticket, Window dialog) =>
+        ticket?.Answer.ContinueWith(_ => Dispatcher.UIThread.Post(dialog.Close), TaskScheduler.Default);
+
+    /// <summary>The phone's answer, when the phone is what closed the dialog.</summary>
+    private static string? PhoneAnswered(IRemoteApprovalTicket? ticket, CancellationToken ct) =>
+        ticket is { Answer.IsCompletedSuccessfully: true } && !ct.IsCancellationRequested ? ticket.Answer.Result : null;
+
+    private static void SettleOnDesktop(IRemoteApprovalTicket? ticket, CancellationToken ct, string decision)
+    {
+        if (ticket is null) return;
+        if (ct.IsCancellationRequested) ticket.Abandon();
+        else ticket.SettleOnDesktop(decision);
+    }
+
+    private static ToolApprovalOutcome FromPhone(string decision) => decision switch
+    {
+        RemoteApprovalDecisions.Once => new ToolApprovalOutcome(true),
+        RemoteApprovalDecisions.Session => new ToolApprovalOutcome(true, ToolGrantScope.Session),
+        _ => new ToolApprovalOutcome(false)
+    };
+
+    private static RemoteApprovalPrompt? ToolPrompt(ToolApprovalRequest request)
+    {
+        if (ApprovalScope.ConversationId is not { Length: > 0 } conversationId) return null;
+        // A grant for "this tool" says nothing about a path outside the workspace,
+        // so that question is only ever answered for this one call.
+        var oneCallOnly = request.AlwaysAsk || request.Capabilities.HasFlag(ToolCapability.OutsideWorkspace);
+        return new RemoteApprovalPrompt(
+            Guid.NewGuid().ToString("N"),
+            conversationId,
+            "tool",
+            request.ToolName,
+            request.DisplayName,
+            request.Description,
+            Preview(request.ArgumentsJson, 4000),
+            null,
+            request.ResolvedPath,
+            CapabilityNames(request.Capabilities),
+            oneCallOnly
+                ? [RemoteApprovalDecisions.Once, RemoteApprovalDecisions.Deny]
+                : [RemoteApprovalDecisions.Once, RemoteApprovalDecisions.Session, RemoteApprovalDecisions.Deny],
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+    }
+
+    private static RemoteApprovalPrompt? PythonPrompt(PythonExecutionApprovalRequest request)
+    {
+        if (ApprovalScope.ConversationId is not { Length: > 0 } conversationId) return null;
+        var notes = new List<string>();
+        if (request.ReviewNote is { Length: > 0 } review) notes.Add("自动检查：" + review);
+        if (request.Risk.Imports.Count > 0) notes.Add("导入模块：" + string.Join("、", request.Risk.Imports));
+        return new RemoteApprovalPrompt(
+            Guid.NewGuid().ToString("N"),
+            conversationId,
+            "python",
+            PythonExecutionTool.ToolName,
+            "运行 Python",
+            request.Description,
+            notes.Count > 0 ? string.Join("\n", notes) : null,
+            Preview(request.Code, 8000),
+            request.RequestedPaths is { Count: > 0 } paths ? string.Join("\n", paths) : null,
+            CapabilityNames(request.Capabilities),
+            [RemoteApprovalDecisions.Once, RemoteApprovalDecisions.Deny],
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+    }
+
+    private static string? Preview(string? text, int limit) =>
+        string.IsNullOrEmpty(text) ? null : text.Length <= limit ? text : text[..limit] + "\n…";
+
+    private static string[] CapabilityNames(ToolCapability capabilities) =>
+        Enum.GetValues<ToolCapability>()
+            .Where(flag => flag != 0 && capabilities.HasFlag(flag))
+            .Select(flag => flag.ToString())
+            .ToArray();
+
     // ---- generic tool approval --------------------------------------------
 
     internal sealed record ToolApprovalOutcome(
@@ -240,7 +353,7 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
         ToolGrantScope Scope = ToolGrantScope.Once,
         string? PathPrefix = null);
 
-    private static async Task<ToolApprovalOutcome> AskToolAsync(
+    private async Task<ToolApprovalOutcome> AskToolAsync(
         ToolApprovalRequest request,
         ToolPermissionMode mode,
         CancellationToken ct)
@@ -252,15 +365,22 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
             return await Dispatcher.UIThread.InvokeAsync(async () =>
             {
                 var owner = MainWindow();
-                if (owner is null || !owner.IsVisible) return new ToolApprovalOutcome(false);
+                var visible = owner is { IsVisible: true };
+                var ticket = Offer(ToolPrompt(request), visible);
+                if (!visible)
+                    return ticket is null ? new ToolApprovalOutcome(false) : FromPhone(await AwaitPhoneAsync(ticket, ct));
 
                 var outcome = new ToolApprovalOutcome(false);
                 var dialog = BuildToolDialog(request, mode, value => outcome = value, out var finish);
 
                 await using var registration = ct.Register(() =>
                     Dispatcher.UIThread.Post(() => dialog.Close()));
-                await dialog.ShowDialog(owner);
+                CloseOnPhoneAnswer(ticket, dialog);
+                await dialog.ShowDialog(owner!);
                 finish();
+                if (PhoneAnswered(ticket, ct) is { } phone) return FromPhone(phone);
+                SettleOnDesktop(ticket, ct, !outcome.Approved ? RemoteApprovalDecisions.Deny
+                    : outcome.Scope == ToolGrantScope.Once ? RemoteApprovalDecisions.Once : RemoteApprovalDecisions.Session);
                 return ct.IsCancellationRequested ? new ToolApprovalOutcome(false) : outcome;
             });
         }

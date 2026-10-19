@@ -41,7 +41,9 @@ public partial class ImagePreviewWindow : MolaWindow
         KeyDown += OnKeyDown;
         Closed += (_, _) =>
         {
+            PART_Image.Source = null;
             if (_ownsBitmap) _bitmap?.Dispose();
+            _bitmap = null;
         };
     }
 

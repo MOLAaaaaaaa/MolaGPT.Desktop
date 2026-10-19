@@ -63,8 +63,7 @@ public static class ImageSourceLoader
         {
             if (s_cache.TryGetValue(key, out var hit))
             {
-                // Refresh recency: an image the viewport is still showing must
-                // not be evicted by one scrolled past long ago.
+                // Keep recently requested images cached for reuse.
                 s_order.Remove(key);
                 s_order.Add(key);
                 return hit;
@@ -94,7 +93,8 @@ public static class ImageSourceLoader
             {
                 var oldest = s_order[0];
                 s_order.RemoveAt(0);
-                if (s_cache.Remove(oldest, out var evicted)) evicted.Dispose();
+                // Controls may still display this shared bitmap after eviction.
+                s_cache.Remove(oldest);
             }
 
             if (s_cache.TryGetValue(key, out var raced))

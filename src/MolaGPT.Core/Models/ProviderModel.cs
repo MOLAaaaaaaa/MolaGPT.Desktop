@@ -83,11 +83,13 @@ public static class ThinkingParamKindInference
             || lower.Contains("qwq", StringComparison.Ordinal))
             return ThinkingParamKind.QwenThinkingBudget;
 
-        if (lower.Contains("gemini-3", StringComparison.Ordinal))
-            return ThinkingParamKind.GeminiThinkingLevel;
-
-        if (lower.Contains("gemini-2.5", StringComparison.Ordinal))
-            return ThinkingParamKind.GeminiBudget;
+        if (lower.Contains("gemini", StringComparison.Ordinal))
+        {
+            var geminiConfig = GeminiModelPolicy.ThinkingFor(modelId);
+            if (geminiConfig is not null) return geminiConfig.Kind;
+            if (lower.Contains("gemini-2.5", StringComparison.Ordinal))
+                return ThinkingParamKind.GeminiBudget;
+        }
 
         if (leaf.StartsWith("o1", StringComparison.Ordinal)
             || leaf.StartsWith("o3", StringComparison.Ordinal)

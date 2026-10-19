@@ -145,6 +145,11 @@ public sealed class StreamPacer
         get { lock (_gate) return _answer.Peek(); }
     }
 
+    public string PendingThinking
+    {
+        get { lock (_gate) return _thinking.Peek(); }
+    }
+
     /// <summary>Accepts text for later release. Safe to call from any thread.</summary>
     public void Enqueue(PacedStream kind, string text)
     {

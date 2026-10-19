@@ -13,6 +13,13 @@ public sealed class ConversationRepository
     private readonly MolaGptDatabase _db;
     public ConversationRepository(MolaGptDatabase db) => _db = db;
 
+    /// <summary>A conversation's row changed: title, model, deletion or which branch
+    /// is active. Raised on the writing thread, after the write is committed.</summary>
+    public event Action<string>? ConversationChanged;
+
+    /// <summary>The active branch of a conversation changed, so its message path did.</summary>
+    public event Action<string>? TimelineChanged;
+
     public IReadOnlyList<ConversationRow> ListActive()
     {
         using var conn = _db.Open();
@@ -84,12 +91,14 @@ public sealed class ConversationRepository
               WHERE id = @timelineId AND conversation_id = @conversationId;",
             new { timelineId, conversationId = row.Id, roleContext = row.RoleContextJson, updatedAt = row.UpdatedAt }, tx);
         tx.Commit();
+        ConversationChanged?.Invoke(row.Id);
     }
 
     public void SoftDelete(string id, long timestampMs)
     {
         using var conn = _db.Open();
         conn.Execute("UPDATE conversations SET deleted_at = @t WHERE id = @id", new { id, t = timestampMs });
+        ConversationChanged?.Invoke(id);
     }
 
     public void CreateWithMessages(ConversationRow row, IReadOnlyList<MessageRow> messages)
@@ -175,6 +184,7 @@ public sealed class ConversationRepository
             new { timelineId, conversationId = message.ConversationId, roleContext, now = message.CreatedAt }, tx);
         if (updated != 1) throw new InvalidOperationException("找不到当前对话。");
         tx.Commit();
+        TimelineChanged?.Invoke(message.ConversationId);
         return timelineId;
     }
 
@@ -193,6 +203,7 @@ public sealed class ConversationRepository
                   WHERE id = @timelineId AND conversation_id = @conversationId)",
             new { conversationId, timelineId });
         if (updated != 1) throw new InvalidOperationException("找不到所选时间线。");
+        TimelineChanged?.Invoke(conversationId);
     }
 
     public void Rename(string id, string title, long timestampMs)
@@ -200,6 +211,7 @@ public sealed class ConversationRepository
         using var conn = _db.Open();
         conn.Execute("UPDATE conversations SET title = @title, updated_at = @t WHERE id = @id",
             new { id, title, t = timestampMs });
+        ConversationChanged?.Invoke(id);
     }
 
     public void SoftDeleteMany(IReadOnlyList<string> ids, long timestampMs)
@@ -211,6 +223,7 @@ public sealed class ConversationRepository
             conn.Execute("UPDATE conversations SET deleted_at = @t WHERE id = @id",
                 new { id, t = timestampMs }, tx);
         tx.Commit();
+        foreach (var id in ids) ConversationChanged?.Invoke(id);
     }
 
     /// <summary>
@@ -228,6 +241,7 @@ public sealed class ConversationRepository
             conn.Execute("UPDATE conversations SET deleted_at = NULL WHERE id = @id",
                 new { id }, tx);
         tx.Commit();
+        foreach (var id in ids) ConversationChanged?.Invoke(id);
     }
 
     /// <summary>

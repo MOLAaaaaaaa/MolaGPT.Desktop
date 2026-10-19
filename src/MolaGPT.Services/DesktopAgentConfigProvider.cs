@@ -66,8 +66,11 @@ public sealed class DesktopAgentConfigProvider : IAgentConfigProvider
         }
     }
 
-    /// <inheritdoc />
-    public string MachineName => Environment.MachineName;
+    /// <summary>
+    /// The full host name. <see cref="Environment.MachineName"/> is the NetBIOS name, cut to
+    /// 15 characters and upper-cased, which is what phones would otherwise show.
+    /// </summary>
+    public string MachineName => System.Net.Dns.GetHostName();
 
     public AgentPermissionMode PermissionMode =>
         Enum.TryParse<AgentPermissionMode>(_settings.Get(KeyPermissionMode), ignoreCase: true, out var mode)

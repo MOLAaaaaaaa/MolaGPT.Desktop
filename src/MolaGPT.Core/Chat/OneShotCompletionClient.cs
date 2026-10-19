@@ -121,6 +121,9 @@ public sealed class OneShotCompletionClient
             body["stream"] = true;
             body["store"] = false;
         }
+        var nativeGoogle = target.Api == OneShotWireApi.GoogleGenerativeAi;
+        if (GeminiRequestParams.Applies(modelId, nativeGoogle, target.Endpoint))
+            GeminiRequestParams.Apply(body, modelId, nativeGoogle, useThinking: useThinking);
 
         using var req = new HttpRequestMessage(HttpMethod.Post, target.Endpoint)
         {

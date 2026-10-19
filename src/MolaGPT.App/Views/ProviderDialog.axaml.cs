@@ -183,6 +183,7 @@ public sealed partial class ModelRow : ObservableObject
     [ObservableProperty] private bool _tools;
     [ObservableProperty] private bool _supportsTemperature = true;
     [ObservableProperty] private bool _supportsTopP = true;
+    [ObservableProperty] private bool _canEditGenerationParameters = true;
     [ObservableProperty] private string _contextWindowText = string.Empty;
     [ObservableProperty] private int _thinkingKindIndex;
     [ObservableProperty] private string _budgetMinText = string.Empty;

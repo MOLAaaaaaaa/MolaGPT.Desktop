@@ -19,6 +19,7 @@ using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Desktop.Services;
+using MolaGPT.Desktop.Services.Remote;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels;
@@ -172,6 +173,7 @@ public partial class App : Application
                  _services.GetRequiredService<PersonalizationViewModel>(),
                  _services.GetRequiredService<MemoryPageViewModel>(),
                  _services.GetRequiredService<PersonalDataService>());
+            window.RemoteWork = _services.GetRequiredService<RemoteWorkSettingsViewModel>();
             desktop.MainWindow = window;
 
             // One router owns "banner, Windows toast, or wait" for every source.
@@ -206,7 +208,7 @@ public partial class App : Application
                 try
                 {
                     AppAutoUpdateService.StartInstallerAfterExit(_pendingUpdateInstallerPath);
-                    desktop.Shutdown();
+                    desktop.TryShutdown();
                 }
                 catch (Exception ex)
                 {
@@ -237,6 +239,60 @@ public partial class App : Application
             {
                 if (agentConfig.BridgeEnabled && settings.IsLoggedIn) StartAgentRelay();
                 else _ = StopAgentRelayAsync();
+            }
+
+            // Phones control MolaGPT conversations through the account, so this
+            // runs only while signed in and switched on.
+            var remoteWork = _services.GetRequiredService<RemoteControlHost>();
+            var remoteWorkSettings = _services.GetRequiredService<RemoteWorkSettingsViewModel>();
+            remoteWorkSettings.EnabledChanged += SyncRemoteWork;
+            settings.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName != nameof(SettingsViewModel.IsLoggedIn)) return;
+                remoteWork.Phones.AccountChanged();
+                SyncRemoteWork();
+                OfferRemoteWork();
+            };
+            // A code is typed at this desk, so its result shows on the settings page.
+            // Account pairing happens from the phone alone; say so here.
+            remoteWork.Paired += (device, viaAccount) =>
+            {
+                if (!viaAccount) return;
+                Dispatcher.UIThread.Post(() => notifications.Notify(new AppNotification
+                {
+                    Key = "remote-pair",
+                    Kind = NotifyKind.Info,
+                    Title = "新手机已配对",
+                    Body = $"「{device}」可查看和控制本机对话",
+                    ActionText = "管理",
+                    Action = () => window.OpenAgentSettings(),
+                    Sticky = true
+                }));
+            };
+            SyncRemoteWork();
+            OfferRemoteWork();
+
+            void SyncRemoteWork()
+            {
+                if (remoteWorkSettings.IsEnabled && settings.IsLoggedIn) remoteWork.Start();
+                else _ = remoteWork.StopAsync();
+            }
+
+            // Signed in but never switched on: say once that the phone can pick these up.
+            void OfferRemoteWork()
+            {
+                if (!settings.IsLoggedIn || !settings.ShowAccountFeatures || remoteWorkSettings.IsEnabled) return;
+                if (!remoteWorkSettings.TryClaimHint()) return;
+                Dispatcher.UIThread.Post(() => notifications.Notify(new AppNotification
+                {
+                    Key = "remote-hint",
+                    Kind = NotifyKind.Info,
+                    Title = "在手机上继续对话",
+                    Body = "开启远程控制后，用同一账号登录的手机可以继续本机的 Work 和 BYOK 对话。",
+                    ActionText = "去开启",
+                    Action = () => window.OpenAgentSettings(),
+                    Sticky = true
+                }));
             }
 
             // Tray close behavior may hide the main window, so shutdown stays
@@ -270,10 +326,12 @@ public partial class App : Application
             desktop.ShutdownRequested += (_, _) =>
             {
                 window.PropertyChanged -= OnMainWindowPropertyChanged;
+                main.Composer.SaveInProgressMessages();
                 _backgroundCheck?.Dispose();
                 cloudSync.StopPeriodicSync();
                 _notificationRouter?.Dispose();
                 StopAgentRelayAsync().GetAwaiter().GetResult();
+                remoteWork.StopAsync().GetAwaiter().GetResult();
                 _tray?.Dispose();
                 var services = _services;
                 _services = null;

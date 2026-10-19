@@ -58,9 +58,12 @@ public sealed class PiWorkLlmShim : IDisposable
         GenerationOptions? Generation = null,
         Action<string>? PromptPrepared = null,
         Action<System.Text.Json.Nodes.JsonObject>? AdaptBody = null,
-        Action<HttpResponseMessage>? ResponseReceived = null);
+        Action<HttpResponseMessage>? ResponseReceived = null,
+        string? ModelId = null);
 
-    public sealed record GenerationOptions(string Api, double? Temperature, double? TopP, int? MaxTokens);
+    public sealed record GenerationOptions(
+        string Api, double? Temperature, double? TopP, int? MaxTokens,
+        string? ReasoningEffort = null, bool? UseThinking = null);
 
     /// <summary>Thrown by a <see cref="ForwardTarget.TokenProvider"/> that has no
     /// credential to give — signed out, or a session that has lapsed. The message
@@ -76,13 +79,9 @@ public sealed class PiWorkLlmShim : IDisposable
         /// path we must not second-guess.</summary>
         Fixed,
 
-        /// <summary><c>Endpoint</c> is a base; whatever Pi appended after the shim's
-        /// own prefix is carried over, query string included. Required by Google's
-        /// generative-language API, which puts the model id and the operation in the
-        /// path (<c>/models/{id}:streamGenerateContent</c>) and selects the stream
-        /// framing with <c>?alt=sse</c> — dropping the query yields a body Pi cannot
-        /// parse ("Incomplete JSON segment at the end").</summary>
-        AppendInboundSuffix,
+        /// <summary><c>Endpoint</c> is a Gemini URL template. The model from Pi's
+        /// request replaces <c>{model}</c>; its query string carries <c>alt=sse</c>.</summary>
+        GeminiModelTemplate,
     }
 
     public enum AuthStyle
@@ -129,8 +128,8 @@ public sealed class PiWorkLlmShim : IDisposable
     private readonly ConcurrentDictionary<string, ForwardTarget> _targets = new(StringComparer.Ordinal);
 
     /// <summary>Path prefix the sidecar's client sees. Anything after it is the
-    /// client's own construction, which <see cref="TargetPathMode.AppendInboundSuffix"/>
-    /// carries through to the real endpoint.</summary>
+    /// client's own construction, which <see cref="TargetPathMode.GeminiModelTemplate"/>
+    /// uses to resolve the real model endpoint.</summary>
     private const string BasePath = "/v1";
 
     /// <summary>Base URL to hand Pi (it appends <c>/chat/completions</c> and friends).</summary>
@@ -199,7 +198,7 @@ public sealed class PiWorkLlmShim : IDisposable
 
             using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
             var body = await reader.ReadToEndAsync().ConfigureAwait(false);
-            var preparedBody = RewriteBody(body, target.ExtraBody, target.DropBodyKeys, target.Generation);
+            var preparedBody = RewriteBody(body, target);
             if (target.AdaptBody is { } adapt
                 && System.Text.Json.Nodes.JsonNode.Parse(preparedBody) is System.Text.Json.Nodes.JsonObject adapted)
             {
@@ -384,8 +383,8 @@ public sealed class PiWorkLlmShim : IDisposable
     ///
     /// In <see cref="TargetPathMode.Fixed"/> the path is only a sanity check — the
     /// destination is the configured endpoint. In
-    /// <see cref="TargetPathMode.AppendInboundSuffix"/> the path <em>is</em> the
-    /// request, so it is carried over whole.
+    /// <see cref="TargetPathMode.GeminiModelTemplate"/> the incoming model is
+    /// substituted into the configured URL template.
     /// </summary>
     private static string? ResolveUpstreamUrl(ForwardTarget target, Uri? requestUrl)
     {
@@ -403,10 +402,17 @@ public sealed class PiWorkLlmShim : IDisposable
         var suffix = path.StartsWith(BasePath + "/", StringComparison.Ordinal)
             ? path[BasePath.Length..]
             : path;
-        if (suffix.Length == 0 || suffix == "/") return null;
+        const string modelPrefix = "/models/";
+        const string operation = ":streamGenerateContent";
+        if (!suffix.StartsWith(modelPrefix, StringComparison.Ordinal)
+            || !suffix.EndsWith(operation, StringComparison.Ordinal)) return null;
 
-        var query = requestUrl?.Query ?? "";
-        return target.Endpoint.TrimEnd('/') + suffix + query;
+        var model = suffix[modelPrefix.Length..^operation.Length];
+        var endpoint = target.Endpoint.Replace("{model}", model, StringComparison.Ordinal);
+        var query = requestUrl!.Query;
+        return query.Length == 0
+            ? endpoint
+            : endpoint + (endpoint.Contains('?') ? "&" : "?") + query.TrimStart('?');
     }
 
     /// <summary>
@@ -426,23 +432,24 @@ public sealed class PiWorkLlmShim : IDisposable
     /// are — the shim is what hides the real provider from it — and the failure is
     /// a 400 on the whole request rather than a degraded answer.
     /// </summary>
-    private string RewriteBody(
-        string body,
-        IReadOnlyDictionary<string, JsonElement>? extra,
-        IReadOnlyList<string>? dropKeys,
-        GenerationOptions? generation)
+    private string RewriteBody(string body, ForwardTarget target)
     {
+        var extra = target.ExtraBody;
+        var dropKeys = target.DropBodyKeys;
+        var generation = target.Generation;
+        var nativeGoogle = target.PathMode == TargetPathMode.GeminiModelTemplate;
+        var google = GeminiRequestParams.Applies(target.ModelId, nativeGoogle, target.Endpoint);
         var hasExtra = extra is { Count: > 0 };
         var hasDrops = dropKeys is { Count: > 0 };
         var hasGeneration = generation is not null
             && (generation.Temperature is not null || generation.TopP is not null || generation.MaxTokens is not null);
         var uncap = generation is { MaxTokens: null } && generation.Api != "anthropic-messages";
-        if (!hasExtra && !hasDrops && !hasGeneration && !uncap) return body;
+        if (!hasExtra && !hasDrops && !hasGeneration && !uncap && !google) return body;
         var parsed = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body)
             ?? throw new JsonException("Pi 请求体为空。");
         var merged = parsed.ToDictionary(kv => kv.Key, kv => (object?)kv.Value, StringComparer.Ordinal);
         if (uncap) RemoveOutputCap(merged, generation!.Api);
-        if (extra is not null
+        if (!google && extra is not null
             && (extra.ContainsKey("thinking_budget")
                 || (extra.TryGetValue("enable_thinking", out var enabled)
                     && enabled.ValueKind == JsonValueKind.False)))
@@ -451,6 +458,8 @@ public sealed class PiWorkLlmShim : IDisposable
         if (hasGeneration) ApplyGenerationOptions(merged, generation!);
         if (hasDrops)
             foreach (var key in dropKeys!) merged.Remove(key);
+        if (google)
+            GeminiRequestParams.Apply(merged, target.ModelId!, nativeGoogle, generation?.ReasoningEffort, generation?.UseThinking);
         return JsonSerializer.Serialize(merged, RelaxedJson);
     }
 

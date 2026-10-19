@@ -81,8 +81,13 @@
       <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right">
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,6,0">
           <Button Name="PART_AgentStatus" Classes="headericon"
-                   ToolTip.Tip="Agent 状态">
-            <TextBlock Classes="icon" Text="&#xE756;" />
+                   ToolTip.Tip="远程控制">
+            <Panel>
+              <TextBlock Classes="icon" Text="&#xE8EA;" />
+              <Ellipse Name="PART_RemoteDot" Width="6" Height="6" IsVisible="False"
+                       Fill="{DynamicResource Brush.Success}" IsHitTestVisible="False"
+                       HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-2,-2,0" />
+            </Panel>
           </Button>
           <Button Name="PART_Settings" Classes="headericon" ToolTip.Tip="设置">
             <Panel>

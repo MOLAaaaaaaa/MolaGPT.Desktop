@@ -659,16 +659,17 @@ public sealed class ArtifactCanvasBody : UserControl
     {
         public OwnedBitmapView(Bitmap bitmap, bool paper)
         {
-            Control image = new Image
+            var image = new Image
             {
                 Source = bitmap,
                 Stretch = Stretch.Uniform,
                 StretchDirection = StretchDirection.DownOnly,
                 HorizontalAlignment = HorizontalAlignment.Center,
             };
+            Control content = image;
             if (paper)
             {
-                image = new Border
+                content = new Border
                 {
                     Background = Brushes.White,
                     Padding = new Thickness(16),
@@ -679,11 +680,15 @@ public sealed class ArtifactCanvasBody : UserControl
 
             Content = new ScrollViewer
             {
-                Content = new Border { Padding = new Thickness(12), Child = image },
+                Content = new Border { Padding = new Thickness(12), Child = content },
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             };
-            DetachedFromVisualTree += (_, _) => bitmap.Dispose();
+            DetachedFromVisualTree += (_, _) =>
+            {
+                image.Source = null;
+                bitmap.Dispose();
+            };
         }
     }
 }

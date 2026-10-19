@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using CommunityToolkit.Mvvm.ComponentModel;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Models;
 using MolaGPT.Presentation.Artifacts;
 using MolaGPT.Storage;
@@ -256,6 +257,7 @@ public sealed partial class ChatViewModel : ObservableObject
     /// (see <see cref="LoadOlderMessages"/>).
     /// </summary>
     private readonly List<PreparedMessage> _pendingOlderMessages = [];
+    private readonly string? _piSessionRoot;
 
     /// <summary>True while part of this conversation's history is still parked
     /// in <see cref="_pendingOlderMessages"/>. Drives the view's scroll-up
@@ -268,6 +270,15 @@ public sealed partial class ChatViewModel : ObservableObject
     /// reflects the change without a full SQLite reload.
     /// </summary>
     public event EventHandler<ConversationTouchedEventArgs>? ConversationTouched;
+
+    /// <summary>
+    /// The user just sent something by hand. The transcript jumps to the newest
+    /// message even if it was scrolled up; turns that start on their own (a queued
+    /// message going out, a background wake) leave the reading position alone.
+    /// </summary>
+    public event Action? ScrollToLatestRequested;
+
+    public void RequestScrollToLatest() => ScrollToLatestRequested?.Invoke();
 
     public ChatViewModel(ProviderRegistry providers)
         : this(providers, null, null, null) { }
@@ -290,13 +301,15 @@ public sealed partial class ChatViewModel : ObservableObject
         MessageRepository? messageRepo,
         ConversationRepository? conversationRepo,
         PersonaListViewModel? personas,
-        SettingsRepository? settingsRepo)
+        SettingsRepository? settingsRepo,
+        string? piSessionRoot = null)
     {
         _providers = providers;
         _messageRepo = messageRepo;
         _conversationRepo = conversationRepo;
         _personas = personas;
         _settingsRepo = settingsRepo;
+        _piSessionRoot = piSessionRoot;
         ArtifactWorkspace = new ArtifactWorkspace(() => _messages);
         ArtifactWorkspace.Changed += (_, _) =>
         {
@@ -593,13 +606,17 @@ public sealed partial class ChatViewModel : ObservableObject
             if (_messageRepo is not null)
             {
                 var readSw = System.Diagnostics.Stopwatch.StartNew();
-                var snapshot = await Task.Run(() =>
+                Task pendingWrites;
+                lock (_messageWriteGate) pendingWrites = _messageWriteTask;
+                var snapshot = await Task.Run(async () =>
                 {
+                    await pendingWrites.ConfigureAwait(false);
+                    var conversation = _conversationRepo?.Get(conversationId);
+                    RecoverInterruptedReply(conversationId, conversation);
                     var activeRows = _messageRepo.List(conversationId);
                     var allRows = _messageRepo.ListAll(conversationId);
                     var messages = PrepareMessageSnapshot(activeRows, conversationId);
                     ApplyBranchMetadata(messages, allRows);
-                    var conversation = _conversationRepo?.Get(conversationId);
                     // allRows is already in hand for the branch metadata, and it is
                     // exactly the set the bill is owed on — abandoned branches
                     // included — so the total rides along instead of re-querying.
@@ -687,6 +704,37 @@ public sealed partial class ChatViewModel : ObservableObject
         }
     }
 
+    private void RecoverInterruptedReply(string conversationId, ConversationRow? conversation)
+    {
+        if (_piSessionRoot is null || _messageRepo is null || conversation is null
+            || conversation.ProviderId == MolaGptProviderIds.Proxy) return;
+        var last = _messageRepo.List(conversationId).LastOrDefault();
+        if (last is null || last.Role != ChatMessage.RoleUser) return;
+        var recovered = PiSessionRecovery.Recover(_piSessionRoot, conversationId, last.CreatedAt, last.Content);
+        if (recovered.Chunks.Count == 0) return;
+
+        using var message = new MessageViewModel(ChatMessage.RoleAssistant, string.Empty,
+            DateTimeOffset.FromUnixTimeMilliseconds(last.CreatedAt + 1))
+        {
+            ParentMessageId = last.Id,
+            ModelLabel = conversation.ModelId,
+            ProviderLabel = _providers.GetById(conversation.ProviderId ?? string.Empty)?.DisplayName,
+            PersonaId = conversation.PersonaId,
+            WasStopped = recovered.HasUnfinishedTurn
+        };
+        foreach (var chunk in recovered.Chunks)
+        {
+            if (chunk.DeltaThinking is { } thinking) message.AppendThinking(thinking);
+            if (chunk.DeltaText is { } text) message.AppendDelta(text);
+            if (chunk.Tool is { } tool) message.ApplyToolDelta(tool);
+            if (chunk.FinishReason is { } finish) message.FinishReason = finish;
+        }
+        message.StopThinking();
+        _messageRepo.Insert(new MessageRow(Guid.NewGuid().ToString("N"), conversationId,
+            ChatMessage.RoleAssistant, message.FullContent, BuildMessageMeta(message),
+            message.Timestamp.ToUnixTimeMilliseconds(), last.Id));
+    }
+
     private static List<PreparedMessage> PrepareMessageSnapshot(IReadOnlyList<MessageRow> rows, string conversationId)
     {
         var prepared = new List<PreparedMessage>(rows.Count);
@@ -768,14 +816,21 @@ public sealed partial class ChatViewModel : ObservableObject
                     toolCalls = ParseToolCalls(doc.RootElement);
                     thinkingSegments = ParseThinkingSegments(doc.RootElement);
                     (toolCalls, thinkingSegments) = InferMissingTimelineIndexes(toolCalls, thinkingSegments);
+                    wasStopped = doc.RootElement.TryGetProperty("stopped", out var st)
+                                 && st.ValueKind == JsonValueKind.True;
+                    if (doc.RootElement.TryGetProperty("streaming", out var streaming)
+                        && streaming.ValueKind == JsonValueKind.True)
+                    {
+                        wasStopped = true;
+                        toolCalls = toolCalls?.Select(tool => tool.Status is "preparing" or "running"
+                            ? tool with { Status = "cancelled" } : tool).ToArray();
+                    }
                     retryAttempts = RestoreCurrentRetryAttemptState(
                         retryAttempts,
                         retryCurrent,
                         thinkingText,
                         thinkingSegments,
                         toolCalls);
-                    wasStopped = doc.RootElement.TryGetProperty("stopped", out var st)
-                                 && st.ValueKind == JsonValueKind.True;
                     finishReason = ReadString(doc.RootElement, "finish_reason");
                     contextTokens = ReadMetaInt(doc.RootElement, "context_tokens");
                     contextWindow = ReadMetaInt(doc.RootElement, "context_window");
@@ -1015,6 +1070,7 @@ public sealed partial class ChatViewModel : ObservableObject
         vm.StartPending(IsRoutesModel(ActiveModel));
         vm.VersionSelected += OnMessageVersionSelected;
         Messages.Add(vm);
+        PersistMessage(vm);
         return vm;
     }
 
@@ -1087,10 +1143,8 @@ public sealed partial class ChatViewModel : ObservableObject
     /// <summary>
     /// Finish an assistant message that is already in the store — a retry.
     ///
-    /// The difference from <see cref="FinalizeAssistantMessage(string, MessageViewModel)"/>
-    /// is the persistence verb: that one inserts, which for a regenerated answer
-    /// would leave two rows for one bubble. Touching the conversation still matters
-    /// though — cloud sync picks work up by <c>updated_at</c>, and updating a
+    /// Touching the conversation still matters: cloud sync picks work up by
+    /// <c>updated_at</c>, and updating a
     /// message row alone does not move it, so without this the server keeps serving
     /// the attempt the user threw away.
     /// </summary>
@@ -1134,6 +1188,11 @@ public sealed partial class ChatViewModel : ObservableObject
     private void PersistMessage(MessageViewModel vm, string conversationId)
     {
         if (_messageRepo is null || string.IsNullOrEmpty(conversationId)) return;
+        if (!string.IsNullOrWhiteSpace(vm.MessageId))
+        {
+            UpdatePersistedMessage(vm, conversationId);
+            return;
+        }
         SyncMessageTaskStates(vm, conversationId);
         var meta = BuildMessageMeta(vm);
         var id = Guid.NewGuid().ToString("N");
@@ -1159,7 +1218,22 @@ public sealed partial class ChatViewModel : ObservableObject
         if (_messageRepo is null || string.IsNullOrWhiteSpace(vm.MessageId)) return;
         var targetConversation = conversationId ?? ConversationId;
         if (!string.IsNullOrEmpty(targetConversation)) SyncMessageTaskStates(vm, targetConversation);
-        _messageRepo.Update(vm.MessageId, vm.FullContent, BuildMessageMeta(vm));
+        QueueMessageWrite(vm.MessageId, CapturePersistenceSnapshot(vm)).GetAwaiter().GetResult();
+    }
+
+    public void SaveInProgressMessage(string conversationId, MessageViewModel vm)
+        => SaveInProgressMessageAsync(conversationId, vm).GetAwaiter().GetResult();
+
+    public Task SaveInProgressMessageAsync(string conversationId, MessageViewModel vm)
+    {
+        if (_messageRepo is null || string.IsNullOrEmpty(conversationId)) return Task.CompletedTask;
+        if (string.IsNullOrWhiteSpace(vm.MessageId))
+        {
+            PersistMessage(vm, conversationId);
+            return Task.CompletedTask;
+        }
+        SyncMessageTaskStates(vm, conversationId);
+        return QueueMessageWrite(vm.MessageId, CapturePersistenceSnapshot(vm));
     }
 
     /// <summary>
@@ -1172,9 +1246,8 @@ public sealed partial class ChatViewModel : ObservableObject
     /// last turn as if nothing had been cut.
     ///
     /// It lands on the newest assistant message, the last thing the model wrote before
-    /// its history was summarized. A turn still streaming has no row yet; leaving the
-    /// property set is enough, because <see cref="FinalizeAssistantMessage(MessageViewModel)"/>
-    /// writes the marker along with everything else.
+    /// its history was summarized. The marker is saved with the message, including
+    /// a turn that is still streaming.
     /// </summary>
     public void NoteManualCompaction(ContextGaugeViewModel.CompactionSizes sizes)
     {
@@ -1197,138 +1270,7 @@ public sealed partial class ChatViewModel : ObservableObject
     }
 
     private static string BuildMessageMeta(MessageViewModel vm)
-    {
-        var meta = new JsonObject();
-        if (!string.IsNullOrWhiteSpace(vm.ModelLabel)) meta["model"] = vm.ModelLabel;
-        if (!string.IsNullOrWhiteSpace(vm.ProviderLabel)) meta["provider"] = vm.ProviderLabel;
-        if (!string.IsNullOrWhiteSpace(vm.Thinking)) meta["thinking"] = vm.Thinking;
-        if (!string.IsNullOrEmpty(vm.PersonaId)) meta["persona_id"] = vm.PersonaId;
-        if (!string.IsNullOrEmpty(vm.PersonaName)) meta["persona_name"] = vm.PersonaName;
-        if (vm.WasStopped) meta["stopped"] = true;
-        if (vm.FinishReason is { Length: > 0 } finish && finish != "stop") meta["finish_reason"] = finish;
-        if (vm.Usage is not null)
-        {
-            meta["response_stats"] = BuildUsageJson(vm.Usage);
-        }
-        if (BuildTurnTimingJson(vm.FirstTokenSeconds, vm.GenerationSeconds) is { } timing)
-            meta["turn_timing"] = timing;
-        // Separate from response_stats: that is the turn's cost, this is how full
-        // the context was left. Persisted so reopening a conversation restores the
-        // gauge instead of blanking it until the next turn.
-        if (vm.ContextTokens > 0) meta["context_tokens"] = vm.ContextTokens;
-        if (vm.ContextWindow > 0) meta["context_window"] = vm.ContextWindow;
-        if (vm.CompactionTokensBefore > 0) meta["compaction_tokens_before"] = vm.CompactionTokensBefore;
-        if (vm.CompactionTokensAfter > 0) meta["compaction_tokens_after"] = vm.CompactionTokensAfter;
-        if (!string.IsNullOrWhiteSpace(vm.CompactionReason)) meta["compaction_reason"] = vm.CompactionReason;
-        if (vm.Sources is { Count: > 0 })
-        {
-            meta["sources"] = new JsonArray(vm.Sources
-                .Select(s => new JsonObject
-                {
-                    ["id"] = s.Id,
-                    ["title"] = s.Title,
-                    ["url"] = s.Url
-                })
-                .Cast<JsonNode?>()
-                .ToArray());
-        }
-        if (vm.ArtifactRefs is { Count: > 0 })
-        {
-            meta["artifact_refs"] = new JsonArray(vm.ArtifactRefs
-                .Select(r => (JsonNode)new JsonObject
-                {
-                    ["title"] = r.Title,
-                    ["kind"] = r.Badge,
-                    ["version"] = r.Version,
-                    ["versions"] = r.VersionCount
-                })
-                .ToArray());
-        }
-        if (vm.Attachments is { Count: > 0 })
-        {
-            meta["attachments"] = new JsonArray(vm.Attachments
-                .Select(a =>
-                {
-                    var obj = new JsonObject
-                    {
-                        ["filename"] = a.FileName,
-                        ["label"] = a.Label
-                    };
-                    if (!string.IsNullOrWhiteSpace(a.ThumbnailUrl))
-                        obj["thumbnailUrl"] = a.ThumbnailUrl;
-                    if (!string.IsNullOrWhiteSpace(a.LocalName))
-                        obj["localName"] = a.LocalName;
-                    if (!string.IsNullOrWhiteSpace(a.MimeType))
-                        obj["mime"] = a.MimeType;
-                    if (a.Kind is { } kind)
-                        obj["kind"] = kind == AttachmentKind.Image ? "image" : "file";
-                    if (!string.IsNullOrWhiteSpace(a.WorkspacePath))
-                        obj["workspacePath"] = a.WorkspacePath;
-                    if (!string.IsNullOrWhiteSpace(a.ExtractedTextPath))
-                        obj["textPath"] = a.ExtractedTextPath;
-                    return obj;
-                })
-                .Cast<JsonNode?>()
-                .ToArray());
-        }
-        if (!string.IsNullOrWhiteSpace(vm.ContentPartsJson))
-        {
-            try
-            {
-                if (JsonNode.Parse(vm.ContentPartsJson!) is JsonNode parts)
-                    meta["content_parts"] = parts;
-            }
-            catch (JsonException) { }
-        }
-        if (vm.RetryAttempts is { Count: > 1 })
-        {
-            meta["retry"] = new JsonObject
-            {
-                ["current"] = vm.RetryCurrentIndex,
-                ["attempts"] = new JsonArray(vm.RetryAttempts
-                    .Select(BuildRetryAttemptJson)
-                    .Cast<JsonNode?>()
-                    .ToArray())
-            };
-        }
-        if (vm.ToolCalls.Count > 0)
-        {
-            meta["tool_calls"] = new JsonArray(vm.ToolCalls
-                .Select(t => new JsonObject
-                {
-                    ["id"] = t.Id,
-                    ["name"] = t.Name,
-                    ["status"] = t.Status,
-                    ["label"] = t.Label,
-                    ["summary"] = t.Summary,
-                    ["detail"] = t.Detail,
-                    ["arguments_json"] = t.ArgumentsJson,
-                    ["result_preview_json"] = t.ResultPreviewJson,
-                    ["provider"] = t.Provider,
-                    ["content_offset"] = t.ContentOffset,
-                    ["timeline_index"] = t.TimelineIndex,
-                    ["background_task_id"] = t.BackgroundTaskId,
-                    ["task_state"] = t.TaskState
-                })
-                .Cast<JsonNode?>()
-                .ToArray());
-        }
-        if (vm.ThinkingSegments.Count > 0)
-        {
-            meta["thinking_segments"] = new JsonArray(vm.ThinkingSegments
-                .Where(t => !string.IsNullOrWhiteSpace(t.Source))
-                .Select(t => new JsonObject
-                {
-                    ["source"] = t.Source,
-                    ["content_offset"] = t.ContentOffset,
-                    ["timeline_index"] = t.TimelineIndex,
-                    ["elapsed_seconds"] = t.ElapsedSeconds
-                })
-                .Cast<JsonNode?>()
-                .ToArray());
-        }
-        return meta.ToJsonString();
-    }
+        => BuildMessageMeta(CapturePersistenceSnapshot(vm));
 
     private static JsonObject BuildUsageJson(Usage usage)
     {

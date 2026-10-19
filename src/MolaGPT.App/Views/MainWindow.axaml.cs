@@ -62,6 +62,25 @@ public partial class MainWindow : MolaWindow
     private readonly MemoryPageViewModel _memoryPage;
     private readonly PersonalDataService _personalData;
 
+    /// <summary>Set by the app once remote control exists; shown in 设置 → 远程控制.</summary>
+    public MolaGPT.Desktop.Services.Remote.RemoteWorkSettingsViewModel? RemoteWork
+    {
+        get => _remoteWork;
+        set
+        {
+            _remoteWork = value;
+            if (value is null) return;
+            PART_TitleBar.SetRemotePhoneConnected(value.PhoneConnected);
+            value.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(value.PhoneConnected))
+                    PART_TitleBar.SetRemotePhoneConnected(value.PhoneConnected);
+            };
+        }
+    }
+
+    private MolaGPT.Desktop.Services.Remote.RemoteWorkSettingsViewModel? _remoteWork;
+
     private bool _sidebarCollapsed;
     private SettingsWindow? _settingsWindow;
     private AboutWindow? _aboutWindow;
@@ -1088,6 +1107,7 @@ public partial class MainWindow : MolaWindow
             () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory,
             ActivateAgentRuntimeAsync, DeactivateAgentRuntime, _personalization, _memoryPage, _proxy,
             _pythonSetup, _personalData);
+        if (RemoteWork is { } remoteWork) window.AttachRemoteWork(remoteWork);
         window.AccountRequested += async (_, _) =>
         {
             if (await OpenLoginAsync(window)) window.RefreshAccountUi();
