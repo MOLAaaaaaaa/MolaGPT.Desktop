@@ -26,7 +26,11 @@ public sealed class ArtifactCanvasBodyHost : UserControl
     {
         Content = _body;
         _body.FixErrorRequested += (_, message) => _main?.ReportArtifactError(message);
+        _body.AskRequested += (_, image) => AskRequested?.Invoke(this, image);
     }
+
+    /// <summary>「附图提问」 on the canvas; the window puts it in the composer.</summary>
+    public event EventHandler<CanvasImage>? AskRequested;
 
     public MainViewModel? Main
     {

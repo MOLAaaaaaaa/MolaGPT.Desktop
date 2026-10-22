@@ -182,6 +182,9 @@
                 <ListBoxItem Content="对话" Tag="PAGE_Chat" />
                 <ListBoxItem Content="任务与子 Agent" Tag="PAGE_Tasks" />
                 <ListBoxItem Content="通知与托盘" Tag="PAGE_System" />
+                <ListBoxItem Content="网络代理" Tag="PAGE_Network" />
+                <ListBoxItem Classes="navgroup" IsEnabled="False" Content="隐私和安全" />
+                <ListBoxItem Name="PART_ApprovalNav" Content="权限与审批" Tag="PAGE_Approval" />
                 <ListBoxItem Content="个人数据管理" Tag="PAGE_PersonalData" />
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="个性化" />
                 <ListBoxItem Name="PART_PersonasNav" Content="角色" Tag="PAGE_Personas" />
@@ -205,8 +208,6 @@
                 <ListBoxItem Name="PART_BrowserNav" Content="浏览器使用" Tag="PAGE_Browser" />
                 <ListBoxItem Content="MCP 服务器" Tag="PAGE_Mcp" />
                 <ListBoxItem Name="PART_SkillsNav" Content="技能" Tag="PAGE_Skills" />
-                <ListBoxItem Classes="navgroup" IsEnabled="False" Content="安全" />
-                <ListBoxItem Content="权限与审批" Tag="PAGE_Approval" />
               </ListBox>
               </Panel>
             </ScrollViewer>
@@ -769,16 +770,112 @@
                 </Border>
               </StackPanel>
 
+              <StackPanel Name="PAGE_Network" IsVisible="False" x:DataType="vm:NetworkProxyViewModel">
+                <TextBlock Classes="pagetitle" Text="网络代理" />
+                <TextBlock Classes="pagesubtitle" Text="模型、搜索与下载的连接设置。" />
+
+                <Border Classes="settingscard">
+                  <StackPanel>
+                    <Grid Classes="settingrow" ColumnDefinitions="*,220">
+                      <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
+                        <TextBlock Classes="rowtitle" Text="连接方式" />
+                        <TextBlock Classes="hint" Text="{Binding ModeHint}" TextWrapping="Wrap" />
+                      </StackPanel>
+                      <ComboBox Grid.Column="1" Classes="settingsinput"
+                                HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                SelectedIndex="{Binding ModeIndex, Mode=TwoWay}">
+                        <ComboBoxItem Content="跟随系统" />
+                        <ComboBoxItem Content="手动设置" />
+                        <ComboBoxItem Content="直接连接" />
+                      </ComboBox>
+                    </Grid>
+                    <StackPanel IsVisible="{Binding IsManual}">
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,220">
+                        <TextBlock Grid.Column="0" Classes="rowtitle" Text="协议" VerticalAlignment="Center" />
+                        <ComboBox Grid.Column="1" Classes="settingsinput"
+                                  HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                  SelectedIndex="{Binding SchemeIndex, Mode=TwoWay}">
+                          <ComboBoxItem Content="HTTP" />
+                          <ComboBoxItem Content="SOCKS5" />
+                        </ComboBox>
+                      </Grid>
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,220">
+                        <TextBlock Grid.Column="0" Classes="rowtitle" Text="代理服务器" VerticalAlignment="Center" />
+                        <TextBox Grid.Column="1" Classes="settingsinput"
+                                 Text="{Binding Host, Mode=TwoWay}" PlaceholderText="127.0.0.1" />
+                      </Grid>
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,220">
+                        <TextBlock Grid.Column="0" Classes="rowtitle" Text="端口" VerticalAlignment="Center" />
+                        <NumericUpDown Grid.Column="1" Classes="settingsinput"
+                                       Value="{Binding Port, Mode=TwoWay}"
+                                       Minimum="1" Maximum="65535" Increment="1" FormatString="0"
+                                       ShowButtonSpinner="False" />
+                      </Grid>
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,220">
+                        <TextBlock Grid.Column="0" Classes="rowtitle" Text="用户名" VerticalAlignment="Center" />
+                        <TextBox Grid.Column="1" Classes="settingsinput"
+                                 Text="{Binding Username, Mode=TwoWay}" PlaceholderText="可选" />
+                      </Grid>
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,220">
+                        <TextBlock Grid.Column="0" Classes="rowtitle" Text="密码" VerticalAlignment="Center" />
+                        <TextBox Grid.Column="1" Classes="settingsinput"
+                                 Text="{Binding Password, Mode=TwoWay}" PasswordChar="•" PlaceholderText="可选" />
+                      </Grid>
+                      <Border Classes="divider" />
+                      <StackPanel Classes="fieldrow">
+                        <TextBlock Classes="label" Text="直连地址" />
+                        <TextBox Classes="settingsinput" Text="{Binding Bypass, Mode=TwoWay}"
+                                 PlaceholderText="example.com, 192.168.0.0/16" />
+                        <TextBlock Classes="hint" TextWrapping="Wrap"
+                                   Text="支持域名、通配符与网段，逗号分隔。" />
+                      </StackPanel>
+                      <TextBlock Classes="hint" Margin="20,0,20,12" TextWrapping="Wrap"
+                                 Foreground="{DynamicResource Brush.Warning.Foreground}"
+                                 IsVisible="{Binding HasProblem}" Text="{Binding Problem}" />
+                    </StackPanel>
+                    <StackPanel IsVisible="{Binding ShowOfficial}">
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                          <TextBlock Classes="rowtitle" Text="官方服务代理" />
+                          <TextBlock Classes="hint" TextWrapping="Wrap"
+                                     Text="登录、官方模型、云同步与远程控制。" />
+                        </StackPanel>
+                        <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                      IsChecked="{Binding ApplyToOfficial, Mode=TwoWay}"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+                    </StackPanel>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <TextBlock Grid.Column="0" Classes="hint" Margin="0,0,16,0"
+                                 VerticalAlignment="Center" TextWrapping="Wrap"
+                                 Text="{Binding TestStatus}" />
+                      <Button Grid.Column="1" Classes="outline" Padding="14,7"
+                              Content="{Binding TestButtonText}"
+                              Command="{Binding TestConnectionCommand}" />
+                    </Grid>
+                  </StackPanel>
+                </Border>
+                <TextBlock Classes="hint" Margin="4,10,4,0" TextWrapping="Wrap"
+                           Text="MCP 代理设置在重新连接后生效。" />
+              </StackPanel>
+
               <StackPanel Name="PAGE_PersonalData" IsVisible="False">
                 <TextBlock Classes="pagetitle" Text="个人数据管理" />
-                <TextBlock Classes="pagesubtitle" Text="保存聊天记录，或将模型配置迁移到另一环境。" />
+                <TextBlock Classes="pagesubtitle" Text="备份聊天记录，导入或导出模型配置。" />
 
                 <TextBlock Classes="section" Text="聊天记录" Margin="2,4,2,8" />
                 <Border Classes="settingscard">
                   <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                     <StackPanel Margin="0,0,20,0">
                       <TextBlock Classes="rowtitle" Text="导出聊天记录" />
-                      <TextBlock Classes="hint" Text="将所有本地对话、分支和消息导出并保存为一个 JSON 文件。" />
+                      <TextBlock Classes="hint" Text="导出全部本地对话、分支和消息，保存为 JSON 文件。" />
                     </StackPanel>
                     <Button Grid.Column="1" Classes="outline" Content="导出…"
                             Click="OnExportConversations" VerticalAlignment="Center" />
@@ -2036,7 +2133,7 @@
                 <Border Classes="settingscard" IsEnabled="{Binding PythonToolEnabled}">
                   <StackPanel Classes="fieldrow" Spacing="12">
                     <TextBlock Classes="hint" TextWrapping="Wrap"
-                               Text="这些规则叠加在审批之上：仅用「额外允许导入」内的模块且无风险时自动放行；命中「禁止导入」或「禁止路径前缀」时直接拦截（完全权限模式下也拦截）。每行或逗号分隔一项。" />
+                               Text="仅使用额外允许的模块且无风险时自动允许。禁止导入和禁止路径始终生效。每行或逗号分隔一项。" />
                     <Grid ColumnDefinitions="*,16,*">
                       <StackPanel Grid.Column="0">
                         <TextBlock Classes="label" Text="额外允许导入" />
@@ -2147,17 +2244,15 @@
                 </Border>
 
                 <TextBlock Classes="section" Text="权限" />
-                <Border Classes="settingscard" IsEnabled="{Binding BrowserToolEnabled}">
-                  <StackPanel>
-                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
-                      <TextBlock Classes="rowtitle" Text="操作审批" VerticalAlignment="Center" />
-                      <ComboBox Grid.Column="1" Name="PART_BrowserPermission" Classes="settingsinput" />
-                    </Grid>
-                    <TextBlock Classes="hint" Margin="16,0,16,6" TextWrapping="Wrap"
-                               Text="打开页面、点击、填写等操作需审批，按网站记住；允许名单内的网站不再询问。" />
-                    <TextBlock Classes="hint" Margin="16,0,16,14" TextWrapping="Wrap"
-                               Text="下载、授权、支付等敏感操作每次都需审批，不受网站授权影响。" />
-                  </StackPanel>
+                <Border Classes="settingscard">
+                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                    <StackPanel Margin="0,0,20,0">
+                      <TextBlock Classes="rowtitle" Text="操作审批" />
+                      <TextBlock Classes="hint" Text="下载、授权、支付等敏感操作始终需要审批。" />
+                    </StackPanel>
+                    <Button Grid.Column="1" Name="PART_OpenApprovalSettings" Classes="outline"
+                            Content="设置审批" VerticalAlignment="Center" />
+                  </Grid>
                 </Border>
 
                 <TextBlock Classes="section" Text="网站名单" />
@@ -2229,42 +2324,21 @@
               <StackPanel Name="PAGE_Approval" IsVisible="False">
                 <TextBlock Classes="pagetitle" Text="权限与审批" />
                 <TextBlock Classes="pagesubtitle"
-                           Text="决定工具调用什么时候需要你确认。Python 的放行与拦截规则在「代码与文件」中，浏览器操作的审批在「浏览器使用」中。" />
+                           Text="管理工具调用权限、自动审批和长期授权。" />
 
-                <TextBlock Classes="section" Text="默认权限" Margin="2,4,2,8" />
+                <TextBlock Classes="section" Text="工具审批" Margin="2,4,2,8" />
                 <Border Classes="settingscard">
-                  <StackPanel Classes="fieldrow">
-                    <TextBlock Classes="label" Text="所有本地工具" />
-                    <ComboBox Name="PART_ToolPermission" Classes="settingsinput" />
-                    <TextBlock Classes="hint" Margin="0,8,0,0" TextWrapping="Wrap"
-                               Text="写入工具限制在本次对话的工作目录内；只读工具在工作目录内自动放行，读取目录以外的文件时逐次询问，可按文件夹或磁盘记住。完全权限可跳过普通写入审批，但破坏性操作和 Python 包安装仍需确认。" />
-                  </StackPanel>
-                </Border>
-
-                <TextBlock Classes="section" Text="按工具单独设置" />
-                <Border Name="PART_PerToolPermissions" Classes="settingscard">
                   <StackPanel>
-                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
-                      <TextBlock Classes="rowtitle" Text="图像生成" VerticalAlignment="Center" />
-                      <ComboBox Grid.Column="1" Name="PART_ImagePermission" Classes="settingsinput" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,180" ColumnSpacing="20">
+                      <StackPanel VerticalAlignment="Center">
+                        <TextBlock Classes="rowtitle" Text="默认权限" />
+                        <TextBlock Classes="hint" Text="按需审批时，工作目录内的只读操作自动允许，访问其他路径需授权。" />
+                      </StackPanel>
+                      <ComboBox Grid.Column="1" Name="PART_ToolPermission" Classes="settingsinput"
+                                VerticalAlignment="Center" AutomationProperties.Name="默认权限" />
                     </Grid>
-                    <Border Classes="divider" />
-                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
-                      <TextBlock Classes="rowtitle" Text="视觉理解" VerticalAlignment="Center" />
-                      <ComboBox Grid.Column="1" Name="PART_VisionPermission" Classes="settingsinput" />
-                    </Grid>
-                    <Border Classes="divider" />
-                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
-                      <TextBlock Classes="rowtitle" Text="MCP 工具" VerticalAlignment="Center" />
-                      <ComboBox Grid.Column="1" Name="PART_McpPermission" Classes="settingsinput" />
-                    </Grid>
-                    <Border Classes="divider" />
-                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
-                      <TextBlock Classes="rowtitle" Text="Python 执行" VerticalAlignment="Center" />
-                      <ComboBox Grid.Column="1" Name="PART_PythonPermission" Classes="settingsinput" />
-                    </Grid>
-                    <TextBlock Classes="hint" Margin="16,0,16,14" TextWrapping="Wrap"
-                               Text="完全权限跳过普通审批；破坏性操作除外；全局设为完全权限时此处设置不生效。" />
+                    <TextBlock Classes="hint" Margin="16,0,16,14"
+                               Text="自动允许跳过常规审批。破坏性操作、Python 包安装和浏览器敏感操作仍需审批。" />
                   </StackPanel>
                 </Border>
 
@@ -2273,67 +2347,119 @@
                   <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                        <TextBlock Classes="rowtitle" Text="自动审批 Python 执行" />
+                        <TextBlock Classes="rowtitle" Text="Python 自动审批" />
                         <TextBlock Classes="hint" TextWrapping="Wrap"
-                                   Text="需要确认的代码先由审批模型判断，未通过的仍由你确认。" />
+                                   Text="由所选模型审核待确认代码，未获批准时转为手动审批。" />
                       </StackPanel>
                       <ToggleButton Grid.Column="1" Classes="settingtoggle"
                                     IsChecked="{Binding PythonAutoReviewEnabled, Mode=TwoWay}"
+                                    AutomationProperties.Name="Python 自动审批"
                                     VerticalAlignment="Center" />
                     </Grid>
-                    <Border Classes="divider" />
-                    <Grid Classes="settingrow" ColumnDefinitions="220,*"
-                          IsEnabled="{Binding PythonAutoReviewEnabled}">
+                    <Border Classes="divider" IsVisible="{Binding PythonAutoReviewEnabled}" />
+                    <Grid Classes="settingrow" ColumnDefinitions="160,*"
+                          IsVisible="{Binding PythonAutoReviewEnabled}">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
                         <TextBlock Classes="rowtitle" Text="审批模型" />
-                        <TextBlock Classes="hint" Text="需单独选择，不随当前对话切换。" />
+                        <TextBlock Classes="hint" Text="独立于对话模型。" />
                       </StackPanel>
                       <ComboBox Grid.Column="1" Classes="settingsinput"
                                 HorizontalAlignment="Stretch" VerticalAlignment="Center"
-                                PlaceholderText="选择模型"
+                                PlaceholderText="选择审批模型"
+                                AutomationProperties.Name="审批模型"
                                 ItemsSource="{Binding ReviewProviderModels}"
                                 SelectedItem="{Binding SelectedReviewProviderModel, Mode=TwoWay}">
                         <ComboBox.ItemTemplate>
                           <DataTemplate x:DataType="vm:TitleProviderModelOption">
-                            <TextBlock Text="{Binding Label}" />
+                            <TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis"
+                                       ToolTip.Tip="{Binding Label}" />
                           </DataTemplate>
                         </ComboBox.ItemTemplate>
                       </ComboBox>
                     </Grid>
+                    <TextBlock Classes="hint" Margin="16,0,16,14"
+                               Foreground="{DynamicResource Brush.Warning.Foreground}"
+                               IsVisible="{Binding PythonAutoReviewNeedsModel}"
+                               Text="选择审批模型后生效。" />
                   </StackPanel>
                 </Border>
 
-                <TextBlock Classes="section" Text="已记住的授权" />
+                <TextBlock Classes="section" Text="按工具设置" />
+                <TextBlock Classes="hint" Margin="4,0,4,10"
+                           IsVisible="{Binding !#PART_PerToolPermissions.IsEnabled}"
+                           Text="默认权限为自动允许，以下设置暂不生效。" />
+                <Border Name="PART_PerToolPermissions" Classes="settingscard">
+                  <StackPanel>
+                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
+                      <TextBlock Classes="rowtitle" Text="Python 执行" VerticalAlignment="Center" />
+                      <ComboBox Grid.Column="1" Name="PART_PythonPermission" Classes="settingsinput"
+                                AutomationProperties.Name="Python 执行权限" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
+                      <TextBlock Classes="rowtitle" Text="MCP 工具" VerticalAlignment="Center" />
+                      <ComboBox Grid.Column="1" Name="PART_McpPermission" Classes="settingsinput"
+                                AutomationProperties.Name="MCP 工具权限" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
+                      <TextBlock Classes="rowtitle" Text="浏览器操作" VerticalAlignment="Center" />
+                      <ComboBox Grid.Column="1" Name="PART_BrowserPermission" Classes="settingsinput"
+                                AutomationProperties.Name="浏览器操作权限" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
+                      <TextBlock Classes="rowtitle" Text="图像生成" VerticalAlignment="Center" />
+                      <ComboBox Grid.Column="1" Name="PART_ImagePermission" Classes="settingsinput"
+                                AutomationProperties.Name="图像生成权限" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,180">
+                      <TextBlock Classes="rowtitle" Text="视觉理解" VerticalAlignment="Center" />
+                      <ComboBox Grid.Column="1" Name="PART_VisionPermission" Classes="settingsinput"
+                                AutomationProperties.Name="视觉理解权限" />
+                    </Grid>
+                  </StackPanel>
+                </Border>
+                <TextBlock Classes="section" Text="长期授权" />
                 <Border Classes="settingscard">
                   <StackPanel Classes="fieldrow">
                     <Grid ColumnDefinitions="*,Auto">
-                      <TextBlock Grid.Column="0" Classes="rowtitle" Text="始终允许（跳过审批）"
+                      <TextBlock Grid.Column="0" Classes="rowtitle" Text="始终允许"
                                  VerticalAlignment="Center" />
                       <Button Grid.Column="1" Name="PART_RevokeAll" Classes="textlink"
-                              Content="全部撤销" VerticalAlignment="Center" />
+                              Content="全部撤销" VerticalAlignment="Center"
+                              IsEnabled="{Binding HasAlwaysAllowedTools}" />
                     </Grid>
                     <TextBlock Classes="hint" Margin="0,5,0,0" TextWrapping="Wrap"
-                               Text="在审批对话框中选择「始终允许」的工具，以及允许只读工具永久读取的文件夹或磁盘，都会在此列出，撤销后恢复审批。" />
+                               Text="已保存的工具、路径和网站授权。撤销后按当前权限规则审批。" />
                     <ItemsControl ItemsSource="{Binding AlwaysAllowedTools}" Margin="0,8,0,0">
                       <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:ToolGrantEntry">
                           <Border Classes="grantrow">
                             <Grid ColumnDefinitions="*,Auto">
-                              <TextBlock Grid.Column="0" Text="{Binding Display}"
+                              <TextBlock Grid.Column="0" Text="{Binding Display}" Margin="0,0,12,0"
+                                         TextWrapping="Wrap" ToolTip.Tip="{Binding Display}"
                                          FontSize="{DynamicResource Font.Size.Small}"
                                          VerticalAlignment="Center" />
-                              <Button Grid.Column="1" Classes="inlineaction"
-                                      Click="OnRevokeGrant" Tag="{Binding Key}" ToolTip.Tip="撤销">
-                                <TextBlock Classes="icon" Text="&#xE711;" FontSize="11" />
-                              </Button>
+                              <Button Grid.Column="1" Classes="textlink" Content="撤销"
+                                      Click="OnRevokeGrant" Tag="{Binding Key}"
+                                      VerticalAlignment="Center" />
                             </Grid>
                           </Border>
                         </DataTemplate>
                       </ItemsControl.ItemTemplate>
                     </ItemsControl>
-                    <TextBlock Name="PART_NoGrants" Classes="hint" Text="暂无始终允许的工具。" />
+                    <TextBlock Classes="hint" Text="暂无长期授权。" Margin="0,8,0,0"
+                               IsVisible="{Binding HasNoAlwaysAllowedTools}" />
                   </StackPanel>
                 </Border>
+
+                <TextBlock Classes="section" Text="相关设置" />
+                <StackPanel Orientation="Horizontal" Spacing="20" Margin="4,4,0,0">
+                  <Button Name="PART_ApprovalSandboxSettings" Classes="textlink" Content="代码与文件" />
+                  <Button Name="PART_ApprovalBrowserSettings" Classes="textlink" Content="浏览器使用" />
+                </StackPanel>
               </StackPanel>
 
               <StackPanel Name="PAGE_Mcp" IsVisible="False">

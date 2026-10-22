@@ -83,6 +83,20 @@ public partial class ComposerView : UserControl
 
     public void FocusInput() => PART_Input.Focus();
 
+    /// <summary>
+    /// A picture handed over from elsewhere in the window (the canvas's
+    /// 「附图提问」). Goes through the same intake as a paste, so a model
+    /// without vision refuses it the same way; the caret then waits for the
+    /// question.
+    /// </summary>
+    public void AttachImage(byte[] bytes, string fileName)
+    {
+        if (DataContext is not ComposerViewModel vm) return;
+        var count = vm.Attachments.Count;
+        Queue(vm, AttachmentIntake.FromBytes(bytes, fileName, Capabilities(vm)));
+        if (vm.Attachments.Count > count) OnFocusRequested();
+    }
+
     public event EventHandler<bool>? PersonaSettingsRequested;
     public event EventHandler<string>? PersonaSelectionFailed;
 
@@ -363,6 +377,51 @@ public partial class ComposerView : UserControl
 
         // Stop the click reaching the card, which would open the preview.
         e.Handled = true;
+    }
+
+    private async void OnEditAttachment(object? sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is not ComposerViewModel vm
+            || sender is not Control { DataContext: Attachment attachment }
+            || !attachment.IsImage || attachment.Bytes.Length == 0
+            || TopLevel.GetTopLevel(this) is not Window owner) return;
+
+        var conversationId = vm.Chat.ConversationId;
+        try
+        {
+            var editor = new ImageAttachmentEditorWindow(attachment.Bytes)
+            {
+                Width = Math.Min(900, owner.Bounds.Width),
+                Height = Math.Min(680, owner.Bounds.Height),
+            };
+            var bytes = await editor.ShowDialog<byte[]?>(owner);
+            if (bytes is null || !ReferenceEquals(DataContext, vm) || vm.Chat.ConversationId != conversationId) return;
+
+            var index = -1;
+            for (var i = 0; i < vm.Attachments.Count; i++)
+            {
+                if (!ReferenceEquals(vm.Attachments[i], attachment)) continue;
+                index = i;
+                break;
+            }
+            if (index < 0) return;
+
+            var name = Path.ChangeExtension(attachment.FileName ?? "图片", ".png");
+            var result = AttachmentIntake.FromBytes(bytes, name, Capabilities(vm));
+            if (result.Attachment is not { } edited)
+            {
+                (owner as MainWindow)?.NotificationCenter.Error("无法保存图片", result.Error, "attachment-edit");
+                return;
+            }
+
+            vm.Attachments[index] = edited;
+            OnFocusRequested();
+        }
+        catch (Exception ex) when (ex is IOException or ArgumentException or InvalidOperationException or NotSupportedException)
+        {
+            (owner as MainWindow)?.NotificationCenter.Error("无法编辑图片", ex.Message, "attachment-edit");
+        }
     }
 
     /// <summary>Clicking an image chip opens it full size; other kinds do

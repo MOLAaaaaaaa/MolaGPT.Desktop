@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
@@ -58,6 +59,7 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
     private static readonly TimeSpan StagedLifetime = TimeSpan.FromMinutes(30);
 
     private readonly HttpClient _http;
+    private readonly IWebProxy? _proxy;
     private readonly MolaGptAuthService _auth;
     private readonly ChatViewModel _chat;
     private readonly ComposerViewModel _composer;
@@ -112,9 +114,11 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         string machineId,
         string machineName,
         Action<string>? log = null,
-        string? baseUrl = null)
+        string? baseUrl = null,
+        IWebProxy? proxy = null)
     {
         _http = http;
+        _proxy = proxy;
         _auth = auth;
         _chat = chat;
         _composer = composer;
@@ -348,6 +352,7 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
             try
             {
                 using var socket = new ClientWebSocket();
+                if (_proxy is not null) socket.Options.Proxy = _proxy;
                 socket.Options.SetRequestHeader("User-Agent", UserAgentProvider.FixedUa);
                 socket.Options.SetRequestHeader("Authorization", "Bearer " + await GetTicketAsync(ct).ConfigureAwait(false));
                 socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);

@@ -34,7 +34,8 @@ internal sealed class McpStdioProcess : IAsyncDisposable
     public Stream Input => _process.StandardInput.BaseStream;
     public Stream Output => _process.StandardOutput.BaseStream;
 
-    public static McpStdioProcess Start(McpServerOptions server, Action<string>? log)
+    public static McpStdioProcess Start(
+        McpServerOptions server, Action<string>? log, IReadOnlyDictionary<string, string>? baseEnvironment = null)
     {
         var command = server.Command?.Trim();
         if (string.IsNullOrEmpty(command)) throw new InvalidOperationException("未设置启动命令。");
@@ -68,6 +69,8 @@ internal sealed class McpStdioProcess : IAsyncDisposable
             psi.FileName = command;
         }
         foreach (var argument in server.Arguments ?? []) psi.ArgumentList.Add(argument);
+        foreach (var (key, value) in baseEnvironment ?? new Dictionary<string, string>())
+            psi.Environment[key] = value;
         foreach (var (key, value) in server.Environment ?? new Dictionary<string, string>())
             psi.Environment[key] = value;
 

@@ -729,6 +729,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             return;
         var isMolaGptImageGenerationSend =
             _chat.ActiveProvider.Kind == ProviderKind.MolaGptProxy && IsImageGenerationMode;
+        var imageGenerationAspectRatio = isMolaGptImageGenerationSend ? ImageAspectRatio : null;
+        var imageGenerationStyle = isMolaGptImageGenerationSend ? ImageStyle : null;
         var generateLocalTitleOnCompletion =
             !_chat.Messages.Any(message => message.Role == ChatMessage.RoleUser)
             && _chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
@@ -785,7 +787,9 @@ public sealed partial class ComposerViewModel : ObservableObject
                 outgoingAttachments = prepared.Attachments.ToList();
                 if (isMolaGptImageGenerationSend)
                 {
-                    outgoingUserText = BuildImageGenerationPrompt(userText, outgoingAttachments, prepared.SystemHint);
+                    outgoingUserText = BuildImageGenerationPrompt(
+                        userText, outgoingAttachments, prepared.SystemHint,
+                        imageGenerationAspectRatio, imageGenerationStyle);
                 }
                 else if (!string.IsNullOrWhiteSpace(prepared.SystemHint))
                 {
@@ -821,7 +825,9 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         else if (isMolaGptImageGenerationSend)
         {
-            outgoingUserText = BuildImageGenerationPrompt(userText, outgoingAttachments, null);
+            outgoingUserText = BuildImageGenerationPrompt(
+                userText, outgoingAttachments, null,
+                imageGenerationAspectRatio, imageGenerationStyle);
             if (userMsg is not null)
             {
                 userMsg.Content = outgoingUserText;
@@ -970,7 +976,10 @@ public sealed partial class ComposerViewModel : ObservableObject
             var req = new ChatRequest(
                 ModelId: model.Id, Messages: msgs, ConversationId: conversationId, SessionId: generationId,
                 UseThinking: IsThinkingEnabled, ReasoningEffort: IsReasoningEffortVisible ? ReasoningEffort : null,
-                ExtraBody: BuildExtras(), ThinkingBudgetTokens: IsThinkingEnabled ? ThinkingBudgetTokens : null,
+                ExtraBody: BuildImageGenerationExtras(
+                    BuildExtras(), isMolaGptImageGenerationSend, outgoingAttachments,
+                    imageGenerationAspectRatio, imageGenerationStyle),
+                ThinkingBudgetTokens: IsThinkingEnabled ? ThinkingBudgetTokens : null,
                 ThinkingParamKind: ResolveActiveThinkingParamKind(), RolePrompt: role?.Plan);
             req = ApplyRoleRequestOptions(req, BuildHistorySeed(userMsg), maxTokens);
             RememberTurnTemplate(conversationId, provider, model, req, assistantMsg);
@@ -1414,6 +1423,30 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         if (_settings is not null && !_settings.TracksEnabled)
             extras["privacy_mode"] = true;
+
+        return extras;
+    }
+
+    private Dictionary<string, object> BuildImageGenerationExtras(
+        Dictionary<string, object> extras,
+        bool imageGenerationTurn,
+        IReadOnlyList<Attachment> attachments,
+        string? imageAspectRatio,
+        string? imageStyle)
+    {
+        if (!imageGenerationTurn) return extras;
+
+        var imageUrl = attachments
+            .Where(a => a.Kind == AttachmentKind.Image)
+            .Select(a => a.RemoteUrl)
+            .FirstOrDefault(url => !string.IsNullOrWhiteSpace(url));
+
+        extras["image_generation_options"] = new
+        {
+            style = string.IsNullOrWhiteSpace(imageStyle) ? null : imageStyle.Trim(),
+            aspect_ratio = string.IsNullOrWhiteSpace(imageAspectRatio) ? "1:1" : imageAspectRatio.Trim(),
+            image_url = imageUrl
+        };
 
         return extras;
     }
@@ -2740,7 +2773,9 @@ public sealed partial class ComposerViewModel : ObservableObject
     private string BuildImageGenerationPrompt(
         string userText,
         IReadOnlyList<Attachment> preparedAttachments,
-        string? sandboxHint)
+        string? sandboxHint,
+        string? imageAspectRatio,
+        string? imageStyle)
     {
         var referenceImageUrl = preparedAttachments
             .Where(a => a.Kind == AttachmentKind.Image)
@@ -2749,20 +2784,26 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         if (!string.IsNullOrWhiteSpace(referenceImageUrl))
         {
+            var editRatioHint = !string.IsNullOrWhiteSpace(imageAspectRatio) && imageAspectRatio != "1:1"
+                ? $"，编辑结果保持 aspect_ratio=\"{imageAspectRatio}\""
+                : string.Empty;
+            var editStyleHint = !string.IsNullOrWhiteSpace(imageStyle)
+                ? $"，编辑风格使用 style=\"{imageStyle}\""
+                : string.Empty;
             return AppendHiddenSystemHint(
                 userText,
-                BuildHiddenSystemHint($"[重要提示: 用户已上传参考图片，公网访问地址为: {referenceImageUrl}。若需编辑此图片，请调用 image_generation_and_editing 工具时使用 action=\"edit\" 并将此 URL 作为 image_url 参数传递。]"));
+                BuildHiddenSystemHint($"[重要提示: 用户已上传参考图片，公网访问地址为: {referenceImageUrl}。若需编辑此图片，请调用 image_generation_and_editing 工具时使用 action=\"edit\" 并将此 URL 作为 image_url 参数传递{editRatioHint}{editStyleHint}]"));
         }
 
         var prompt = string.IsNullOrWhiteSpace(sandboxHint)
             ? userText
             : AppendHiddenSystemHint(userText, sandboxHint!);
 
-        var ratioHint = !string.IsNullOrWhiteSpace(ImageAspectRatio) && ImageAspectRatio != "1:1"
-            ? $"，必须使用 aspect_ratio=\"{ImageAspectRatio}\""
+        var ratioHint = !string.IsNullOrWhiteSpace(imageAspectRatio) && imageAspectRatio != "1:1"
+            ? $"，必须使用 aspect_ratio=\"{imageAspectRatio}\""
             : string.Empty;
-        var styleHint = !string.IsNullOrWhiteSpace(ImageStyle)
-            ? $"，必须使用 style=\"{ImageStyle}\""
+        var styleHint = !string.IsNullOrWhiteSpace(imageStyle)
+            ? $"，必须使用 style=\"{imageStyle}\""
             : string.Empty;
 
         return AppendHiddenSystemHint(

@@ -16,6 +16,7 @@ using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Tools.Vision;
 using MolaGPT.Core.Memory;
+using MolaGPT.Core.Net;
 using MolaGPT.Core.Personalization;
 using MolaGPT.Core.Remote;
 using MolaGPT.Desktop.Services;
@@ -64,6 +65,16 @@ internal static class AppServices
         services.AddSingleton<CookieContainer>();
         services.AddTransient<MolaDeviceCookieHandler>();
 
+        // Loaded here rather than by the settings page: the first request can leave
+        // before anyone opens it, and it must already know the user's proxy.
+        services.AddSingleton(sp =>
+        {
+            var proxy = new AppProxy();
+            proxy.Apply(ProxyConfigStore.Load(
+                sp.GetRequiredService<SettingsRepository>(), sp.GetRequiredService<CredentialStore>()));
+            return proxy;
+        });
+
         services.AddHttpClient(HttpClientNames.MolaGpt, (_, client) =>
             {
                 client.Timeout = Timeout.InfiniteTimeSpan;
@@ -82,16 +93,20 @@ internal static class AppServices
                 CookieContainer = sp.GetRequiredService<CookieContainer>(),
                 UseCookies = true,
                 AllowAutoRedirect = true,
-                AutomaticDecompression = DecompressionMethods.All
+                AutomaticDecompression = DecompressionMethods.All,
+                Proxy = sp.GetRequiredService<AppProxy>().Official,
+                UseProxy = true
             })
             .SetHandlerLifetime(TimeSpan.FromHours(24));
 
         services.AddHttpClient(HttpClientNames.Byok, client =>
-        {
-            client.Timeout = Timeout.InfiniteTimeSpan;
-            client.DefaultRequestHeaders.UserAgent.Clear();
-            client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgentProvider.FixedUa);
-        });
+            {
+                client.Timeout = Timeout.InfiniteTimeSpan;
+                client.DefaultRequestHeaders.UserAgent.Clear();
+                client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgentProvider.FixedUa);
+            })
+            // Keeps the factory's own defaults (no cookie jar, pooled lifetime); only the proxy is ours.
+            .UseSocketsHttpHandler((handler, sp) => handler.Proxy = sp.GetRequiredService<AppProxy>().General);
 
         // ---- auth / providers ---------------------------------------------
         services.AddSingleton(sp => new MolaGptAuthService(
@@ -135,7 +150,6 @@ internal static class AppServices
         // and the capped sidecar pool. Per-provider runtimes would put the memory
         // ceiling back where it was, since nothing would bound the total.
         services.AddSingleton(sp => new PiRuntime(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
             line => DiagnosticLog.Write("pi-runtime", line)));
         services.AddSingleton<MolaGptLocalToolsRegistrar>();
         services.AddSingleton(sp => new ChatGptAccount(
@@ -152,7 +166,9 @@ internal static class AppServices
         services.AddSingleton<BackgroundStreamService>();
         services.AddSingleton(sp => new McpClientManager(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
-            line => DiagnosticLog.Write("mcp", line)));
+            line => DiagnosticLog.Write("mcp", line),
+            // npx and uvx fetch their packages from inside the child, which knows nothing of ours.
+            () => sp.GetRequiredService<AppProxy>().Config.ToEnvironment()));
 
         // ---- Agent Bridge --------------------------------------------------
         services.AddSingleton<AgentCliResolver>();
@@ -174,7 +190,8 @@ internal static class AppServices
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
             sp.GetRequiredService<MolaGptAuthService>(),
             machineId: sp.GetRequiredService<IAgentConfigProvider>().MachineId,
-            machineName: sp.GetRequiredService<IAgentConfigProvider>().MachineName));
+            machineName: sp.GetRequiredService<IAgentConfigProvider>().MachineName,
+            proxy: sp.GetRequiredService<AppProxy>().Official));
         services.AddSingleton(sp => new AgentRelayClient(
             sp.GetRequiredService<AgentBridgeService>(),
             sp.GetRequiredService<IRelayProducer>(),
@@ -202,7 +219,8 @@ internal static class AppServices
             onUi: work => Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(work),
             machineId: sp.GetRequiredService<IAgentConfigProvider>().MachineId,
             machineName: sp.GetRequiredService<IAgentConfigProvider>().MachineName,
-            log: line => DiagnosticLog.Write("RemoteWork", line)));
+            log: line => DiagnosticLog.Write("RemoteWork", line),
+            proxy: sp.GetRequiredService<AppProxy>().Official));
         services.AddSingleton(sp => new RemoteWorkSettingsViewModel(
             sp.GetRequiredService<RemoteControlHost>(),
             sp.GetRequiredService<SettingsRepository>(),
@@ -351,11 +369,20 @@ internal static class AppServices
                 });
             return chat;
         });
+        services.AddSingleton(sp => new NetworkProxyViewModel(
+            sp.GetRequiredService<AppProxy>(),
+            sp.GetRequiredService<SettingsRepository>(),
+            sp.GetRequiredService<CredentialStore>(),
+            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            line => DiagnosticLog.Write("proxy", line)));
         services.AddSingleton(sp => new SettingsViewModel(
             sp.GetRequiredService<ProviderRepository>(),
             sp.GetRequiredService<CredentialStore>(),
             sp.GetRequiredService<SettingsRepository>(),
-            sp.GetRequiredService<ProviderRegistry>()));
+            sp.GetRequiredService<ProviderRegistry>())
+        {
+            NetworkProxy = sp.GetRequiredService<NetworkProxyViewModel>()
+        });
         services.AddSingleton(sp => new MemoryPageViewModel(
             sp.GetRequiredService<MemoryService>(),
             sp.GetRequiredService<MemoryConsolidator>(),

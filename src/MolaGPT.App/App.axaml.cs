@@ -7,6 +7,7 @@ using Avalonia.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using MolaGPT.App.Infrastructure;
 using MolaGPT.App.Rendering;
+using MolaGPT.App.Rendering.Canvas;
 using MolaGPT.App.Views;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
@@ -18,6 +19,7 @@ using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
+using MolaGPT.Core.Net;
 using MolaGPT.Desktop.Services;
 using MolaGPT.Desktop.Services.Remote;
 using MolaGPT.Storage;
@@ -58,6 +60,7 @@ public partial class App : Application
             UrlSchemeRegistrar.EnsureRegistered();
             _services = AppServices.Build();
             _services.GetRequiredService<MolaGptDatabase>().EnsureSchema();
+            CdnProxy.ConfigureProxy(_services.GetRequiredService<AppProxy>().General);
             _services.GetRequiredService<PersonalDataService>().UpgradeCredentialStorage();
             _services.GetRequiredService<PersonaListViewModel>().EnsureBuiltinsSeeded();
 

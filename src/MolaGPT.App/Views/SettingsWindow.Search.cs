@@ -30,7 +30,8 @@ public partial class SettingsWindow
         ["PAGE_Chat"] = "Enter 回车 发送 换行 快捷键 输入 思考 推理 折叠 标题 画布 可视化 图表 HTML SVG Mermaid CSV",
         ["PAGE_Tasks"] = "任务 后台 子 Agent 并发 插队 引导 排队 运行 唤醒 默认模型",
         ["PAGE_System"] = "通知 提醒 托盘 最小化 关闭 后台 系统",
-        ["PAGE_PersonalData"] = "个人数据 数据管理 导出 导入 备份 迁移 聊天记录 对话 模型配置 API Key 密钥 加密 密码 JSON",
+        ["PAGE_Network"] = "代理 proxy 网络 梯子 VPN Clash v2ray SOCKS5 HTTP 端口 7890 连接 超时 直连 绕过 出口",
+        ["PAGE_PersonalData"] = "隐私和安全 个人数据 数据管理 导出 导入 备份 迁移 聊天记录 对话 模型配置 API Key 密钥 加密 密码 JSON",
         ["PAGE_Personas"] = "角色 人设 系统提示词 提示词 prompt 角色卡 世界书 SillyTavern RisuAI 提示词编排 预设 preset 氛围 默认模型 温度 temperature",
         ["PAGE_Memory"] = "记忆 本地记忆 个人资料 称呼 职业 所在地 语言 历史对话 整理",
         ["PAGE_PostProcessing"] = "文本替换 替换 正则 regex 后处理",
@@ -42,7 +43,7 @@ public partial class SettingsWindow
         ["PAGE_Browser"] = "浏览器 Chrome Edge Kimi 网站 自动化 操作网页",
         ["PAGE_Mcp"] = "MCP 工具 插件 服务器 Model Context Protocol",
         ["PAGE_Skills"] = "技能 skill SKILL.md 导入",
-        ["PAGE_Approval"] = "权限 审批 授权 确认 始终允许 安全",
+        ["PAGE_Approval"] = "隐私和安全 权限 审批 授权 确认 始终允许 完全权限 浏览器 Python 自动审批",
         ["PAGE_Agent"] = "远程 手机 移动端 Bridge 桥接 Agent Claude Code Codex",
     };
 

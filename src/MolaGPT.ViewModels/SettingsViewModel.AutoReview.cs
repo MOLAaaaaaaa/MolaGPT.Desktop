@@ -16,7 +16,9 @@ public sealed partial class SettingsViewModel
     public const string PythonReviewProviderIdKey = "python_review_provider_id";
     public const string PythonReviewModelIdKey = "python_review_model_id";
 
-    [ObservableProperty] private bool _pythonAutoReviewEnabled;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(PythonAutoReviewNeedsModel))]
+    private bool _pythonAutoReviewEnabled;
 
     private string? _reviewProviderId;
     private string? _reviewModelId;
@@ -26,7 +28,11 @@ public sealed partial class SettingsViewModel
     /// whose code it is judging.</summary>
     public ObservableCollection<TitleProviderModelOption> ReviewProviderModels { get; } = new();
 
-    [ObservableProperty] private TitleProviderModelOption? _selectedReviewProviderModel;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(PythonAutoReviewNeedsModel))]
+    private TitleProviderModelOption? _selectedReviewProviderModel;
+
+    public bool PythonAutoReviewNeedsModel => PythonAutoReviewEnabled && SelectedReviewProviderModel is null;
 
     private void LoadAutoReviewSettings()
     {

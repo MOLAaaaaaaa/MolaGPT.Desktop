@@ -212,6 +212,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_PersonaEditor.DataContext = _emptyPersona;
         InitializeMemoryPage(memoryPage);
         PAGE_Agent.DataContext = _agentStatus;
+        PAGE_Network.DataContext = _settings.NetworkProxy;
         PAGE_Personas.DataContext = _personas;
 
         // Only the connection card watches the bridge; the rest of the page edits
@@ -300,21 +301,24 @@ public partial class SettingsWindow : MolaContentWindow
             PART_McpToken.PasswordChar = PART_McpToken.PasswordChar == '\0' ? '•' : '\0';
         PART_SyncNow.Click += OnSyncNowClick;
         PART_SyncConversations.Click += OnSyncConversationsClick;
-        PART_RevokeAll.Click += (_, _) =>
-        {
-            _settings.RevokeAllToolGrants();
-            RefreshGrants();
-        };
+        PART_RevokeAll.Click += (_, _) => _settings.RevokeAllToolGrants();
+        PART_OpenApprovalSettings.Click += (_, _) => PART_Nav.SelectedItem = PART_ApprovalNav;
+        PART_ApprovalSandboxSettings.Click += (_, _) => OpenSandboxPage();
+        PART_ApprovalBrowserSettings.Click += (_, _) => OpenBrowserPage();
 
         RefreshProviders();
-        RefreshGrants();
         RefreshAccountUi();
         RefreshMcpServers();
         RefreshSpecializedModelChoices();
         RefreshSkills();
         LoadPersonaForm(null);
         RefreshPersonaLibrary();
-        Closing += (_, _) => PersistEditingPersona();
+        Closing += (_, _) =>
+        {
+            PersistEditingPersona();
+            // Edits wait a moment before they apply; closing must not drop the last one.
+            _settings.NetworkProxy?.Flush();
+        };
 
         Opened += (_, _) =>
         {
@@ -324,7 +328,6 @@ public partial class SettingsWindow : MolaContentWindow
             _settings.Reload();
             _settings.ReloadToolGrants();
             RefreshProviders();
-            RefreshGrants();
             RefreshAccountUi();
             RefreshMcpServers();
             RefreshSpecializedModelChoices();
@@ -644,7 +647,7 @@ public partial class SettingsWindow : MolaContentWindow
     private void BuildPermissionChoices()
     {
         var order = new[] { ToolPermissionMode.Approval, ToolPermissionMode.FullAccess };
-        var labels = new[] { "审批权限", "完全权限" };
+        var labels = new[] { "按需审批", "自动允许" };
 
         Bind(PART_ToolPermission, _settings.LocalToolPermissionMode, mode =>
         {
@@ -3458,14 +3461,10 @@ public partial class SettingsWindow : MolaContentWindow
 
     // ---- tool grants -------------------------------------------------------
 
-    private void RefreshGrants() =>
-        PART_NoGrants.IsVisible = _settings.AlwaysAllowedTools.Count == 0;
-
     private void OnRevokeGrant(object? sender, RoutedEventArgs e)
     {
         if (sender is not Control { Tag: string key }) return;
         _settings.RevokeToolGrant(key);
-        RefreshGrants();
     }
 }
 

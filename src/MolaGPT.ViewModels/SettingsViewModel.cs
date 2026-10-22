@@ -297,6 +297,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     private string? _subagentProviderId;
     private string? _subagentModelId;
 
+    /// <summary>网络代理 has its own model: it is applied to live HTTP clients and read
+    /// before this view model exists, so it is only hosted here for the page to reach.</summary>
+    public NetworkProxyViewModel? NetworkProxy { get; init; }
+
     public SettingsViewModel() { }
 
     public SettingsViewModel(ProviderRepository? repo, CredentialStore? credentialStore,

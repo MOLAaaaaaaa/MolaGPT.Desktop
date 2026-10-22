@@ -47,6 +47,7 @@ public sealed class PiWorkLlmShim : IDisposable
     /// <param name="ResponseReceived">Sees each upstream response before its body
     /// is relayed, for figures an endpoint reports in headers.</param>
     public sealed record ForwardTarget(
+        HttpClient Http,
         string Endpoint,
         Func<CancellationToken, Task<string?>> TokenProvider,
         Action? OnUnauthorized = null,
@@ -110,7 +111,6 @@ public sealed class PiWorkLlmShim : IDisposable
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
-    private readonly HttpClient _http;
     private readonly HttpListener _listener = new();
     private readonly CancellationTokenSource _cts = new();
     private readonly Action<string>? _log;
@@ -135,9 +135,8 @@ public sealed class PiWorkLlmShim : IDisposable
     /// <summary>Base URL to hand Pi (it appends <c>/chat/completions</c> and friends).</summary>
     public string BaseUrl { get; }
 
-    public PiWorkLlmShim(HttpClient http, Action<string>? log = null)
+    public PiWorkLlmShim(Action<string>? log = null)
     {
-        _http = http;
         _log = log;
         var port = FreeTcpPort();
         BaseUrl = $"http://127.0.0.1:{port}{BasePath}";
@@ -233,7 +232,7 @@ public sealed class PiWorkLlmShim : IDisposable
                 OpenRouterAttribution.Apply(upstream, target.Endpoint, target.Headers);
                 CustomRequestParams.ApplyHeaders(upstream, target.Headers);
 
-                using var resp = await _http
+                using var resp = await target.Http
                     .SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, _cts.Token)
                     .ConfigureAwait(false);
 

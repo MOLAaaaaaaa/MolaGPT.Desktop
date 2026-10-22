@@ -30,6 +30,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     private PiWorkProviderConfig _config;
     private readonly IChatToolHost _toolHost;
     private readonly HttpClient _http;
+    private readonly HttpClient _toolHttp;
     private readonly PiRuntime _runtime;
     private readonly Action<string>? _log;
 
@@ -55,12 +56,14 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         PiWorkProviderConfig config,
         IChatToolHost toolHost,
         HttpClient http,
+        HttpClient toolHttp,
         PiRuntime runtime,
         Action<string>? log = null)
     {
         _config = config;
         _toolHost = toolHost;
         _http = http;
+        _toolHttp = toolHttp;
         _runtime = runtime;
         _log = log;
     }
@@ -117,7 +120,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
 
         // LocalHttpClient must be supplied: ChatToolHost refuses search_web /
         // web_fetch / read_file / glob_files / grep_files without it.
-        var toolContext = new ChatToolContext(request, Id, request.ModelId, modelSupportsVision, Models, _http);
+        var toolContext = new ChatToolContext(request, Id, request.ModelId, modelSupportsVision, Models, _toolHttp);
 
         // MolaGPT's live tool set for this turn, in the same order the direct
         // provider sends it. The sidecar registers exactly these, so names and
@@ -184,6 +187,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             (name, argsJson, report, toolCt) => ExecuteToolAsync(name, argsJson, toolCt, report));
 
         var target = new PiWorkLlmShim.ForwardTarget(
+            _http,
             creds.Endpoint,
             creds.TokenProvider,
             creds.OnUnauthorized,
@@ -363,6 +367,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             () => null);
 
         var target = new PiWorkLlmShim.ForwardTarget(
+            _http,
             creds.Endpoint,
             creds.TokenProvider,
             creds.OnUnauthorized,

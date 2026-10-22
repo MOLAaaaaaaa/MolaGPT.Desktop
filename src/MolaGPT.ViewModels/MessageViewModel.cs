@@ -1307,10 +1307,9 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     /// <summary>
     /// Whether the transcript would draw anything for this message yet.
     ///
-    /// Deliberately conservative about text: whitespace produces a display block
-    /// but no markdown block, so counting blocks alone would call an empty
-    /// message visible. Tool cards and reasoning cards are structural — they are
-    /// on screen the moment they exist.
+    /// Whitespace and zero-width characters cannot replace the pending indicator.
+    /// Tool cards and reasoning cards are structural — they are on screen the
+    /// moment they exist.
     /// </summary>
     private bool HasVisibleOutput
     {
@@ -1320,7 +1319,8 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             {
                 if (block.Tool is not null || block.ToolGroup is not null || block.Thinking is not null)
                     return true;
-                if (block.IsText && !string.IsNullOrWhiteSpace(block.Text)) return true;
+                if (block.IsText && block.Text!.Any(ch => !char.IsWhiteSpace(ch) && ch != '\u200B' && ch != '\uFEFF'))
+                    return true;
             }
             return false;
         }

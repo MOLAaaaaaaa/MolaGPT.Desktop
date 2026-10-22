@@ -52,6 +52,7 @@
       <Button Grid.Column="1"
               Name="PART_ModelSelector"
               Classes="outline"
+              RenderTransform="{x:Null}"
               HorizontalAlignment="Left"
               VerticalAlignment="Center"
               Padding="14,6"

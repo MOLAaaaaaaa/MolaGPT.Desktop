@@ -40,10 +40,19 @@ internal static class CdnProxy
     private const long MaxBody = 24 * 1024 * 1024;
     private const long CacheBudget = 256L * 1024 * 1024;
 
+    private static readonly SocketsHttpHandler Handler = new()
+    {
+        AutomaticDecompression = DecompressionMethods.All,
+        AllowAutoRedirect = true,
+        ConnectTimeout = TimeSpan.FromSeconds(8),
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+    };
     private static readonly HttpClient Http = CreateClient();
     private static int _trimmed;
 
     public static string CacheDirectory { get; } = Path.Combine(CanvasEnvironment.Root, "cdn-cache");
+
+    public static void ConfigureProxy(IWebProxy proxy) => Handler.Proxy = proxy;
 
     public static bool IsAllowed(string host) =>
         AllowedHosts.Contains(host.ToLowerInvariant(), StringComparer.Ordinal);
@@ -233,14 +242,7 @@ internal static class CdnProxy
 
     private static HttpClient CreateClient()
     {
-        var handler = new SocketsHttpHandler
-        {
-            AutomaticDecompression = DecompressionMethods.All,
-            AllowAutoRedirect = true,
-            ConnectTimeout = TimeSpan.FromSeconds(8),
-            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-        };
-        var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(40) };
+        var client = new HttpClient(Handler) { Timeout = TimeSpan.FromSeconds(40) };
         client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) MolaGPT-Canvas/1.0");
         return client;
     }

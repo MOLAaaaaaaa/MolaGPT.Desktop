@@ -121,7 +121,7 @@
               ClipToBounds="True">
         <Grid Margin="16,14,14,14" RowDefinitions="Auto,Auto,*">
           <!-- Header: what this is, how many, and the list / canvas switch. -->
-          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto" Margin="2,0,0,12">
+          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto" Margin="2,0,0,12">
             <StackPanel VerticalAlignment="Center" Spacing="2" IsVisible="{Binding IsArtifactPanelSelected}">
               <TextBlock Text="交付物" FontWeight="SemiBold"
                          FontSize="{DynamicResource Font.Size.Heading}"
@@ -150,6 +150,12 @@
               </StackPanel>
             </Border>
             <Button Grid.Column="2" Classes="headericon" VerticalAlignment="Center"
+                    Command="{Binding OpenWorkspaceFolderCommand}"
+                    IsVisible="{Binding CanOpenWorkspaceFolder}"
+                    ToolTip.Tip="打开工作目录" AutomationProperties.Name="打开工作目录">
+              <TextBlock Classes="icon" Text="&#xE8B7;" />
+            </Button>
+            <Button Grid.Column="3" Classes="headericon" VerticalAlignment="Center"
                     Command="{Binding ToggleArtifactPanelCommand}"
                     ToolTip.Tip="收起">
               <TextBlock Classes="icon" Text="&#xE8BB;" />
@@ -514,6 +520,35 @@
       <Setter Property="Padding" Value="10,5" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
       <Setter Property="BorderThickness" Value="0,1,0,0" />
+    </Style>
+    <!-- Above the canvas: image navigation and markup tools. -->
+    <Style Selector="Border.canvastoolbar">
+      <Setter Property="Padding" Value="6,4" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="0,0,0,1" />
+    </Style>
+    <Style Selector=":is(Button).canvastool">
+      <Setter Property="Width" Value="28" />
+      <Setter Property="Height" Value="28" />
+      <Setter Property="FontSize" Value="14" />
+    </Style>
+    <Style Selector=":is(Button).canvastool:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector=":is(Button).canvastool:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+    <Style Selector="ToggleButton.canvastool:checked /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+    </Style>
+    <Style Selector="ToggleButton.canvastool:checked">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+    <Style Selector="Button.canvasask">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+    <Style Selector="Button.canvasask:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
     </Style>
     <Style Selector="Border.canvaserror">
       <Setter Property="Padding" Value="10,4,6,4" />

@@ -97,7 +97,7 @@
               <DataTemplate x:DataType="att:Attachment">
                 <Border Classes="attachchip" ToolTip.Tip="{Binding FileName}"
                         PointerReleased="OnAttachmentCardClick">
-                  <Grid ColumnDefinitions="Auto,*,Auto">
+                  <Grid ColumnDefinitions="Auto,*,Auto,Auto">
                     <!-- 32×32 thumbnail: the queued bytes for an image, a typed
                          glyph otherwise. -->
                     <Border Grid.Column="0" Width="32" Height="32" CornerRadius="{DynamicResource Radius.Xs}"
@@ -117,7 +117,13 @@
                                VerticalAlignment="Center" TextWrapping="NoWrap"
                                TextTrimming="CharacterEllipsis" />
 
-                    <Button Grid.Column="2" Margin="4,0,0,0" Width="18" Height="18" Padding="0"
+                    <Button Grid.Column="2" Margin="4,0,0,0" Width="22" Height="22" Padding="0"
+                            VerticalAlignment="Center" ToolTip.Tip="编辑图片" AutomationProperties.Name="编辑图片"
+                            IsVisible="{Binding IsImage}" Click="OnEditAttachment">
+                      <TextBlock Classes="icon" Text="&#xE70F;" FontSize="12"
+                                 Foreground="{DynamicResource Brush.Text.Secondary}" />
+                    </Button>
+                    <Button Grid.Column="3" Margin="4,0,0,0" Width="18" Height="18" Padding="0"
                             VerticalAlignment="Center" Opacity="0.55" ToolTip.Tip="移除"
                             Click="OnRemoveAttachment">
                       <TextBlock Classes="icon" Text="&#xE711;" FontSize="10"

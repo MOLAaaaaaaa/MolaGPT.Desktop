@@ -143,6 +143,7 @@ public sealed class MolaGptLocalToolsRegistrar
             config,
             _toolHost,
             _httpClientFactory.CreateClient(HttpClientNames.MolaGpt),
+            _httpClientFactory.CreateClient(HttpClientNames.Byok),
             _runtime,
             // To the diagnostic log, not just the debugger: Work is where sidecar
             // trouble actually shows up, and a line only a debugger can see is one

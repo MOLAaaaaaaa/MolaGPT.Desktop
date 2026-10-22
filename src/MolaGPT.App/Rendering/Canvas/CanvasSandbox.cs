@@ -70,6 +70,9 @@ internal sealed partial class CanvasSandbox
     private readonly Dictionary<string, string> _documents = new(StringComparer.OrdinalIgnoreCase);
     private CoreWebView2? _core;
     private string? _currentHost;
+    private string? _currentUrl;
+    private long _navigationSequence;
+    private ulong? _navigationId;
     private TaskCompletionSource? _loading;
 
     public CanvasTraffic Traffic { get; private set; } = new();
@@ -79,6 +82,9 @@ internal sealed partial class CanvasSandbox
 
     /// <summary>A request was served or refused; the counters changed.</summary>
     public event EventHandler? TrafficChanged;
+
+    /// <summary>A diagram's zoom changed (1 = natural size).</summary>
+    public event EventHandler<double>? ZoomChanged;
 
     public void Attach(CoreWebView2 core)
     {
@@ -97,8 +103,8 @@ internal sealed partial class CanvasSandbox
         core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
         core.WebResourceRequested += OnWebResourceRequested;
         core.NavigationStarting += OnNavigationStarting;
-        core.DOMContentLoaded += (_, _) => OnPageLoaded();
-        core.NavigationCompleted += (_, _) => OnPageLoaded();
+        core.DOMContentLoaded += (_, e) => OnPageLoaded(e.NavigationId);
+        core.NavigationCompleted += (_, e) => OnPageLoaded(e.NavigationId);
         core.NewWindowRequested += OnNewWindowRequested;
         core.DownloadStarting += (_, e) => e.Cancel = true;
         core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
@@ -122,15 +128,17 @@ internal sealed partial class CanvasSandbox
         var loading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _loading = loading;
         // The query only defeats the page cache; the document is served from memory.
-        _core.Navigate($"https://{host}/?v={Environment.TickCount64}");
+        _currentUrl = $"https://{host}/?v={++_navigationSequence}";
+        _navigationId = null;
+        _core.Navigate(_currentUrl);
         return loading.Task;
     }
 
-    private void OnPageLoaded()
+    private void OnPageLoaded(ulong navigationId)
     {
         // Only the page that was asked for: the about:blank a hidden canvas
         // navigated to can finish after the next page has been requested.
-        if (_core is null || _currentHost is null) return;
+        if (_core is null || _currentHost is null || navigationId != _navigationId) return;
         if (!Uri.TryCreate(_core.Source, UriKind.Absolute, out var source)
             || !string.Equals(source.Host, _currentHost, StringComparison.OrdinalIgnoreCase)) return;
         _loading?.TrySetResult();
@@ -140,7 +148,11 @@ internal sealed partial class CanvasSandbox
     /// the canvas shows something native instead.</summary>
     public void Blank()
     {
+        _loading?.TrySetResult();
+        _loading = null;
         _currentHost = null;
+        _currentUrl = null;
+        _navigationId = null;
         try
         {
             _core?.Navigate("about:blank");
@@ -154,6 +166,19 @@ internal sealed partial class CanvasSandbox
     {
         if (_core is null || _currentHost is null) return;
         _ = _core.ExecuteScriptAsync(theme.Script());
+    }
+
+    /// <summary>Drives the diagram stage of <see cref="BuildMermaid"/>; a page
+    /// without one ignores it.</summary>
+    public void ZoomBy(double factor) =>
+        RunZoom("by(" + factor.ToString(System.Globalization.CultureInfo.InvariantCulture) + ")");
+
+    public void ToggleFit() => RunZoom("toggle()");
+
+    private void RunZoom(string call)
+    {
+        if (_core is null || _currentHost is null) return;
+        _ = _core.ExecuteScriptAsync("window.__molaZoom&&window.__molaZoom." + call);
     }
 
     // ---- documents ------------------------------------------------------------------
@@ -199,21 +224,61 @@ internal sealed partial class CanvasSandbox
                + "</head><body" + bodyAttributes + ">" + body + "</body></html>";
     }
 
+    /// <summary>
+    /// A diagram on a pan-and-zoom stage: drawn at its natural size, framed to
+    /// fit, then moved by a CSS transform. Zooming the page instead would scale
+    /// the error box with it, and fitting by max-width:100% left a tall chart
+    /// as a strip to scroll past.
+    /// </summary>
     public static string BuildMermaid(string source, CanvasTheme theme)
     {
         var diagram = JsonSerializer.Serialize(source);
         var mermaidTheme = theme.Dark ? "dark" : "neutral";
         return "<!doctype html><html><head><meta charset=\"utf-8\">"
                + theme.Style() + RuntimeScript
-               + "<style>html,body{height:100%;margin:0}#canvas{min-height:100%;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box}"
-               + "#canvas svg{max-width:100%;height:auto}</style>"
-               + "</head><body><div id=\"canvas\"><pre class=\"mermaid\" id=\"diagram\"></pre></div>"
+               + "<style>html,body{height:100%;margin:0;overflow:hidden}"
+               + "body{cursor:grab;user-select:none;touch-action:none}body.mola-drag{cursor:grabbing}"
+               + "#diagram{position:absolute;left:0;top:0;margin:0;transform-origin:0 0;visibility:hidden}</style>"
+               + "</head><body><pre class=\"mermaid\" id=\"diagram\"></pre>"
                + "<script>document.getElementById('diagram').textContent=" + diagram + ";</script>"
+               + ZoomScript
                + "<script src=\"/_mola/mermaid.min.js\"></script>"
-               + "<script>mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'" + mermaidTheme + "'});"
-               + "mermaid.run({nodes:[document.getElementById('diagram')]}).catch(function(e){throw e;});</script>"
+               // Without the library the source stays on screen as text.
+               + "<script>if(!window.mermaid){__molaZoom.fit();}else{"
+               + "mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'" + mermaidTheme + "'});"
+               + "mermaid.run({nodes:[document.getElementById('diagram')]})"
+               + ".then(function(){__molaZoom.fit();},function(e){__molaZoom.fit();throw e;});}</script>"
                + "</body></html>";
     }
+
+    /// <summary>Wheel zooms around the pointer, a drag pans, a double click
+    /// toggles fit ↔ 100%; the host's toolbar drives the same functions and
+    /// hears the scale back. Mirrors <see cref="ImageMarkupView"/>.</summary>
+    private const string ZoomScript = """
+<script>(function(){
+var post=function(m){try{window.chrome.webview.postMessage(JSON.stringify(m));}catch(e){}};
+var d=document.getElementById('diagram'),s=1,x=0,y=0,fitted=true,drag=null,pad=20;
+var apply=function(){d.style.transform='translate('+x+'px,'+y+'px) scale('+s+')';post({type:'zoom',scale:s,fitted:fitted});};
+var axis=function(o,ext,vp){return ext+2*pad<=vp?(vp-ext)/2:Math.min(pad,Math.max(vp-ext-pad,o));};
+var clamp=function(){x=axis(x,d.offsetWidth*s,innerWidth);y=axis(y,d.offsetHeight*s,innerHeight);};
+var fitScale=function(){var w=d.offsetWidth,h=d.offsetHeight;if(!w||!h){return 1;}return Math.max(0.02,Math.min(1,(innerWidth-2*pad)/w,(innerHeight-2*pad)/h));};
+var fit=function(){
+var svg=d.querySelector('svg');
+if(svg&&svg.viewBox&&svg.viewBox.baseVal&&svg.viewBox.baseVal.width){var vb=svg.viewBox.baseVal;svg.style.maxWidth='none';svg.setAttribute('width',vb.width);svg.setAttribute('height',vb.height);}
+s=fitScale();fitted=true;x=(innerWidth-d.offsetWidth*s)/2;y=(innerHeight-d.offsetHeight*s)/2;d.style.visibility='visible';apply();};
+var zoomAt=function(n,cx,cy){n=Math.min(16,Math.max(Math.min(fitScale(),1)/2,n));var f=n/s;x=cx-(cx-x)*f;y=cy-(cy-y)*f;s=n;fitted=false;clamp();apply();};
+window.__molaZoom={fit:fit,
+by:function(f){zoomAt(s*f,innerWidth/2,innerHeight/2);},
+toggle:function(){if(fitted&&Math.abs(s-1)>0.001){zoomAt(1,innerWidth/2,innerHeight/2);}else{fit();}}};
+addEventListener('wheel',function(e){e.preventDefault();var dy=e.deltaMode===1?e.deltaY*33:e.deltaY;zoomAt(s*Math.pow(1.2,Math.max(-1,Math.min(1,-dy/100))),e.clientX,e.clientY);},{passive:false});
+addEventListener('dblclick',function(e){if(fitted&&Math.abs(s-1)>0.001){zoomAt(1,e.clientX,e.clientY);}else{fit();}});
+addEventListener('pointerdown',function(e){if(e.button>1){return;}drag={sx:e.clientX,sy:e.clientY,x:x,y:y};document.body.classList.add('mola-drag');try{document.body.setPointerCapture(e.pointerId);}catch(_){}});
+addEventListener('pointermove',function(e){if(!drag){return;}x=drag.x+e.clientX-drag.sx;y=drag.y+e.clientY-drag.sy;fitted=false;clamp();apply();});
+var end=function(){drag=null;document.body.classList.remove('mola-drag');};
+addEventListener('pointerup',end);addEventListener('pointercancel',end);
+addEventListener('resize',function(){if(fitted){fit();}else{clamp();apply();}});
+})();</script>
+""";
 
     /// <summary>Reports errors to the host (and shows them in the page, so a
     /// broken page says so instead of sitting blank), and lets the host restyle
@@ -324,10 +389,14 @@ window.__molaTheme=function(t){var r=document.documentElement;r.style.colorSchem
 
     /// <summary>A page cannot navigate itself anywhere. A link the user
     /// actually clicked opens in their browser instead.</summary>
-    private static void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
+    private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
     {
         if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri)) { e.Cancel = true; return; }
-        if (uri.Host.EndsWith(HostSuffix, StringComparison.OrdinalIgnoreCase)) return;
+        if (uri.Host.EndsWith(HostSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.Equals(e.Uri, _currentUrl, StringComparison.Ordinal)) _navigationId = e.NavigationId;
+            return;
+        }
         if (e.Uri.StartsWith("about:blank", StringComparison.OrdinalIgnoreCase)) return;
 
         e.Cancel = true;
@@ -362,6 +431,10 @@ window.__molaTheme=function(t){var r=document.documentElement;r.style.colorSchem
             if (type == "error" && root.TryGetProperty("message", out var message))
             {
                 PageError?.Invoke(this, message.GetString() ?? string.Empty);
+            }
+            else if (type == "zoom" && root.TryGetProperty("scale", out var scale) && scale.TryGetDouble(out var value))
+            {
+                ZoomChanged?.Invoke(this, value);
             }
             else if (type == "blocked" && root.TryGetProperty("uri", out var blocked))
             {

@@ -1,0 +1,74 @@
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
+                         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                         xmlns:views="clr-namespace:MolaGPT.App.Views"
+                         x:Class="MolaGPT.App.Views.ImageAttachmentEditorWindow"
+                         Title="编辑图片"
+                         Width="900" Height="680"
+                         MinWidth="480" MinHeight="420"
+                         CanResize="True"
+                         ShowInTaskbar="False"
+                         WindowStartupLocation="CenterOwner">
+  <Grid RowDefinitions="Auto,*,Auto" Margin="20,16,20,20">
+    <Border Classes="attachmenttoolbar">
+      <StackPanel Orientation="Horizontal" Spacing="4">
+        <ToggleButton Name="PART_Pen" Classes="attachmenttool" Content="画笔"
+                      ToolTip.Tip="画笔" />
+        <ToggleButton Name="PART_Crop" Classes="attachmenttool" Content="裁切"
+                      ToolTip.Tip="裁切" />
+        <Button Name="PART_Undo" Classes="attachmenttool" Content="撤销"
+                ToolTip.Tip="撤销" />
+      </StackPanel>
+    </Border>
+
+    <Border Grid.Row="1" Classes="attachmentstage" Margin="0,12,0,0">
+      <ContentControl Name="PART_EditorHost"
+                      HorizontalContentAlignment="Stretch"
+                      VerticalContentAlignment="Stretch" />
+    </Border>
+
+    <Grid Grid.Row="2" ColumnDefinitions="*,Auto" Margin="0,16,0,0">
+      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10">
+        <Button Name="PART_Cancel" Classes="outline" Content="取消"
+                Padding="18,7" />
+        <Button Name="PART_Save" Classes="pillprimary" Content="保存"
+                Padding="18,7" />
+      </StackPanel>
+    </Grid>
+  </Grid>
+
+  <Window.Styles>
+    <Style Selector="Border.attachmenttoolbar">
+      <Setter Property="Padding" Value="6" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+    </Style>
+    <Style Selector=":is(Button).attachmenttool">
+      <Setter Property="MinWidth" Value="52" />
+      <Setter Property="Height" Value="30" />
+      <Setter Property="Padding" Value="10,0" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <Style Selector=":is(Button).attachmenttool:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector=":is(Button).attachmenttool:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+    <Style Selector="ToggleButton.attachmenttool:checked /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+    </Style>
+    <Style Selector="ToggleButton.attachmenttool:checked">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+    <Style Selector="Border.attachmentstage">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Subtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+  </Window.Styles>
+</views:MolaContentWindow>

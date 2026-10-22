@@ -16,6 +16,9 @@ using MolaGPT.ViewModels;
 
 namespace MolaGPT.App.Rendering;
 
+/// <summary>A picture from the canvas on its way to the composer.</summary>
+public sealed record CanvasImage(byte[] Png, string FileName);
+
 /// <summary>
 /// What the canvas shows for the selected artifact.
 ///
@@ -66,13 +69,100 @@ public sealed class ArtifactCanvasBody : UserControl
     private string? _pendingError;
     private int _generation;
     private bool _webMode;
+    private bool _webReady;
     private DateTime _lastRender;
+
+    // Pictures (and pages, once captured) get a toolbar above the stage —
+    // above, not over: nothing can be layered on the web view.
+    private readonly Border _toolbar;
+    private readonly Button _zoomOut;
+    private readonly Button _zoomIn;
+    private readonly Button _zoomReset;
+    private readonly TextBlock _zoomLabel = new() { FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center };
+    private readonly ToggleButton _penTool;
+    private readonly Button _undo;
+    private readonly Button _exitSnapshot;
+    private ImageMarkupView? _markup;
+    // _markup is a capture of the page, which waits offstage underneath.
+    private bool _snapshot;
+    private bool _snapshotThemeChanged;
+    private double _webZoom = 1;
 
     /// <summary>「发给模型修复」 on a page that threw.</summary>
     public event EventHandler<string>? FixErrorRequested;
 
+    /// <summary>「附图提问」: the picture with its markup.</summary>
+    public event EventHandler<CanvasImage>? AskRequested;
+
     public ArtifactCanvasBody()
     {
+        _zoomOut = ToolButton("\uE71F", "缩小");
+        _zoomOut.Click += (_, _) => Zoom(1 / 1.25);
+        _zoomIn = ToolButton("\uE8A3", "放大");
+        _zoomIn.Click += (_, _) => Zoom(1.25);
+        _zoomReset = new Button { Classes = { "canvastool" }, Width = double.NaN, MinWidth = 44, Content = _zoomLabel };
+        ToolTip.SetTip(_zoomReset, "适应 / 100%");
+        Avalonia.Automation.AutomationProperties.SetName(_zoomReset, "适应 / 100%");
+        _zoomReset.Click += (_, _) =>
+        {
+            if (_markup is { } markup) markup.ToggleFit();
+            else if (_webReady) _sandbox.ToggleFit();
+        };
+
+        _penTool = ToolToggle("\uE70F", "画笔");
+        _penTool.Click += (_, _) => _ = TogglePenAsync();
+        _undo = ToolButton("\uE7A7", "撤销");
+        _undo.Click += (_, _) => _markup?.Undo();
+        _exitSnapshot = ToolButton("\uE72B", "返回预览");
+        _exitSnapshot.Click += (_, _) => ExitSnapshot();
+
+        var askIcon = new TextBlock { Classes = { "icon" }, Text = "\uE723", FontSize = 13, VerticalAlignment = VerticalAlignment.Center };
+        var ask = new Button
+        {
+            Classes = { "canvasask" },
+            Height = 28,
+            Padding = new Thickness(4, 0),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+            Content = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                Children =
+                {
+                    askIcon,
+                    new TextBlock { Text = "添加到聊天", FontSize = 12, VerticalAlignment = VerticalAlignment.Center },
+                },
+            },
+        };
+        Avalonia.Automation.AutomationProperties.SetName(ask, "添加到聊天");
+        ask.Click += (_, _) => _ = AskAsync();
+
+        var tools = new WrapPanel
+        {
+            Orientation = Orientation.Horizontal,
+            ItemSpacing = 2,
+            LineSpacing = 2,
+            Children = { _zoomOut, _zoomReset, _zoomIn, _penTool, _undo, _exitSnapshot },
+        };
+        var header = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            RowDefinitions = new RowDefinitions("Auto,Auto"),
+            Children = { tools, ask },
+        };
+        Grid.SetColumn(ask, 1);
+        header.SizeChanged += (_, e) =>
+        {
+            var stacked = e.NewSize.Width < 300;
+            Grid.SetRow(ask, stacked ? 1 : 0);
+            Grid.SetColumn(ask, stacked ? 0 : 1);
+            Grid.SetColumnSpan(ask, stacked ? 2 : 1);
+            Grid.SetColumnSpan(tools, stacked ? 2 : 1);
+            askIcon.IsVisible = e.NewSize.Width >= 100;
+        };
+        _toolbar = new Border { Classes = { "canvastoolbar" }, Child = header, IsVisible = false };
+
         var fix = new Button
         {
             Classes = { "inlineaction" },
@@ -100,8 +190,10 @@ public sealed class ArtifactCanvasBody : UserControl
         _stage.Children.Add(_native);
 
         var root = new DockPanel();
+        DockPanel.SetDock(_toolbar, Dock.Top);
         DockPanel.SetDock(_trafficBar, Dock.Bottom);
         DockPanel.SetDock(_errorBar, Dock.Bottom);
+        root.Children.Add(_toolbar);
         root.Children.Add(_trafficBar);
         root.Children.Add(_errorBar);
         root.Children.Add(_stage);
@@ -116,6 +208,11 @@ public sealed class ArtifactCanvasBody : UserControl
             _errorBar.IsVisible = true;
         };
         _sandbox.TrafficChanged += (_, _) => UpdateTraffic();
+        _sandbox.ZoomChanged += (_, zoom) =>
+        {
+            _webZoom = zoom;
+            UpdateToolbar();
+        };
         _errorText.Bind(TextBlock.ForegroundProperty, _errorText.GetResourceObservable("Brush.Danger.Foreground"));
 
         _streamingTimer = new DispatcherTimer { Interval = StreamingInterval };
@@ -222,6 +319,9 @@ public sealed class ArtifactCanvasBody : UserControl
 
     private void ShowNative(Control? content)
     {
+        _snapshot = false;
+        _snapshotThemeChanged = false;
+        _webReady = false;
         if (_webMode)
         {
             _webMode = false;
@@ -235,12 +335,19 @@ public sealed class ArtifactCanvasBody : UserControl
         }
 
         _trafficBar.IsVisible = false;
+        Track(content as ImageMarkupView);
         _native.Content = content ?? Empty("请选择交付物");
+        UpdateToolbar();
     }
 
     private async Task ShowWebAsync(string originKey, string html, int generation)
     {
         _webMode = true;
+        _webReady = false;
+        _snapshot = false;
+        _snapshotThemeChanged = false;
+        _webZoom = 1;
+        Track(null);
         if (_web is null)
         {
             _web = new CanvasWebView();
@@ -265,6 +372,7 @@ public sealed class ArtifactCanvasBody : UserControl
 
         _trafficBar.IsVisible = true;
         UpdateTraffic();
+        UpdateToolbar();
 
         try
         {
@@ -277,6 +385,10 @@ public sealed class ArtifactCanvasBody : UserControl
             if (!onScreen) await Task.WhenAny(loaded, Task.Delay(RevealTimeout));
             if (generation != _generation) return;
             _web.Unpark();
+            await loaded;
+            if (generation != _generation) return;
+            _webReady = true;
+            UpdateToolbar();
         }
         catch (Exception ex)
         {
@@ -286,15 +398,196 @@ public sealed class ArtifactCanvasBody : UserControl
             _web.Unpark();
             _web.IsVisible = false;
             _webMode = false;
+            _webReady = false;
             _trafficBar.IsVisible = false;
             _native.Content = Empty(
                 "网页预览不可用",
                 "需要 Microsoft Edge WebView2 运行时。请从微软官网安装「WebView2 Runtime」后重新打开画布；或单击「源码」查看内容。\n" + ex.Message);
+            UpdateToolbar();
         }
+    }
+
+    // ---- markup ------------------------------------------------------------------
+
+    private static Button ToolButton(string glyph, string tip)
+    {
+        var button = new Button { Classes = { "canvastool" }, Content = new TextBlock { Classes = { "icon" }, Text = glyph } };
+        ToolTip.SetTip(button, tip);
+        Avalonia.Automation.AutomationProperties.SetName(button, tip);
+        return button;
+    }
+
+    private static ToggleButton ToolToggle(string glyph, string tip)
+    {
+        var button = new ToggleButton { Classes = { "canvastool" }, Content = new TextBlock { Classes = { "icon" }, Text = glyph } };
+        ToolTip.SetTip(button, tip);
+        Avalonia.Automation.AutomationProperties.SetName(button, tip);
+        return button;
+    }
+
+    private void Track(ImageMarkupView? markup)
+    {
+        if (ReferenceEquals(markup, _markup)) return;
+        if (_markup is not null) _markup.StateChanged -= OnMarkupChanged;
+        _markup = markup;
+        if (_markup is not null) _markup.StateChanged += OnMarkupChanged;
+    }
+
+    private void OnMarkupChanged(object? sender, EventArgs e) => UpdateToolbar();
+
+    /// <summary>Pictures get markup tools; a diagram zooms in the page and is
+    /// captured for the rest; a page is only captured.</summary>
+    private void UpdateToolbar()
+    {
+        var kind = _item?.RenderKind;
+        var markup = _markup;
+        var livePage = _webMode && !_snapshot && kind is ArtifactRenderKind.Mermaid or ArtifactRenderKind.Html;
+        _toolbar.IsVisible = markup is not null || livePage;
+        _toolbar.IsEnabled = markup is not null || _webReady;
+        if (!_toolbar.IsVisible) return;
+
+        var zoomable = markup is not null || kind == ArtifactRenderKind.Mermaid;
+        _zoomOut.IsVisible = zoomable;
+        _zoomIn.IsVisible = zoomable;
+        _zoomReset.IsVisible = zoomable;
+        _zoomLabel.Text = $"{Math.Round((markup?.Zoom ?? _webZoom) * 100)}%";
+        _penTool.IsChecked = markup?.Tool == MarkupTool.Pen;
+        _undo.IsEnabled = markup?.CanUndo == true;
+        _exitSnapshot.IsVisible = _snapshot;
+    }
+
+    private void Zoom(double factor)
+    {
+        if (_markup is { } markup) markup.ZoomBy(factor);
+        else if (_webReady) _sandbox.ZoomBy(factor);
+    }
+
+    private async Task TogglePenAsync()
+    {
+        if (_markup is { } markup)
+        {
+            markup.Tool = markup.Tool == MarkupTool.Pen ? MarkupTool.None : MarkupTool.Pen;
+            markup.Focus();
+            return;
+        }
+
+        // A page cannot be drawn on: take what it shows now and mark that up.
+        if (await EnterSnapshotAsync() is { } snapshot)
+        {
+            snapshot.Tool = MarkupTool.Pen;
+            snapshot.Focus();
+        }
+
+        UpdateToolbar();
+    }
+
+    private async Task<ImageMarkupView?> EnterSnapshotAsync()
+    {
+        if (!_webReady || !_webMode || _snapshot || _web is not { IsParked: false } web) return null;
+        var generation = _generation;
+        var png = await CaptureWebAsync(web);
+        if (png is null || generation != _generation || !_webReady || !_webMode || _snapshot) return null;
+
+        Bitmap bitmap;
+        try
+        {
+            using var stream = new MemoryStream(png);
+            bitmap = new Bitmap(stream);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+
+        // Captured at device pixels; 100% is the size it had on screen.
+        var view = new ImageMarkupView(bitmap, ownsBitmap: true, paper: false, naturalSize: web.Bounds.Size, inset: 0);
+        _snapshot = true;
+        Track(view);
+        _native.Content = view;
+        // Offstage rather than hidden, so the page keeps its layout and zoom
+        // for when the capture is put away.
+        web.Park();
+        return view;
+    }
+
+    private void ExitSnapshot()
+    {
+        if (!_snapshot) return;
+        _snapshot = false;
+        Track(null);
+        _native.Content = null;
+        if (_snapshotThemeChanged)
+        {
+            Render();
+            return;
+        }
+        _web?.Unpark();
+        UpdateToolbar();
+    }
+
+    private static async Task<byte[]?> CaptureWebAsync(CanvasWebView web)
+    {
+        try
+        {
+            return await web.CaptureAsync();
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidOperationException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private async Task AskAsync()
+    {
+        if (_item is not { } item) return;
+        var generation = _generation;
+        var markup = _markup;
+        var snapshot = _snapshot;
+        var originalFile = markup is not null && !markup.CanUndo && !snapshot
+            && item.RenderKind == ArtifactRenderKind.Image && item.FullPath is { } path && File.Exists(path);
+
+        byte[]? png = null;
+        var edited = false;
+        try
+        {
+            if (markup is not null)
+            {
+                edited = markup.CanUndo;
+                // An untouched file goes as it is, not re-encoded.
+                png = originalFile
+                    ? await File.ReadAllBytesAsync(item.FullPath!)
+                    : markup.ExportPng();
+            }
+            else if (_webReady && _webMode && _web is { IsParked: false } web)
+            {
+                png = await CaptureWebAsync(web);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            png = null;
+        }
+
+        if (png is null || generation != _generation || !ReferenceEquals(markup, _markup) || snapshot != _snapshot) return;
+
+        var name = Path.GetFileNameWithoutExtension(item.FileName);
+        foreach (var invalid in Path.GetInvalidFileNameChars()) name = name.Replace(invalid, '_');
+        if (string.IsNullOrWhiteSpace(name)) name = "画布";
+        var extension = originalFile ? Path.GetExtension(item.FileName) : ".png";
+        AskRequested?.Invoke(this, new CanvasImage(png, name + (edited ? "-标注" : string.Empty) + extension));
     }
 
     private void OnThemeChanged()
     {
+        if (_markup is not null)
+        {
+            if (!_snapshot) return;
+            if (_item?.RenderKind == ArtifactRenderKind.Mermaid)
+            {
+                _snapshotThemeChanged = true;
+                return;
+            }
+        }
         // A page restyles in place through its CSS variables. Mermaid bakes its
         // theme into the SVG when it draws, so a diagram is drawn again.
         if (_webMode && _item?.RenderKind != ArtifactRenderKind.Mermaid)
@@ -423,7 +716,7 @@ public sealed class ArtifactCanvasBody : UserControl
                 return Empty("图片文件不存在");
 
             using var stream = File.OpenRead(item.FullPath);
-            return new OwnedBitmapView(new Bitmap(stream), paper: false);
+            return new ImageMarkupView(new Bitmap(stream), ownsBitmap: true, paper: false);
         }
         catch (Exception ex)
         {
@@ -465,7 +758,9 @@ public sealed class ArtifactCanvasBody : UserControl
                 canvas.Flush();
             }
 
-            return new OwnedBitmapView(image, paper: true);
+            // The raster's DPI carries the scale, so its Size — and 100% — is
+            // the size the SVG declares.
+            return new ImageMarkupView(image, ownsBitmap: true, paper: true);
         }
         catch
         {
@@ -651,44 +946,5 @@ public sealed class ArtifactCanvasBody : UserControl
         }
 
         return panel;
-    }
-
-    /// <summary>A bitmap the canvas owns: fit to width, scroll for the rest,
-    /// released when it leaves the screen.</summary>
-    private sealed class OwnedBitmapView : UserControl
-    {
-        public OwnedBitmapView(Bitmap bitmap, bool paper)
-        {
-            var image = new Image
-            {
-                Source = bitmap,
-                Stretch = Stretch.Uniform,
-                StretchDirection = StretchDirection.DownOnly,
-                HorizontalAlignment = HorizontalAlignment.Center,
-            };
-            Control content = image;
-            if (paper)
-            {
-                content = new Border
-                {
-                    Background = Brushes.White,
-                    Padding = new Thickness(16),
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    Child = image,
-                }.WithRadius("Radius.Md");
-            }
-
-            Content = new ScrollViewer
-            {
-                Content = new Border { Padding = new Thickness(12), Child = content },
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            };
-            DetachedFromVisualTree += (_, _) =>
-            {
-                image.Source = null;
-                bitmap.Dispose();
-            };
-        }
     }
 }

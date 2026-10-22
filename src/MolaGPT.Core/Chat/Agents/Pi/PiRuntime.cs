@@ -1,5 +1,3 @@
-using System.Net.Http;
-
 namespace MolaGPT.Core.Chat.Agents.Pi;
 
 /// <summary>
@@ -65,7 +63,7 @@ public sealed class PiRuntime : IAsyncDisposable
         get { lock (_gate) return _entries.Count; }
     }
 
-    public PiRuntime(HttpClient http, Action<string>? log = null, int maxSidecars = DefaultMaxSidecars)
+    public PiRuntime(Action<string>? log = null, int maxSidecars = DefaultMaxSidecars)
     {
         _log = log;
         _maxSidecars = Math.Max(1, maxSidecars);
@@ -76,7 +74,7 @@ public sealed class PiRuntime : IAsyncDisposable
         var turnSlots = _maxSidecars - subagentSlots;
         _turnSlots = new SemaphoreSlim(turnSlots, turnSlots);
         _subagentSlots = subagentSlots == 0 ? null : new SemaphoreSlim(subagentSlots, subagentSlots);
-        _shim = new PiWorkLlmShim(http, log);
+        _shim = new PiWorkLlmShim(log);
         _bridge = new PiWorkToolBridge(log);
         _idleSweep = new Timer(_ => SweepIdle(), null, IdleSweepInterval, IdleSweepInterval);
     }

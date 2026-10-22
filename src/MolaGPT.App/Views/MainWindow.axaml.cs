@@ -201,6 +201,12 @@ public partial class MainWindow : MolaWindow
         PART_TitleBar.LoginRequested += async (_, _) => await OpenAccountAsync();
         PART_TitleBar.AgentStatusRequested += (_, _) => OpenAgentSettings();
 
+        PART_ArtifactCanvas.AskRequested += (_, image) =>
+        {
+            // A maximized canvas covers the composer the picture is going to.
+            _main.ArtifactCanvasMaximized = false;
+            PART_Composer.AttachImage(image.Png, image.FileName);
+        };
         PART_Composer.PersonaSettingsRequested += (_, startNew) => OpenPersonaSettings(startNew);
         PART_Composer.PersonaSelectionFailed += (_, error) => _notifications.Error("角色切换失败", error, "persona-selection");
         _chat.HistorySaveFailed += error => _notifications.Error("回复版本保存失败", error, "message-history");
@@ -256,11 +262,9 @@ public partial class MainWindow : MolaWindow
             if (e.Delta.Y > 0) _subagentFollowBottom = false;
         };
         SyncArtifactPanel();
-        // A narrower window must not leave the canvas wider than its share.
-        PART_BodyGrid.SizeChanged += (_, _) =>
-        {
-            if (_main.ArtifactPanelVisible && _main.ArtifactCanvasVisible) SyncArtifactPanel();
-        };
+        PART_BodyGrid.SizeChanged += OnArtifactLayoutSizeChanged;
+        PART_SidebarCard.SizeChanged += OnArtifactLayoutSizeChanged;
+        PART_SidebarGap.SizeChanged += OnArtifactLayoutSizeChanged;
 
         PART_Sidebar.CollapseRequested += (_, _) => SetSidebarCollapsed(true);
         PART_Header.ExpandSidebarRequested += (_, _) => SetSidebarCollapsed(false);
@@ -570,6 +574,7 @@ public partial class MainWindow : MolaWindow
         if (maximized)
         {
             PART_ArtifactCard.Transitions = null;
+            PART_ArtifactCard.MaxWidth = double.PositiveInfinity;
             PART_ArtifactCard.Width = double.NaN;
             PART_ArtifactGap.Width = 0;
             width = PART_BodyGrid.Bounds.Width;
@@ -578,6 +583,8 @@ public partial class MainWindow : MolaWindow
         {
             PART_ArtifactCard.Transitions = _artifactResizeActive ? null : _artifactPanelTransitions;
             width = open ? canvas ? ClampArtifactCanvasWidth(_artifactCanvasWidth) : ArtifactPanelWidth : 0;
+            // Apply the shrink limit immediately, even while Width is animating.
+            PART_ArtifactCard.MaxWidth = canvas ? width : double.PositiveInfinity;
             PART_ArtifactCard.Width = width;
             PART_ArtifactGap.Width = open ? ArtifactPanelGap : 0;
         }
@@ -599,11 +606,19 @@ public partial class MainWindow : MolaWindow
 
     private double ClampArtifactCanvasWidth(double width)
     {
-        var available = Math.Max(MinCanvasWidth, PART_BodyGrid.Bounds.Width * 0.62);
-        return Math.Clamp(width, MinCanvasWidth, available);
+        var available = Math.Max(0, PART_BodyGrid.Bounds.Width
+            - PART_SidebarCard.Bounds.Width - PART_SidebarGap.Bounds.Width - ArtifactPanelGap);
+        var maximum = Math.Max(0, Math.Min(available * 0.62, available - MinChatWidth));
+        return Math.Clamp(width, Math.Min(MinCanvasWidth, maximum), maximum);
     }
 
     private const double MinCanvasWidth = 360;
+    private const double MinChatWidth = 420;
+
+    private void OnArtifactLayoutSizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        if (_main.ArtifactPanelVisible && _main.ArtifactCanvasVisible) SyncArtifactPanel();
+    }
 
     private void OnArtifactResizePressed(object? sender, PointerPressedEventArgs e)
     {

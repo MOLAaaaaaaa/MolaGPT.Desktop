@@ -237,10 +237,12 @@ public sealed class PiByokProviderFactory
                 AdaptBody: account?.Kind is { } kind ? body => ChatGptAccount.AdaptBody(body, kind) : null,
                 ResponseReceived: account is null ? null : account.ReadUsage));
 
+        var http = _httpClientFactory.CreateClient(HttpClientNames.Byok);
         var provider = new PiWorkProvider(
             config,
             _toolHost,
-            _httpClientFactory.CreateClient(HttpClientNames.Byok),
+            http,
+            http,
             _runtime,
             _log);
 

@@ -52,6 +52,15 @@ internal sealed class CanvasWebView : NativeControlHost
 
     public void Unpark() => Margin = default;
 
+    /// <summary>What the page shows right now, at device pixels, as PNG.</summary>
+    public async Task<byte[]?> CaptureAsync()
+    {
+        if (Core is not { } core) return null;
+        using var stream = new MemoryStream();
+        await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream);
+        return stream.Length > 0 ? stream.ToArray() : null;
+    }
+
     public void SetBackground(Avalonia.Media.Color color)
     {
         _background = System.Drawing.Color.FromArgb(255, color.R, color.G, color.B);

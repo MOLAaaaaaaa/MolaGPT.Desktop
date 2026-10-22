@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
@@ -42,16 +43,19 @@ public sealed partial class HttpRelayProducer : IRelayProducer
     private readonly string _base; // e.g. https://chatgpt.wljay.cn/v2
     private readonly string _machineId;
     private readonly string _machineName;
+    private readonly IWebProxy? _proxy;
 
     public HttpRelayProducer(
         HttpClient http,
         MolaGptAuthService auth,
         string? baseUrl = null,
         string? machineId = null,
-        string? machineName = null)
+        string? machineName = null,
+        IWebProxy? proxy = null)
     {
         _http = http;
         _auth = auth;
+        _proxy = proxy;
         _base = baseUrl ?? "https://chatgpt.wljay.cn/v2";
         _machineId = (machineId ?? string.Empty).Trim();
         _machineName = string.IsNullOrWhiteSpace(machineName)

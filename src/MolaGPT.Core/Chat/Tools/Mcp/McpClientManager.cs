@@ -45,10 +45,16 @@ public sealed class McpClientManager : IAsyncDisposable
     private readonly ConcurrentDictionary<string, byte> _initializeOnly = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _lifetime = new();
 
-    public McpClientManager(HttpClient http, Action<string>? log = null)
+    /// <summary>Variables every stdio server starts with — the proxy, today — under whatever
+    /// the server's own configuration sets.</summary>
+    private readonly Func<IReadOnlyDictionary<string, string>>? _baseEnvironment;
+
+    public McpClientManager(HttpClient http, Action<string>? log = null,
+        Func<IReadOnlyDictionary<string, string>>? baseEnvironment = null)
     {
         _http = http;
         _log = log;
+        _baseEnvironment = baseEnvironment;
     }
 
     /// <summary>A server could not be reached while a turn gathered its tools. The
@@ -356,7 +362,7 @@ public sealed class McpClientManager : IAsyncDisposable
         Action? onToolsChanged,
         CancellationToken ct)
     {
-        var process = McpStdioProcess.Start(server, _log);
+        var process = McpStdioProcess.Start(server, _log, _baseEnvironment?.Invoke());
         try
         {
             IClientTransport transport = new StreamClientTransport(process.Input, process.Output);

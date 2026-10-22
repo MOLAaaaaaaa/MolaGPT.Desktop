@@ -26,6 +26,7 @@ public sealed partial class HttpRelayProducer
                 response.EnsureSuccessStatusCode();
                 using var ticket = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
                 using var socket = new ClientWebSocket();
+                if (_proxy is not null) socket.Options.Proxy = _proxy;
                 socket.Options.SetRequestHeader("User-Agent", UserAgentProvider.FixedUa);
                 socket.Options.SetRequestHeader("Authorization", "Bearer " + ticket.RootElement.GetProperty("ticket").GetString());
                 socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);

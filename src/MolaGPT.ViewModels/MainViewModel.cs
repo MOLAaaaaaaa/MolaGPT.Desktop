@@ -499,6 +499,8 @@ public sealed partial class MainViewModel : ObservableObject
         };
         Chat.PropertyChanged += (_, e) =>
         {
+            if (e.PropertyName is nameof(ChatViewModel.ConversationId) or nameof(ChatViewModel.ActiveProvider))
+                OnPropertyChanged(nameof(CanOpenWorkspaceFolder));
             if (e.PropertyName != nameof(ChatViewModel.ConversationId)) return;
             // Another conversation's artifacts are not this one's.
             SelectedArtifact = null;
@@ -720,6 +722,30 @@ public sealed partial class MainViewModel : ObservableObject
         {
             // Best-effort reveal; swallow shell errors so a missing/locked file
             // never crashes the UI.
+        }
+    }
+
+    /// <summary>Account chats run their tools on the server and have no local
+    /// working directory; a draft has no id to name one by.</summary>
+    public bool CanOpenWorkspaceFolder =>
+        !string.IsNullOrEmpty(Chat.ConversationId) && Chat.ActiveProvider?.Kind != ProviderKind.MolaGptProxy;
+
+    /// <summary>Opens the conversation's working directory — where its tools
+    /// write and its uploads are copied. Created if nothing has been written
+    /// yet, so files can be put there for the next turn.</summary>
+    [RelayCommand]
+    private void OpenWorkspaceFolder()
+    {
+        if (!CanOpenWorkspaceFolder) return;
+        try
+        {
+            var directory = MolaGPT.Core.Chat.Tools.PythonExecution.PythonExecutionTool.GetSessionDirectory(Chat.ConversationId);
+            System.IO.Directory.CreateDirectory(directory);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(directory) { UseShellExecute = true });
+        }
+        catch (Exception)
+        {
+            // Explorer refusing to open is not worth a dialog.
         }
     }
 
