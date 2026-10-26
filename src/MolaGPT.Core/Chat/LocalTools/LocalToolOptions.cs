@@ -232,7 +232,10 @@ public sealed record LocalToolOptions(
             ReadBool(node, "supportsEdit"),
             ReadString(node, "format"),
             ReadString(node, "generationPath"),
-            ReadString(node, "editPath"));
+            ReadString(node, "editPath"),
+            ReadString(node, "providerType"),
+            ReadString(node, "chatPath"),
+            ReadStringMap(node, "customHeaders"));
     }
 
     private static PythonExecutionOptions? ReadPythonExecution(object raw)
@@ -526,14 +529,15 @@ public sealed record ImageGenerationOptions(
     string? Style = null,
     bool AsTool = false,
     bool SupportsEdit = false,
-    // Interface dialect: "openai-images" (DALL·E / gpt-image, dedicated
-    // /images/* endpoints) or "openai-chat-image" (OpenRouter / nano-banana,
-    // image output via /chat/completions + modalities). Null => openai-images.
+    // Persisted names identify dedicated image and conversational image APIs.
     string? Format = null,
     // Explicit, user-editable endpoint paths (carry the version segment).
     // Null => format-specific default.
     string? GenerationPath = null,
-    string? EditPath = null);
+    string? EditPath = null,
+    string? ProviderType = null,
+    string? ChatPath = null,
+    IReadOnlyDictionary<string, string>? CustomHeaders = null);
 
 public static class ImageApiFormat
 {
@@ -542,6 +546,31 @@ public static class ImageApiFormat
 
     public static bool IsChatImage(string? format) =>
         string.Equals(format, OpenAiChatImage, StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsOpenRouter(string? baseUrl) =>
+        Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)
+        && (uri.Host.Equals("openrouter.ai", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".openrouter.ai", StringComparison.OrdinalIgnoreCase));
+
+    public static string DefaultImagesPath(string? providerType, string? baseUrl) =>
+        IsOpenRouter(baseUrl) ? "v1/images" : "v1/images/generations";
+
+    public static string DefaultChatPath(string? providerType) =>
+        providerType == "gemini" ? "models/{model}:generateContent" : "v1/chat/completions";
+
+    /// <summary>Models that only return images through the chat API. Keep in sync with
+    /// the mobile client's <c>looksLikeChatImageModel</c>.</summary>
+    public static bool LooksLikeChatImageModel(string id)
+    {
+        var value = id[(id.LastIndexOf('/') + 1)..].ToLowerInvariant();
+        return value.Contains("nano-banana")
+            || System.Text.RegularExpressions.Regex.IsMatch(value, @"gemini-.*image")
+            || System.Text.RegularExpressions.Regex.IsMatch(value, @"^gpt-\d+(?:\.\d+)?-image")
+            || System.Text.RegularExpressions.Regex.IsMatch(value, @"^(?:sora[-_]image|grok-\d+(?:\.\d+)?-image|gpt-4o-image)");
+    }
+
+    public static string Infer(string id) =>
+        LooksLikeChatImageModel(id) ? OpenAiChatImage : OpenAiImages;
 }
 
 public sealed record PythonExecutionOptions(
@@ -559,5 +588,6 @@ public sealed record PythonExecutionOptions(
 public enum PythonPermissionMode
 {
     Approval,
-    FullAccess
+    FullAccess,
+    AutoReview
 }

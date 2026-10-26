@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -15,13 +16,13 @@ using MolaGPT.Desktop.Services;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels;
+using SkiaSharp;
 
 namespace MolaGPT.App.Views;
 
 public partial class ImageGenerationWorkbenchView : UserControl
 {
-    /// <summary>How many gallery entries are loaded at once. Every entry holds a
-    /// decoded thumbnail, so this is a memory ceiling, not a query nicety.</summary>
+    /// <summary>How many recent gallery entries are shown.</summary>
     private const int GalleryLimit = 200;
 
     private readonly SettingsViewModel _settings;
@@ -261,9 +262,10 @@ public partial class ImageGenerationWorkbenchView : UserControl
             {
                 var fileName = $"generated-{DateTime.Now:yyyyMMdd-HHmmss}-{++index}{ExtensionForMime(image.MimeType)}";
                 var localName = _attachmentStore.Save(image.Bytes, image.MimeType, fileName);
+                var stored = ReadStoredImageInfo(localName);
                 var result = new ImageWorkbenchResult(
                     fileName, image.MimeType, ByteSourceFor(localName, image.Bytes), localName,
-                    image.RevisedPrompt, DecodeThumbnail(image.Bytes), prompt, DateTimeOffset.Now,
+                    image.RevisedPrompt, stored?.Path, stored?.Size ?? default, prompt, DateTimeOffset.Now,
                     modelLabel, _conversationId);
                 results.Add(result);
                 _gallery.Insert(0, result);
@@ -866,8 +868,8 @@ public partial class ImageGenerationWorkbenchView : UserControl
             }
         }
 
-        // The query is already newest-first, so taking the head keeps the cap on
-        // the *recent* end — and stops before decoding a thumbnail for entry 201.
+        // The query is already newest-first, so taking the head keeps the cap
+        // on the recent end. Only image headers are read while building rows.
         var stored = _messageRepo
             .ListImageWorkbenchMessages(ConversationListViewModel.ImageWorkbenchProviderId)
             .Select(row => ParseStored(
@@ -934,9 +936,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
                 if (attachment.ValueKind != JsonValueKind.Object) continue;
                 var localName = ReadString(attachment, "localName");
 
-                // Decoding from the file also doubles as the existence check the
-                // eager Load() used to perform.
-                if (DecodeStoredThumbnail(localName) is not { } thumbnail) continue;
+                if (ReadStoredImageInfo(localName) is not { } stored) continue;
                 var mime = ReadString(attachment, "mime") ?? "image/png";
                 var fileName = ReadString(attachment, "filename")
                     ?? localName
@@ -944,7 +944,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
                 images.Add(new ImageWorkbenchResult(
                     fileName, mime, ByteSourceFor(localName, null), localName,
                     ReadString(attachment, "revised_prompt") ?? sharedRevised,
-                    thumbnail, prompt, created, modelLabel, conversationId));
+                    stored.Path, stored.Size, prompt, created, modelLabel, conversationId));
             }
 
             return images.Count == 0
@@ -1131,17 +1131,16 @@ public partial class ImageGenerationWorkbenchView : UserControl
     /// </summary>
     private const int ThumbnailWidth = 640;
 
-    /// <summary>Decodes straight off disk, so the full-size bytes never have to
-    /// exist in memory just to draw a preview.</summary>
-    private Bitmap? DecodeStoredThumbnail(string? localName)
+    private (string Path, PixelSize Size)? ReadStoredImageInfo(string? localName)
     {
         if (!_attachmentStore.TryGetPath(localName, out var path)) return null;
         try
         {
             using var stream = File.OpenRead(path);
-            return Bitmap.DecodeToWidth(stream, ThumbnailWidth);
+            using var codec = SKCodec.Create(stream);
+            return codec is null ? null : (path, new PixelSize(codec.Info.Width, codec.Info.Height));
         }
-        catch
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return null;
         }
@@ -1234,11 +1233,8 @@ public sealed record ImageWorkbenchRun(
 }
 
 /// <summary>
-/// One picture. The full-resolution bytes are deliberately *not* a field: the
-/// gallery holds every image ever generated, and keeping a 1–3 MB PNG plus a
-/// full-size decoded surface per entry made a few hundred pictures cost hundreds
-/// of megabytes. The bytes live on disk in the attachment store and are read
-/// back only when something actually needs them.
+/// One stored picture; dimensions reserve its layout before the visible
+/// thumbnail is decoded. Neither encoded bytes nor bitmaps are retained here.
 /// </summary>
 public sealed record ImageWorkbenchResult(
     string FileName,
@@ -1246,7 +1242,8 @@ public sealed record ImageWorkbenchResult(
     Func<byte[]>? BytesSource,
     string? LocalName,
     string? RevisedPrompt,
-    Bitmap? Thumbnail,
+    string? ImagePath,
+    PixelSize ImageSize,
     string Prompt,
     DateTimeOffset CreatedAt,
     string? ModelLabel = null,
@@ -1260,9 +1257,7 @@ public sealed record ImageWorkbenchResult(
     /// image back into memory.</summary>
     public byte[] LoadBytes() => BytesSource?.Invoke() ?? [];
 
-    // A decoded thumbnail is proof the bytes were readable; asking LoadBytes()
-    // here would put a disk read behind a property the templates bind to.
-    public bool HasImage => Thumbnail is not null;
+    public bool HasImage => ImageSize.Width > 0 && ImageSize.Height > 0;
     public bool HasRevisedPrompt => !string.IsNullOrWhiteSpace(RevisedPrompt);
     public string CreatedAtText => CreatedAt.ToString("MM-dd HH:mm");
 

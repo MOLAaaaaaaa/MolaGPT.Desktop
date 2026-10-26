@@ -20,6 +20,7 @@ public partial class NotificationBanner : UserControl
     private static readonly Cursor ArrowCursor = new(StandardCursorType.Arrow);
 
     private readonly DispatcherTimer _timer;
+    private readonly List<Visual> _visibilityAncestors = [];
     private TimeSpan _total;
     private TimeSpan _remaining;
     private bool _hovered;
@@ -92,12 +93,9 @@ public partial class NotificationBanner : UserControl
 
         var isProgress = notification.Kind == NotifyKind.Progress;
         PART_Progress.IsVisible = isProgress;
-        if (isProgress)
-        {
-            PART_Progress.IsIndeterminate = notification.Progress is null;
-            if (notification.Progress is { } value)
-                PART_Progress.Value = Math.Clamp(value, 0, 1);
-        }
+        UpdateProgressAnimation();
+        if (isProgress && notification.Progress is { } value)
+            PART_Progress.Value = Math.Clamp(value, 0, 1);
 
         PART_Action.Content = notification.ActionText ?? string.Empty;
         PART_Action.IsVisible = !string.IsNullOrWhiteSpace(notification.ActionText);
@@ -188,16 +186,37 @@ public partial class NotificationBanner : UserControl
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         _timer.Stop();
+        foreach (var ancestor in _visibilityAncestors)
+            ancestor.PropertyChanged -= OnAncestorVisibilityChanged;
+        _visibilityAncestors.Clear();
+        PART_Progress.IsIndeterminate = false;
         base.OnDetachedFromVisualTree(e);
     }
 
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
+        foreach (var ancestor in this.GetVisualAncestors().Prepend(this))
+        {
+            _visibilityAncestors.Add(ancestor);
+            ancestor.PropertyChanged += OnAncestorVisibilityChanged;
+        }
+        UpdateProgressAnimation();
         PART_Icon.Foreground = AccentFor(Notification.Kind);
         PART_Timer.Background = AccentFor(Notification.Kind);
         SetHovered(false);
     }
+
+    private void OnAncestorVisibilityChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == IsVisibleProperty || e.Property == Window.WindowStateProperty)
+            UpdateProgressAnimation();
+    }
+
+    private void UpdateProgressAnimation() =>
+        PART_Progress.IsIndeterminate = Notification.Kind == NotifyKind.Progress && Notification.Progress is null
+            && this.IsAttachedToVisualTree() && IsEffectivelyVisible
+            && TopLevel.GetTopLevel(this) is not Window { WindowState: WindowState.Minimized };
 
     private static string IconFor(NotifyKind kind) => kind switch
     {

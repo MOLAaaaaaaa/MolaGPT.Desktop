@@ -44,7 +44,7 @@ public sealed class PiByokProviderFactory
                 AuthHeader: false,
                 PathMode: PiWorkLlmShim.TargetPathMode.GeminiModelTemplate),
 
-            // A ChatGPT plan, through either sign-in (see ChatGptAccount). No base URL
+            // A ChatGPT plan through its selected sign-in. No base URL
             // or key of its own — both come from the signed-in account, per turn.
             ["chatgpt"] = new("openai-responses", "responses", PiWorkLlmShim.AuthStyle.Bearer),
         };
@@ -53,15 +53,13 @@ public sealed class PiByokProviderFactory
     /// Fields a ChatGPT plan request must not carry; OpenAI rejects the request
     /// over any of them. Pi's own OpenAI provider omits the same set when it sees a
     /// ChatGPT token, but behind the shim it cannot see one. The list is the
-    /// official flow's; the Codex backend was checked against it and refuses
-    /// <c>max_output_tokens</c>, <c>temperature</c> and <c>prompt_cache_retention</c>
-    /// the same way.
+    /// official flow's.
     /// </summary>
     private static readonly string[] ChatGptPlanDrops =
     [
         "background", "conversation", "max_output_tokens", "max_tool_calls", "metadata", "moderation",
         "multi_agent", "prompt", "prompt_cache_retention", "prompt_cache_options", "safety_identifier",
-        "temperature", "top_logprobs", "top_p", "truncation", "user"
+        "temperature", "top_logprobs", "top_p", "truncation", "user", "previous_response_id"
     ];
 
     /// <summary>Wire defaults for rows that leave the api path blank.</summary>
@@ -197,9 +195,15 @@ public sealed class PiByokProviderFactory
         var account = chatGpt ? _chatGpt : null;
         Func<CancellationToken, Task<string?>> token = account is null
             ? _ => Task.FromResult<string?>(key)
-            : async ct => await account.GetAccessTokenAsync(ct).ConfigureAwait(false)
-                          ?? throw new PiWorkLlmShim.CredentialUnavailableException(
-                              account.LastError ?? "未登录 ChatGPT，请在「设置 → 模型服务」中登录。");
+            : async ct =>
+            {
+                var access = await account.GetAccessTokenAsync(ct).ConfigureAwait(false)
+                    ?? throw new PiWorkLlmShim.CredentialUnavailableException(
+                        account.LastError ?? "未登录 ChatGPT，请在「设置 → 模型服务」中登录。");
+                if (!account.CanUsePlan)
+                    throw new PiWorkLlmShim.CredentialUnavailableException("请在「设置 → 模型服务」中授权使用 ChatGPT 套餐。");
+                return access;
+            };
         var config = new PiWorkProviderConfig(
             id,
             displayName,
@@ -215,18 +219,13 @@ public sealed class PiByokProviderFactory
                 models[0].Id,
                 shape.Api,
                 shape.AuthHeader),
-            // A ChatGPT row follows whichever sign-in the account holds at the
-            // start of the turn: the two reach different endpoints.
             request => new PiProviderCreds(
                 account?.Endpoint ?? endpoint,
                 token,
                 request.ModelId,
                 Api: shape.Api,
-                // OpenAI refusing the token means the grant is gone; the next turn
-                // should ask for a sign-in, not fail the same way.
-                OnUnauthorized: account is null ? null : () => account.Expire("ChatGPT 登录已失效，请重新登录。"),
                 Auth: shape.Auth,
-                Headers: account?.RequestHeaders() ?? headers,
+                Headers: account is null ? headers : account.RequestHeaders(),
                 // Custom parameters are per model, so they are resolved per turn
                 // rather than baked in when the provider is built.
                 ExtraBody: models.FirstOrDefault(m =>
@@ -235,7 +234,7 @@ public sealed class PiByokProviderFactory
                 PathMode: shape.PathMode,
                 StreamOnly: account is not null,
                 AdaptBody: account?.Kind is { } kind ? body => ChatGptAccount.AdaptBody(body, kind) : null,
-                ResponseReceived: account is null ? null : account.ReadUsage));
+                ResponseReceived: account is null ? null : account.ObserveResponse));
 
         var http = _httpClientFactory.CreateClient(HttpClientNames.Byok);
         var provider = new PiWorkProvider(

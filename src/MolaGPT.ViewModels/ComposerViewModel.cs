@@ -139,6 +139,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     private readonly ChatViewModel _chat;
     private readonly BackgroundStreamService? _backgroundStreams;
     private readonly SettingsViewModel? _settings;
+    private readonly ApprovalModeState? _approvalMode;
     private readonly PersonaListViewModel? _personas;
     private readonly SkillsViewModel? _skills;
     private readonly Services.MemoryService? _memory;
@@ -183,11 +184,15 @@ public sealed partial class ComposerViewModel : ObservableObject
         MolaGPT.Storage.AttachmentStore? attachmentStore,
         SkillsViewModel? skills = null,
         Services.MemoryService? memory = null,
-        Services.MemoryConsolidator? consolidator = null)
+        Services.MemoryConsolidator? consolidator = null,
+        ApprovalModeState? approvalMode = null)
     {
         _chat = chat;
         _backgroundStreams = backgroundStreams;
         _settings = settings;
+        _approvalMode = approvalMode;
+        if (_approvalMode is not null)
+            _approvalMode.PropertyChanged += (_, _) => RaiseApprovalModeChanged();
         _personas = personas;
         _attachmentStore = attachmentStore;
         _skills = skills;
@@ -238,6 +243,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 OnPropertyChanged(nameof(AreNetworkToolsEnabled));
                 OnPropertyChanged(nameof(IsPythonToolVisible));
                 OnPropertyChanged(nameof(IsBrowserToolAvailable));
+                OnPropertyChanged(nameof(IsApprovalModeVisible));
                 OnPropertyChanged(nameof(IsPersonaPickerVisible));
                 OnPropertyChanged(nameof(IsImageGenerationAvailable));
                 OnPropertyChanged(nameof(IsImageOptionsVisible));
@@ -279,6 +285,9 @@ public sealed partial class ComposerViewModel : ObservableObject
         {
             _settings.PropertyChanged += (_, e) =>
             {
+                if (e.PropertyName is nameof(SettingsViewModel.SelectedReviewProviderModel)
+                    or nameof(SettingsViewModel.IsReviewModelMissing))
+                    RaiseApprovalModeChanged();
                 if (e.PropertyName is nameof(SettingsViewModel.MemoryEnabled)
                     or nameof(SettingsViewModel.MemoryUseEnabled))
                 {
@@ -316,7 +325,6 @@ public sealed partial class ComposerViewModel : ObservableObject
                     or nameof(SettingsViewModel.PythonToolTimeoutSeconds)
                     or nameof(SettingsViewModel.PythonToolMaxOutputCharacters)
                     or nameof(SettingsViewModel.PythonToolAllowNetwork)
-                    or nameof(SettingsViewModel.LocalToolPermissionMode)
                     or nameof(SettingsViewModel.PythonToolAllowedImports)
                     or nameof(SettingsViewModel.PythonToolDeniedImports)
                     or nameof(SettingsViewModel.PythonToolAllowedPathPrefixes)
@@ -518,6 +526,66 @@ public sealed partial class ComposerViewModel : ObservableObject
     public bool AreNetworkToolsEnabled =>
         SubjectProvider?.Kind == ProviderKind.MolaGptProxy || SubjectModel?.SupportsToolCalling == true;
     public bool IsPythonToolVisible => CanUseByokPythonTool;
+    public ToolPermissionMode ApprovalMode => _approvalMode?.Mode ?? ApprovalModeState.Default;
+    public bool IsApprovalModeManual => ApprovalMode == ToolPermissionMode.Approval;
+    public bool IsApprovalModeAuto => ApprovalMode == ToolPermissionMode.AutoReview;
+    public bool IsApprovalModeFull => ApprovalMode == ToolPermissionMode.FullAccess;
+
+    public string ApprovalModeLabel => ApprovalMode switch
+    {
+        ToolPermissionMode.FullAccess => "完全权限",
+        ToolPermissionMode.AutoReview => "自动审批",
+        _ => "按需审批"
+    };
+
+    public string ApprovalModeGlyph => ApprovalMode switch
+    {
+        ToolPermissionMode.FullAccess => "", // Warning
+        ToolPermissionMode.AutoReview => "", // Robot
+        _ => ""                              // Shield
+    };
+
+    public bool IsReviewModelMissing => _settings?.IsReviewModelMissing ?? true;
+    public bool ShowsReviewModelWarning => IsApprovalModeAuto && IsReviewModelMissing;
+    public string? ReviewModelLabel => _settings?.SelectedReviewProviderModel?.Label;
+    public string ReviewModelMissingText =>
+        _settings?.SelectedReviewProviderModel is null ? "未设置审批模型" : "所选审批模型不可用";
+
+    /// <summary>Automatic review needs a review model to hand calls to. Already being
+    /// in it stays selectable, so the check mark does not turn grey.</summary>
+    public bool IsAutoReviewSelectable => !IsReviewModelMissing || IsApprovalModeAuto;
+
+    public string ApprovalModeToolTip => ShowsReviewModelWarning
+        ? "未设置审批模型，需确认的操作将转为人工确认"
+        : $"审批模式：{ApprovalModeLabel}";
+
+    /// <summary>Local tools run only for BYOK models that call tools.</summary>
+    public bool IsApprovalModeVisible =>
+        SubjectProvider?.Kind != ProviderKind.MolaGptProxy
+        && SubjectModel?.SupportsToolCalling == true;
+
+    /// <summary>Full access is confirmed by the view before it gets here.</summary>
+    public void SetApprovalMode(ToolPermissionMode mode)
+    {
+        if (_approvalMode is not null) _approvalMode.Mode = mode;
+    }
+
+    private void RaiseApprovalModeChanged()
+    {
+        OnPropertyChanged(nameof(ApprovalMode));
+        OnPropertyChanged(nameof(IsApprovalModeManual));
+        OnPropertyChanged(nameof(IsApprovalModeAuto));
+        OnPropertyChanged(nameof(IsApprovalModeFull));
+        OnPropertyChanged(nameof(ApprovalModeLabel));
+        OnPropertyChanged(nameof(ApprovalModeGlyph));
+        OnPropertyChanged(nameof(IsReviewModelMissing));
+        OnPropertyChanged(nameof(ShowsReviewModelWarning));
+        OnPropertyChanged(nameof(ReviewModelLabel));
+        OnPropertyChanged(nameof(ReviewModelMissingText));
+        OnPropertyChanged(nameof(IsAutoReviewSelectable));
+        OnPropertyChanged(nameof(ApprovalModeToolTip));
+    }
+
     /// <summary>
     /// 浏览器操作是本地 agent（Work/BYOK）的工具，云端 Chat 代理没有 WebBridge
     /// 客户端，所以那边恒为 false。
@@ -1314,7 +1382,6 @@ public sealed partial class ComposerViewModel : ObservableObject
             ["steelBrowser"] = network,
             ["code"] = true,
             ["deepResearch"] = false,
-            ["permissionMode"] = _settings?.LocalToolPermissionMode ?? ToolPermissionMode.Approval,
             ["imageGenerationPermissionMode"] = _settings?.ImageGenerationPermissionMode ?? ToolPermissionMode.Approval,
             ["visionPermissionMode"] = _settings?.VisionPermissionMode ?? ToolPermissionMode.Approval,
             ["mcpPermissionMode"] = _settings?.McpPermissionMode ?? ToolPermissionMode.Approval
@@ -1892,6 +1959,8 @@ public sealed partial class ComposerViewModel : ObservableObject
         if (!CanUseByokPythonTool || _settings is null) return null;
 
         var options = _settings.BuildPythonExecutionOptions();
+        var fullAccess = ApprovalMode == ToolPermissionMode.FullAccess
+                         || options.PermissionMode == PythonPermissionMode.FullAccess;
         var lines = new List<string>
         {
             // 「文件跨轮次保留」听起来像是有东西可找，新对话第一轮却必然是空的：实测
@@ -1906,7 +1975,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         // Nothing prompts under full access, and no path scope applies there, so
         // stating either would be a lie that also discourages the model from
         // acting.
-        if (options.PermissionMode != PythonPermissionMode.FullAccess)
+        if (!fullAccess)
         {
             lines.Add("默认只有工作目录可写，全盘可读。要写到别处（含桌面、文档、下载），在 paths 参数里声明该文件夹，用户确认一次后长期有效；未声明就写会直接报错并列出已批准范围，此时向用户说明需要哪个位置、为什么，不要反复重试。");
             lines.Add("删除移动文件、装包、起子进程需要用户确认，合并成一次执行并在 description 里说清意图。");

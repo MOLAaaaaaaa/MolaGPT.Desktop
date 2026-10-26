@@ -6,6 +6,7 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MolaGPT.Core.Chat.Attachments;
+using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
 using MolaGPT.Desktop.Services;
 using MolaGPT.ViewModels;
@@ -68,6 +69,30 @@ public partial class ComposerView : UserControl
             observed = DataContext as ComposerViewModel;
             if (observed is not null) observed.FocusRequested += OnFocusRequested;
         };
+    }
+
+    public event EventHandler? ApprovalSettingsRequested;
+
+    private void OnOpenApprovalSettings(object? sender, RoutedEventArgs e)
+    {
+        PART_ApprovalMode.Flyout?.Hide();
+        ApprovalSettingsRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private async void OnPickApprovalMode(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Control { Tag: string tag }
+            || !Enum.TryParse<ToolPermissionMode>(tag, out var mode)
+            || DataContext is not ComposerViewModel vm) return;
+
+        PART_ApprovalMode.Flyout?.Hide();
+        if (mode == vm.ApprovalMode) return;
+        if (mode == ToolPermissionMode.FullAccess)
+        {
+            if (TopLevel.GetTopLevel(this) is not Window owner) return;
+            if (!await FullAccessConfirmWindow.AskAsync(owner)) return;
+        }
+        vm.SetApprovalMode(mode);
     }
 
     private void OnFocusRequested() => Dispatcher.UIThread.Post(() =>

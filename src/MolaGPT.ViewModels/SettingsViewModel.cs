@@ -74,8 +74,6 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string PythonToolTimeoutSecondsKey = "python_tool_timeout_seconds";
     private const string PythonToolMaxOutputCharactersKey = "python_tool_max_output_characters";
     private const string PythonToolAllowNetworkKey = "python_tool_allow_network";
-    private const string ToolPermissionModeKey = "tool_permission_mode";
-    private const string PythonToolPermissionModeKey = "python_tool_permission_mode";
     private const string ImageGenerationPermissionModeKey = "image_generation_permission_mode";
     private const string VisionPermissionModeKey = "vision_permission_mode";
     private const string McpPermissionModeKey = "mcp_permission_mode";
@@ -237,7 +235,6 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private int _pythonToolTimeoutSeconds = 60;
     [ObservableProperty] private int _pythonToolMaxOutputCharacters = 20000;
     [ObservableProperty] private bool _pythonToolAllowNetwork;
-    [ObservableProperty] private ToolPermissionMode _localToolPermissionMode = ToolPermissionMode.Approval;
     [ObservableProperty] private ToolPermissionMode _imageGenerationPermissionMode = ToolPermissionMode.Approval;
     [ObservableProperty] private ToolPermissionMode _visionPermissionMode = ToolPermissionMode.Approval;
     [ObservableProperty] private ToolPermissionMode _mcpPermissionMode = ToolPermissionMode.Approval;
@@ -310,6 +307,18 @@ public sealed partial class SettingsViewModel : ObservableObject
         _credentialStore = credentialStore;
         _settingsRepo = settingsRepo;
         _providerRegistry = providerRegistry;
+        if (providerRegistry is not null)
+        {
+            // Providers register after this view model exists (agent runtime, sign-in),
+            // so the review list built by Reload() would stay a startup snapshot, and
+            // the composer's approval menu reads it without ever opening settings.
+            var ui = SynchronizationContext.Current;
+            providerRegistry.Changed += (_, _) =>
+            {
+                if (ui is null || SynchronizationContext.Current == ui) RefreshReviewProviderModels();
+                else ui.Post(_ => RefreshReviewProviderModels(), null);
+            };
+        }
         Reload();
     }
 
@@ -327,7 +336,19 @@ public sealed partial class SettingsViewModel : ObservableObject
             var models = TryDeserializeModels(row.Models);
             var customHeaders = TryDeserializeHeaders(row.CustomHeaders is { } headers && _credentialStore is not null
                 ? _credentialStore.DecryptText(headers) : row.CustomHeaders);
-            Providers.Add(new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat, customHeaders));
+            var entry = new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat, customHeaders, row.ImageChatPath);
+            if (IsImagePurpose(entry.Purpose) && entry.ImageChatPath is null)
+            {
+                var legacyChat = ImageApiFormat.IsChatImage(entry.ImageFormat)
+                    || entry.Type == "gemini" && entry.ApiPath?.Contains(":generateContent", StringComparison.OrdinalIgnoreCase) == true;
+                entry = entry with
+                {
+                    ImageChatPath = legacyChat ? entry.ApiPath ?? ImageApiFormat.DefaultChatPath(entry.Type) : ImageApiFormat.DefaultChatPath(entry.Type),
+                    ApiPath = legacyChat ? ImageApiFormat.DefaultImagesPath(entry.Type, entry.BaseUrl) : entry.ApiPath,
+                    ImageFormat = legacyChat ? ImageApiFormat.OpenAiChatImage : entry.ImageFormat
+                };
+            }
+            Providers.Add(entry);
         }
         RefreshTitleProviderModels();
         RefreshSubagentProviderModels();
@@ -447,13 +468,9 @@ public sealed partial class SettingsViewModel : ObservableObject
             if (int.TryParse(_settingsRepo.Get(PythonToolMaxOutputCharactersKey), out var pythonMaxOutput))
                 PythonToolMaxOutputCharacters = Math.Clamp(pythonMaxOutput, 2000, 100000);
             PythonToolAllowNetwork = bool.TryParse(_settingsRepo.Get(PythonToolAllowNetworkKey), out var pythonAllowNetwork) && pythonAllowNetwork;
-            var permissionModeRaw = _settingsRepo.Get(ToolPermissionModeKey)
-                                    ?? _settingsRepo.Get(PythonToolPermissionModeKey);
-            if (!string.IsNullOrWhiteSpace(permissionModeRaw)
-                && Enum.TryParse<ToolPermissionMode>(permissionModeRaw, true, out var permissionMode))
-            {
-                LocalToolPermissionMode = permissionMode;
-            }
+            SetOrRemove("tool_permission_mode", null);
+            SetOrRemove("python_tool_permission_mode", null);
+            SetOrRemove("python_auto_review_enabled", null);
             if (Enum.TryParse<ToolPermissionMode>(_settingsRepo.Get(ImageGenerationPermissionModeKey), true, out var imgMode))
                 ImageGenerationPermissionMode = imgMode;
             if (Enum.TryParse<ToolPermissionMode>(_settingsRepo.Get(VisionPermissionModeKey), true, out var visMode))
@@ -915,12 +932,6 @@ public sealed partial class SettingsViewModel : ObservableObject
         _settingsRepo.Set(PythonToolAllowNetworkKey, value.ToString());
     }
 
-    partial void OnLocalToolPermissionModeChanged(ToolPermissionMode value)
-    {
-        if (_loadingSettings || _settingsRepo is null) return;
-        _settingsRepo.Set(ToolPermissionModeKey, value.ToString());
-    }
-
     partial void OnImageGenerationPermissionModeChanged(ToolPermissionMode value)
     {
         if (_loadingSettings || _settingsRepo is null) return;
@@ -1028,7 +1039,8 @@ public sealed partial class SettingsViewModel : ObservableObject
             CustomHeaders: entry.CustomHeaders is { Count: > 0 }
                 ? (_credentialStore ?? throw new InvalidOperationException("凭据存储不可用。"))
                     .EncryptText(JsonSerializer.Serialize(entry.CustomHeaders))
-                : null));
+                : null,
+            ImageChatPath: entry.ImageChatPath));
         RefreshVisionProviderModels();
         RefreshTitleProviderModels();
         RefreshSubagentProviderModels();
@@ -1099,9 +1111,12 @@ public sealed partial class SettingsViewModel : ObservableObject
             ImageGenerationStyle,
             true,
             SelectedImageGenerationModel?.SupportsEdit == true,
-            provider?.ImageFormat,
+            provider?.Models.FirstOrDefault(m => m.Id == ImageGenerationModelId)?.ImageFormat ?? provider?.ImageFormat,
             provider?.ApiPath,
-            provider?.ImageEditPath);
+            provider?.ImageEditPath,
+            provider?.Type,
+            provider?.ImageChatPath,
+            provider?.CustomHeaders?.ToDictionary(h => h.Name, h => h.Value));
     }
 
     public ImageGenerationOptions BuildWorkbenchImageGenerationOptions()
@@ -1116,9 +1131,12 @@ public sealed partial class SettingsViewModel : ObservableObject
             WorkbenchImageGenerationStyle,
             false,
             SelectedWorkbenchImageGenerationModel?.SupportsEdit == true,
-            provider?.ImageFormat,
+            provider?.Models.FirstOrDefault(m => m.Id == WorkbenchImageGenerationModelId)?.ImageFormat ?? provider?.ImageFormat,
             provider?.ApiPath,
-            provider?.ImageEditPath);
+            provider?.ImageEditPath,
+            provider?.Type,
+            provider?.ImageChatPath,
+            provider?.CustomHeaders?.ToDictionary(h => h.Name, h => h.Value));
     }
 
     public PythonExecutionOptions BuildPythonExecutionOptions() => new(
@@ -1127,7 +1145,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         Math.Clamp(PythonToolTimeoutSeconds, 5, 300),
         Math.Clamp(PythonToolMaxOutputCharacters, 2000, 100000),
         PythonToolAllowNetwork,
-        LocalToolPermissionMode == ToolPermissionMode.FullAccess || PythonExecutionPermissionMode == ToolPermissionMode.FullAccess
+        PythonExecutionPermissionMode == ToolPermissionMode.FullAccess
             ? PythonPermissionMode.FullAccess
             : PythonPermissionMode.Approval,
         PythonToolAllowedImports,
@@ -1492,7 +1510,8 @@ public sealed record ProviderEntry(
     string? ApiPath = null,                                // chat: 对话路径; image: 生成路径 (含版本段)
     string? ImageEditPath = null,                          // image(openai-images): 编辑路径
     string? ImageFormat = null,                            // image: openai-images|openai-chat-image
-    List<CustomHeaderEntry>? CustomHeaders = null);        // BYOK: 附加到该服务全部请求的自定义请求头
+    List<CustomHeaderEntry>? CustomHeaders = null,
+    string? ImageChatPath = null);
 
 public sealed record ProviderModelEntry(
     string Id,
@@ -1515,7 +1534,8 @@ public sealed record ProviderModelEntry(
     bool ReasoningMandatory = false,
     bool SupportsTemperature = true,
     bool SupportsTopP = true,
-    ModelPricing? Pricing = null);
+    ModelPricing? Pricing = null,
+    string? ImageFormat = null);
 
 /// <summary>A user-defined HTTP header appended to a BYOK provider's requests.</summary>
 public sealed record CustomHeaderEntry(string Name = "", string Value = "");

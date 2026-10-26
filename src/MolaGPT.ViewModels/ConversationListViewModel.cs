@@ -72,10 +72,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
     private bool _isMolaGptGroupExpanded = true;
 
     /// <summary>
-    /// False under 隐藏 MolaGPT 账号功能 while signed out. Signing out keeps the
-    /// account chats already downloaded, and they cannot be continued without the
-    /// account, so the group goes with the rest of the account surface. Hidden,
-    /// not filtered: the rows come back the moment the switch or a sign-in does.
+    /// False when 显示 MolaGPT 账号入口 is off. The account chats (Chat and Work)
+    /// go with the rest of the account surface. Hidden, not filtered: the rows
+    /// come back the moment the switch does.
     /// </summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ShowMolaGptGroup))]
@@ -131,7 +130,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
     /// Nothing for the sidebar to list: no BYOK rows and no account group on
     /// screen. Both groups hide their headers when empty, so without a word here
     /// a first launch is a blank column. Counts what is shown rather than what is
-    /// stored, so account chats hidden by 隐藏 MolaGPT 账号功能 do not count.
+    /// stored, so account chats hidden by 显示 MolaGPT 账号入口 do not count.
     /// </summary>
     public bool IsSidebarEmpty => !HasByokConversations && !ShowMolaGptGroup;
 
@@ -139,8 +138,11 @@ public sealed partial class ConversationListViewModel : ObservableObject
     // debounce runs, the rows on screen still answer the previous query.
     private bool IsSearchEmpty => IsSidebarEmpty && _appliedSearchQuery.Trim().Length > 0;
     public string EmptyStateGlyph => IsSearchEmpty ? "\uE721" : "\uE8BD";
-    public string EmptyStateTitle => IsSearchEmpty ? "没有匹配的对话" : "还没有对话";
-    public string EmptyStateHint => IsSearchEmpty ? "只搜索对话标题" : "对话记录会保存在这里";
+    public string EmptyStateTitle => !IsSearchEmpty ? "还没有对话"
+        : _isSearching ? "正在搜索对话"
+        : _searchError is not null ? "搜索未完成" : "没有匹配的对话";
+    public string EmptyStateHint => !IsSearchEmpty ? "对话记录会保存在这里"
+        : _searchError ?? (_isSearching ? string.Empty : "试试其他关键词");
 
     private void RaiseEmptyStateChanged()
     {
@@ -154,6 +156,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
     {
         RaiseGroupVisibilityChanged();
         RaiseEmptyStateChanged();
+        if (!string.IsNullOrWhiteSpace(SearchQuery)) StartSearch(SearchQuery, debounce: true);
     }
 
     private readonly ConversationRepository? _repository;
@@ -169,8 +172,16 @@ public sealed partial class ConversationListViewModel : ObservableObject
     // plus list rebuild on each one and cleared the bulk selection. We wait for
     // a typing pause, read off the UI thread, then reconcile the visible rows.
     private const int SearchDebounceMilliseconds = 250;
+    private const int CloudSearchDebounceMilliseconds = 600;
     private CancellationTokenSource? _searchDebounceCts;
     private string _appliedSearchQuery = string.Empty;
+    private Dictionary<string, string> _messageMatches = new(StringComparer.Ordinal);
+    private IReadOnlyDictionary<string, string> _cloudMatches = new Dictionary<string, string>();
+    private bool _isSearching;
+    private string? _searchError;
+
+    public Func<string, CancellationToken, Task<IReadOnlyDictionary<string, string>>>? SearchCloudAsync { get; set; }
+    public event EventHandler<string>? SearchFailed;
 
     // --- Undo of the most recent soft-delete ---
     // 10s, not 6: the toast is the only safety net for a mis-clicked delete, and
@@ -379,6 +390,11 @@ public sealed partial class ConversationListViewModel : ObservableObject
             return;
         }
 
+        if (!string.IsNullOrWhiteSpace(SearchQuery))
+        {
+            StartSearch(SearchQuery, debounce: false);
+            return;
+        }
         ApplyRows(_repository.ListActive());
     }
 
@@ -395,6 +411,12 @@ public sealed partial class ConversationListViewModel : ObservableObject
             return;
         }
 
+        if (!string.IsNullOrWhiteSpace(SearchQuery))
+        {
+            StartSearch(SearchQuery, debounce: false);
+            return;
+        }
+
         var rows = await Task.Run(() => _repository.ListActive(), cancellationToken)
             .ConfigureAwait(true);
         if (cancellationToken.IsCancellationRequested) return;
@@ -403,6 +425,12 @@ public sealed partial class ConversationListViewModel : ObservableObject
 
     private void ApplyRows(IReadOnlyList<ConversationRow> rows)
     {
+        if (!string.IsNullOrWhiteSpace(SearchQuery))
+        {
+            StartSearch(SearchQuery, debounce: false);
+            return;
+        }
+
         // The reload already owns a fresh snapshot. Cancel any older search and
         // render this snapshot using the query that is currently in the box.
         CancelPendingSearch();
@@ -413,6 +441,12 @@ public sealed partial class ConversationListViewModel : ObservableObject
         IReadOnlyList<ConversationRow> changedRows,
         IReadOnlyList<string> removedIds)
     {
+        if (!string.IsNullOrWhiteSpace(SearchQuery) || !string.IsNullOrWhiteSpace(_appliedSearchQuery))
+        {
+            StartSearch(SearchQuery, debounce: true);
+            return;
+        }
+
         var removed = removedIds
             .Where(id => !string.IsNullOrWhiteSpace(id))
             .ToHashSet(StringComparer.Ordinal);
@@ -471,18 +505,25 @@ public sealed partial class ConversationListViewModel : ObservableObject
 
         if (_generatingIds.Contains(row.Id) || existing?.IsGenerating == true)
             item.IsGenerating = true;
+        item.UpdateSearchMatch(_appliedSearchQuery.Trim(), _messageMatches.GetValueOrDefault(row.Id) ?? string.Empty);
 
         return item;
     }
 
-    private void ApplyRowsForQuery(IReadOnlyList<ConversationRow> rows, string query)
+    private void ApplyRowsForQuery(IReadOnlyList<ConversationRow> rows, string query, Dictionary<string, string>? messageMatches = null)
     {
+        _messageMatches = messageMatches ?? new Dictionary<string, string>(StringComparer.Ordinal);
         var visibleRows = rows.Where(row => RowMatchesQuery(row, query)).ToList();
         _appliedSearchQuery = query;
         // An empty list can stay empty while the reason changes (no rows at all →
         // no rows matching), and the early return below would skip the repaint.
         RaiseEmptyStateChanged();
-        if (RowsMatchCurrentItems(visibleRows)) return;
+        if (RowsMatchCurrentItems(visibleRows))
+        {
+            foreach (var item in Items)
+                item.UpdateSearchMatch(query.Trim(), _messageMatches.GetValueOrDefault(item.Id) ?? string.Empty);
+            return;
+        }
 
         var existingById = Items.ToDictionary(item => item.Id, StringComparer.Ordinal);
         var items = new List<ConversationListItem>(visibleRows.Count);
@@ -494,12 +535,13 @@ public sealed partial class ConversationListViewModel : ObservableObject
         ReplaceAllItems(items);
     }
 
-    private static bool RowMatchesQuery(ConversationRow row, string query)
+    private bool RowMatchesQuery(ConversationRow row, string query)
     {
         var needle = query.Trim();
         if (needle.Length == 0) return true;
         var title = string.IsNullOrWhiteSpace(row.Title) ? "新对话" : row.Title;
-        return title.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
+        return title.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0
+            || _messageMatches.ContainsKey(row.Id);
     }
 
     private void ReplaceAllItems(IReadOnlyList<ConversationListItem> items)
@@ -590,6 +632,11 @@ public sealed partial class ConversationListViewModel : ObservableObject
         bool? pinned = null)
     {
         if (string.IsNullOrEmpty(id)) return;
+        if (!string.IsNullOrWhiteSpace(SearchQuery))
+        {
+            StartSearch(SearchQuery, debounce: true);
+            return;
+        }
         var existingIdx = -1;
         for (int i = 0; i < Items.Count; i++)
         {
@@ -821,10 +868,6 @@ public sealed partial class ConversationListViewModel : ObservableObject
             ConversationSelected?.Invoke(this, value);
     }
 
-    /// <summary>When the user types in the sidebar search box, re-query
-    /// SQLite for matching titles. We keep it simple and case-insensitive —
-    /// the repo returns all rows and we filter in-memory because the typical
-    /// conversation count is small (&lt;1000).</summary>
     /// <summary>Drives the search box's clear (×) button visibility.</summary>
     public bool HasSearchQuery => !string.IsNullOrEmpty(SearchQuery);
 
@@ -842,8 +885,14 @@ public sealed partial class ConversationListViewModel : ObservableObject
     private void StartSearch(string value, bool debounce)
     {
         CancelPendingSearch();
+        if (value.Trim().Length == 0 || !ShowAccountConversations
+            || !string.Equals(value, _appliedSearchQuery, StringComparison.Ordinal))
+            _cloudMatches = new Dictionary<string, string>();
         var cts = new CancellationTokenSource();
         _searchDebounceCts = cts;
+        _isSearching = true;
+        _searchError = null;
+        RaiseEmptyStateChanged();
         _ = SearchAsync(value, cts, debounce);
     }
 
@@ -851,6 +900,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
     {
         var pending = _searchDebounceCts;
         _searchDebounceCts = null;
+        _isSearching = false;
         pending?.Cancel();
     }
 
@@ -861,6 +911,7 @@ public sealed partial class ConversationListViewModel : ObservableObject
             return;
 
         var token = request.Token;
+        var searchingCloud = false;
 
         try
         {
@@ -868,22 +919,49 @@ public sealed partial class ConversationListViewModel : ObservableObject
                 await Task.Delay(SearchDebounceMilliseconds, token).ConfigureAwait(true);
             if (token.IsCancellationRequested) return;
 
-            var rows = await Task.Run(() => repository.ListActive(), token).ConfigureAwait(true);
-            if (token.IsCancellationRequested
-                || !ReferenceEquals(_searchDebounceCts, request)
-                || !string.Equals(SearchQuery, value, StringComparison.Ordinal))
-                return;
+            var (rows, matches) = await Task.Run(() =>
+                (repository.ListActive(), repository.FindByMessageContent(value, token)), token).ConfigureAwait(true);
+            token.ThrowIfCancellationRequested();
+            // Keep cloud hits visible during a reload of the same query.
+            var visibleMatches = new Dictionary<string, string>(matches, StringComparer.Ordinal);
+            foreach (var match in _cloudMatches) visibleMatches.TryAdd(match.Key, match.Value);
+            ApplyRowsForQuery(rows, value, visibleMatches);
 
-            ApplyRowsForQuery(rows, value);
+            // Local results appear first. Only short excerpts survive the response;
+            // downloading full cloud histories is still deferred until opening one.
+            var cloudSearch = SearchCloudAsync;
+            if (value.Trim().Length == 0 || !ShowAccountConversations || cloudSearch is null) return;
+            // The server scans conversation files; wait for a longer typing pause there.
+            if (debounce)
+                await Task.Delay(CloudSearchDebounceMilliseconds - SearchDebounceMilliseconds, token).ConfigureAwait(true);
+            searchingCloud = true;
+            var cloudMatches = await cloudSearch(value.Trim(), token).ConfigureAwait(true);
+            token.ThrowIfCancellationRequested();
+            _cloudMatches = cloudMatches;
+            foreach (var match in cloudMatches) matches.TryAdd(match.Key, match.Value);
+            rows = await Task.Run(() => repository.ListActive(), token).ConfigureAwait(true);
+            token.ThrowIfCancellationRequested();
+            ApplyRowsForQuery(rows, value, matches);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
             // Superseded by a newer query or data refresh.
+        }
+        catch (Exception ex)
+        {
+            if (token.IsCancellationRequested) return;
+            _searchError = searchingCloud ? "云端搜索失败，请稍后重试" : "搜索失败，请稍后重试";
+            SearchFailed?.Invoke(this, ex.Message);
         }
         finally
         {
             if (ReferenceEquals(_searchDebounceCts, request))
+            {
                 _searchDebounceCts = null;
+                _isSearching = false;
+                RaiseEmptyStateChanged();
+            }
+            request.Dispose();
         }
     }
 
@@ -947,6 +1025,11 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
     public string Id { get; }
     private string _title;
     public string Title => _title;
+    private string _searchQuery = string.Empty;
+    public string SearchQuery => _searchQuery;
+    private string _searchSnippet = string.Empty;
+    public string SearchSnippet => _searchSnippet;
+    public bool HasSearchSnippet => _searchSnippet.Length > 0;
     private DateTimeOffset _updatedAt;
     public DateTimeOffset UpdatedAt => _updatedAt;
     /// <summary>Three-way sidebar group (Byok / Chat / Work).</summary>
@@ -1020,6 +1103,7 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
     internal void UpdateFrom(ConversationListItem source)
     {
         SetProperty(ref _title, source.Title, nameof(Title));
+        UpdateSearchMatch(source.SearchQuery, source.SearchSnippet);
         if (SetProperty(ref _updatedAt, source.UpdatedAt, nameof(UpdatedAt)))
             OnPropertyChanged(nameof(TimeLabel));
         if (SetProperty(ref _group, source.Group, nameof(Group)))
@@ -1038,6 +1122,13 @@ public sealed class ConversationListItem : CommunityToolkit.Mvvm.ComponentModel.
         SetProperty(ref _pinned, source.Pinned, nameof(Pinned));
         PersonaLabel = source.PersonaLabel;
         IsGenerating = source.IsGenerating;
+    }
+
+    internal void UpdateSearchMatch(string query, string snippet)
+    {
+        SetProperty(ref _searchQuery, query, nameof(SearchQuery));
+        if (SetProperty(ref _searchSnippet, snippet, nameof(SearchSnippet)))
+            OnPropertyChanged(nameof(HasSearchSnippet));
     }
 
     /// <summary>

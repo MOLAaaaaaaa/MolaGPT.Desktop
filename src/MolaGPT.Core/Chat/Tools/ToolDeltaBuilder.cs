@@ -224,7 +224,8 @@ public static class ToolDeltaBuilder
                 {
                     parts.Add(mode switch
                     {
-                        "Approval" => "审批权限",
+                        "Approval" => "按需审批",
+                        "AutoReview" => "自动审批",
                         "FullAccess" => "完全权限",
                         "Rules" => "规则模式",
                         _ => mode

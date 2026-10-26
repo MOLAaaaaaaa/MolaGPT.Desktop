@@ -84,9 +84,7 @@ public sealed record PythonReviewVerdict(
 
 public interface IPythonAutoReviewer
 {
-    /// <summary>Null when automatic review is off; the caller asks the user as it
-    /// always did.</summary>
-    Task<PythonReviewVerdict?> ReviewAsync(PythonReviewRequest request, CancellationToken ct);
+    Task<PythonReviewVerdict> ReviewAsync(PythonReviewRequest request, CancellationToken ct);
 }
 
 public sealed record PythonReviewTarget(OneShotTarget Target, string ModelId, string Label);
@@ -129,16 +127,13 @@ public sealed class PythonAutoReviewer : IPythonAutoReviewer
         WriteIndented = true
     };
 
-    private readonly Func<bool> _enabled;
     private readonly Func<PythonReviewTarget?> _target;
     private readonly Func<OneShotCompletionClient> _client;
 
     public PythonAutoReviewer(
-        Func<bool> enabled,
         Func<PythonReviewTarget?> target,
         Func<OneShotCompletionClient> client)
     {
-        _enabled = enabled;
         _target = target;
         _client = client;
     }
@@ -152,18 +147,17 @@ public sealed class PythonAutoReviewer : IPythonAutoReviewer
         return new PythonReviewTarget(target, found.Model.Id, $"{found.Provider.DisplayName} / {found.Model.DisplayName}");
     }
 
-    public async Task<PythonReviewVerdict?> ReviewAsync(PythonReviewRequest request, CancellationToken ct)
+    public async Task<PythonReviewVerdict> ReviewAsync(PythonReviewRequest request, CancellationToken ct)
     {
-        if (!_enabled()) return null;
         // Switched on with no usable model is a failure the user is told about,
         // not a silent fall-back: otherwise it looks on and does nothing.
         if (_target() is not { } target)
-            return new PythonReviewVerdict(false, "未选择审批模型，或所选模型不可用", "", Failed: true);
+            return new PythonReviewVerdict(false, "未设置审批模型或所选模型不可用", "", Failed: true);
 
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
         limit.CancelAfter(Timeout);
         using var activityStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        request.Context.ReportActivity?.Invoke("reviewing");
+        request.Context.ReportActivity?.Invoke(ToolActivity.Reviewing);
         var activity = ReportExtendedReviewAsync(request.Context.ReportActivity, activityStop.Token);
         string answer;
         try
@@ -193,16 +187,16 @@ public sealed class PythonAutoReviewer : IPythonAutoReviewer
             request.Context.ReportActivity?.Invoke(string.Empty);
         }
 
-        return Parse(answer, target.Label);
+        return ParseVerdict(answer, target.Label);
     }
 
-    private static async Task ReportExtendedReviewAsync(Action<string>? report, CancellationToken ct)
+    internal static async Task ReportExtendedReviewAsync(Action<string>? report, CancellationToken ct)
     {
         if (report is null) return;
         try
         {
             await Task.Delay(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
-            report("reviewing_extended");
+            report(ToolActivity.ReviewingExtended);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
     }
@@ -214,10 +208,10 @@ public sealed class PythonAutoReviewer : IPythonAutoReviewer
     /// is one dialog away, and a destructive step the model misread a path for is
     /// exactly what that dialog exists to catch.
     /// </summary>
-    private static bool Allows(string risk, string authorization) =>
+    internal static bool Allows(string risk, string authorization) =>
         risk == "low" || (risk == "medium" && authorization is "high" or "medium");
 
-    private static PythonReviewVerdict Parse(string answer, string model)
+    internal static PythonReviewVerdict ParseVerdict(string answer, string model)
     {
         var start = answer.IndexOf('{');
         var end = answer.LastIndexOf('}');
@@ -255,22 +249,9 @@ public sealed class PythonAutoReviewer : IPythonAutoReviewer
     {
         var context = request.Context;
 
-        // Newest first until the budget runs out, then back in order: the latest
-        // request is the one most likely to cover this code.
-        var users = new List<string>();
-        var used = 0;
-        foreach (var text in context.UserMessages.Reverse().Take(MaxUserMessages))
-        {
-            var clipped = Clip(text, MaxUserMessageChars);
-            if (used + clipped.Length > MaxUserChars && users.Count > 0) break;
-            users.Add(clipped);
-            used += clipped.Length;
-        }
-        users.Reverse();
-
         var input = new
         {
-            user_messages = users,
+            user_messages = SelectUserMessages(context),
             delegation = context.Delegation is null ? null : Clip(context.Delegation, MaxUserMessageChars),
             earlier_calls = context.EarlierCalls
                 .TakeLast(MaxEarlierCalls)
@@ -289,7 +270,24 @@ public sealed class PythonAutoReviewer : IPythonAutoReviewer
         return JsonSerializer.Serialize(input, InputJson);
     }
 
-    private static string Clip(string text, int max)
+    internal static List<string> SelectUserMessages(PythonReviewContext context)
+    {
+        // Newest first until the budget runs out, then back in order: the latest
+        // request is the one most likely to cover this code.
+        var users = new List<string>();
+        var used = 0;
+        foreach (var text in context.UserMessages.Reverse().Take(MaxUserMessages))
+        {
+            var clipped = Clip(text, MaxUserMessageChars);
+            if (used + clipped.Length > MaxUserChars && users.Count > 0) break;
+            users.Add(clipped);
+            used += clipped.Length;
+        }
+        users.Reverse();
+        return users;
+    }
+
+    internal static string Clip(string text, int max)
     {
         if (text.Length <= max) return text;
         var head = max * 3 / 4;

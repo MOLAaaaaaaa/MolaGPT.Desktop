@@ -35,7 +35,7 @@ internal static class RemoteProjection
         Full
     }
 
-    public static JsonObject Message(MessageRow row, Detail detail = Detail.Normal)
+    public static JsonObject Message(MessageRow row, Detail detail = Detail.Normal, Func<string, string?>? taskState = null)
     {
         var content = StripHiddenHints(row.Content ?? string.Empty);
         var result = new JsonObject
@@ -60,7 +60,7 @@ internal static class RemoteProjection
             };
         }
         result["content"] = content;
-        result["meta"] = Meta(row.Meta, detail);
+        result["meta"] = Meta(row.Meta, detail, taskState);
         return result;
     }
 
@@ -79,7 +79,7 @@ internal static class RemoteProjection
         return text.TrimEnd();
     }
 
-    private static JsonObject? Meta(string? json, Detail detail)
+    private static JsonObject? Meta(string? json, Detail detail, Func<string, string?>? taskState)
     {
         if (string.IsNullOrWhiteSpace(json)) return null;
         JsonObject meta;
@@ -104,6 +104,7 @@ internal static class RemoteProjection
         {
             foreach (var tool in tools.OfType<JsonObject>())
             {
+                ResolveBackgroundTask(tool, taskState);
                 if (detail == Detail.Full) continue;
                 CutField(tool, "arguments_json", detail == Detail.Compact ? 0 : ArgumentsLimit);
                 CutField(tool, "result_preview_json", detail == Detail.Compact ? 0 : ResultLimit);
@@ -130,6 +131,39 @@ internal static class RemoteProjection
         }
         return meta;
     }
+
+    private static void ResolveBackgroundTask(JsonObject tool, Func<string, string?>? taskState)
+    {
+        var name = Str(tool, "name");
+        var taskId = Str(tool, "background_task_id");
+        if (Str(tool, "result_preview_json") is { } preview)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(preview);
+                var root = doc.RootElement;
+                if (root.ValueKind == JsonValueKind.Object)
+                {
+                    if (taskId is null
+                        && root.TryGetProperty("background", out var background) && background.ValueKind == JsonValueKind.True
+                        && root.TryGetProperty("task_id", out var id) && id.ValueKind == JsonValueKind.String)
+                        taskId = id.GetString();
+                    if ((name is SubagentTool.ToolName or SubagentTool.FollowupToolName)
+                        && root.TryGetProperty("agent_id", out var agent) && agent.ValueKind == JsonValueKind.String)
+                        tool["agent_id"] = agent.GetString();
+                }
+            }
+            catch (JsonException) { }
+        }
+        if (taskId is null) return;
+        tool["background_task_id"] = taskId;
+        if (taskState is null) return;
+        var stored = Str(tool, "task_state");
+        tool["task_state"] = taskState(taskId) ?? (stored is null or "running" ? "interrupted" : stored);
+    }
+
+    private static string? Str(JsonObject obj, string name) =>
+        obj[name] is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
     private static void CutField(JsonObject owner, string name, int limit)
     {

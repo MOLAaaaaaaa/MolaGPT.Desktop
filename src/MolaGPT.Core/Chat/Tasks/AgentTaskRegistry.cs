@@ -462,11 +462,12 @@ public sealed class AgentTaskRegistry
                 .OrderBy(a => a.RegisteredAt).ToList();
     }
 
-    public IReadOnlyList<AgentActivity> ListAgentActivities(string conversationId, string agentId)
+    public IReadOnlyList<AgentActivity> ListAgentActivities(string conversationId, string agentId, int? limit = null)
     {
         lock (_gate)
             return _agents.TryGetValue(Key(conversationId, agentId), out var agent)
-                ? agent.Activities.Select(activity => activity.Snapshot()).ToArray() : [];
+                ? agent.Activities.Skip(limit is { } count ? Math.Max(0, agent.Activities.Count - count) : 0)
+                    .Select(activity => activity.Snapshot()).ToArray() : [];
     }
 
     public void BeginAgentTurn(string conversationId, string agentId, string task)
@@ -479,6 +480,7 @@ public sealed class AgentTaskRegistry
             entry.Append(task);
             agent.Activities.Add(entry);
             agent.RecentOutput = string.Empty;
+            agent.Version++;
             activity = entry.Snapshot();
         }
         AgentActivityChanged?.Invoke(conversationId, agentId, activity);
@@ -500,6 +502,7 @@ public sealed class AgentTaskRegistry
                 if (!thinking) agent.RecentOutput = string.Empty;
             }
             entry.Append(text);
+            agent.Version++;
             activity = new AgentActivity(entry.Id, entry.Kind, entry.Label, entry.Status,
                 text, null, entry.Revision, IsDelta: true);
             if (!thinking)
@@ -538,6 +541,7 @@ public sealed class AgentTaskRegistry
             else
                 entry.ToolDeltas.Add(display);
             entry.Update();
+            agent.Version++;
             if (tool.Status is "preparing" or "running")
                 agent.RecentOutput = "正在调用 " + entry.Label;
             if (notify)

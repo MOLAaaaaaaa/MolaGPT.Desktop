@@ -21,7 +21,14 @@ public enum ToolCapability
 public enum ToolPermissionMode
 {
     Approval,
-    FullAccess
+    FullAccess,
+    AutoReview
+}
+
+/// <summary>The mode in force, read once at the start of each tool call.</summary>
+public interface IApprovalModeSource
+{
+    ToolPermissionMode Current { get; }
 }
 
 /// <summary>
@@ -66,7 +73,9 @@ public sealed record ToolApprovalRequest(
     string ArgumentsJson,
     string? Description = null,
     bool AlwaysAsk = false,
-    string? ResolvedPath = null);
+    string? ResolvedPath = null,
+    bool HumanOnly = false,
+    string? ReviewNote = null);
 
 public enum ToolApprovalDecision
 {
@@ -120,14 +129,21 @@ public interface IToolGrantStore
     /// folder (or, for read-only tools, the drive) the user picked in the dialog.
     ///
     /// Deliberately <b>not</b> keyed by tool name. The user is answering "may this
-    /// app reach D:\论文", not "may read_file specifically reach it"; keying by tool
-    /// would ask again for grep_files over the same folder, which teaches people
+    /// app reach D:\论文", not "may read_file specifically reach it"; keying by
+    /// tool would ask again for grep_files over the same folder, which teaches people
     /// to stop reading the dialog. It is also strictly narrower than the per-tool
     /// grant it sits beside: that one covers every path, this one covers one
     /// subtree.
     /// </summary>
     /// <param name="allowWriting">Record a read-write grant, which implies read.</param>
     void GrantPath(string pathPrefix, ToolGrantScope scope, bool allowWriting = false);
+
+    /// <summary>
+    /// Drops the in-memory session grants. Used when the source of a remote
+    /// session grant goes away (a paired phone is revoked): the safe direction
+    /// is to ask again at the desk rather than keep a grant of unclear origin.
+    /// </summary>
+    void ClearSessionGrants();
 
     /// <summary>
     /// Prefixes the user has granted read-write. Handed to the Python risk
@@ -162,4 +178,31 @@ public static class ToolCapabilityCatalog
         "grep_files" => new(toolName, "搜索文件内容", ToolCapability.Read, argumentsJson),
         _ => new(toolName, toolName, ToolCapability.Write, argumentsJson)
     };
+}
+
+public static class ToolApprovalPolicy
+{
+    public static bool NeedsDecision(ToolApprovalRequest request, ToolPermissionMode mode) =>
+        request.AlwaysAsk
+        || request.Capabilities.HasFlag(ToolCapability.Destructive)
+        || (mode != ToolPermissionMode.FullAccess
+            && (request.Capabilities.HasFlag(ToolCapability.Write)
+                || request.Capabilities.HasFlag(ToolCapability.OutsideWorkspace)));
+
+    public static bool ForWriting(ToolApprovalRequest request) =>
+        request.Capabilities.HasFlag(ToolCapability.Write)
+        || request.Capabilities.HasFlag(ToolCapability.Destructive);
+
+    public static bool IsGranted(ToolApprovalRequest request, IToolGrantStore grants)
+    {
+        var outside = request.Capabilities.HasFlag(ToolCapability.OutsideWorkspace);
+        if (outside
+            && request.ResolvedPath is { Length: > 0 } path
+            && grants.IsPathGranted(path, ForWriting(request)))
+            return true;
+        return !request.AlwaysAsk && !outside && grants.IsGranted(request.ToolName);
+    }
+
+    public static ToolPermissionMode Combine(ToolPermissionMode session, ToolPermissionMode perTool) =>
+        perTool == ToolPermissionMode.FullAccess ? ToolPermissionMode.FullAccess : session;
 }

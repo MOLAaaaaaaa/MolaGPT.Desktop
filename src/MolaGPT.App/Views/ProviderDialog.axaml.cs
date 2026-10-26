@@ -192,8 +192,19 @@ public sealed partial class ModelRow : ObservableObject
     [ObservableProperty] private string _defaultEffort = string.Empty;
     [ObservableProperty] private string _effortLevelsText = string.Empty;
     [ObservableProperty] private bool _imageEdit;
+    [ObservableProperty] private int _imageFormatIndex;
     [ObservableProperty] private bool _isImageProvider;
+    [ObservableProperty] private bool _canChooseImageFormat = true;
     [ObservableProperty] private bool _isExpanded;
+
+    public string ImageFormatHint => ImageFormatIndex switch
+    {
+        1 => "适用于 gpt-image、Seedream、Qwen-Image 等图像模型",
+        2 => "适用于 Nano Banana 等可输出图像的多模态模型",
+        _ => "使用服务的默认接口"
+    };
+
+    partial void OnImageFormatIndexChanged(int value) => OnPropertyChanged(nameof(ImageFormatHint));
 
     [ObservableProperty] private string _priceInputText = string.Empty;
     [ObservableProperty] private string _priceOutputText = string.Empty;

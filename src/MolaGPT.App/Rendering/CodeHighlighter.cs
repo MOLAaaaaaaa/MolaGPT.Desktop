@@ -182,8 +182,7 @@ internal static class CodeHighlighter
 
         if (!Grammars.TryGetValue((dark, language), out var grammar))
         {
-            var options = new RegistryOptions(dark ? ThemeName.DarkPlus : ThemeName.LightPlus);
-            var scope = options.GetScopeByLanguageId(language);
+            var scope = ((RegistryOptions)palette.Registry.GetLocator()).GetScopeByLanguageId(language);
             grammar = string.IsNullOrEmpty(scope) ? null : palette.Registry.LoadGrammar(scope);
             Grammars[(dark, language)] = grammar;
         }

@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tasks;
 using MolaGPT.Core.Memory;
 using MolaGPT.Core.Models;
@@ -2054,11 +2055,15 @@ public sealed partial class ToolCallViewModel : ObservableObject
         TaskTools.StopToolName => "\uE71A",
         _ => "\uE90F"
     };
-    private string? _activity;
-    public bool IsReviewing => Status == "running" && _activity is "reviewing" or "reviewing_extended";
+    private string? _approvalNote;
+    public string? ApprovalNote => _approvalNote;
+    public bool HasApprovalNote => !string.IsNullOrEmpty(_approvalNote);
 
-    public string StatusText => Status == "running" && _activity == "reviewing" ? "正在审视代码安全性"
-        : Status == "running" && _activity == "reviewing_extended" ? "正在进一步审视代码安全性"
+    private string? _activity;
+    public bool IsReviewing => Status == "running" && _activity is ToolActivity.Reviewing or ToolActivity.ReviewingExtended;
+
+    public string StatusText => Status == "running" && _activity == ToolActivity.Reviewing ? "自动审批中"
+        : Status == "running" && _activity == ToolActivity.ReviewingExtended ? "自动审批耗时较长"
         : IsError ? "失败" : Name == "send_agent_message" && IsCompleted
         ? "已入队" : Status switch
         {
@@ -2207,6 +2212,16 @@ public sealed partial class ToolCallViewModel : ObservableObject
 
     public void Apply(ToolCallDelta delta)
     {
+        // The reviewer's approval of a non-Python call arrives as an activity. It is
+        // kept as a note on the card rather than as the running activity.
+        if (delta.Activity is { } activity
+            && activity.StartsWith(ToolActivity.AutoApprovedPrefix, StringComparison.Ordinal))
+        {
+            _approvalNote = "自动审批通过：" + activity[ToolActivity.AutoApprovedPrefix.Length..];
+            OnPropertyChanged(nameof(ApprovalNote));
+            OnPropertyChanged(nameof(HasApprovalNote));
+            delta = delta with { Activity = null };
+        }
         Status = delta.Status;
         if (delta.Activity is not null || Status != "running") _activity = delta.Activity;
 

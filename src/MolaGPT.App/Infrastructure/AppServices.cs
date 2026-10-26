@@ -154,7 +154,8 @@ internal static class AppServices
         services.AddSingleton<MolaGptLocalToolsRegistrar>();
         services.AddSingleton(sp => new ChatGptAccount(
             sp.GetRequiredService<CredentialStore>(),
-            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok)));
+            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            line => DiagnosticLog.Write("chatgpt", line)));
         services.AddSingleton(sp => new PiByokProviderFactory(
             sp.GetRequiredService<PiWorkSidecarLocator>(),
             sp.GetRequiredService<IChatToolHost>(),
@@ -206,6 +207,11 @@ internal static class AppServices
         services.AddSingleton(sp => new PairedPhoneStore(
             sp.GetRequiredService<CredentialStore>(),
             () => sp.GetRequiredService<MolaGptAuthService>().CurrentUsername));
+        services.AddSingleton(sp => new AnonymousDeviceIdentity(sp.GetRequiredService<CredentialStore>()));
+        services.AddSingleton(sp => new AnonApiClient(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredService<AnonymousDeviceIdentity>(),
+            baseUrl: "https://chatgpt.wljay.cn/v2"));
         services.AddSingleton(sp => new RemoteControlHost(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
             sp.GetRequiredService<MolaGptAuthService>(),
@@ -220,7 +226,9 @@ internal static class AppServices
             machineId: sp.GetRequiredService<IAgentConfigProvider>().MachineId,
             machineName: sp.GetRequiredService<IAgentConfigProvider>().MachineName,
             log: line => DiagnosticLog.Write("RemoteWork", line),
-            proxy: sp.GetRequiredService<AppProxy>().Official));
+            proxy: sp.GetRequiredService<AppProxy>().Official,
+            anonApi: sp.GetRequiredService<AnonApiClient>(),
+            grantStore: sp.GetRequiredService<IToolGrantStore>()));
         services.AddSingleton(sp => new RemoteWorkSettingsViewModel(
             sp.GetRequiredService<RemoteControlHost>(),
             sp.GetRequiredService<SettingsRepository>(),
@@ -263,6 +271,8 @@ internal static class AppServices
         // Remote control plugs into approvals later; the relay is what approvals hold.
         services.AddSingleton<RemoteApprovalRelay>();
         services.AddSingleton<IRemoteApprovalChannel>(sp => sp.GetRequiredService<RemoteApprovalRelay>());
+        services.AddSingleton<ApprovalModeState>();
+        services.AddSingleton<IApprovalModeSource>(sp => sp.GetRequiredService<ApprovalModeState>());
         services.AddSingleton<ToolApprovalService>();
         services.AddSingleton<IPythonExecutionApprovalService>(sp => sp.GetRequiredService<ToolApprovalService>());
         services.AddSingleton<IToolApprovalService>(sp => sp.GetRequiredService<ToolApprovalService>());
@@ -289,11 +299,22 @@ internal static class AppServices
             var providers = sp.GetRequiredService<ProviderRegistry>();
             var http = sp.GetRequiredService<IHttpClientFactory>();
             return new PythonAutoReviewer(
-                () => bool.TryParse(settings.Get(SettingsViewModel.PythonAutoReviewKey), out var on) && on,
                 () => PythonAutoReviewer.ResolveTarget(
                     providers,
-                    settings.Get(SettingsViewModel.PythonReviewProviderIdKey),
-                    settings.Get(SettingsViewModel.PythonReviewModelIdKey)),
+                    settings.Get(SettingsViewModel.ReviewProviderIdKey),
+                    settings.Get(SettingsViewModel.ReviewModelIdKey)),
+                () => new OneShotCompletionClient(http.CreateClient(HttpClientNames.Byok)));
+        });
+        services.AddSingleton<IToolAutoReviewer>(sp =>
+        {
+            var settings = sp.GetRequiredService<SettingsRepository>();
+            var providers = sp.GetRequiredService<ProviderRegistry>();
+            var http = sp.GetRequiredService<IHttpClientFactory>();
+            return new ToolAutoReviewer(
+                () => PythonAutoReviewer.ResolveTarget(
+                    providers,
+                    settings.Get(SettingsViewModel.ReviewProviderIdKey),
+                    settings.Get(SettingsViewModel.ReviewModelIdKey)),
                 () => new OneShotCompletionClient(http.CreateClient(HttpClientNames.Byok)));
         });
         services.AddSingleton<PythonExecutionTool>();
@@ -347,10 +368,19 @@ internal static class AppServices
         });
         services.AddSingleton(sp => new PersonaListViewModel(sp.GetRequiredService<PersonaRepository>(),
             library: sp.GetRequiredService<RoleLibraryViewModel>()));
-        services.AddSingleton(sp => new ConversationListViewModel(
-            sp.GetRequiredService<ConversationRepository>(),
-            sp.GetRequiredService<PersonaListViewModel>(),
-            sp.GetRequiredService<SettingsRepository>()));
+        services.AddSingleton(sp =>
+        {
+            var list = new ConversationListViewModel(
+                sp.GetRequiredService<ConversationRepository>(),
+                sp.GetRequiredService<PersonaListViewModel>(),
+                sp.GetRequiredService<SettingsRepository>())
+            {
+                SearchCloudAsync = sp.GetRequiredService<CloudSyncService>().SearchConversationsAsync
+            };
+            list.SearchFailed += (_, message) => sp.GetRequiredService<NotificationCenter>()
+                .Error("对话搜索失败", message, key: "conversation-search");
+            return list;
+        });
         services.AddSingleton(sp =>
         {
             var chat = new ChatViewModel(
@@ -409,7 +439,8 @@ internal static class AppServices
             sp.GetRequiredService<AttachmentStore>(),
             sp.GetRequiredService<SkillsViewModel>(),
             sp.GetRequiredService<MemoryService>(),
-            sp.GetRequiredService<MemoryConsolidator>()));
+            sp.GetRequiredService<MemoryConsolidator>(),
+            sp.GetRequiredService<ApprovalModeState>()));
         services.AddSingleton(sp => new MainViewModel(
             sp.GetRequiredService<ConversationListViewModel>(),
             sp.GetRequiredService<ChatViewModel>(),
@@ -417,8 +448,7 @@ internal static class AppServices
             sp.GetRequiredService<SettingsViewModel>(),
             sp.GetRequiredService<PersonaListViewModel>(),
             sp.GetRequiredService<BackgroundStreamService>(),
-            sp.GetRequiredService<MolaGptProxyProvider>(),
-            sp.GetRequiredService<ChatGptAccount>()));
+            sp.GetRequiredService<MolaGptProxyProvider>()));
         services.AddSingleton<AccountSessionCoordinator>();
         services.AddSingleton(sp => new AppNotificationService(
             conversationId =>

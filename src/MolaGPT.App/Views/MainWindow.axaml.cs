@@ -208,6 +208,7 @@ public partial class MainWindow : MolaWindow
             PART_Composer.AttachImage(image.Png, image.FileName);
         };
         PART_Composer.PersonaSettingsRequested += (_, startNew) => OpenPersonaSettings(startNew);
+        PART_Composer.ApprovalSettingsRequested += (_, _) => OpenApprovalSettings();
         PART_Composer.PersonaSelectionFailed += (_, error) => _notifications.Error("角色切换失败", error, "persona-selection");
         _chat.HistorySaveFailed += error => _notifications.Error("回复版本保存失败", error, "message-history");
         // An event, not a state: this turn ran without the server's tools.
@@ -398,6 +399,32 @@ public partial class MainWindow : MolaWindow
         var show = _settings.ShowAccountFeatures;
         PART_TitleBar.SetAccountFeaturesVisible(show);
         _conversations.ShowAccountConversations = show;
+        _chat.AccountProvidersAllowed = show;
+        if (!show) LeaveAccountProviders();
+    }
+
+    /// <summary>
+    /// The entry went off while an account model is active. Staying on it would
+    /// keep writing a conversation the sidebar no longer shows, so an account
+    /// conversation on screen is left for a new one, and the model moves to the
+    /// user's own key — or to none when there is no key.
+    /// </summary>
+    private void LeaveAccountProviders()
+    {
+        if (!MolaGptProviderIds.IsMolaGptAccount(_chat.ActiveProvider?.Id)) return;
+
+        // Read from the store, not the sidebar: a search can filter the row out.
+        if (_chat.ConversationId is { } id
+            && MolaGptProviderIds.IsMolaGptAccount(_conversationRepository.Get(id)?.ProviderId))
+        {
+            if (_composer.IsSending) _composer.DetachToBackground();
+            _conversations.ClearSelection();
+            _chat.StartDraftConversation();
+        }
+
+        if (_chat.SwitchToMode(AppMode.Byok, out _)) return;
+        _chat.ActiveProvider = null;
+        _chat.ActiveModel = null;
     }
 
     /// <summary>
@@ -1030,6 +1057,13 @@ public partial class MainWindow : MolaWindow
     {
         OpenSettings();
         _settingsWindow?.OpenPersonaPage(startNew, _chat.ActivePersonaId);
+    }
+
+    /// <summary>The approval menu's 「去设置」: the review model is only chosen here.</summary>
+    private void OpenApprovalSettings()
+    {
+        OpenSettings();
+        _settingsWindow?.OpenApprovalPage();
     }
 
     private void OpenProviderSettings()

@@ -25,6 +25,9 @@ public sealed class ChatToolHost : IChatToolHost
     private readonly IMemoryToolBackend? _memory;
     private readonly AgentTaskRegistry? _tasks;
     private readonly ISubagentRunner? _subagents;
+    private readonly IApprovalModeSource? _modeSource;
+    private readonly IToolGrantStore? _grants;
+    private readonly IToolAutoReviewer? _reviewer;
 
     /// <summary>Each turn's tool calls so far, which automatic review reads as
     /// background. Keyed by the turn's request, so a record goes with its turn.</summary>
@@ -41,11 +44,17 @@ public sealed class ChatToolHost : IChatToolHost
         BrowserActivityLog? browserActivity = null,
         IMemoryToolBackend? memory = null,
         AgentTaskRegistry? tasks = null,
-        ISubagentRunner? subagents = null)
+        ISubagentRunner? subagents = null,
+        IApprovalModeSource? modeSource = null,
+        IToolGrantStore? grants = null,
+        IToolAutoReviewer? reviewer = null)
     {
         _memory = memory;
         _tasks = tasks;
         _subagents = subagents;
+        _modeSource = modeSource;
+        _grants = grants;
+        _reviewer = reviewer;
         _mcp = mcp;
         _vision = vision;
         _imageAnalysis = imageAnalysis;
@@ -173,6 +182,9 @@ public sealed class ChatToolHost : IChatToolHost
         // Approvals raised anywhere below this call know which conversation asked.
         using var approvalScope = MolaGPT.Core.Remote.ApprovalScope.Enter(context.Request.ConversationId);
         var earlierCalls = _turnCalls.GetValue(context.Request, _ => new TurnCalls()).Add(toolName, argumentsJson);
+        var session = _modeSource?.Current ?? options.PermissionMode;
+        PythonReviewContext Review() =>
+            PythonReviewContext.From(context.Request, earlierCalls) with { ReportActivity = context.ReportActivity };
 
         // A sub-agent sees its parent's whole tool list, so these arrive as ordinary
         // calls and are turned away here.
@@ -183,7 +195,7 @@ public sealed class ChatToolHost : IChatToolHost
         {
             var request = WithWorkspaceScope(
                 ToolCapabilityCatalog.ForBuiltIn(toolName, argumentsJson), toolName, argumentsJson, options);
-            if (!await IsApprovedAsync(request, options.PermissionMode, options.IsSubagent, ct).ConfigureAwait(false))
+            if (!await IsApprovedAsync(request, session, options.IsSubagent, Review, ct).ConfigureAwait(false))
                 return PermissionDenied(toolName);
             if (context.LocalHttpClient is null)
                 return ToolError("Local HTTP client is unavailable.");
@@ -199,7 +211,7 @@ public sealed class ChatToolHost : IChatToolHost
                 ToolCapability.Read | ToolCapability.External,
                 argumentsJson,
                 "把当前对话中的图片发送给已配置的视觉模型分析");
-            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.VisionPermissionMode), options.IsSubagent, ct).ConfigureAwait(false))
+            if (!await IsApprovedAsync(request, ToolApprovalPolicy.Combine(session, options.VisionPermissionMode), options.IsSubagent, Review, ct).ConfigureAwait(false))
                 return PermissionDenied(toolName);
             return await _vision.ExecuteAsync(argumentsJson, context, options.Vision, ct).ConfigureAwait(false);
         }
@@ -230,7 +242,7 @@ public sealed class ChatToolHost : IChatToolHost
                 };
             }
 
-            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.VisionPermissionMode), options.IsSubagent, ct).ConfigureAwait(false))
+            if (!await IsApprovedAsync(request, ToolApprovalPolicy.Combine(session, options.VisionPermissionMode), options.IsSubagent, Review, ct).ConfigureAwait(false))
                 return PermissionDenied(toolName);
             return await _imageAnalysis.ExecuteAsync(argumentsJson, options, ct).ConfigureAwait(false);
         }
@@ -243,7 +255,7 @@ public sealed class ChatToolHost : IChatToolHost
                 ToolCapability.Write | ToolCapability.External,
                 argumentsJson,
                 "调用外部图像服务并在本地创建图片");
-            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.ImageGenerationPermissionMode), options.IsSubagent, ct).ConfigureAwait(false))
+            if (!await IsApprovedAsync(request, ToolApprovalPolicy.Combine(session, options.ImageGenerationPermissionMode), options.IsSubagent, Review, ct).ConfigureAwait(false))
                 return PermissionDenied(toolName);
             return await _imageGeneration.ExecuteToolAsync(
                 argumentsJson, options.ImageGeneration, options.WorkspaceRoot, ct).ConfigureAwait(false);
@@ -258,8 +270,14 @@ public sealed class ChatToolHost : IChatToolHost
                     : new AgentTaskOwner(workspaceConversation!, context.Request.SessionId),
                 AllowBackground: options.BackgroundTasks && !options.IsSubagent,
                 Unattended: options.IsSubagent,
-                Review: PythonReviewContext.From(context.Request, earlierCalls) with { ReportActivity = context.ReportActivity });
-            return await _python.ExecuteAsync(argumentsJson, options.Python, workspaceConversation, run, ct).ConfigureAwait(false);
+                Review: Review());
+            var python = options.Python is null ? null : options.Python with
+            {
+                PermissionMode = ToPython(ToolApprovalPolicy.Combine(session,
+                    options.Python.PermissionMode == PythonPermissionMode.FullAccess
+                        ? ToolPermissionMode.FullAccess : ToolPermissionMode.Approval))
+            };
+            return await _python.ExecuteAsync(argumentsJson, python, workspaceConversation, run, ct).ConfigureAwait(false);
         }
 
         if (toolName is TaskTools.StatusToolName or TaskTools.StopToolName)
@@ -300,7 +318,7 @@ public sealed class ChatToolHost : IChatToolHost
 
             if (!plan.PreApproved)
             {
-                var mode = EffectiveMode(options.PermissionMode, options.BrowserPermissionMode);
+                var mode = ToolApprovalPolicy.Combine(session, options.BrowserPermissionMode);
                 var request = new ToolApprovalRequest(
                     plan.GrantKey,
                     plan.DisplayName,
@@ -320,8 +338,10 @@ public sealed class ChatToolHost : IChatToolHost
                     // thing a standing authorization cannot cover: turning on
                     // FullAccess means "stop asking me about clicks", not "put the
                     // payment page through too".
-                    AlwaysAsk: plan.IsProtected || (plan.AlwaysAsk && mode == ToolPermissionMode.Approval));
-                if (!await IsApprovedAsync(request, mode, options.IsSubagent, ct).ConfigureAwait(false))
+                    // Protected pages can only be approved by a person.
+                    AlwaysAsk: plan.IsProtected || (plan.AlwaysAsk && mode != ToolPermissionMode.FullAccess),
+                    HumanOnly: plan.IsProtected);
+                if (!await IsApprovedAsync(request, mode, options.IsSubagent, Review, ct).ConfigureAwait(false))
                 {
                     RecordBrowserActivity(plan, success: false, note: "用户拒绝");
                     return PermissionDenied(toolName);
@@ -361,7 +381,7 @@ public sealed class ChatToolHost : IChatToolHost
         }
 
         if (McpToolName.TryDecode(toolName, out var serverSlug, out var toolSlug))
-            return await ExecuteMcpAsync(serverSlug, toolSlug, argumentsJson, options, ct).ConfigureAwait(false);
+            return await ExecuteMcpAsync(serverSlug, toolSlug, argumentsJson, options, session, Review, ct).ConfigureAwait(false);
 
         return ToolError($"Unknown tool: {toolName}");
     }
@@ -387,6 +407,8 @@ public sealed class ChatToolHost : IChatToolHost
         string toolSlug,
         string argumentsJson,
         LocalToolOptions options,
+        ToolPermissionMode session,
+        Func<PythonReviewContext> review,
         CancellationToken ct)
     {
         var server = options.McpServers?
@@ -414,7 +436,7 @@ public sealed class ChatToolHost : IChatToolHost
                 descriptor.Capabilities,
                 argumentsJson,
                 descriptor.Description);
-            if (!await IsApprovedAsync(request, EffectiveMode(options.PermissionMode, options.McpPermissionMode), options.IsSubagent, ct).ConfigureAwait(false))
+            if (!await IsApprovedAsync(request, ToolApprovalPolicy.Combine(session, options.McpPermissionMode), options.IsSubagent, review, ct).ConfigureAwait(false))
                 return PermissionDenied(request.ToolName);
 
             return await _mcp.CallToolAsync(server, descriptor, argumentsJson, ct).ConfigureAwait(false);
@@ -539,30 +561,40 @@ public sealed class ChatToolHost : IChatToolHost
         }
     }
 
-    /// <param name="unattended">A sub-agent is asking: nobody is watching its turn, so
-    /// a dialog would appear out of nowhere. What would prompt is refused; what the
-    /// user's mode already lets through without a dialog still goes.</param>
+    /// <param name="unattended">A sub-agent is asking: nobody is watching its turn.
+    /// What would prompt is refused, unless the review model lets it through.</param>
     private async Task<bool> IsApprovedAsync(
         ToolApprovalRequest request,
         ToolPermissionMode mode,
         bool unattended,
+        Func<PythonReviewContext> review,
         CancellationToken ct)
     {
-        if (unattended && mode == ToolPermissionMode.FullAccess)
-            return !request.AlwaysAsk;
+        if (!ToolApprovalPolicy.NeedsDecision(request, mode))
+            return true;
 
-        if (_approval is null || unattended)
+        // A remembered answer settles it before the reviewer is paid for. Not for
+        // sub-agents: their grants were never asked about.
+        if (!unattended && _grants is not null && ToolApprovalPolicy.IsGranted(request, _grants))
+            return true;
+
+        string? note = null;
+        if (mode == ToolPermissionMode.AutoReview && !request.HumanOnly && _reviewer is not null)
         {
-            // Nobody to ask. Anything that would have prompted is refused rather
-            // than waved through — including a read that leaves the workspace,
-            // which is exactly the case that only a human can answer.
-            return !request.AlwaysAsk
-                   && !request.Capabilities.HasFlag(ToolCapability.Write)
-                   && !request.Capabilities.HasFlag(ToolCapability.Destructive)
-                   && !request.Capabilities.HasFlag(ToolCapability.OutsideWorkspace);
+            var context = review();
+            var verdict = await _reviewer.ReviewAsync(new ToolReviewRequest(request, context), ct).ConfigureAwait(false);
+            if (verdict.Approved)
+            {
+                context.ReportActivity?.Invoke(ToolActivity.AutoApproved(verdict.Reason));
+                return true;
+            }
+            note = verdict.Describe();
         }
 
-        return await _approval.RequestApprovalAsync(request, mode, ct).ConfigureAwait(false)
+        if (_approval is null || unattended)
+            return false;
+
+        return await _approval.RequestApprovalAsync(request with { ReviewNote = note }, mode, ct).ConfigureAwait(false)
             == ToolApprovalDecision.Approved;
     }
 
@@ -814,11 +846,12 @@ public sealed class ChatToolHost : IChatToolHost
         root.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()?.Trim() : null;
 
-    /// <summary>Global FullAccess overrides per-tool; per-tool FullAccess overrides global Approval.</summary>
-    private static ToolPermissionMode EffectiveMode(ToolPermissionMode global, ToolPermissionMode perTool) =>
-        global == ToolPermissionMode.FullAccess || perTool == ToolPermissionMode.FullAccess
-            ? ToolPermissionMode.FullAccess
-            : ToolPermissionMode.Approval;
+    private static PythonPermissionMode ToPython(ToolPermissionMode mode) => mode switch
+    {
+        ToolPermissionMode.FullAccess => PythonPermissionMode.FullAccess,
+        ToolPermissionMode.AutoReview => PythonPermissionMode.AutoReview,
+        _ => PythonPermissionMode.Approval
+    };
 
     /// <summary>The latest calls of one turn, arguments clipped, oldest dropped.
     /// Parallel calls arrive on different threads.</summary>

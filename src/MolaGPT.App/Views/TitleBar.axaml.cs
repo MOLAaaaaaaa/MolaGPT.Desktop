@@ -167,13 +167,12 @@ public partial class TitleBar : UserControl
 
     /// <summary>
     /// Account entry visibility. The switcher goes as a whole rather than
-    /// losing its Chat half: a one-segment switch has nothing to switch to. The
-    /// 远程控制 button relays through the account.
+    /// losing its Chat half: a one-segment switch has nothing to switch to.
+    /// 远程控制 stays: it keeps running while the account surfaces are hidden.
     /// </summary>
     public void SetAccountFeaturesVisible(bool visible)
     {
         PART_ModeSwitch.IsVisible = visible;
-        PART_AgentStatus.IsVisible = visible;
         PART_Login.IsVisible = visible;
     }
 

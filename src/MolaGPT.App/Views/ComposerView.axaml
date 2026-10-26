@@ -424,8 +424,97 @@
                ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
 
       <!-- Row 4: hint on the left, context gauge and send/stop on the right -->
-      <Grid Grid.Row="4" ColumnDefinitions="*,Auto,Auto,Auto" Margin="0,6,0,0">
-        <Panel Grid.Column="0" VerticalAlignment="Center">
+      <Grid Grid.Row="4" ColumnDefinitions="Auto,*,Auto,Auto,Auto" Margin="0,6,0,0">
+        <!-- 审批模式。状态，不是事件：只在这里显示，不发横幅。 -->
+        <Button Grid.Column="0"
+                Name="PART_ApprovalMode"
+                Classes="modechip"
+                Classes.auto="{Binding IsApprovalModeAuto}"
+                Classes.full="{Binding IsApprovalModeFull}"
+                IsVisible="{Binding IsApprovalModeVisible}"
+                ToolTip.Tip="{Binding ApprovalModeToolTip}"
+                AutomationProperties.Name="审批模式"
+                VerticalAlignment="Center"
+                Margin="0,0,8,0">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <TextBlock Classes="icon modeglyph modechiptext" Text="{Binding ApprovalModeGlyph}" FontSize="12"
+                       VerticalAlignment="Center" />
+            <TextBlock Classes="modechiptext" Text="{Binding ApprovalModeLabel}" FontSize="12" VerticalAlignment="Center" />
+            <Ellipse Width="6" Height="6" Fill="{DynamicResource Brush.Warning}"
+                     IsVisible="{Binding ShowsReviewModelWarning}" VerticalAlignment="Center" />
+            <TextBlock Classes="icon modechiptext" Text="&#xE70D;" FontSize="8" Margin="1,1,0,0" VerticalAlignment="Center" />
+          </StackPanel>
+          <Button.Flyout>
+            <Flyout Placement="TopEdgeAlignedLeft" FlyoutPresenterClasses="molaflyout">
+              <Border Classes="flyoutsurface approvalpanel" Width="320">
+                <StackPanel>
+                  <TextBlock Text="审批模式" Classes="muted" FontSize="12" FontWeight="SemiBold" Margin="10,2,10,6" />
+
+                  <Button Classes="modeoption" Tag="Approval" Click="OnPickApprovalMode">
+                    <Grid ColumnDefinitions="18,10,*,Auto">
+                      <TextBlock Classes="icon" Text="&#xEA18;" FontSize="13" Margin="0,2,0,0" />
+                      <StackPanel Grid.Column="2" Spacing="1">
+                        <TextBlock Text="按需审批" FontWeight="SemiBold" />
+                        <TextBlock Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}" TextWrapping="Wrap"
+                                   Text="写入文件、访问工作目录外路径及浏览器操作需确认" />
+                      </StackPanel>
+                      <TextBlock Grid.Column="3" Classes="icon modecheck" Text="&#xE73E;" FontSize="12"
+                                 IsVisible="{Binding IsApprovalModeManual}" />
+                    </Grid>
+                  </Button>
+
+                  <!-- Without a review model, switching to automatic review would only mean every
+                       prompt is handed to a reviewer that is not there. The row below says why. -->
+                  <Button Classes="modeoption" Tag="AutoReview" Click="OnPickApprovalMode"
+                          IsEnabled="{Binding IsAutoReviewSelectable}">
+                    <Grid ColumnDefinitions="18,10,*,Auto">
+                      <TextBlock Classes="icon autoglyph" Text="&#xE99A;" FontSize="13" Margin="0,2,0,0" />
+                      <StackPanel Grid.Column="2" Spacing="1">
+                        <TextBlock Text="自动审批" FontWeight="SemiBold" />
+                        <TextBlock Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}" TextWrapping="Wrap"
+                                   Text="将自主审批命令安全性，如发现不安全之处将会暂停操作" />
+                      </StackPanel>
+                      <TextBlock Grid.Column="3" Classes="icon modecheck" Text="&#xE73E;" FontSize="12"
+                                 IsVisible="{Binding IsApprovalModeAuto}" />
+                    </Grid>
+                  </Button>
+
+                  <!-- The review model is chosen in settings only: it is a standing choice, not
+                       something to change mid-conversation. Here it is shown, with the way there. -->
+                  <Border Classes="reviewerline" Classes.missing="{Binding IsReviewModelMissing}">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <Panel VerticalAlignment="Center">
+                        <TextBlock IsVisible="{Binding !IsReviewModelMissing}" TextTrimming="CharacterEllipsis"
+                                   Text="{Binding ReviewModelLabel, StringFormat='审批模型 · {0}'}"
+                                   ToolTip.Tip="{Binding ReviewModelLabel}" />
+                        <TextBlock IsVisible="{Binding IsReviewModelMissing}"
+                                   Text="{Binding ReviewModelMissingText}" />
+                      </Panel>
+                      <Button Grid.Column="1" Classes="textlink" Margin="8,0,0,0" Click="OnOpenApprovalSettings"
+                              Content="模型配置" ToolTip.Tip="在 设置 › 权限与审批 中修改审批模型" />
+                    </Grid>
+                  </Border>
+
+                  <Button Classes="modeoption" Tag="FullAccess" Click="OnPickApprovalMode">
+                    <Grid ColumnDefinitions="18,10,*,Auto">
+                      <TextBlock Classes="icon fullglyph" Text="&#xE7BA;" FontSize="13" Margin="0,2,0,0" />
+                      <StackPanel Grid.Column="2" Spacing="1">
+                        <TextBlock Text="完全权限" FontWeight="SemiBold" />
+                        <TextBlock Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}" TextWrapping="Wrap"
+                                   Text="常规操作将直接执行，高风险操作仍需确认" />
+                      </StackPanel>
+                      <TextBlock Grid.Column="3" Classes="icon modecheck" Text="&#xE73E;" FontSize="12"
+                                 IsVisible="{Binding IsApprovalModeFull}" />
+                    </Grid>
+                  </Button>
+
+                  <Border Classes="divider" Margin="4,6,4,0" />
+                </StackPanel>
+              </Border>
+            </Flyout>
+          </Button.Flyout>
+        </Button>
+        <Panel Grid.Column="1" VerticalAlignment="Center">
           <Panel IsVisible="{Binding !IsInjectAvailable}">
             <TextBlock Name="PART_Hint" Classes="muted"
                        FontSize="{DynamicResource Font.Size.XSmall}"
@@ -443,7 +532,7 @@
 
         <!-- Running background tasks of this conversation. State, not an event:
              a count beside the gauge, the list and its stop buttons behind it. -->
-        <Button Grid.Column="1"
+        <Button Grid.Column="2"
                 Name="PART_Tasks"
                 Classes="contextgauge"
                 IsVisible="{Binding Chat.HasRunningTasks}"
@@ -504,7 +593,7 @@
         <!-- Context gauge. Sits beside 发送 because that is where the decision it
              informs gets made: send another turn, or compact first. Absent rather
              than empty until there is a real reading — see ContextGaugeViewModel. -->
-        <Button Grid.Column="2"
+        <Button Grid.Column="3"
                 Name="PART_ContextGauge"
                 Classes="contextgauge"
                 IsVisible="{Binding ContextGauge.IsVisible}"
@@ -631,7 +720,7 @@
              people cancel answers they wanted to keep. -->
         <!-- Running-turn send sits beside 停止 rather than replacing it: both are live while the
              turn runs, and neither should move under the cursor. -->
-        <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6">
+        <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="6">
         <Button Name="PART_Inject"
                 Classes="inject"
                  Command="{Binding SendDuringTaskCommand}"
@@ -663,6 +752,76 @@
   </Border>
 
   <UserControl.Styles>
+    <Style Selector="Button.modechip">
+      <Setter Property="Height" Value="28" />
+      <Setter Property="MinHeight" Value="28" />
+      <Setter Property="Padding" Value="7,0,8,0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="FontFamily" Value="{DynamicResource Font.Cjk}" />
+    </Style>
+    <Style Selector="Button.modechip TextBlock.modechiptext">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <Style Selector="Button.modechip:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Button.modechip.auto TextBlock.modechiptext">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+    <Style Selector="Button.modechip.full /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Warning.Surface}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Warning.Border}" />
+    </Style>
+    <Style Selector="Button.modechip.full TextBlock.modechiptext">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Warning.Foreground}" />
+    </Style>
+    <Style Selector="Button.modechip.full TextBlock.modeglyph">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Warning}" />
+    </Style>
+
+    <Style Selector="Border.approvalpanel">
+      <Setter Property="Padding" Value="6" />
+    </Style>
+    <Style Selector="Button.modeoption">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="10,8" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    </Style>
+    <Style Selector="Button.modeoption:pointerover /template/ Border#PART_Root, Button.modeoption:focus-visible /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Button.modeoption:disabled">
+      <Setter Property="Opacity" Value="0.6" />
+    </Style>
+    <Style Selector="Button.modeoption TextBlock.autoglyph, Button.modeoption TextBlock.modecheck">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
+    </Style>
+    <Style Selector="Button.modeoption TextBlock.fullglyph">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Warning}" />
+    </Style>
+    <Style Selector="Border.reviewerline">
+      <Setter Property="Margin" Value="38,0,10,4" />
+      <Setter Property="Padding" Value="8,4" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+    </Style>
+    <Style Selector="Border.reviewerline TextBlock">
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <Style Selector="Border.reviewerline.missing">
+      <Setter Property="Background" Value="{DynamicResource Brush.Warning.Surface}" />
+    </Style>
+    <Style Selector="Border.reviewerline.missing TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Warning.Foreground}" />
+    </Style>
     <Style Selector="Border.composer">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Elevated}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Strong}" />

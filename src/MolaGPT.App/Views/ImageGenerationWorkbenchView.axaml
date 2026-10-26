@@ -323,8 +323,8 @@
                measured height is width ÷ aspect, which is what gives the
                masonry panel columns of different lengths to balance. -->
           <Button Classes="galleryimage" Click="OnPreviewResult" ToolTip.Tip="点击查看原图">
-            <Image Source="{Binding Thumbnail}" Stretch="Uniform"
-                   HorizontalAlignment="Stretch" />
+            <r:WorkbenchThumbnail ImagePath="{Binding ImagePath}" ImageSize="{Binding ImageSize}"
+                                  Stretch="Uniform" HorizontalAlignment="Stretch" />
           </Button>
 
           <StackPanel Margin="11,9,11,10">
@@ -369,8 +369,8 @@
              blurred-up copy of a picture the store still holds at full size. -->
         <Border CornerRadius="{DynamicResource Radius.Md}"
                 Background="{DynamicResource Brush.Bg.Tertiary}" ClipToBounds="True">
-          <Image Source="{Binding Thumbnail}" Stretch="Uniform" StretchDirection="DownOnly"
-                 MaxHeight="460" />
+          <r:WorkbenchThumbnail ImagePath="{Binding ImagePath}" ImageSize="{Binding ImageSize}"
+                                Stretch="Uniform" StretchDirection="DownOnly" MaxHeight="460" />
         </Border>
         <Grid ColumnDefinitions="*,Auto" Margin="0,6,0,0">
           <TextBlock Text="{Binding RevisedPromptDisplay}" Classes="muted"

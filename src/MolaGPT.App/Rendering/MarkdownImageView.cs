@@ -53,6 +53,9 @@ public sealed class MarkdownImageView : TemplatedControl
     private readonly Border _card;
     private CancellationTokenSource? _load;
     private Bitmap? _bitmap;
+    private TopLevel? _topLevel;
+    private IDisposable? _resizeReload;
+    private int _requestedDecodeWidth;
     private Point? _pressedPosition;
 
     public MarkdownImageView()
@@ -116,18 +119,18 @@ public sealed class MarkdownImageView : TemplatedControl
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
-        var scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1;
-        if (Url is { Length: > 0 }
-            && (_bitmap is null && _load is null
-                || scale > 1.5 && (_bitmap?.PixelSize.Width ?? 0) < CardSize(Bounds.Width).Width * scale))
-            Reload();
+        _topLevel = TopLevel.GetTopLevel(this);
+        _requestedDecodeWidth = _bitmap?.PixelSize.Width ?? 0;
+        InvalidateArrange();
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
+        _resizeReload?.Dispose();
+        _resizeReload = null;
         _load?.Cancel();
-        _load?.Dispose();
         _load = null;
+        _topLevel = null;
         _pressedPosition = null;
         base.OnDetachedFromVisualTree(e);
     }
@@ -145,6 +148,7 @@ public sealed class MarkdownImageView : TemplatedControl
     {
         var (width, height) = CardSize(finalSize.Width);
         _card.Arrange(new Rect(0, 0, width, height));
+        RequestBitmap();
         return new Size(width, height);
     }
 
@@ -173,11 +177,13 @@ public sealed class MarkdownImageView : TemplatedControl
     private void UpdateFallbackText() =>
         _fallback.Text = Alt is { Length: > 0 } alt ? alt : Url;
 
-    private async void Reload()
+    private void Reload()
     {
+        _resizeReload?.Dispose();
+        _resizeReload = null;
         _load?.Cancel();
-        _load?.Dispose();
         _load = null;
+        _requestedDecodeWidth = 0;
 
         _image.IsVisible = false;
         _image.Source = null;
@@ -185,16 +191,61 @@ public sealed class MarkdownImageView : TemplatedControl
         _bitmap = null;
         UpdateFallbackText();
         ToolTip.SetTip(_card, Url);
+        InvalidateMeasure();
+    }
+
+    private int DecodeWidth()
+    {
+        if (_topLevel is null || this.TransformToVisual(_topLevel) is not { } transform) return 0;
+        var scale = Math.Sqrt(transform.M11 * transform.M11 + transform.M12 * transform.M12);
+        return (int)Math.Ceiling(_card.Bounds.Width * scale * _topLevel.RenderScaling);
+    }
+
+    private void RequestBitmap()
+    {
+        if (Url is not { Length: > 0 }) return;
+        var width = DecodeWidth();
+        if (width <= _requestedDecodeWidth) return;
+
+        _resizeReload?.Dispose();
+        var firstLoad = _requestedDecodeWidth == 0;
+        _requestedDecodeWidth = width;
+        if (firstLoad)
+        {
+            _resizeReload = null;
+            LoadBitmap(width);
+            return;
+        }
+
+        // Keep the current image while a resize settles, then decode only if it grew.
+        _resizeReload = DispatcherTimer.RunOnce(() =>
+        {
+            _resizeReload = null;
+            var needed = DecodeWidth();
+            if (needed <= 0)
+            {
+                _requestedDecodeWidth = _bitmap?.PixelSize.Width ?? 0;
+                return;
+            }
+            if (_bitmap is not null && _bitmap.PixelSize.Width >= needed)
+                _requestedDecodeWidth = _bitmap.PixelSize.Width;
+            else
+                LoadBitmap(needed);
+        }, TimeSpan.FromMilliseconds(150));
+    }
+
+    private async void LoadBitmap(int decodeWidth)
+    {
+        _load?.Cancel();
 
         if (Url is not { Length: > 0 } url) return;
 
         var cts = new CancellationTokenSource();
         _load = cts;
+        _requestedDecodeWidth = decodeWidth;
 
         try
         {
-            var scale = Math.Max(1.5, TopLevel.GetTopLevel(this)?.RenderScaling ?? 1);
-            var decodeWidth = (int)Math.Ceiling(CardSize(Bounds.Width).Width * scale);
             var bitmap = await ImageSourceLoader.LoadAsync(url, decodeWidth, cts.Token);
             if (cts.IsCancellationRequested) return;
 
@@ -212,6 +263,11 @@ public sealed class MarkdownImageView : TemplatedControl
         catch (OperationCanceledException)
         {
             // Row recycled or URL changed mid-flight; nothing to report.
+        }
+        finally
+        {
+            if (ReferenceEquals(_load, cts)) _load = null;
+            cts.Dispose();
         }
     }
 

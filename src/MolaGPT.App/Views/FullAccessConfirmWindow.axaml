@@ -1,0 +1,144 @@
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        x:Class="MolaGPT.App.Views.FullAccessConfirmWindow"
+        Title="开启完全权限"
+        Width="460"
+        MaxWidth="460"
+        SizeToContent="Height"
+        CanResize="False"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        FontFamily="{DynamicResource Font.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+  <views:MolaContentWindow.Header>
+    <Border Height="52"
+            Background="{DynamicResource Brush.Bg.Tertiary}"
+            BorderBrush="{DynamicResource Brush.Divider}"
+            BorderThickness="0,0,0,1"
+            Padding="20,0">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Classes="inlinerow" Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBlock Classes="icon" Text="&#xE7BA;" FontSize="15" Margin="0,0,9,0"
+                     Foreground="{DynamicResource Brush.Warning}" />
+          <TextBlock Text="开启完全权限" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
+        </StackPanel>
+        <Button Grid.Column="1" Name="PART_Close" Classes="headericon" ToolTip.Tip="关闭">
+          <TextBlock Classes="icon" Text="&#xE711;" FontSize="14" />
+        </Button>
+      </Grid>
+    </Border>
+  </views:MolaContentWindow.Header>
+
+  <StackPanel Margin="22,18,22,20" Spacing="14">
+    <TextBlock Classes="secondary" TextWrapping="Wrap" Text="开启后，以下操作将直接执行，不再请求确认。" />
+
+    <Border Classes="scopecard">
+      <StackPanel>
+        <Grid Classes="scoperow" ColumnDefinitions="18,12,*">
+          <TextBlock Classes="icon" Text="&#xE8B7;" FontSize="13" />
+          <StackPanel Grid.Column="2" Spacing="1">
+            <TextBlock Classes="scopetitle" Text="文件操作" />
+            <TextBlock Classes="scopebody" Text="读取和修改本机任意位置的文件" />
+          </StackPanel>
+        </Grid>
+        <Border Classes="divider" />
+        <Grid Classes="scoperow" ColumnDefinitions="18,12,*">
+          <TextBlock Classes="icon" Text="&#xE943;" FontSize="13" />
+          <StackPanel Grid.Column="2" Spacing="1">
+            <TextBlock Classes="scopetitle" Text="代码与工具" />
+            <TextBlock Classes="scopebody" Text="运行 Python 代码、调用 MCP 工具、生成图像" />
+          </StackPanel>
+        </Grid>
+        <Border Classes="divider" />
+        <Grid Classes="scoperow" ColumnDefinitions="18,12,*">
+          <TextBlock Classes="icon" Text="&#xE774;" FontSize="13" />
+          <StackPanel Grid.Column="2" Spacing="1">
+            <TextBlock Classes="scopetitle" Text="浏览器操作" />
+            <TextBlock Classes="scopebody" Text="在已登录的浏览器中跳转、点击和填写" />
+          </StackPanel>
+        </Grid>
+      </StackPanel>
+    </Border>
+
+    <StackPanel Spacing="3">
+      <TextBlock Classes="sectionlabel" Text="仍需确认" />
+      <TextBlock TextWrapping="Wrap"
+                 Text="删除或覆盖文件、安装 Python 包、浏览器下载、授权与支付页面等。" />
+    </StackPanel>
+
+    <Border Classes="banner warning">
+      <TextBlock TextWrapping="Wrap" Text="存在数据丢失、泄露及提示注入风险。仅本次启动有效。" />
+    </Border>
+
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+      <Button Name="PART_Cancel" Classes="outline" Content="取消" Padding="16,7" />
+      <Button Name="PART_Confirm" Classes="dangeraction" Content="开启完全权限" />
+    </StackPanel>
+  </StackPanel>
+
+  <Window.Styles>
+    <Style Selector="Border.scopecard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Divider}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+    </Style>
+    <Style Selector="Grid.scoperow">
+      <Setter Property="Margin" Value="14,10" />
+    </Style>
+    <Style Selector="Grid.scoperow TextBlock.icon">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="Margin" Value="0,3,0,0" />
+    </Style>
+    <Style Selector="TextBlock.scopetitle">
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="TextBlock.scopebody">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style Selector="TextBlock.sectionlabel">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <!-- 与 ToolApprovalWindow 的 banner.warning 相同 -->
+    <Style Selector="Border.banner">
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,10" />
+    </Style>
+    <Style Selector="Border.banner TextBlock">
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="LineHeight" Value="20" />
+    </Style>
+    <Style Selector="Border.banner.warning">
+      <Setter Property="Background" Value="{DynamicResource Brush.Warning.Surface}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Warning.Border}" />
+    </Style>
+    <Style Selector="Border.banner.warning TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Warning.Foreground}" />
+    </Style>
+    <Style Selector="Button.dangeraction">
+      <Setter Property="MinHeight" Value="34" />
+      <Setter Property="Padding" Value="16,7" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Danger.Surface}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Danger.Foreground}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Danger.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.dangeraction:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Danger.Surface}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Error}" />
+    </Style>
+    <Style Selector="Button.dangeraction:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Danger.Foreground}" />
+    </Style>
+  </Window.Styles>
+</views:MolaContentWindow>

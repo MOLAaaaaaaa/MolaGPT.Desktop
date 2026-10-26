@@ -1,7 +1,12 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
+using Avalonia.OpenGL;
+using Avalonia.Platform;
+using Avalonia.Rendering.Composition;
 using Avalonia.Styling;
 using Avalonia.Threading;
 using Microsoft.Extensions.DependencyInjection;
@@ -244,10 +249,11 @@ public partial class App : Application
                 else _ = StopAgentRelayAsync();
             }
 
-            // Phones control MolaGPT conversations through the account, so this
-            // runs only while signed in and switched on.
+            // Phones control MolaGPT conversations while switched on: over the account
+            // relay while signed in, and over the account-less link always.
             var remoteWork = _services.GetRequiredService<RemoteControlHost>();
             var remoteWorkSettings = _services.GetRequiredService<RemoteWorkSettingsViewModel>();
+            var remoteSync = new SemaphoreSlim(1, 1);
             remoteWorkSettings.EnabledChanged += SyncRemoteWork;
             settings.PropertyChanged += (_, e) =>
             {
@@ -275,10 +281,27 @@ public partial class App : Application
             SyncRemoteWork();
             OfferRemoteWork();
 
-            void SyncRemoteWork()
+            void SyncRemoteWork() => _ = SyncRemoteWorkAsync();
+
+            async Task SyncRemoteWorkAsync()
             {
-                if (remoteWorkSettings.IsEnabled && settings.IsLoggedIn) remoteWork.Start();
-                else _ = remoteWork.StopAsync();
+                await remoteSync.WaitAsync();
+                try
+                {
+                    var enabled = remoteWorkSettings.IsEnabled;
+                    if (enabled && settings.IsLoggedIn) remoteWork.Start();
+                    else await remoteWork.StopAccountAsync();
+                    if (enabled) await remoteWork.StartAnonymousAsync();
+                    else await remoteWork.StopAnonymousAsync();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"remote sync: {ex.Message}");
+                }
+                finally
+                {
+                    remoteSync.Release();
+                }
             }
 
             // Signed in but never switched on: say once that the phone can pick these up.
@@ -776,11 +799,69 @@ public partial class App : Application
 
         CodeHighlighter.TrimForBackground();
         ImageSourceLoader.TrimForBackground();
+        _ = TrimGraphicsForBackgroundAsync();
 
         // 回收一次并归还空闲 GC 堆页；30s 内不重复请求。
         _ = Task.Run(() => GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive,
             blocking: true, compacting: true));
     }
+
+    private async Task TrimGraphicsForBackgroundAsync()
+    {
+        try
+        {
+            var compositor = Compositor.TryGetDefaultCompositor();
+            if (compositor is null) return;
+            var feature = await compositor.TryGetRenderInterfaceFeature(
+                typeof(IOpenGlTextureSharingRenderInterfaceContextFeature));
+            if (!_backgroundMode || feature is not IPlatformGraphicsContext graphics) return;
+
+            using var current = graphics.EnsureCurrent();
+            using var process = Process.GetCurrentProcess();
+            var angle = process.Modules.Cast<ProcessModule>().FirstOrDefault(module =>
+                string.Equals(module.ModuleName, "av_libglesv2.dll", StringComparison.OrdinalIgnoreCase));
+            if (angle is null) return;
+
+            var getProc = Marshal.GetDelegateForFunctionPointer<EglGetProcAddress>(
+                NativeLibrary.GetExport(angle.BaseAddress, "EGL_GetProcAddress"));
+            var getDisplayAddress = getProc("eglGetCurrentDisplay");
+            var queryDisplayAddress = getProc("eglQueryDisplayAttribEXT");
+            var queryDeviceAddress = getProc("eglQueryDeviceAttribEXT");
+            if (getDisplayAddress == 0 || queryDisplayAddress == 0 || queryDeviceAddress == 0) return;
+            var display = Marshal.GetDelegateForFunctionPointer<EglGetCurrentDisplay>(getDisplayAddress)();
+            var queryDisplay = Marshal.GetDelegateForFunctionPointer<EglQueryAttribute>(queryDisplayAddress);
+            var queryDevice = Marshal.GetDelegateForFunctionPointer<EglQueryAttribute>(queryDeviceAddress);
+            if (queryDisplay(display, 0x322C, out var eglDevice) == 0
+                || queryDevice(eglDevice, 0x33A1, out var d3dDevice) == 0 || d3dDevice == 0) return;
+
+            var iid = new Guid("6007896c-3244-4afd-bf18-a6d3beda5023");
+            Marshal.ThrowExceptionForHR(Marshal.QueryInterface(d3dDevice, in iid, out var dxgiDevice));
+            try
+            {
+                // IDXGIDevice3::Trim follows the 17 inherited COM methods.
+                var trim = Marshal.GetDelegateForFunctionPointer<DxgiTrimDevice>(
+                    Marshal.ReadIntPtr(Marshal.ReadIntPtr(dxgiDevice), 17 * IntPtr.Size));
+                trim(dxgiDevice);
+            }
+            finally
+            {
+                Marshal.Release(dxgiDevice);
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write("rendering", "后台图形缓存回收失败：" + ex.Message);
+        }
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate nint EglGetProcAddress([MarshalAs(UnmanagedType.LPStr)] string name);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate nint EglGetCurrentDisplay();
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int EglQueryAttribute(nint handle, int attribute, out nint value);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void DxgiTrimDevice(nint device);
 
     private void ExitBackground()
     {

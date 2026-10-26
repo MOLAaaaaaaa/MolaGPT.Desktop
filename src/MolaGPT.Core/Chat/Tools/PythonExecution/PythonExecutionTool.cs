@@ -73,13 +73,8 @@ public sealed class PythonExecutionTool
     {
         if (allowBackground)
             return WithBackground(BuildOpenAiToolDefinition(options));
-        // In approval mode a confirmation dialog may appear before a run (any
-        // code above the auto-approve bar), so the model must always state what
-        // the code is for. Make `description` required there; optional otherwise.
-        var requiresPurpose = options.PermissionMode == PythonPermissionMode.Approval;
-        var descriptionHint = requiresPurpose
-            ? "REQUIRED. One concise sentence, in the user's language, stating what this code does and why. It is shown to the user in an approval dialog before the code runs, so it must be specific (e.g. '用最小二乘法拟合这组散点并画出回归线'), not generic like 'run code'."
-            : "Short user-facing purpose of this execution, in the user's language.";
+        // The definition stays the same when the approval mode changes.
+        var descriptionHint = "REQUIRED. One concise sentence, in the user's language, stating what this code does and why. It is shown to the user in an approval dialog before the code runs, so it must be specific (e.g. '用最小二乘法拟合这组散点并画出回归线'), not generic like 'run code'.";
 
         return new
         {
@@ -94,9 +89,7 @@ public sealed class PythonExecutionTool
                 description = "Run Python code locally on the user's computer. This is a general-purpose local execution tool, similar to a bash/shell: prefer it whenever a task is better done by running code than by answering from memory — math and data analysis, reading and writing local files and folders, converting or generating documents, spreadsheets, images and plots, inspecting the system, and automating multi-step local tasks through the standard library (os, pathlib, shutil, subprocess). "
                     + "It runs real Python on the local machine with the user's own privileges and a persistent working directory, not a throwaway cloud sandbox. "
                     + "Print results and short progress to stdout so the user and you can see them. "
-                    + (requiresPurpose
-                        ? "Risky actions need the user's approval first, so always provide the `description` argument: they read it before deciding."
-                        : $"Current execution permission mode is {options.PermissionMode}."),
+                    + "Some actions need the user's approval or an automatic review before they run, so always provide the `description` argument: it is shown before the decision.",
                 parameters = new
                 {
                     type = "object",
@@ -124,7 +117,7 @@ public sealed class PythonExecutionTool
                             description = "Folders outside the working directory this code needs to WRITE to, including the user's own folders such as the desktop (optional, but declare them whenever you already know them). Only the working directory is writable by default; declaring a folder turns what would otherwise be a failed run into one up-front question, and the user's answer is remembered. Reading is already allowed across the machine and never needs to be declared. An undeclared write fails with the refused path named — relay that to the user instead of retrying."
                         }
                     },
-                    required = requiresPurpose ? new[] { "code", "description" } : new[] { "code" }
+                    required = new[] { "code", "description" }
                 }
             }
         };
@@ -177,7 +170,9 @@ public sealed class PythonExecutionTool
         // Fold any session-scoped allow rules (granted earlier in this run via
         // the approval dialog) into the options BEFORE analysis, so the analyzer
         // sees the allowed modules/paths as known-safe and auto-approves them.
-        var effectiveOptions = MergeSessionAllowList(options, _sessionAllowList, _grants);
+        var effectiveOptions = run?.Unattended == true
+            ? options
+            : MergeSessionAllowList(options, _sessionAllowList, _grants);
 
         // The analyzer needs the working directory to tell "writes a chart next to
         // its own script" from "writes into the user's Documents folder".
@@ -264,7 +259,9 @@ public sealed class PythonExecutionTool
                     python.FileName,
                     options.AllowNetwork,
                     grantedWritable: SplitPrefixes(effectiveOptions.AllowedPathPrefixes)
-                        .Concat(_grants?.WritablePathPrefixes ?? Array.Empty<string>())
+                        .Concat(run?.Unattended == true
+                            ? Array.Empty<string>()
+                            : _grants?.WritablePathPrefixes ?? Array.Empty<string>())
                         .Concat(newScopeRequests));
 
             AgentTaskReservation? reservation = null;
@@ -508,7 +505,7 @@ public sealed class PythonExecutionTool
         string unavailableReason,
         CancellationToken ct)
     {
-        var verdict = review is null || _reviewer is null
+        var verdict = review is null || _reviewer is null || options.PermissionMode != PythonPermissionMode.AutoReview
             ? null
             : await _reviewer.ReviewAsync(
                 new PythonReviewRequest(code, description, risk, newScopeRequests, workspaceRoot, options.AllowNetwork, review),

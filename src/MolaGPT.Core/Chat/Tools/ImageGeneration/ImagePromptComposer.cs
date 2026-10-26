@@ -22,13 +22,7 @@ public readonly record struct ImageParameterDelivery(
     ImageParameterChannel Style);
 
 /// <summary>
-/// The single place that decides what the model is actually told.
-///
-/// The two dialects carry different fields: the /images/* endpoints take a
-/// <c>size</c> (and <c>style</c>, but only DALL·E 3), while the chat-completions
-/// dialect takes neither. Everything the endpoint cannot carry is folded into
-/// the prompt here instead of being dropped on the floor — the workbench used to
-/// show 画幅比例 and 风格 chips that changed nothing for most models.
+/// Folds style into the prompt when the selected API has no style parameter.
 /// </summary>
 public static class ImagePromptComposer
 {
@@ -49,19 +43,8 @@ public static class ImagePromptComposer
     public static ImageParameterDelivery Describe(ImageGenerationOptions options, bool isEdit)
     {
         var chatDialect = ImageApiFormat.IsChatImage(options.Format);
-        var hasSize = AspectRatio(options.Size) is not null;
         var hasStyle = !string.IsNullOrWhiteSpace(options.Style);
-
-        var size = (chatDialect, hasSize) switch
-        {
-            (false, _) => ImageParameterChannel.Parameter,
-            (true, true) when !isEdit => ImageParameterChannel.Prompt,
-
-            // Editing through the chat dialect: the output follows the source
-            // image, and an aspect-ratio instruction would reframe it. Saying
-            // "ignored" is better than quietly cropping the user's picture.
-            (true, _) => ImageParameterChannel.Ignored
-        };
+        var size = ImageParameterChannel.Parameter;
 
         var style = (chatDialect || isEdit || !IsDallE3(options.Model)) && hasStyle
             ? ImageParameterChannel.Prompt
@@ -76,9 +59,6 @@ public static class ImagePromptComposer
         var delivery = Describe(options, isEdit);
         var body = prompt.Trim();
         var directives = new List<string>(2);
-
-        if (delivery.Size == ImageParameterChannel.Prompt && AspectRatio(options.Size) is { } ratio)
-            directives.Add($"Aspect ratio: {ratio}.");
 
         if (delivery.Style == ImageParameterChannel.Prompt && options.Style?.Trim() is { Length: > 0 } style)
             directives.Add($"Style: {style}.");

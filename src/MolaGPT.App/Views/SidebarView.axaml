@@ -1,6 +1,7 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:MolaGPT.ViewModels;assembly=MolaGPT.ViewModels"
+             xmlns:r="clr-namespace:MolaGPT.App.Rendering"
              x:Class="MolaGPT.App.Views.SidebarView"
              x:DataType="vm:ConversationListViewModel">
 
@@ -267,7 +268,7 @@
   <UserControl.Resources>
     <!-- One row, shared by both groups — the WPF ConversationRowTemplate. -->
     <DataTemplate x:Key="ConversationRowTemplate" DataType="vm:ConversationListItem">
-      <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto" Background="Transparent">
+      <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto" Background="Transparent">
 
         <!-- Right-click menu. The hover trash button stays as the fast path;
              this exists because actions the user cannot see do not exist, and
@@ -294,8 +295,9 @@
                    Margin="0,0,10,0" />
 
         <Grid Grid.Column="1" Grid.Row="0" ColumnDefinitions="*,Auto">
-          <TextBlock Grid.Column="0"
-                     Text="{Binding Title}"
+          <r:SearchHighlightTextBlock Grid.Column="0"
+                     SourceText="{Binding Title}"
+                     Query="{Binding SearchQuery}"
                      ToolTip.Tip="{Binding Title}"
                      TextTrimming="CharacterEllipsis"
                      TextWrapping="NoWrap"
@@ -371,6 +373,14 @@
             </Button>
           </Panel>
         </Grid>
+        <r:SearchHighlightTextBlock Grid.Column="1" Grid.Row="2"
+                   SourceText="{Binding SearchSnippet}"
+                   Query="{Binding SearchQuery}"
+                   IsVisible="{Binding HasSearchSnippet}"
+                   ToolTip.Tip="{Binding SearchSnippet}"
+                   FontSize="12" LineHeight="17" Margin="0,4,0,1"
+                   Foreground="{DynamicResource Brush.Text.Secondary}"
+                   TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" />
       </Grid>
     </DataTemplate>
 

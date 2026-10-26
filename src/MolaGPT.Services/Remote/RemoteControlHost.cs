@@ -16,6 +16,7 @@ using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Agents.Relay;
 using MolaGPT.Core.Chat.Attachments;
+using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Remote;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
@@ -39,8 +40,13 @@ public enum RemoteControlState
 /// nothing; the HTTP side only carries the conversation list and a heartbeat, so
 /// the phone can show the computer while it is asleep. Protocol: the phone repo's
 /// <c>docs/desktop-remote-design.md</c>.
+///
+/// Two links run side by side: the account relay while signed in, and the
+/// account-less device namespace (RemoteControlHost.Anonymous.cs). Peers of the
+/// anonymous link carry an <see cref="AnonPeerPrefix"/> inside this class, so the
+/// per-peer state below never mixes the two.
 /// </summary>
-public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
+public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
 {
     private const int Protocol = 1;
     private const int ListLimit = 50;
@@ -75,6 +81,8 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
     private readonly string _machineName;
     private readonly string _appVersion;
     private readonly RelayCommandJournal _journal;
+    private readonly AnonApiClient? _anonApi;
+    private readonly IToolGrantStore? _grantStore;
 
     private readonly object _gate = new();
     // peer -> conversation -> subscription
@@ -87,18 +95,38 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
     private readonly Dictionary<string, Upload> _uploads = new(StringComparer.Ordinal);
     private readonly string _uploadDirectory;
     private HashSet<string> _listed = new(StringComparer.Ordinal);
-    private Pairing? _pairing;
 
-    private Channel<byte[]>? _outbox;
     private readonly Channel<(string ConversationId, string MessageId)> _writes =
         Channel.CreateUnbounded<(string, string)>(new UnboundedChannelOptions { SingleReader = true });
     private readonly SemaphoreSlim _listSignal = new(0);
     private long _listDueAtMs;
-    private string? _lastPublishedList;
 
-    private CancellationTokenSource? _cts;
-    private Task? _run;
-    private RemoteControlState _state = RemoteControlState.Off;
+    private const string AnonPeerPrefix = "anon:";
+
+    /// <summary>One relay connection: the account one or the anonymous one.</summary>
+    private sealed class Link(bool anonymous)
+    {
+        public bool Anonymous { get; } = anonymous;
+        public CancellationTokenSource? Cts;
+        public Task? Run;
+        public RemoteControlState State = RemoteControlState.Off;
+        public Channel<(string Peer, byte[] Frame)>? Outbox;
+        public CancellationTokenSource? ConnectionAbort;
+        public long QueuedBytes;
+        public string? LastPublished;
+    }
+
+    private readonly Link _accountLink = new(false);
+    private readonly Link _anonLink = new(true);
+
+    // Bounded-send accounting (anonymous link): a phone that stops reading must
+    // be shed, and a wedged device socket must reconnect, not buffer forever.
+    private readonly Dictionary<string, long> _outboxPerPeer = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _outboxDroppedPeers = new(StringComparer.Ordinal);
+
+    // The list, write pump and state tick serve both links; they run while either does.
+    private CancellationTokenSource? _coreCts;
+    private Task? _coreRun;
 
     public RemoteControlHost(
         HttpClient http,
@@ -115,7 +143,9 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         string machineName,
         Action<string>? log = null,
         string? baseUrl = null,
-        IWebProxy? proxy = null)
+        IWebProxy? proxy = null,
+        AnonApiClient? anonApi = null,
+        IToolGrantStore? grantStore = null)
     {
         _http = http;
         _proxy = proxy;
@@ -132,6 +162,8 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         _machineName = string.IsNullOrWhiteSpace(machineName) ? Environment.MachineName : machineName.Trim();
         _log = log;
         _base = baseUrl ?? "https://chatgpt.wljay.cn/v2";
+        _anonApi = anonApi;
+        _grantStore = grantStore;
         _appVersion = typeof(RemoteControlHost).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion?.Split('+')[0] ?? "0";
         var dataRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MolaGPT");
@@ -161,25 +193,22 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         };
     }
 
+    /// <summary>The better of the two links: online if either is.</summary>
     public RemoteControlState State
     {
-        get { lock (_gate) return _state; }
+        get { lock (_gate) return CombinedState(); }
+    }
+
+    private RemoteControlState CombinedState()
+    {
+        var states = new[] { _accountLink.State, _anonLink.State };
+        return states.Contains(RemoteControlState.Online) ? RemoteControlState.Online
+            : states.Contains(RemoteControlState.Connecting) ? RemoteControlState.Connecting
+            : states.Contains(RemoteControlState.Offline) ? RemoteControlState.Offline
+            : RemoteControlState.Off;
     }
 
     public event Action? StateChanged;
-
-    /// <summary>The code to show while pairing, or null.</summary>
-    public string? PairingCode
-    {
-        get { lock (_gate) return _pairing is { } p && !p.Expired ? p.Code : null; }
-    }
-
-    public DateTimeOffset? PairingExpiresAt
-    {
-        get { lock (_gate) return _pairing is { } p && !p.Expired ? p.ExpiresAt : null; }
-    }
-
-    public event Action? PairingChanged;
 
     /// <summary>
     /// A phone finished pairing: its name, and whether it paired through the account
@@ -197,175 +226,193 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
 
     public event Action? ConnectedPhonesChanged;
 
+    public bool AccountRunning { get { lock (_gate) return _accountLink.Run is not null; } }
+    public bool AnonymousRunning { get { lock (_gate) return _anonLink.Run is not null; } }
+
     // ---- lifecycle ------------------------------------------------------------
 
-    public void Start()
+    /// <summary>Starts the account link.</summary>
+    public void Start() => StartLink(_accountLink);
+
+    private void StartLink(Link link)
     {
         lock (_gate)
         {
-            if (_run is not null) return;
-            _cts = new CancellationTokenSource();
-            var token = _cts.Token;
-            _run = Task.Run(() => RunAsync(token));
+            if (link.Run is not null) return;
+            link.Cts = new CancellationTokenSource();
+            var token = link.Cts.Token;
+            link.Run = Task.Run(() => SocketLoopAsync(link, token));
+            if (_coreRun is null)
+            {
+                _coreCts = new CancellationTokenSource();
+                var core = _coreCts.Token;
+                _coreRun = Task.Run(() => RunCoreAsync(core));
+            }
         }
         _approvalRelay.Attach(this);
-        SetState(RemoteControlState.Connecting);
+        SetLinkState(link, RemoteControlState.Connecting);
     }
 
     public async Task StopAsync()
     {
-        CancellationTokenSource? cts;
-        Task? run;
-        lock (_gate)
-        {
-            cts = _cts;
-            run = _run;
-            _cts = null;
-            _run = null;
-        }
-        if (cts is null) return;
-        _approvalRelay.Attach(null);
-        cts.Cancel();
-        // The loops may be waiting on the UI thread, which may be the one stopping us.
-        if (run is not null) await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(1))).ConfigureAwait(false);
-        cts.Dispose();
-        CancelPairing();
-        foreach (var pending in TakeAllApprovals()) pending.Tcs.TrySetResult(RemoteApprovalDecisions.Deny);
-        DropUploads(_ => true);
+        await StopAccountAsync().ConfigureAwait(false);
+        await StopAnonymousAsync().ConfigureAwait(false);
+    }
+
+    public async Task StopAccountAsync()
+    {
+        if (!await StopLinkAsync(_accountLink).ConfigureAwait(false)) return;
         using var offline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         try { await PostDirectoryAsync(new JsonObject { ["kind"] = "offline", ["machineId"] = _machineId }, offline.Token).ConfigureAwait(false); }
         catch (Exception ex) { Log($"offline: {ex.Message}"); }
-        SetState(RemoteControlState.Off);
+    }
+
+    public async Task StopAnonymousAsync()
+    {
+        if (!await StopLinkAsync(_anonLink).ConfigureAwait(false)) return;
+        lock (_gate) _anonymousSessions.Clear();
+        await OnAnonymousStoppedAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Stops one link; the shared loops stop with the last one. False if it was not running.</summary>
+    private async Task<bool> StopLinkAsync(Link link)
+    {
+        CancellationTokenSource? cts;
+        Task? run;
+        CancellationTokenSource? coreCts = null;
+        Task? coreRun = null;
+        lock (_gate)
+        {
+            cts = link.Cts;
+            run = link.Run;
+            link.Cts = null;
+            link.Run = null;
+            if (cts is not null && _accountLink.Run is null && _anonLink.Run is null)
+            {
+                coreCts = _coreCts;
+                coreRun = _coreRun;
+                _coreCts = null;
+                _coreRun = null;
+            }
+        }
+        if (cts is null) return false;
+        cts.Cancel();
+        coreCts?.Cancel();
+        // The loops may be waiting on the UI thread, which may be the one stopping us.
+        var loops = new[] { run, coreRun }.OfType<Task>().ToArray();
+        await Task.WhenAny(Task.WhenAll(loops), Task.Delay(TimeSpan.FromSeconds(1))).ConfigureAwait(false);
+        cts.Dispose();
+        coreCts?.Dispose();
+        DropUploads(upload => IsOn(link, upload.Peer));
+        if (coreCts is not null)
+        {
+            _approvalRelay.Attach(null);
+            foreach (var pending in TakeAllApprovals()) pending.Tcs.TrySetResult(RemoteApprovalDecisions.Deny);
+        }
+        SetLinkState(link, RemoteControlState.Off);
+        return true;
     }
 
     public async ValueTask DisposeAsync() => await StopAsync().ConfigureAwait(false);
 
-    private async Task RunAsync(CancellationToken ct)
+    private async Task RunCoreAsync(CancellationToken ct)
     {
         ScheduleList(TimeSpan.Zero);
         await Task.WhenAll(
-            SocketLoopAsync(ct),
             DirectoryLoopAsync(ct),
             WritePumpAsync(ct),
             StateTickAsync(ct)).ConfigureAwait(false);
     }
 
-    private void SetState(RemoteControlState state)
+    private void SetLinkState(Link link, RemoteControlState state)
     {
         lock (_gate)
         {
-            if (_state == state) return;
-            _state = state;
+            if (link.State == state) return;
+            var before = CombinedState();
+            link.State = state;
+            if (CombinedState() == before) return;
         }
         StateChanged?.Invoke();
     }
 
-    // ---- pairing --------------------------------------------------------------
+    private Link LinkOf(string peer) => peer.StartsWith(AnonPeerPrefix, StringComparison.Ordinal) ? _anonLink : _accountLink;
 
-    private sealed class Pairing(string code)
-    {
-        public string Code { get; } = code;
-        public DateTimeOffset ExpiresAt { get; } = DateTimeOffset.UtcNow + PairingLifetime;
-        public int AttemptsLeft { get; set; } = PairingAttempts;
-        public bool Expired => DateTimeOffset.UtcNow >= ExpiresAt;
-    }
+    private bool IsOn(Link link, string peer) => ReferenceEquals(LinkOf(peer), link);
 
-    /// <summary>Show a new pairing code; any earlier one stops working.</summary>
-    public string BeginPairing()
-    {
-        string code;
-        lock (_gate)
-        {
-            code = RemotePairing.NewCode();
-            _pairing = new Pairing(code);
-        }
-        PairingChanged?.Invoke();
-        return code;
-    }
+    private static string RawPeer(string peer) =>
+        peer.StartsWith(AnonPeerPrefix, StringComparison.Ordinal) ? peer[AnonPeerPrefix.Length..] : peer;
 
-    public void CancelPairing()
-    {
-        lock (_gate)
-        {
-            if (_pairing is null) return;
-            _pairing = null;
-        }
-        PairingChanged?.Invoke();
-    }
+    // ---- account pairing ------------------------------------------------------
 
     public void Unpair(string pairId) => _phones.Remove(pairId);
 
-    private JsonObject HandlePair(JsonObject args, bool accountPairing)
+    /// <summary>One-tap pairing from a phone signed in to the same account. Codes
+    /// typed at this desk go through the anonymous link instead.</summary>
+    private JsonObject HandleAccountPair(JsonObject args)
     {
         var phoneKey = Text(args, "pub") ?? throw new RemoteError("bad_request", "缺少配对数据");
-        var mac = Text(args, "mac");
         var device = Text(args, "device") is { Length: > 0 } name ? name[..Math.Min(name.Length, 60)] : "手机";
         var deviceId = Text(args, "deviceId");
 
-        var code = RemotePairing.AccountPairingContext;
-        if (!accountPairing)
-        {
-            lock (_gate)
-            {
-                if (_pairing is not { Expired: false } pairing)
-                    throw new RemoteError("no_pairing", "配对码未生成或已过期，请在电脑端重新生成");
-                if (!RemotePairing.MacMatches(pairing.Code, phoneKey, mac))
-                {
-                    pairing.AttemptsLeft--;
-                    if (pairing.AttemptsLeft <= 0) _pairing = null;
-                    throw new RemoteError("bad_code", pairing.AttemptsLeft <= 0 ? "配对尝试次数过多，请在电脑端重新生成配对码" : "配对码不正确");
-                }
-                code = pairing.Code;
-                _pairing = null;
-            }
-            PairingChanged?.Invoke();
-        }
-
         string desktopKey;
         byte[] secret;
-        try { (desktopKey, secret) = RemotePairing.Agree(code, phoneKey); }
+        try { (desktopKey, secret) = RemotePairing.Agree(RemotePairing.AccountPairingContext, phoneKey); }
         catch (Exception) { throw new RemoteError("bad_request", "配对数据无效，请重试"); }
         var pairId = RemotePairing.NewPairId();
         _phones.Add(pairId, device, deviceId, secret);
         Log($"paired {device}");
-        Paired?.Invoke(device, accountPairing);
+        Paired?.Invoke(device, true);
         return new JsonObject
         {
             ["pairId"] = pairId,
             ["pub"] = desktopKey,
-            ["mac"] = Convert.ToBase64String(accountPairing
-                ? HMACSHA256.HashData(secret, Encoding.UTF8.GetBytes($"{RemotePairing.AccountPairingContext}|{phoneKey}|{desktopKey}|{pairId}"))
-                : RemotePairing.Mac(code, phoneKey + "|" + desktopKey + "|" + pairId)),
+            ["mac"] = Convert.ToBase64String(
+                HMACSHA256.HashData(secret, Encoding.UTF8.GetBytes($"{RemotePairing.AccountPairingContext}|{phoneKey}|{desktopKey}|{pairId}"))),
             ["machineName"] = _machineName
         };
     }
 
     // ---- realtime socket ------------------------------------------------------
 
-    private async Task SocketLoopAsync(CancellationToken ct)
+    private async Task SocketLoopAsync(Link link, CancellationToken ct)
     {
         var attempt = 0;
         while (!ct.IsCancellationRequested)
         {
             var renewed = false;
-            using var connection = CancellationTokenSource.CreateLinkedTokenSource(ct);
             try
             {
+                var ticket = await GetTicketAsync(link, ct).ConfigureAwait(false);
+                if (ticket is null)
+                {
+                    // Anonymous idle: retry after the wait handled in GetTicketAsync.
+                    attempt = 0;
+                    continue;
+                }
+                using var connection = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                lock (_gate) link.ConnectionAbort = connection;
                 using var socket = new ClientWebSocket();
                 if (_proxy is not null) socket.Options.Proxy = _proxy;
                 socket.Options.SetRequestHeader("User-Agent", UserAgentProvider.FixedUa);
-                socket.Options.SetRequestHeader("Authorization", "Bearer " + await GetTicketAsync(ct).ConfigureAwait(false));
+                socket.Options.SetRequestHeader("Authorization", "Bearer " + ticket);
                 socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
                 socket.Options.KeepAliveTimeout = TimeSpan.FromSeconds(20);
                 var uri = new UriBuilder(_base + "/agent-realtime") { Scheme = new Uri(_base).Scheme == "https" ? "wss" : "ws" };
                 await socket.ConnectAsync(uri.Uri, ct).ConfigureAwait(false);
                 attempt = 0;
-                var outbox = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
-                lock (_gate) _outbox = outbox;
-                SetState(RemoteControlState.Online);
-                Log("connected");
-                var writer = WriteLoopAsync(socket, outbox.Reader, connection.Token);
-                renewed = await ReadLoopAsync(socket, ct).ConfigureAwait(false);
+                var outbox = Channel.CreateUnbounded<(string Peer, byte[] Frame)>(new UnboundedChannelOptions { SingleReader = true });
+                lock (_gate)
+                {
+                    link.Outbox = outbox;
+                    link.QueuedBytes = 0;
+                    foreach (var peer in _outboxPerPeer.Keys.Where(peer => IsOn(link, peer)).ToList()) _outboxPerPeer.Remove(peer);
+                    _outboxDroppedPeers.RemoveWhere(peer => IsOn(link, peer));
+                }
+                SetLinkState(link, RemoteControlState.Online);
+                Log(link.Anonymous ? "anon connected" : "connected");
+                var writer = WriteLoopAsync(link, socket, outbox.Reader, connection.Token);
+                renewed = await ReadLoopAsync(link, socket, ct).ConfigureAwait(false);
                 connection.Cancel();
                 try { await writer.ConfigureAwait(false); } catch (OperationCanceledException) { }
             }
@@ -376,20 +423,21 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
             }
             finally
             {
-                bool hadPeers;
+                bool lastPeerGone;
                 lock (_gate)
                 {
-                    _outbox?.Writer.TryComplete();
-                    _outbox = null;
+                    link.Outbox?.Writer.TryComplete();
+                    link.Outbox = null;
                     // Peers are per connection; phones open their conversations again.
-                    _subscriptions.Clear();
-                    hadPeers = _peerQueues.Count > 0;
-                    _peerQueues.Clear();
+                    foreach (var peer in _subscriptions.Keys.Where(peer => IsOn(link, peer)).ToList()) _subscriptions.Remove(peer);
+                    var gone = _peerQueues.Keys.Where(peer => IsOn(link, peer)).ToList();
+                    foreach (var peer in gone) _peerQueues.Remove(peer);
+                    lastPeerGone = gone.Count > 0 && _peerQueues.Count == 0;
                 }
-                if (hadPeers) ConnectedPhonesChanged?.Invoke();
+                if (lastPeerGone) ConnectedPhonesChanged?.Invoke();
                 // Uploads in flight belonged to peers of this connection; finished ones wait for a send.
-                DropUploads(upload => upload.Staged is null);
-                if (!ct.IsCancellationRequested) SetState(RemoteControlState.Offline);
+                DropUploads(upload => upload.Staged is null && IsOn(link, upload.Peer));
+                if (!ct.IsCancellationRequested) SetLinkState(link, RemoteControlState.Offline);
             }
 
             // The relay recycles every socket after half an hour; that is not a failure.
@@ -399,8 +447,24 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         }
     }
 
-    private async Task<string> GetTicketAsync(CancellationToken ct)
+    private async Task<string?> GetTicketAsync(Link link, CancellationToken ct)
     {
+        if (link.Anonymous)
+        {
+            try { return await _anonApi!.FetchTicketAsync(ct).ConfigureAwait(false); }
+            catch (AnonApiException ex) when (ex.Code is "idle" or "closed")
+            {
+                // Nothing to relay for right now: no grant and no open pairing
+                // window. Wait quietly instead of hot-looping the ticket endpoint.
+                SetLinkState(link, RemoteControlState.Off);
+                var wake = _anonTicketWake;
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(TimeSpan.FromSeconds(30));
+                try { await wake.WaitAsync(timeout.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+                return null;
+            }
+        }
         using var request = new HttpRequestMessage(HttpMethod.Get,
             $"{_base}/api/auth/agent_realtime.php?role=device&machineId={Uri.EscapeDataString(_machineId)}");
         AttachAuth(request);
@@ -410,14 +474,20 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         return doc.RootElement.GetProperty("ticket").GetString() ?? throw new InvalidDataException("No ticket.");
     }
 
-    private static async Task WriteLoopAsync(ClientWebSocket socket, ChannelReader<byte[]> outbox, CancellationToken ct)
+    private async Task WriteLoopAsync(Link link, ClientWebSocket socket, ChannelReader<(string Peer, byte[] Frame)> outbox, CancellationToken ct)
     {
-        await foreach (var frame in outbox.ReadAllAsync(ct).ConfigureAwait(false))
-            await socket.SendAsync(frame, WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+        await foreach (var (peer, frame) in outbox.ReadAllAsync(ct).ConfigureAwait(false))
+        {
+            // Frames of a shed peer are drained, not sent, so their bytes stop
+            // counting the moment the writer passes them.
+            if (!IsPeerShed(peer))
+                await socket.SendAsync(frame, WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+            OutboxReleased(link, peer, frame.Length);
+        }
     }
 
     /// <summary>Reads until the socket closes. True when the relay asked for a renewal.</summary>
-    private async Task<bool> ReadLoopAsync(ClientWebSocket socket, CancellationToken ct)
+    private async Task<bool> ReadLoopAsync(Link link, ClientWebSocket socket, CancellationToken ct)
     {
         var buffer = new byte[64 * 1024];
         var message = new ArrayBufferWriter<byte>();
@@ -429,23 +499,26 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
             message.Write(buffer.AsSpan(0, result.Count));
             if (message.WrittenCount > MaxFrameBytes) throw new InvalidDataException("Frame too large.");
             if (!result.EndOfMessage) continue;
-            try { OnFrame(message.WrittenSpan); }
+            try { OnFrame(link, message.WrittenSpan); }
             catch (Exception ex) { Log($"frame: {ex.Message}"); }
             message.Clear();
         }
         return false;
     }
 
-    private void OnFrame(ReadOnlySpan<byte> raw)
+    private void OnFrame(Link link, ReadOnlySpan<byte> raw)
     {
         if (JsonNode.Parse(raw) is not JsonObject frame) return;
-        if (Text(frame, "from") is { } peer && frame["body"] is JsonObject body)
+        if (Text(frame, "from") is { } from && frame["body"] is JsonObject body)
         {
-            _ = HandleRequestAsync(peer, body);
+            if (link.Anonymous) AnonOnPeerFrame(AnonPeerPrefix + from, body);
+            else _ = HandleRequestAsync(from, body);
             return;
         }
-        if (Text(frame, "kind") == "gone" && Text(frame, "peer") is { } gone)
+        if (Text(frame, "kind") == "gone" && Text(frame, "peer") is { } goneRaw)
         {
+            var gone = link.Anonymous ? AnonPeerPrefix + goneRaw : goneRaw;
+            AnonPeerGone(gone);
             bool lastPeer;
             lock (_gate)
             {
@@ -459,9 +532,72 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
 
     private void SendToPeer(string peer, JsonObject body)
     {
-        var frame = new JsonObject { ["to"] = peer, ["body"] = body };
-        var bytes = Encoding.UTF8.GetBytes(frame.ToJsonString());
-        lock (_gate) _outbox?.Writer.TryWrite(bytes);
+        if (!LinkOf(peer).Anonymous) SendFrame(peer, body);
+        else if (AnonSealForPeer(peer, body) is { } sealedFrame) SendFrame(peer, sealedFrame);
+    }
+
+    private void SendFrame(string peer, JsonObject body) =>
+        EnqueueOutbox(peer, Encoding.UTF8.GetBytes(new JsonObject { ["to"] = RawPeer(peer), ["body"] = body }.ToJsonString()));
+
+    private void EnqueueOutbox(string peer, byte[] bytes)
+    {
+        const long perPeerCap = 8L * 1024 * 1024;
+        const long totalCap = 32L * 1024 * 1024;
+        var link = LinkOf(peer);
+        bool abortSocket = false;
+        lock (_gate)
+        {
+            var outbox = link.Outbox;
+            if (outbox is null) return;
+            if (_outboxDroppedPeers.Contains(peer)) return;
+            link.QueuedBytes += bytes.Length;
+            _outboxPerPeer[peer] = _outboxPerPeer.GetValueOrDefault(peer) + bytes.Length;
+            outbox.Writer.TryWrite((peer, bytes));
+            if (!link.Anonymous) return;
+            if (_outboxPerPeer[peer] > perPeerCap)
+            {
+                _outboxDroppedPeers.Add(peer);
+                _subscriptions.Remove(peer);
+                // Ask the relay to close that phone; its queued frames drain unsent.
+                WriteRelayDrop(link, peer);
+                Log("shed peer (send queue)");
+            }
+            else if (link.QueuedBytes > totalCap)
+            {
+                abortSocket = true;
+            }
+        }
+        if (abortSocket)
+        {
+            Log("send queue full; reconnecting device socket");
+            try { link.ConnectionAbort?.Cancel(); } catch (ObjectDisposedException) { }
+        }
+    }
+
+    /// <summary>Asks the relay to close a phone. Caller holds <see cref="_gate"/>.</summary>
+    private static void WriteRelayDrop(Link link, string peer)
+    {
+        if (link.Outbox is not { } outbox) return;
+        var frame = Encoding.UTF8.GetBytes(new JsonObject { ["kind"] = "drop", ["peer"] = RawPeer(peer) }.ToJsonString());
+        link.QueuedBytes += frame.Length;
+        outbox.Writer.TryWrite(("relay-drop:" + peer, frame));
+    }
+
+    private bool IsPeerShed(string peer)
+    {
+        lock (_gate) return _outboxDroppedPeers.Contains(peer);
+    }
+
+    private void OutboxReleased(Link link, string peer, long length)
+    {
+        lock (_gate)
+        {
+            link.QueuedBytes -= length;
+            if (!_outboxPerPeer.TryGetValue(peer, out var queued)) return;
+            queued -= length;
+            if (queued <= 0) _outboxPerPeer.Remove(peer);
+            else _outboxPerPeer[peer] = queued;
+        }
     }
 
     // ---- requests -------------------------------------------------------------
@@ -471,7 +607,7 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         public string Code { get; } = code;
     }
 
-    private async Task HandleRequestAsync(string peer, JsonObject body)
+    private async Task HandleRequestAsync(string peer, JsonObject body, string? sessionPairId = null)
     {
         var id = Text(body, "id");
         var op = Text(body, "op");
@@ -495,14 +631,21 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         {
             JsonNode? data;
             var args = ParseArgs(Text(body, "a"));
-            if (op is "pair" or "pair_account")
+            // Pairing ops are for the account link; an anonymous session is
+            // already paired and must not mint account pairings.
+            if (sessionPairId is null && op == "pair_account")
             {
                 // The relay only forwards terminal requests from this desktop's account.
-                data = HandlePair(args, accountPairing: op == "pair_account");
+                data = HandleAccountPair(args);
+            }
+            else if (sessionPairId is null && op == "pair")
+            {
+                // Codes typed at this desk pair over the anonymous link now.
+                throw new RemoteError("no_pairing", "请更新手机端后重新配对");
             }
             else
             {
-                var pairId = Authenticate(body, id, op);
+                var pairId = sessionPairId ?? Authenticate(body, id, op);
                 (data, opened) = op switch
                 {
                     "hello" => (Hello(), null),
@@ -518,6 +661,9 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
                     "upload_end" => (await UploadEndAsync(pairId, args).ConfigureAwait(false), null),
                     "upload_cancel" => (UploadCancel(pairId, args), null),
                     "stop" => (await StopTurnAsync(args).ConfigureAwait(false), null),
+                    "stop_task" => (await StopTaskAsync(args).ConfigureAwait(false), null),
+                    "agent_open" => (AgentOpen(peer, args), null),
+                    "agent_close" => (AgentClose(peer), null),
                     "approve" => (Approve(args), null),
                     "models" => (await ModelsAsync().ConfigureAwait(false), null),
                     "configure" => (await ConfigureAsync(args).ConfigureAwait(false), null),
@@ -526,6 +672,7 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
             }
             SendToPeer(peer, new JsonObject { ["v"] = Protocol, ["re"] = id, ["ok"] = true, ["data"] = data });
             if (opened is not null) FinishOpening(peer, opened);
+            if (op == "agent_open") FinishAgentOpen(peer);
         }
         catch (RemoteError error)
         {
@@ -596,27 +743,34 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
     {
         var conversationId = RequiredConversation(args);
         var limit = Math.Clamp(Int(args, "limit") ?? 30, 1, 60);
+        long startSeq;
 
         // Subscribe before reading, so nothing written in between is missed.
         lock (_gate)
         {
             if (!_subscriptions.TryGetValue(peer, out var mine))
                 _subscriptions[peer] = mine = new(StringComparer.Ordinal);
-            mine[conversationId] = new Subscription();
+            // Keep the cursor monotonic when reopening on the same connection.
+            // A phone can then discard events from before this snapshot.
+            startSeq = mine.TryGetValue(conversationId, out var previous) ? previous.Seq : 0;
+            mine[conversationId] = new Subscription { Seq = startSeq };
+            if (_agentWatches.TryGetValue(peer, out var watch) && watch.ConversationId == conversationId)
+                _agentWatches.Remove(peer);
         }
         try
         {
             var info = await DescribeAsync(conversationId).ConfigureAwait(false);
             var rows = await Task.Run(() => _messages.List(conversationId)).ConfigureAwait(false);
-            var (messages, hasOlder) = Page(rows, rows.Count, limit);
+            var (messages, hasOlder) = Page(rows, rows.Count, limit, TaskStates(conversationId));
             lock (_gate) _busy[conversationId] = info.Busy;
             return new JsonObject
             {
-                ["seq"] = 0,
+                ["seq"] = startSeq,
                 ["conversation"] = info.Json,
                 ["messages"] = messages,
                 ["hasOlder"] = hasOlder,
-                ["approvals"] = new JsonArray(ApprovalsFor(conversationId).Select(p => (JsonNode)PromptJson(p.Prompt)).ToArray())
+                ["approvals"] = new JsonArray(ApprovalsFor(conversationId).Select(p => (JsonNode)PromptJson(p.Prompt)).ToArray()),
+                ["tasks"] = TasksJson(conversationId)
             };
         }
         catch
@@ -636,15 +790,19 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
                 return;
             pending = subscription.Pending;
             subscription.Pending = null;
+            foreach (var (ev, data) in pending ?? []) PushTo(peer, conversationId, ev, data);
         }
-        foreach (var (ev, data) in pending ?? []) PushTo(peer, conversationId, ev, data);
     }
 
     private JsonObject Close(string peer, JsonObject args)
     {
         var conversationId = RequiredConversation(args);
         lock (_gate)
+        {
             if (_subscriptions.TryGetValue(peer, out var mine)) mine.Remove(conversationId);
+            if (_agentWatches.TryGetValue(peer, out var watch) && watch.ConversationId == conversationId)
+                _agentWatches.Remove(peer);
+        }
         return new JsonObject();
     }
 
@@ -655,7 +813,7 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         var limit = Math.Clamp(Int(args, "limit") ?? 30, 1, 60);
         var rows = await Task.Run(() => _messages.List(conversationId)).ConfigureAwait(false);
         var end = rows.ToList().FindIndex(row => row.Id == before);
-        var (messages, hasOlder) = end < 0 ? (new JsonArray(), false) : Page(rows, end, limit);
+        var (messages, hasOlder) = end < 0 ? (new JsonArray(), false) : Page(rows, end, limit, TaskStates(conversationId));
         return new JsonObject { ["messages"] = messages, ["hasOlder"] = hasOlder };
     }
 
@@ -666,11 +824,12 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         var row = await Task.Run(() => _messages.Get(messageId)).ConfigureAwait(false);
         if (row is null || row.ConversationId != conversationId)
             throw new RemoteError("not_found", "消息不存在");
-        return new JsonObject { ["message"] = RemoteProjection.Message(row, RemoteProjection.Detail.Full) };
+        return new JsonObject { ["message"] = RemoteProjection.Message(row, RemoteProjection.Detail.Full, TaskStates(conversationId)) };
     }
 
     /// <summary>Newest first until the budget is spent, then previews for the rest.</summary>
-    private static (JsonArray Messages, bool HasOlder) Page(IReadOnlyList<MessageRow> rows, int end, int limit)
+    private static (JsonArray Messages, bool HasOlder) Page(IReadOnlyList<MessageRow> rows, int end, int limit,
+        Func<string, string?>? taskState)
     {
         var start = Math.Max(0, end - limit);
         var items = new List<JsonObject>();
@@ -678,7 +837,7 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         for (var i = end - 1; i >= start; i--)
         {
             var detail = used > RemoteProjection.SnapshotBudget ? RemoteProjection.Detail.Compact : RemoteProjection.Detail.Normal;
-            var item = RemoteProjection.Message(rows[i], detail);
+            var item = RemoteProjection.Message(rows[i], detail, taskState);
             used += RemoteProjection.Size(item);
             items.Add(item);
         }
@@ -743,11 +902,12 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
                 return;
             }
             seq = ++subscription.Seq;
+            // Queue in sequence order even when the write pump and state tick race.
+            SendToPeer(peer, new JsonObject
+            {
+                ["v"] = Protocol, ["ev"] = ev, ["conversationId"] = conversationId, ["seq"] = seq, ["data"] = data
+            });
         }
-        SendToPeer(peer, new JsonObject
-        {
-            ["v"] = Protocol, ["ev"] = ev, ["conversationId"] = conversationId, ["seq"] = seq, ["data"] = data
-        });
     }
 
     /// <summary>Messages written to conversations someone is watching, sent as they
@@ -769,7 +929,7 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
                     try
                     {
                         if (_messages.Get(messageId) is { } row)
-                            Push(conversationId, "upsert", RemoteProjection.Message(row));
+                            Push(conversationId, "upsert", RemoteProjection.Message(row, taskState: TaskStates(conversationId)));
                     }
                     catch (Exception ex) { Log($"project: {ex.Message}"); }
                 }
@@ -811,7 +971,10 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
             try { await Task.Delay(TimeSpan.FromSeconds(1), ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
             SweepUploads();
+            if (AnonymousRunning) AnonSweep();
             if (State != RemoteControlState.Online) continue;
+            PushTaskChanges();
+            PushAgentActivity();
 
             HashSet<string> watched;
             lock (_gate)
@@ -1512,24 +1675,24 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
                     await PublishListAsync(ct).ConfigureAwait(false);
                     lastContact = DateTimeOffset.UtcNow;
                 }
-                else if (now - lastContact >= PingInterval)
+                else if (AccountRunning && now - lastContact >= PingInterval)
                 {
+                    lastContact = now;
                     using var reply = await PostDirectoryAsync(
                         new JsonObject { ["kind"] = "ping", ["machineId"] = _machineId }, ct).ConfigureAwait(false);
                     // The phone removed this computer, or the record expired: publish again.
                     if (reply.RootElement.TryGetProperty("known", out var known) && known.ValueKind == JsonValueKind.False)
                     {
-                        _lastPublishedList = null;
+                        _accountLink.LastPublished = null;
                         ScheduleList(TimeSpan.Zero);
                     }
-                    lastContact = now;
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
                 Log($"directory: {ex.Message}");
-                _lastPublishedList = null;
+                _accountLink.LastPublished = null;
                 ScheduleList(TimeSpan.FromSeconds(10));
             }
 
@@ -1542,8 +1705,13 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         }
     }
 
+    /// <summary>Publishes the list to each running link: in plain to the account
+    /// directory, sealed under the directory key to the anonymous one.</summary>
     private async Task PublishListAsync(CancellationToken ct)
     {
+        var account = AccountRunning;
+        var anonymous = AnonymousRunning && _phones.AnonymousAny();
+        if (!account && !anonymous) return;
         var rows = await Task.Run(() => _conversations.ListActive(), ct).ConfigureAwait(false);
         var conversations = new JsonArray();
         var listed = new HashSet<string>(StringComparer.Ordinal);
@@ -1571,6 +1739,18 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
         }).ConfigureAwait(false);
         lock (_gate) _listed = listed;
 
+        if (anonymous)
+        {
+            try { await PublishAnonymousDirectoryAsync(conversations, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                // Busy flags ride this blob now; a dropped upload (rate limit, network) must not stick.
+                Log($"anon directory: {ex.Message}");
+                ScheduleList(TimeSpan.FromSeconds(10));
+            }
+        }
+        if (!account) return;
         var body = new JsonObject
         {
             ["kind"] = "put",
@@ -1578,16 +1758,16 @@ public sealed class RemoteControlHost : IRemoteApprovalChannel, IAsyncDisposable
             ["machineName"] = _machineName,
             ["appVersion"] = _appVersion,
             ["protocol"] = Protocol,
-            ["conversations"] = conversations
+            ["conversations"] = conversations.DeepClone()
         };
         var json = body.ToJsonString();
-        if (json == _lastPublishedList)
+        if (json == _accountLink.LastPublished)
         {
             using var _ = await PostDirectoryAsync(new JsonObject { ["kind"] = "ping", ["machineId"] = _machineId }, ct).ConfigureAwait(false);
             return;
         }
         using (await PostDirectoryAsync(body, ct).ConfigureAwait(false)) { }
-        _lastPublishedList = json;
+        _accountLink.LastPublished = json;
     }
 
     private async Task<JsonDocument> PostDirectoryAsync(JsonObject body, CancellationToken ct)

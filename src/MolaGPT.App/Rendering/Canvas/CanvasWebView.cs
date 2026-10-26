@@ -2,7 +2,10 @@ using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Platform;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
 using Microsoft.Web.WebView2.Core;
+using MolaGPT.Desktop.Services;
 
 namespace MolaGPT.App.Rendering.Canvas;
 
@@ -29,6 +32,113 @@ internal sealed class CanvasWebView : NativeControlHost
     private CoreWebView2Controller? _controller;
     private TaskCompletionSource<CoreWebView2> _ready = NewReady();
     private System.Drawing.Color _background = System.Drawing.Color.White;
+    private readonly List<Visual> _ancestors = [];
+    private readonly DispatcherTimer _idleTimer;
+    private Window? _window;
+    private bool _allowSuspend;
+    private bool _loading;
+    private bool _suspending;
+    private int _powerVersion;
+
+    public CanvasWebView()
+    {
+        _idleTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+        _idleTimer.Tick += (_, _) =>
+        {
+            _idleTimer.Stop();
+            _ = SuspendAsync();
+        };
+    }
+
+    public bool AllowSuspend
+    {
+        get => _allowSuspend;
+        set
+        {
+            if (_allowSuspend == value) return;
+            _allowSuspend = value;
+            RefreshPowerState();
+        }
+    }
+
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        _window = TopLevel.GetTopLevel(this) as Window;
+        foreach (var ancestor in this.GetVisualAncestors())
+        {
+            _ancestors.Add(ancestor);
+            ancestor.PropertyChanged += OnAncestorChanged;
+        }
+        RefreshPowerState();
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        foreach (var ancestor in _ancestors) ancestor.PropertyChanged -= OnAncestorChanged;
+        _ancestors.Clear();
+        _window = null;
+        _idleTimer.Stop();
+        base.OnDetachedFromVisualTree(e);
+    }
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+        if (change.Property == IsVisibleProperty || change.Property == MarginProperty) RefreshPowerState();
+    }
+
+    private void OnAncestorChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == IsVisibleProperty || e.Property == Window.WindowStateProperty) RefreshPowerState();
+    }
+
+    private bool IsWebVisible => _window is { IsVisible: true } window
+        && window.WindowState != WindowState.Minimized && IsEffectivelyVisible && !IsParked;
+
+    private void RefreshPowerState()
+    {
+        _powerVersion++;
+        if (_controller is not { } controller) return;
+        var visible = IsWebVisible;
+        var idle = !visible && _allowSuspend && !_loading;
+        controller.IsVisible = visible;
+        var core = controller.CoreWebView2;
+        if (!idle)
+        {
+            _idleTimer.Stop();
+            if (core.IsSuspended) core.Resume();
+        }
+        core.MemoryUsageTargetLevel = visible
+            ? CoreWebView2MemoryUsageTargetLevel.Normal : CoreWebView2MemoryUsageTargetLevel.Low;
+        if (idle && !_suspending && !core.IsSuspended && !_idleTimer.IsEnabled) _idleTimer.Start();
+    }
+
+    private async Task SuspendAsync()
+    {
+        if (_controller is not { } controller || IsWebVisible || !_allowSuspend || _loading) return;
+        var version = _powerVersion;
+        _suspending = true;
+        try
+        {
+            await controller.CoreWebView2.TrySuspendAsync();
+            if (ReferenceEquals(controller, _controller) && version != _powerVersion)
+            {
+                controller.CoreWebView2.Resume();
+                _suspending = false;
+                RefreshPowerState();
+            }
+        }
+        catch (Exception ex) when (ex is COMException or InvalidOperationException)
+        {
+            if (ReferenceEquals(controller, _controller))
+                DiagnosticLog.Write("canvas", "挂起网页预览失败：" + ex.Message);
+        }
+        finally
+        {
+            if (ReferenceEquals(controller, _controller)) _suspending = false;
+        }
+    }
 
     /// <summary>Completes with the CoreWebView2 once the controller exists, or
     /// faults when the runtime is missing or broken.</summary>
@@ -79,15 +189,20 @@ internal sealed class CanvasWebView : NativeControlHost
 
     protected override void DestroyNativeControlCore(IPlatformHandle control)
     {
+        _idleTimer.Stop();
+        _powerVersion++;
+        _suspending = false;
+        _loading = false;
+        var controller = _controller;
+        _controller = null;
         try
         {
-            _controller?.Close();
+            controller?.Close();
         }
         catch (COMException)
         {
         }
 
-        _controller = null;
         CanvasWindowClass.Destroy(_hwnd);
         _hwnd = IntPtr.Zero;
         _ready.TrySetException(new ObjectDisposedException(nameof(CanvasWebView)));
@@ -109,7 +224,19 @@ internal sealed class CanvasWebView : NativeControlHost
             _controller = controller;
             controller.DefaultBackgroundColor = _background;
             FitToWindow();
-            controller.IsVisible = true;
+            controller.CoreWebView2.NavigationStarting += (_, _) =>
+            {
+                if (!ReferenceEquals(controller, _controller)) return;
+                _loading = true;
+                RefreshPowerState();
+            };
+            controller.CoreWebView2.NavigationCompleted += (_, _) =>
+            {
+                if (!ReferenceEquals(controller, _controller)) return;
+                _loading = false;
+                RefreshPowerState();
+            };
+            RefreshPowerState();
             _ready.TrySetResult(controller.CoreWebView2);
         }
         catch (Exception ex)

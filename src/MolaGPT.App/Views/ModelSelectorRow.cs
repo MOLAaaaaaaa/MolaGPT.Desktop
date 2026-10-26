@@ -73,7 +73,10 @@ public sealed class ModelSelectorRow
         var activeProviderId = chat.ActiveProvider?.Id;
         var activeModelId = chat.ActiveModel?.Id;
 
+        // 显示 MolaGPT 账号入口 off: the sidebar hides account conversations, so
+        // the picker must not start one.
         var providers = registry.Providers
+            .Where(p => chat.AccountProvidersAllowed || !MolaGptProviderIds.IsMolaGptAccount(p.Id))
             .OrderBy(p => p.DisplayName, StringComparer.CurrentCultureIgnoreCase)
             .ToList();
 

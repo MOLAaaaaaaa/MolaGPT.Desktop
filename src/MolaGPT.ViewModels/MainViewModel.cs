@@ -72,7 +72,6 @@ public sealed partial class MainViewModel : ObservableObject
 
     private readonly BackgroundStreamService? _backgroundStreams;
     private readonly MolaGptProxyProvider? _molaGptProxy;
-    private readonly ChatGptAccount? _chatGpt;
     private int _usageRefreshVersion;
     private UsageSource _usageSource;
     private (MolaGptStatus Status, DateTimeOffset ReadAt)? _molaGptStatus;
@@ -84,8 +83,7 @@ public sealed partial class MainViewModel : ObservableObject
         SettingsViewModel settings,
         PersonaListViewModel personas,
         BackgroundStreamService? backgroundStreams = null,
-        MolaGptProxyProvider? molaGptProxy = null,
-        ChatGptAccount? chatGpt = null)
+        MolaGptProxyProvider? molaGptProxy = null)
     {
         _conversationList = conversationList;
         _chat = chat;
@@ -94,7 +92,6 @@ public sealed partial class MainViewModel : ObservableObject
         _personas = personas;
         _backgroundStreams = backgroundStreams;
         _molaGptProxy = molaGptProxy;
-        _chatGpt = chatGpt;
         _chat.AutoCollapseThinking = _settings.AutoCollapseThinking;
         _chat.CodeFenceKinds = _settings.CodeFenceKinds;
 
@@ -175,7 +172,7 @@ public sealed partial class MainViewModel : ObservableObject
         WireArtifacts();
 
         // The plan under the context gauge follows the active model: Work draws
-        // on the MolaGPT account's credits, a ChatGPT row on that plan's limits.
+        // on the MolaGPT account's credits.
         _chat.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(ChatViewModel.CurrentMode)
@@ -205,25 +202,13 @@ public sealed partial class MainViewModel : ObservableObject
                 _ = RefreshUsageAsync();
             }
         };
-        // A turn spends credits; a ChatGPT turn reports its own figures instead.
+        // A turn may spend MolaGPT credits.
         _composer.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(ComposerViewModel.IsSending) && !Composer.IsSending)
                 _ = RefreshUsageAsync(force: true);
         };
         _chat.ContextGauge.Usage.RefreshRequested = () => RefreshUsageAsync();
-        if (_chatGpt is not null)
-        {
-            // Raised wherever the reading came in, the agent's relay included.
-            var sync = SynchronizationContext.Current;
-            void OnUi(Action action)
-            {
-                if (sync is null) action();
-                else sync.Post(_ => action(), null);
-            }
-            _chatGpt.UsageChanged += (_, _) => OnUi(ShowChatGptUsage);
-            _chatGpt.Changed += (_, _) => OnUi(() => _ = RefreshUsageAsync());
-        }
 
         RefreshActivePromptState();
         _ = RefreshUsageAsync();
@@ -279,7 +264,7 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     /// <summary>Which plan the active model draws on.</summary>
-    private enum UsageSource { None, MolaGpt, ChatGpt }
+    private enum UsageSource { None, MolaGpt }
 
     /// <summary>Re-reading sooner than this only repeats what is on screen.</summary>
     private static readonly TimeSpan UsageFreshFor = TimeSpan.FromSeconds(30);
@@ -291,11 +276,6 @@ public sealed partial class MainViewModel : ObservableObject
             // Chat has no context gauge to sit under, so only the agent modes.
             if (Chat.CurrentMode == AppMode.Work)
                 return Settings.IsLoggedIn && _molaGptProxy is not null ? UsageSource.MolaGpt : UsageSource.None;
-            if (Chat.CurrentMode == AppMode.Byok
-                && _chatGpt is not null
-                && Chat.ActiveProvider?.Id is { } id
-                && Settings.Providers.Any(p => p.Id == id && p.Type == "chatgpt"))
-                return UsageSource.ChatGpt;
             return UsageSource.None;
         }
     }
@@ -320,18 +300,6 @@ public sealed partial class MainViewModel : ObservableObject
 
         switch (source)
         {
-            case UsageSource.ChatGpt:
-                // Not forced after a turn: the turn's own response brought new figures.
-                ShowChatGptUsage();
-                var now = DateTimeOffset.UtcNow;
-                if (_chatGpt!.UsageReadAt is { } read && now - read < UsageFreshFor
-                    && _chatGpt.Usage is { } chatGptUsage
-                    && !chatGptUsage.Windows.Any(window => window.ResetsAt is { } at && read < at && at <= now)) return;
-                try { await _chatGpt!.RefreshUsageAsync(ct); }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception) { /* Shown from UsageChanged when it works; the last figures stand otherwise. */ }
-                return;
-
             case UsageSource.MolaGpt:
                 var modelId = Chat.ActiveModel?.Id ?? string.Empty;
                 if (!force && _molaGptStatus is { } cached && DateTimeOffset.UtcNow - cached.ReadAt < UsageFreshFor)
@@ -362,12 +330,6 @@ public sealed partial class MainViewModel : ObservableObject
             default:
                 return;
         }
-    }
-
-    private void ShowChatGptUsage()
-    {
-        if (_usageSource != UsageSource.ChatGpt || _chatGpt is null) return;
-        Chat.ContextGauge.Usage.ShowChatGpt(_chatGpt.Usage, _chatGpt.PlanType, DateTimeOffset.UtcNow);
     }
 
     /// <summary>The drawer is offered whenever the conversation has anything in

@@ -43,7 +43,7 @@ public partial class SettingsWindow
         ["PAGE_Browser"] = "浏览器 Chrome Edge Kimi 网站 自动化 操作网页",
         ["PAGE_Mcp"] = "MCP 工具 插件 服务器 Model Context Protocol",
         ["PAGE_Skills"] = "技能 skill SKILL.md 导入",
-        ["PAGE_Approval"] = "隐私和安全 权限 审批 授权 确认 始终允许 完全权限 浏览器 Python 自动审批",
+        ["PAGE_Approval"] = "隐私和安全 权限 审批 审批模式 按需审批 自动审批 完全权限 审批模型 授权 确认 始终允许 浏览器 Python",
         ["PAGE_Agent"] = "远程 手机 移动端 Bridge 桥接 Agent Claude Code Codex",
     };
 
@@ -165,7 +165,6 @@ public partial class SettingsWindow
 
         var tokens = query.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
         var results = _searchIndex
-            .Where(entry => entry.Nav.IsVisible)
             .Select(entry => (Entry: entry, Score: Score(entry, query, tokens)))
             .Where(hit => hit.Score >= 0)
             .OrderBy(hit => hit.Score)

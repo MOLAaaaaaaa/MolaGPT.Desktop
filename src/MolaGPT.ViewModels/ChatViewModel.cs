@@ -340,11 +340,19 @@ public sealed partial class ChatViewModel : ObservableObject
         TryAutoPickActive();
     }
 
+    /// <summary>
+    /// False while 显示 MolaGPT 账号入口 is off. The sidebar then hides account
+    /// conversations, so neither the model picker nor auto-pick lands on an
+    /// account provider.
+    /// </summary>
+    public bool AccountProvidersAllowed { get; set; } = true;
+
     /// <summary>If no provider is currently active, pick the first registered one.</summary>
     public void TryAutoPickActive()
     {
         if (ActiveProvider is not null && ActiveModel is not null) return;
-        var first = _providers.Providers.FirstOrDefault();
+        var first = _providers.Providers
+            .FirstOrDefault(p => AccountProvidersAllowed || !MolaGptProviderIds.IsMolaGptAccount(p.Id));
         if (first is null || first.Models.Count == 0) return;
         ActiveProvider = first;
         ActiveModel = first.Models[0];
@@ -433,14 +441,15 @@ public sealed partial class ChatViewModel : ObservableObject
                 var provider = string.IsNullOrWhiteSpace(lastAgentId) ? null : _providers.GetById(lastAgentId!);
                 if (provider is null || provider.Kind == ProviderKind.MolaGptProxy)
                     provider = _providers.GetById(MolaGptProviderIds.LocalTools)
-                               ?? _providers.Providers.FirstOrDefault(p => !p.Kind.IsMolaGptAccount());
+                               ?? _providers.Providers.FirstOrDefault(p => !MolaGptProviderIds.IsMolaGptAccount(p.Id));
                 if (provider is null) { needsLogin = true; return (null, null); }
                 return (provider.Id, RecallModel(provider) ?? provider.Models.FirstOrDefault()?.Id);
             }
             default:
             {
                 // BYOK: last-chosen BYOK provider if still registered, else first BYOK.
-                var byok = _providers.Providers.Where(p => !p.Kind.IsMolaGptAccount()).ToList();
+                // By id: BYOK runs through Pi too, so its Kind is MolaGptLocalTools.
+                var byok = _providers.Providers.Where(p => !MolaGptProviderIds.IsMolaGptAccount(p.Id)).ToList();
                 if (byok.Count == 0) return (null, null);
                 var lastId = _settingsRepo?.Get(ModeLastProviderKeyPrefix + "byok");
                 var chosen = byok.FirstOrDefault(p => p.Id == lastId) ?? byok[0];

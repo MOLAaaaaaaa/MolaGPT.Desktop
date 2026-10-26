@@ -47,15 +47,9 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
         ToolPermissionMode mode,
         CancellationToken ct)
     {
+        if (!ToolApprovalPolicy.NeedsDecision(request, mode)) return ToolApprovalDecision.Approved;
         var outsideWorkspace = request.Capabilities.HasFlag(ToolCapability.OutsideWorkspace);
-        var needsPrompt = request.AlwaysAsk
-                          || request.Capabilities.HasFlag(ToolCapability.Destructive)
-                          || (mode == ToolPermissionMode.Approval
-                              && (request.Capabilities.HasFlag(ToolCapability.Write) || outsideWorkspace));
-        if (!needsPrompt) return ToolApprovalDecision.Approved;
-
-        var forWriting = request.Capabilities.HasFlag(ToolCapability.Write)
-                         || request.Capabilities.HasFlag(ToolCapability.Destructive);
+        var forWriting = ToolApprovalPolicy.ForWriting(request);
 
         try { await _prompting.WaitAsync(ct).ConfigureAwait(true); }
         catch (OperationCanceledException) { return ToolApprovalDecision.Denied; }
@@ -76,18 +70,8 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
         bool forWriting,
         CancellationToken ct)
     {
-        if (outsideWorkspace
-            && request.ResolvedPath is { Length: > 0 } resolvedPath
-            && _grants.IsPathGranted(resolvedPath, forWriting))
-        {
-            return ToolApprovalDecision.Approved;
-        }
-
-        // A previous "don't ask again" for this exact tool. Checked after the
-        // capability gate so a grant can never widen what the mode already
-        // allows — and never for a path outside the workspace, because that
-        // grant was answered about the tool, not about the user's disk.
-        if (!request.AlwaysAsk && !outsideWorkspace && _grants.IsGranted(request.ToolName))
+        // Recheck after the preceding prompt may have granted this call too.
+        if (ToolApprovalPolicy.IsGranted(request, _grants))
             return ToolApprovalDecision.Approved;
 
         var outcome = await AskToolAsync(request, mode, ct).ConfigureAwait(true);
@@ -249,8 +233,12 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
         return names.Count == 0 ? "未声明" : string.Join(" / ", names);
     }
 
-    private static string FormatMode(ToolPermissionMode mode) =>
-        mode == ToolPermissionMode.FullAccess ? "完全权限" : "审批权限";
+    private static string FormatMode(ToolPermissionMode mode) => mode switch
+    {
+        ToolPermissionMode.FullAccess => "完全权限",
+        ToolPermissionMode.AutoReview => "自动审批",
+        _ => "按需审批"
+    };
 
     // ---- paired phones ----------------------------------------------------
     //
@@ -305,7 +293,9 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
             "tool",
             request.ToolName,
             request.DisplayName,
-            request.Description,
+            request.ReviewNote is { Length: > 0 } note
+                ? string.IsNullOrWhiteSpace(request.Description) ? note : note + "\n" + request.Description
+                : request.Description,
             Preview(request.ArgumentsJson, 4000),
             null,
             request.ResolvedPath,
@@ -429,6 +419,14 @@ internal sealed class ToolApprovalService : IToolApprovalService, IPythonExecuti
 
         var details = new StackPanel();
         Grid.SetRow(details, 1);
+        if (request.ReviewNote is { Length: > 0 } reviewNote)
+        {
+            details.Children.Add(Banner("warning", new SelectableTextBlock
+            {
+                Text = reviewNote,
+                TextWrapping = TextWrapping.Wrap
+            }));
+        }
         if (outsideWorkspace)
         {
             // Red here, unlike the Python dialog's amber: leaving the working

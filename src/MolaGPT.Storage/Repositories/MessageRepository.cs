@@ -212,8 +212,11 @@ public sealed class MessageRepository
                 foreach (var attempt in attempts.OfType<JsonObject>())
                     changed |= UpdateToolStates(attempt["tool_calls"] as JsonArray, taskId, state);
             if (changed)
+            {
                 conn.Execute("UPDATE messages SET meta = @meta WHERE id = @id",
                     new { id = row.Id, meta = meta.ToJsonString() });
+                MessageWritten?.Invoke(conversationId, row.Id);
+            }
         }
     }
 

@@ -535,7 +535,7 @@
                           <TextBlock Text="新增" FontSize="10" Foreground="{DynamicResource Brush.Primary}" />
                         </Border>
                       </StackPanel>
-                      <TextBlock Classes="hint" Text="在主界面显示网页版对话、远程控制和账号入口。" />
+                      <TextBlock Classes="hint" Text="在主界面显示网页版对话、账号模型和登录入口。" />
                     </StackPanel>
                     <ToggleButton Grid.Column="1" Name="PART_HideAccountFeatures"
                                   Classes="settingtoggle"
@@ -693,7 +693,7 @@
                       <StackPanel Grid.Column="0" Margin="0,0,20,0">
                         <TextBlock Classes="rowtitle" Text="启用子 Agent" />
                         <TextBlock Classes="hint" TextWrapping="Wrap"
-                                   Text="允许模型把可独立完成的任务交给子 Agent。子 Agent 不能操作浏览器，也不能执行需要你确认的操作（自动审批放行的 Python 除外）。" />
+                                   Text="允许模型把可独立完成的任务交给子 Agent。子 Agent 不能操作浏览器，也不能执行需要确认的操作（自动审批放行的操作除外）。" />
                       </StackPanel>
                       <ToggleButton Grid.Column="1" Classes="settingtoggle"
                                     IsChecked="{Binding SubagentsEnabled, Mode=TwoWay}"
@@ -1025,6 +1025,14 @@
                       </StackPanel>
 
                       <StackPanel Name="PART_ChatGptPanel" IsVisible="False" Spacing="10">
+                        <StackPanel Spacing="6">
+                          <TextBlock Classes="label" Text="登录方式" />
+                          <ComboBox Name="PART_ChatGptLoginMethod" Classes="settingsinput" SelectedIndex="0"
+                                    HorizontalAlignment="Stretch">
+                            <ComboBoxItem Content="Plus / Pro（Sign in with ChatGPT）" />
+                            <ComboBoxItem Content="Team / Business（Codex OAuth）" />
+                          </ComboBox>
+                        </StackPanel>
                         <TextBlock Classes="label" Text="ChatGPT 账号" />
                         <Grid ColumnDefinitions="*,Auto">
                           <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center" Spacing="2">
@@ -1033,10 +1041,12 @@
                           </StackPanel>
                           <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"
                                       VerticalAlignment="Center">
+                            <Button Name="PART_ChatGptOtherAccount" Classes="outline"
+                                    Content="切换账号" Padding="12,6" />
                             <Button Name="PART_ChatGptSignOut" Classes="outline"
                                     Content="退出登录" Padding="12,6" />
                             <Button Name="PART_ChatGptSignIn" Classes="pillprimary"
-                                    Content="使用 ChatGPT 登录" Padding="14,7" />
+                                    Content="使用 ChatGPT 继续" Padding="14,7" />
                           </StackPanel>
                         </Grid>
                         <TextBlock Name="PART_ChatGptError" Classes="hint" IsVisible="False"
@@ -1066,11 +1076,17 @@
 
                       <StackPanel Name="PART_ProviderImageFields" IsVisible="False" Spacing="14">
                         <StackPanel>
-                          <TextBlock Classes="label" Text="接口格式" />
+                          <TextBlock Classes="label" Text="默认接口" />
                           <ComboBox Name="PART_ProviderImageFormat" Classes="settingsinput">
-                            <ComboBoxItem Content="OpenAI 图像接口（DALL·E、gpt-image）" />
-                            <ComboBoxItem Content="对话补全出图（OpenRouter、nano-banana）" />
+                            <ComboBoxItem Content="图像接口" />
+                            <ComboBoxItem Content="对话接口" />
                           </ComboBox>
+                          <TextBlock Name="PART_ProviderImageFormatHint" Classes="hint" />
+                        </StackPanel>
+                        <StackPanel>
+                          <TextBlock Classes="label" Text="对话路径" />
+                          <TextBox Name="PART_ProviderImageChatPath" Classes="settingsinput"
+                                   PlaceholderText="v1/chat/completions" />
                         </StackPanel>
                         <StackPanel Name="PART_ProviderImageEditPathField">
                           <TextBlock Classes="label" Text="编辑路径" />
@@ -1213,6 +1229,16 @@
                                 <TextBlock Classes="label" Text="显示名称" />
                                 <TextBox Classes="settingsinput" Text="{Binding DisplayName, Mode=TwoWay}"
                                          PlaceholderText="留空使用模型 ID" />
+                              </StackPanel>
+                              <StackPanel IsVisible="{Binding IsImageProvider}">
+                                <TextBlock Classes="label" Text="接口" />
+                                <ComboBox Classes="settingsinput" SelectedIndex="{Binding ImageFormatIndex, Mode=TwoWay}"
+                                          IsEnabled="{Binding CanChooseImageFormat}">
+                                  <ComboBoxItem Content="跟随服务" />
+                                  <ComboBoxItem Content="图像接口" />
+                                  <ComboBoxItem Content="对话接口" />
+                                </ComboBox>
+                                <TextBlock Classes="hint" Text="{Binding ImageFormatHint}" />
                               </StackPanel>
                               <StackPanel>
                                 <TextBlock Classes="label" Text="上下文窗口（tokens）" />
@@ -2324,44 +2350,15 @@
               <StackPanel Name="PAGE_Approval" IsVisible="False">
                 <TextBlock Classes="pagetitle" Text="权限与审批" />
                 <TextBlock Classes="pagesubtitle"
-                           Text="管理工具调用权限、自动审批和长期授权。" />
+                           Text="管理审批模型、按工具权限和长期授权。" />
 
-                <TextBlock Classes="section" Text="工具审批" Margin="2,4,2,8" />
+                <TextBlock Classes="section" Text="审批模式" Margin="2,4,2,8" />
                 <Border Classes="settingscard">
                   <StackPanel>
-                    <Grid Classes="settingrow" ColumnDefinitions="*,180" ColumnSpacing="20">
-                      <StackPanel VerticalAlignment="Center">
-                        <TextBlock Classes="rowtitle" Text="默认权限" />
-                        <TextBlock Classes="hint" Text="按需审批时，工作目录内的只读操作自动允许，访问其他路径需授权。" />
-                      </StackPanel>
-                      <ComboBox Grid.Column="1" Name="PART_ToolPermission" Classes="settingsinput"
-                                VerticalAlignment="Center" AutomationProperties.Name="默认权限" />
-                    </Grid>
-                    <TextBlock Classes="hint" Margin="16,0,16,14"
-                               Text="自动允许跳过常规审批。破坏性操作、Python 包安装和浏览器敏感操作仍需审批。" />
-                  </StackPanel>
-                </Border>
-
-                <TextBlock Classes="section" Text="自动审批" />
-                <Border Classes="settingscard">
-                  <StackPanel>
-                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
-                      <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                        <TextBlock Classes="rowtitle" Text="Python 自动审批" />
-                        <TextBlock Classes="hint" TextWrapping="Wrap"
-                                   Text="由所选模型审核待确认代码，未获批准时转为手动审批。" />
-                      </StackPanel>
-                      <ToggleButton Grid.Column="1" Classes="settingtoggle"
-                                    IsChecked="{Binding PythonAutoReviewEnabled, Mode=TwoWay}"
-                                    AutomationProperties.Name="Python 自动审批"
-                                    VerticalAlignment="Center" />
-                    </Grid>
-                    <Border Classes="divider" IsVisible="{Binding PythonAutoReviewEnabled}" />
-                    <Grid Classes="settingrow" ColumnDefinitions="160,*"
-                          IsVisible="{Binding PythonAutoReviewEnabled}">
+                    <Grid Classes="settingrow" ColumnDefinitions="160,*">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
                         <TextBlock Classes="rowtitle" Text="审批模型" />
-                        <TextBlock Classes="hint" Text="独立于对话模型。" />
+                        <TextBlock Classes="hint" Text="自动审批使用，独立于对话模型" />
                       </StackPanel>
                       <ComboBox Grid.Column="1" Classes="settingsinput"
                                 HorizontalAlignment="Stretch" VerticalAlignment="Center"
@@ -2377,17 +2374,18 @@
                         </ComboBox.ItemTemplate>
                       </ComboBox>
                     </Grid>
-                    <TextBlock Classes="hint" Margin="16,0,16,14"
+                    <TextBlock Classes="hint" Margin="16,0,16,8"
                                Foreground="{DynamicResource Brush.Warning.Foreground}"
-                               IsVisible="{Binding PythonAutoReviewNeedsModel}"
-                               Text="选择审批模型后生效。" />
+                               IsVisible="{Binding IsReviewModelMissing}"
+                               Text="未设置审批模型时，自动审批将转为人工确认。" />
+                    <TextBlock Classes="hint" Margin="16,0,16,14"
+                               Text="审批模式在输入框左下角切换，每次启动默认为自动审批。" />
                   </StackPanel>
                 </Border>
 
                 <TextBlock Classes="section" Text="按工具设置" />
                 <TextBlock Classes="hint" Margin="4,0,4,10"
-                           IsVisible="{Binding !#PART_PerToolPermissions.IsEnabled}"
-                           Text="默认权限为自动允许，以下设置暂不生效。" />
+                           Text="设为完全权限的工具在任何审批模式下直接执行，高风险操作除外。" />
                 <Border Name="PART_PerToolPermissions" Classes="settingscard">
                   <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,180">
@@ -2662,10 +2660,9 @@
                   <Border Classes="settingscard" Margin="0,0,0,10">
                     <StackPanel>
                       <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
-                        <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                        <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
                           <TextBlock Classes="rowtitle" Text="允许手机控制对话" />
-                          <TextBlock Classes="hint"
-                                     Text="同一 MolaGPT 账号可在手机端一键配对，继续 Work、BYOK 对话并审批工具调用。" />
+                          <TextBlock Classes="hint" Text="{Binding StatusText}" />
                         </StackPanel>
                         <Button Grid.Column="1"
                                 Classes="outline"
@@ -2674,63 +2671,95 @@
                                 Command="{Binding ToggleCommand}"
                                 Content="{Binding ToggleLabel}" />
                       </Grid>
-                      <Border Classes="divider" IsVisible="{Binding IsEnabled}" />
-                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto" IsVisible="{Binding IsEnabled}">
-                        <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
-                          <TextBlock Classes="rowtitle" Text="{Binding StatusText}" />
-                          <TextBlock Classes="hint"
-                                     Text="{Binding PairedMessage}"
-                                     IsVisible="{Binding PairedMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+
+                      <StackPanel IsVisible="{Binding IsEnabled}">
+                        <Border Classes="divider" />
+                        <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                          <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                            <TextBlock Classes="rowtitle" Text="已配对手机" />
+                            <TextBlock Classes="hint" Text="暂无" IsVisible="{Binding !HasPhones}" />
+                            <TextBlock Classes="hint"
+                                       Text="{Binding Error}"
+                                       IsVisible="{Binding Error, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+                          </StackPanel>
+                          <Button Grid.Column="1"
+                                  Classes="outline"
+                                  Padding="12,6"
+                                  VerticalAlignment="Center"
+                                  IsEnabled="{Binding CanBeginPairing}"
+                                  Command="{Binding BeginPairingCommand}"
+                                  Content="配对新手机" />
+                        </Grid>
+
+                        <StackPanel IsVisible="{Binding IsPairing}">
+                          <Border Classes="divider" />
+                          <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                            <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                              <TextBlock Classes="hint" Margin="0" Text="配对码" />
+                              <SelectableTextBlock Margin="0,4,0,4"
+                                                   FontSize="28"
+                                                   FontWeight="SemiBold"
+                                                   FontFamily="Consolas, Cascadia Mono, monospace"
+                                                   Text="{Binding PairingCode}" />
+                              <TextBlock Classes="hint" Text="{Binding PairingHint}" />
+                            </StackPanel>
+                            <Button Grid.Column="1"
+                                    Classes="outline"
+                                    Padding="12,6"
+                                    VerticalAlignment="Center"
+                                    Command="{Binding CancelPairingCommand}"
+                                    Content="取消" />
+                          </Grid>
                         </StackPanel>
-                        <Button Grid.Column="1"
-                                Classes="outline"
-                                Padding="12,6"
-                                VerticalAlignment="Center"
-                                IsEnabled="{Binding CanPair}"
-                                Command="{Binding BeginPairingCommand}"
-                                Content="配对新手机" />
-                      </Grid>
-                      <Border Classes="divider" IsVisible="{Binding IsPairing}" />
-                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto" IsVisible="{Binding IsPairing}">
-                        <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                          <TextBlock Classes="hint" Margin="0" Text="配对码" />
-                          <SelectableTextBlock Margin="0,4,0,4"
-                                               FontSize="28"
-                                               FontWeight="SemiBold"
-                                               FontFamily="Consolas, Cascadia Mono, monospace"
-                                               Text="{Binding PairingCode}" />
-                          <TextBlock Classes="hint" Text="{Binding PairingHint}" />
+
+                        <StackPanel IsVisible="{Binding HasConfirm}">
+                          <Border Classes="divider" />
+                          <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                            <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                              <TextBlock Classes="rowtitle"
+                                         Text="{Binding ConfirmName, StringFormat='「{0}」请求配对'}" />
+                              <TextBlock Classes="hint" Text="确认与手机上的校验码一致" />
+                              <SelectableTextBlock Margin="0,6,0,0"
+                                                   FontSize="28"
+                                                   FontWeight="SemiBold"
+                                                   FontFamily="Consolas, Cascadia Mono, monospace"
+                                                   Text="{Binding ConfirmSas}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                              <Button Classes="outline"
+                                      Padding="16,7"
+                                      Command="{Binding DenyPairingCommand}"
+                                      Content="拒绝" />
+                              <Button Classes="primary"
+                                      Padding="16,7"
+                                      Command="{Binding AllowPairingCommand}"
+                                      Content="允许" />
+                            </StackPanel>
+                          </Grid>
                         </StackPanel>
-                        <Button Grid.Column="1"
-                                Classes="outline"
-                                Padding="12,6"
-                                VerticalAlignment="Center"
-                                Command="{Binding CancelPairingCommand}"
-                                Content="取消" />
-                      </Grid>
-                    </StackPanel>
-                  </Border>
-                  <Border Classes="settingscard" Margin="0,0,0,10" IsVisible="{Binding HasPhones}">
-                    <StackPanel Classes="fieldrow">
-                      <TextBlock Classes="rowtitle" Text="已配对手机" />
-                      <ItemsControl ItemsSource="{Binding Phones}">
-                        <ItemsControl.ItemTemplate>
-                          <DataTemplate x:DataType="remote:PairedPhoneRow">
-                            <Grid ColumnDefinitions="*,Auto" Margin="0,10,0,0">
-                              <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                                <TextBlock Classes="rowtitle" Text="{Binding Name}" />
-                                <TextBlock Classes="hint" Text="{Binding Detail}" />
+
+                        <ItemsControl ItemsSource="{Binding Phones}">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="remote:PairedPhoneRow">
+                              <StackPanel>
+                                <Border Classes="divider" />
+                                <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                                  <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                                    <TextBlock Classes="rowtitle" Text="{Binding Name}" />
+                                    <TextBlock Classes="hint" Text="{Binding Detail}" />
+                                  </StackPanel>
+                                  <Button Grid.Column="1"
+                                          Classes="outline"
+                                          Padding="12,5"
+                                          VerticalAlignment="Center"
+                                          Command="{Binding RemoveCommand}"
+                                          Content="取消配对" />
+                                </Grid>
                               </StackPanel>
-                              <Button Grid.Column="1"
-                                      Classes="outline"
-                                      Padding="12,5"
-                                      VerticalAlignment="Center"
-                                      Command="{Binding RemoveCommand}"
-                                      Content="取消配对" />
-                            </Grid>
-                          </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                      </ItemsControl>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </StackPanel>
                     </StackPanel>
                   </Border>
                 </StackPanel>

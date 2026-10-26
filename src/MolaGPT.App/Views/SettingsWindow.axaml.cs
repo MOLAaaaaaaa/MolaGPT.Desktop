@@ -120,10 +120,18 @@ public partial class SettingsWindow : MolaContentWindow
             ThinkingParamKind.GeminiThinkingLevel, ApiPath: "models/{model}:streamGenerateContent"),
         new("custom-openai", "自定义（OpenAI 兼容）", "openai-compat", "https://api.openai.com/", "v1/models",
             ThinkingParamKind.OpenAiReasoningEffort),
-        new("openrouter-images", "OpenRouter 图像", "openai-compat", "https://openrouter.ai/api/", "v1/models",
-            ThinkingParamKind.None, "image", "v1/chat/completions", ImageFormat: "openai-chat-image"),
+        new("openrouter-images", "OpenRouter 图像", "openai-compat", "https://openrouter.ai/api/", "v1/images/models",
+            ThinkingParamKind.None, "image", "v1/images", ImageFormat: "openai-images", ImageChatPath: "v1/chat/completions"),
         new("openai-images", "OpenAI 图像", "openai-compat", OpenAiBaseUrl, "v1/models",
-            ThinkingParamKind.None, "image", "v1/images/generations", "v1/images/edits", "openai-images")
+            ThinkingParamKind.None, "image", "v1/images/generations", "v1/images/edits", "openai-images"),
+        new("volcengine-images", "火山方舟图像", "openai-compat", "https://ark.cn-beijing.volces.com/api/v3/", "models",
+            ThinkingParamKind.None, "image", "images/generations", ImageFormat: "openai-images", ImageChatPath: "chat/completions"),
+        new("siliconflow-images", "SiliconFlow 图像", "openai-compat", "https://api.siliconflow.cn/", "v1/models",
+            ThinkingParamKind.None, "image", "v1/images/generations", ImageFormat: "openai-images"),
+        new("xai-images", "xAI 图像", "openai-compat", "https://api.x.ai/", "v1/models",
+            ThinkingParamKind.None, "image", "v1/images/generations", "v1/images/edits", "openai-images"),
+        new("gemini-images", "Google Gemini 图像", "gemini", GeminiNativeBaseUrl, "models",
+            ThinkingParamKind.None, "image", ImageFormat: "openai-chat-image", ImageChatPath: "models/{model}:generateContent")
     ];
 
     // Endpoint defaults for the provider presets and the connection test. These
@@ -287,6 +295,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_ProviderHttps.IsCheckedChanged += OnProviderHttpsChanged;
         PART_ProviderApiPath.TextChanged += OnProviderEndpointChanged;
         PART_ProviderImageEditPath.TextChanged += OnProviderEndpointChanged;
+        PART_ProviderImageChatPath.TextChanged += OnProviderEndpointChanged;
         PART_DetectedModelSearch.TextChanged += (_, _) => RefreshDetectedModelFilter();
         PART_SelectAllDetectedModels.Click += OnSelectAllDetectedModels;
         PART_CloseDetectedModels.Click += (_, _) => CloseDetectedModels();
@@ -464,6 +473,12 @@ public partial class SettingsWindow : MolaContentWindow
     {
         _browserActivity?.Clear();
         RefreshBrowserActivity();
+    }
+
+    internal void OpenApprovalPage()
+    {
+        PART_Nav.SelectedItem = PART_ApprovalNav;
+        ShowSelectedPage();
     }
 
     /// <summary>Where image services are added, which is what every 「去设置」
@@ -647,13 +662,8 @@ public partial class SettingsWindow : MolaContentWindow
     private void BuildPermissionChoices()
     {
         var order = new[] { ToolPermissionMode.Approval, ToolPermissionMode.FullAccess };
-        var labels = new[] { "按需审批", "自动允许" };
+        var labels = new[] { "跟随审批模式", "完全权限" };
 
-        Bind(PART_ToolPermission, _settings.LocalToolPermissionMode, mode =>
-        {
-            _settings.LocalToolPermissionMode = mode;
-            PART_PerToolPermissions.IsEnabled = mode == ToolPermissionMode.Approval;
-        });
         Bind(PART_ImagePermission, _settings.ImageGenerationPermissionMode,
             mode => _settings.ImageGenerationPermissionMode = mode);
         Bind(PART_VisionPermission, _settings.VisionPermissionMode,
@@ -665,7 +675,6 @@ public partial class SettingsWindow : MolaContentWindow
         Bind(PART_BrowserPermission, _settings.BrowserPermissionMode,
             mode => _settings.BrowserPermissionMode = mode);
 
-        PART_PerToolPermissions.IsEnabled = _settings.LocalToolPermissionMode == ToolPermissionMode.Approval;
         return;
 
         void Bind(ComboBox combo, ToolPermissionMode selected, Action<ToolPermissionMode> apply)
@@ -907,12 +916,13 @@ public partial class SettingsWindow : MolaContentWindow
                 PART_ProviderApiPath.Text = legacyGemini
                     ? "models/{model}:streamGenerateContent"
                     : string.IsNullOrWhiteSpace(existing.ApiPath)
-                    ? DefaultProviderApiPath(existing.Purpose, existing.ImageFormat, existing.Type)
+                    ? DefaultProviderApiPath(existing.Purpose, existing.ImageFormat, existing.Type, existing.BaseUrl)
                     : existing.ApiPath;
                 PART_ProviderImageFormat.SelectedIndex = ImageApiFormat.IsChatImage(existing.ImageFormat) ? 1 : 0;
                 PART_ProviderImageEditPath.Text = string.IsNullOrWhiteSpace(existing.ImageEditPath)
                     ? "v1/images/edits"
                     : existing.ImageEditPath;
+                PART_ProviderImageChatPath.Text = existing.ImageChatPath ?? ImageApiFormat.DefaultChatPath(existing.Type);
 
                 foreach (var model in existing.Models) _providerModels.Add(CreateModelRow(model));
                 foreach (var header in existing.CustomHeaders ?? [])
@@ -1143,6 +1153,12 @@ public partial class SettingsWindow : MolaContentWindow
             DefaultEffort = resolvedGeminiDefault
                 ?? (row.Thinking && !string.IsNullOrWhiteSpace(row.DefaultEffort) ? row.DefaultEffort.Trim().ToLowerInvariant() : null),
             ImageEdit = row.IsImageProvider && row.ImageEdit,
+            ImageFormat = row.IsImageProvider && row.CanChooseImageFormat ? row.ImageFormatIndex switch
+            {
+                1 => ImageApiFormat.OpenAiImages,
+                2 => ImageApiFormat.OpenAiChatImage,
+                _ => null
+            } : null,
             CustomBody = customBody.Count > 0 ? customBody : null,
             EffortLevels = resolvedGeminiLevels?.ToList() ?? (effortLevels.Count > 0 ? effortLevels : null),
             Pricing = row.Pricing()
@@ -1190,7 +1206,7 @@ public partial class SettingsWindow : MolaContentWindow
             .Select(header => new CustomHeaderEntry(header.Name.Trim(), header.Value ?? string.Empty))
             .ToList();
         var image = _editingProviderPurpose == "image";
-        var imageFormat = image && PART_ProviderImageFormat.SelectedIndex == 1
+        var imageFormat = image && (EditingProviderType == "gemini" || PART_ProviderImageFormat.SelectedIndex == 1)
             ? ImageApiFormat.OpenAiChatImage
             : image ? ImageApiFormat.OpenAiImages : null;
 
@@ -1225,12 +1241,12 @@ public partial class SettingsWindow : MolaContentWindow
             SortOrder: _editingProvider?.SortOrder ?? _settings.Providers.Count,
             Purpose: _editingProviderPurpose,
             ApiPath: apiPath,
-            ImageEditPath: image && !ImageApiFormat.IsChatImage(imageFormat)
-                && !string.IsNullOrWhiteSpace(PART_ProviderImageEditPath.Text)
+            ImageEditPath: image && !string.IsNullOrWhiteSpace(PART_ProviderImageEditPath.Text)
                     ? PART_ProviderImageEditPath.Text.Trim()
                     : null,
             ImageFormat: imageFormat,
-            CustomHeaders: !chatGpt && headers.Count > 0 ? headers : null);
+            CustomHeaders: !chatGpt && headers.Count > 0 ? headers : null,
+            ImageChatPath: image ? PART_ProviderImageChatPath.Text?.Trim() : null);
         return true;
     }
 
@@ -1331,7 +1347,9 @@ public partial class SettingsWindow : MolaContentWindow
             DefaultEffort = resolvedGeminiDefault
                 ?? (string.IsNullOrWhiteSpace(model.DefaultEffort) ? "high" : model.DefaultEffort),
             ImageEdit = model.ImageEdit,
+            ImageFormatIndex = model.ImageFormat is null ? 0 : ImageApiFormat.IsChatImage(model.ImageFormat) ? 2 : 1,
             IsImageProvider = _editingProviderPurpose == "image",
+            CanChooseImageFormat = EditingProviderType != "gemini",
             EffortLevelsText = string.Join(", ", resolvedGeminiLevels ?? model.EffortLevels?.ToArray() ?? []),
             Source = model,
             LoadedPricing = model.Pricing
@@ -1444,6 +1462,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_ProviderImageEditPath.Text = string.IsNullOrWhiteSpace(preset.ImageEditPath)
             ? "v1/images/edits"
             : preset.ImageEditPath;
+        PART_ProviderImageChatPath.Text = preset.ImageChatPath ?? ImageApiFormat.DefaultChatPath(preset.Type);
     }
 
     private static int ProviderTypeIndex(string? type)
@@ -1488,28 +1507,38 @@ public partial class SettingsWindow : MolaContentWindow
         PART_ProviderSourceField.IsVisible = !image;
         PART_ProviderPurpose.Text = image ? "图像服务" : "对话服务";
         PART_ProviderImageFields.IsVisible = image;
-        PART_ProviderApiPathLabel.Text = image ? "生成路径" : "对话路径";
+        PART_ProviderApiPathLabel.Text = image ? "图像路径" : "对话路径";
 
         for (var i = 0; i < PART_ProviderType.Items.Count; i++)
         {
             if (PART_ProviderType.Items[i] is not ComboBoxItem item) continue;
-            item.IsVisible = !image || i is 0 or 3;
+            item.IsVisible = !image || i is 0 or 2;
             item.IsEnabled = item.IsVisible;
         }
-        if (image && PART_ProviderType.SelectedIndex is not (0 or 3)) PART_ProviderType.SelectedIndex = 0;
+        if (image && PART_ProviderType.SelectedIndex is not (0 or 2)) PART_ProviderType.SelectedIndex = 0;
 
-        var chatImage = image && PART_ProviderImageFormat.SelectedIndex == 1;
-        PART_ProviderImageEditPathField.IsVisible = image && !chatImage;
+        var geminiImage = image && EditingProviderType == "gemini";
+        if (geminiImage) PART_ProviderImageFormat.SelectedIndex = 1;
+        PART_ProviderImageFormat.IsEnabled = !geminiImage;
+        PART_ProviderImageFormatHint.Text = PART_ProviderImageFormat.SelectedIndex == 1
+            ? "适用于 Nano Banana 等可输出图像的多模态模型"
+            : "适用于 gpt-image、Seedream、Qwen-Image 等图像模型";
+        PART_ProviderImageEditPathField.IsVisible = image && !geminiImage && !IsOpenRouterBaseUrl(PART_ProviderBaseUrl.Text);
         PART_FetchEditingProviderPricing.IsVisible = !image && !EditingChatGpt;
         PART_AddDetectedModels.Content = image || EditingChatGpt ? "添加选中模型" : "添加并获取价格";
-        foreach (var model in _providerModels) model.IsImageProvider = image;
+        foreach (var model in _providerModels)
+        {
+            model.IsImageProvider = image;
+            model.CanChooseImageFormat = !geminiImage;
+        }
         UpdateChatGptUi();
+        if (geminiImage) PART_ProviderApiPathField.IsVisible = false;
     }
 
-    private static string DefaultProviderApiPath(string? purpose, string? imageFormat, string? type)
+    private static string DefaultProviderApiPath(string? purpose, string? imageFormat, string? type, string? baseUrl = null)
     {
         if (SettingsViewModel.IsImagePurpose(purpose))
-            return ImageApiFormat.IsChatImage(imageFormat) ? "v1/chat/completions" : "v1/images/generations";
+            return ImageApiFormat.DefaultImagesPath(type, baseUrl);
         return type?.Trim().ToLowerInvariant() switch
         {
             "anthropic" => "v1/messages",
@@ -1525,14 +1554,17 @@ public partial class SettingsWindow : MolaContentWindow
         var known = new[]
         {
             "v1/chat/completions", "chat/completions", "v1/messages", "v1/responses",
-            "models/{model}:streamGenerateContent"
+            "models/{model}:streamGenerateContent", "v1/images/generations", "v1/images"
         };
         var current = PART_ProviderApiPath.Text?.Trim() ?? string.Empty;
         if (current.Length == 0 || known.Contains(current, StringComparer.OrdinalIgnoreCase))
             PART_ProviderApiPath.Text = DefaultProviderApiPath(
                 _editingProviderPurpose,
                 PART_ProviderImageFormat.SelectedIndex == 1 ? ImageApiFormat.OpenAiChatImage : ImageApiFormat.OpenAiImages,
-                EditingProviderType);
+                EditingProviderType, PART_ProviderBaseUrl.Text);
+        var chatPath = PART_ProviderImageChatPath.Text?.Trim() ?? string.Empty;
+        if (chatPath.Length == 0 || chatPath is "v1/chat/completions" or "models/{model}:generateContent")
+            PART_ProviderImageChatPath.Text = ImageApiFormat.DefaultChatPath(EditingProviderType);
         UpdateProviderPurposeUi();
         UpdateProviderEndpointPreview();
     }
@@ -1540,14 +1572,6 @@ public partial class SettingsWindow : MolaContentWindow
     private void OnProviderImageFormatChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (_loadingProviderForm) return;
-        var current = PART_ProviderApiPath.Text?.Trim() ?? string.Empty;
-        var known = new[] { "v1/chat/completions", "v1/images/generations" };
-        if (current.Length == 0 || known.Contains(current, StringComparer.OrdinalIgnoreCase))
-            PART_ProviderApiPath.Text = PART_ProviderImageFormat.SelectedIndex == 1
-                ? "v1/chat/completions"
-                : "v1/images/generations";
-        if (PART_ProviderImageFormat.SelectedIndex == 0 && string.IsNullOrWhiteSpace(PART_ProviderImageEditPath.Text))
-            PART_ProviderImageEditPath.Text = "v1/images/edits";
         UpdateProviderPurposeUi();
         UpdateProviderEndpointPreview();
     }
@@ -1598,11 +1622,10 @@ public partial class SettingsWindow : MolaContentWindow
             return;
         }
 
-        var chatImage = PART_ProviderImageFormat.SelectedIndex == 1;
-        var generation = Join(PART_ProviderApiPath.Text, chatImage ? "v1/chat/completions" : "v1/images/generations");
-        PART_ProviderEndpointPreview.Text = chatImage
-            ? "生成 / 编辑地址：" + generation
-            : "生成地址：" + generation + "\n编辑地址：" + Join(PART_ProviderImageEditPath.Text, "v1/images/edits");
+        var chat = Join(PART_ProviderImageChatPath.Text, ImageApiFormat.DefaultChatPath(EditingProviderType));
+        if (EditingProviderType == "gemini") PART_ProviderEndpointPreview.Text = "请求地址：" + chat;
+        else PART_ProviderEndpointPreview.Text = "图像地址：" + Join(PART_ProviderApiPath.Text, ImageApiFormat.DefaultImagesPath(EditingProviderType, baseUrl))
+            + "\n对话地址：" + chat;
     }
 
     private async void OnDetectProviderModels(object? sender, RoutedEventArgs e)
@@ -1626,6 +1649,10 @@ public partial class SettingsWindow : MolaContentWindow
                     row.EffortLevelsText = string.Join(", ", model.EffortLevels);
                     row.RefreshEffortLevelOptions();
                 }
+                if (SettingsViewModel.IsImagePurpose(entry.Purpose)
+                    && _providerModels.FirstOrDefault(row => row.Id.Equals(model.Id, StringComparison.OrdinalIgnoreCase)) is { } imageRow
+                    && imageRow.ImageFormatIndex == 0 && model.ImageFormat is not null)
+                    imageRow.ImageFormatIndex = ImageApiFormat.IsChatImage(model.ImageFormat) ? 2 : 1;
                 var alreadyExists = existing.Contains(model.Id);
                 _detectedModels.Add(new DetectedModelRow(model, false, !alreadyExists,
                     alreadyExists ? "已存在" : string.Empty));
@@ -2047,9 +2074,12 @@ public partial class SettingsWindow : MolaContentWindow
                     Style: null,
                     AsTool: false,
                     SupportsEdit: false,
-                    Format: entry.ImageFormat,
+                    Format: entry.Models.FirstOrDefault()?.ImageFormat ?? entry.ImageFormat,
                     GenerationPath: entry.ApiPath,
-                    EditPath: entry.ImageEditPath);
+                    EditPath: entry.ImageEditPath,
+                    ProviderType: entry.Type,
+                    ChatPath: entry.ImageChatPath,
+                    CustomHeaders: entry.CustomHeaders?.ToDictionary(h => h.Name, h => h.Value));
                 var images = await new ImageGenerationTool(_byokHttpFactory).GenerateAsync(
                     options, "a single small red dot on a white background", CancellationToken.None);
                 ShowProviderStatus(images.Count > 0 ? "连接成功，图像服务可用。" : "连接成功，但未返回图片。");
@@ -2107,26 +2137,19 @@ public partial class SettingsWindow : MolaContentWindow
         if (entry.Type == ChatGptType) return await FetchChatGptModelsAsync();
         var preset = FindProviderPreset(entry);
         var baseUrl = NetworkSecurity.RequireHttpOrHttpsBaseUrl(entry.BaseUrl ?? DefaultProviderBaseUrl(entry.Type), $"{entry.Name} 接入地址");
+        var image = SettingsViewModel.IsImagePurpose(entry.Purpose);
+        if (image && IsOpenRouter(entry)) return await FetchOpenRouterImageModelsAsync(entry, baseUrl);
         var modelsPath = preset?.ModelsPath ?? (entry.Type == "gemini" || IsGeminiOpenAiCompat(entry) ? "models" : "v1/models");
-        var url = NetworkSecurity.CombineEndpoint(baseUrl, modelsPath, $"{entry.Name} 接入地址");
 
-        using var http = _byokHttpFactory!();
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        ApplyProviderAuthentication(request, entry);
-        ApplyProviderCustomHeaders(request, entry);
-        using var response = await http.SendAsync(request);
-        var body = await response.Content.ReadAsStringAsync();
-        if (!response.IsSuccessStatusCode)
-            throw new HttpRequestException($"HTTP {(int)response.StatusCode}：{body}");
-
-        using var document = JsonDocument.Parse(body);
-        var models = entry.Type == "gemini"
-            ? ParseGeminiModels(document.RootElement)
-            : SettingsViewModel.IsImagePurpose(entry.Purpose)
-                ? ParseImageModels(document.RootElement)
+        using var document = await FetchModelsDocumentAsync(entry, baseUrl, modelsPath);
+        var models = image
+            ? ParseImageModels(document.RootElement, entry)
+            : entry.Type == "gemini"
+                ? ParseGeminiModels(document.RootElement)
                 : IsOpenRouter(entry)
                     ? ParseOpenRouterModels(document.RootElement)
                     : ParseCompatibleModels(document.RootElement);
+        if (image) return models;
 
         if (IsGoogleGeminiRoute(entry.Type, entry.BaseUrl))
             models = models.Select(ApplyGeminiModelPolicy).ToList();
@@ -2137,6 +2160,57 @@ public partial class SettingsWindow : MolaContentWindow
         return models.Select(model => model.Thinking && string.IsNullOrWhiteSpace(model.ThinkingParamKind)
             ? model with { ThinkingParamKind = kindName }
             : model).ToList();
+    }
+
+    private async Task<JsonDocument> FetchModelsDocumentAsync(ProviderEntry entry, string baseUrl, string path)
+    {
+        var url = NetworkSecurity.CombineEndpoint(baseUrl, path, $"{entry.Name} 接入地址");
+        using var http = _byokHttpFactory!();
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        ApplyProviderAuthentication(request, entry);
+        ApplyProviderCustomHeaders(request, entry);
+        using var response = await http.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+            throw new HttpRequestException($"HTTP {(int)response.StatusCode}：{body}");
+        return JsonDocument.Parse(body);
+    }
+
+    /// <summary>OpenRouter lists its image API models and its image-output chat models in
+    /// two catalogs. A model in both can use either API, so it follows the provider default.</summary>
+    private async Task<List<ProviderModelEntry>> FetchOpenRouterImageModelsAsync(ProviderEntry entry, string baseUrl)
+    {
+        using var imagesDoc = await FetchModelsDocumentAsync(entry, baseUrl, "v1/images/models");
+        using var chatDoc = await FetchModelsDocumentAsync(entry, baseUrl, "v1/models?output_modalities=image");
+        var images = ParseImageModels(imagesDoc.RootElement, entry, ImageApiFormat.OpenAiImages)
+            .ToDictionary(model => model.Id, StringComparer.OrdinalIgnoreCase);
+        var chat = ParseImageModels(chatDoc.RootElement, entry, ImageApiFormat.OpenAiChatImage)
+            .Where(model => !model.Id.StartsWith("openrouter/", StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(model => model.Id, StringComparer.OrdinalIgnoreCase);
+        // The general catalog also lists image-only models; only those that also output
+        // text can really use both APIs.
+        var multimodal = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (chatDoc.RootElement.TryGetProperty("data", out var chatData) && chatData.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in chatData.EnumerateArray())
+            {
+                if (item.TryGetProperty("id", out var idNode) && idNode.ValueKind == JsonValueKind.String
+                    && ReadStringArray(item, "architecture", "output_modalities").Contains("text"))
+                    multimodal.Add(idNode.GetString()!);
+            }
+        }
+        var models = new List<ProviderModelEntry>();
+        foreach (var id in images.Keys.Union(chat.Keys, StringComparer.OrdinalIgnoreCase))
+        {
+            images.TryGetValue(id, out var viaImages);
+            chat.TryGetValue(id, out var viaChat);
+            models.Add(viaImages is not null && viaChat is not null && multimodal.Contains(id)
+                ? viaImages with { ImageFormat = null, ImageEdit = viaImages.ImageEdit || viaChat.ImageEdit }
+                : viaImages is not null
+                    ? viaImages with { ImageFormat = string.Equals(entry.ImageFormat, ImageApiFormat.OpenAiImages, StringComparison.OrdinalIgnoreCase) ? null : ImageApiFormat.OpenAiImages }
+                    : viaChat!);
+        }
+        return models.OrderBy(model => model.Id, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     private static void ApplyProviderAuthentication(HttpRequestMessage request, ProviderEntry entry)
@@ -2340,16 +2414,55 @@ public partial class SettingsWindow : MolaContentWindow
         return models.OrderBy(model => model.Id, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    private static List<ProviderModelEntry> ParseImageModels(JsonElement root)
+    /// <summary>
+    /// Image models from a model list. <paramref name="catalogFormat"/> is set when the list
+    /// itself says which API its models use; otherwise relays' <c>supported_endpoint_types</c>
+    /// and the model name decide. A format equal to the provider default is stored as null
+    /// (follow the provider). Gemini always uses generateContent and has no per-model choice.
+    /// </summary>
+    private static List<ProviderModelEntry> ParseImageModels(JsonElement root, ProviderEntry entry, string? catalogFormat = null)
     {
-        if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array) return [];
+        if ((!root.TryGetProperty("data", out var data) && !root.TryGetProperty("models", out data))
+            || data.ValueKind != JsonValueKind.Array) return [];
+        var gemini = entry.Type == "gemini";
+        var providerFormat = entry.ImageFormat ?? ImageApiFormat.OpenAiImages;
         var models = new List<ProviderModelEntry>();
         foreach (var item in data.EnumerateArray())
         {
-            if (!item.TryGetProperty("id", out var idNode) || idNode.ValueKind != JsonValueKind.String) continue;
-            var id = idNode.GetString();
-            if (string.IsNullOrWhiteSpace(id) || !LooksLikeImageModel(id)) continue;
-            models.Add(new ProviderModelEntry(id, BeautifyModelName(id), ImageEdit: LooksLikeImageEditModel(id)));
+            var hasId = item.TryGetProperty("id", out var idNode) && idNode.ValueKind == JsonValueKind.String;
+            var raw = hasId
+                ? idNode.GetString()
+                : item.TryGetProperty("name", out var nameNode) && nameNode.ValueKind == JsonValueKind.String
+                    ? nameNode.GetString()
+                    : null;
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            var id = raw.StartsWith("models/", StringComparison.OrdinalIgnoreCase) ? raw[7..] : raw;
+            // Imagen is no longer served by the Gemini API.
+            if (gemini && id.StartsWith("imagen", StringComparison.OrdinalIgnoreCase)) continue;
+            var declaredImagesApi = ReadStringArray(item, "supported_endpoint_types").Contains("image-generation");
+            if (catalogFormat is null && !declaredImagesApi && !LooksLikeImageModel(id)) continue;
+
+            string? format = null;
+            if (!gemini)
+            {
+                var inferred = catalogFormat
+                    ?? (declaredImagesApi ? ImageApiFormat.OpenAiImages
+                        : ImageApiFormat.LooksLikeChatImageModel(id) ? ImageApiFormat.OpenAiChatImage : null);
+                format = inferred is not null && !string.Equals(inferred, providerFormat, StringComparison.OrdinalIgnoreCase)
+                    ? inferred : null;
+            }
+            var edit = catalogFormat == ImageApiFormat.OpenAiImages
+                ? item.TryGetProperty("supported_parameters", out var parameters)
+                  && parameters.ValueKind == JsonValueKind.Object
+                  && parameters.TryGetProperty("input_references", out _)
+                : LooksLikeImageEditModel(id);
+            var display = item.TryGetProperty("displayName", out var displayNode) && displayNode.ValueKind == JsonValueKind.String
+                ? displayNode.GetString()
+                : hasId && item.TryGetProperty("name", out var labelNode) && labelNode.ValueKind == JsonValueKind.String
+                    ? labelNode.GetString()
+                    : null;
+            models.Add(new ProviderModelEntry(id, string.IsNullOrWhiteSpace(display) ? BeautifyModelName(id) : display!,
+                ImageEdit: edit, ImageFormat: format));
         }
         return models.OrderBy(model => model.Id, StringComparer.OrdinalIgnoreCase).ToList();
     }
@@ -2421,19 +2534,29 @@ public partial class SettingsWindow : MolaContentWindow
                || value.Contains("claude-haiku-4") || value.Contains("deepseek-chat") || value.Contains("qwen-vl");
     }
 
+    // Same rules as the mobile client's looksLikeByokImageModel / looksLikeByokImageEditModel.
     private static bool LooksLikeImageModel(string id)
     {
         var value = id.ToLowerInvariant();
-        return value.Contains("dall-e") || value.Contains("image") || value.Contains("flux")
-               || value.Contains("midjourney") || value.Contains("sdxl")
-               || value.Contains("stable-diffusion") || value.Contains("recraft");
+        if (value.Contains("video")) return false;
+        string[] markers =
+        [
+            "dall-e", "image", "imagen", "flux", "midjourney", "sdxl", "stable-diffusion", "recraft",
+            "seedream", "seededit", "nano-banana", "cogview", "kolors", "grok-imagine", "riverflow",
+            "ideogram", "jimeng", "hidream", "z-image", "wanx"
+        ];
+        return markers.Any(value.Contains)
+               || System.Text.RegularExpressions.Regex.IsMatch(value[(value.LastIndexOf('/') + 1)..], @"^wan\d.*(?:t2i|image)");
     }
 
     private static bool LooksLikeImageEditModel(string id)
     {
         var value = id.ToLowerInvariant();
-        return value.Contains("gpt-image") || value.Contains("gpt image")
-               || value.Contains("imagen") || value.Contains("edit");
+        return value.Contains("gpt-image") || value.Contains("gpt image") || value.Contains("edit")
+               || value.Contains("inpaint") || value.Contains("kontext") || value.Contains("seededit")
+               || value.Contains("nano-banana") || value.Contains("grok-imagine")
+               || value.Contains("seedream") && !value.Contains("t2i")
+               || System.Text.RegularExpressions.Regex.IsMatch(value, @"qwen-image-(?:edit|[23])|sora[-_]image|gemini-.*image");
     }
 
     private static bool LooksLikeToolModel(string id)
@@ -3502,7 +3625,8 @@ public sealed record ProviderPresetRow(
     string Purpose = "chat",
     string? ApiPath = null,
     string? ImageEditPath = null,
-    string? ImageFormat = null);
+    string? ImageFormat = null,
+    string? ImageChatPath = null);
 
 public sealed partial class DetectedModelRow : CommunityToolkit.Mvvm.ComponentModel.ObservableObject
 {

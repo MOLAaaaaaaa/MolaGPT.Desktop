@@ -524,6 +524,12 @@
                      Foreground="{DynamicResource Brush.Error}"
                      TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
         </r:ToolRevealPresenter>
+        <r:ToolRevealPresenter IsOpen="{Binding HasApprovalNote}">
+          <TextBlock Text="{Binding ApprovalNote}" FontSize="11" Margin="24,0,4,4"
+                     Foreground="{DynamicResource Brush.Text.Secondary}"
+                     ToolTip.Tip="{Binding ApprovalNote}"
+                     TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+        </r:ToolRevealPresenter>
         </StackPanel>
       </Border>
     </DataTemplate>

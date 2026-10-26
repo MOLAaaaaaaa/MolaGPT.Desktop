@@ -1,4 +1,5 @@
 using Dapper;
+using Microsoft.Data.Sqlite;
 
 namespace MolaGPT.Storage.Repositories;
 
@@ -27,6 +28,46 @@ public sealed class ConversationRepository
             $"SELECT {SelectColumns} FROM conversations " +
             "WHERE deleted_at IS NULL ORDER BY pinned DESC, updated_at DESC")
             .ToList();
+    }
+
+    public Dictionary<string, string> FindByMessageContent(string query, CancellationToken cancellationToken = default)
+    {
+        var needle = query.Trim();
+        if (needle.Length == 0) return new Dictionary<string, string>(StringComparer.Ordinal);
+
+        cancellationToken.ThrowIfCancellationRequested();
+        using var conn = _db.Open();
+        // Interrupt superseded scans inside SQLite; only short excerpts enter .NET.
+        SQLitePCL.raw.sqlite3_progress_handler(conn.Handle, 1000,
+            _ => cancellationToken.IsCancellationRequested ? 1 : 0, null);
+        try
+        {
+            var pattern = "%" + needle.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_") + "%";
+            var snippetLength = Math.Max(120, needle.Length + 8);
+            return conn.Query<(string Id, int Position, int ContentLength, string Snippet)>(
+                @"SELECT c.id, instr(lower(m.content), lower(@needle)), length(m.content),
+                         substr(m.content, max(1, instr(lower(m.content), lower(@needle)) - 8), @snippetLength)
+                  FROM conversations c
+                  JOIN messages m ON m.rowid = (
+                    SELECT hit.rowid FROM messages hit
+                    WHERE hit.conversation_id = c.id AND hit.role IN ('user', 'assistant')
+                      AND hit.content LIKE @pattern ESCAPE '\' LIMIT 1
+                  ) WHERE c.deleted_at IS NULL", new { pattern, needle, snippetLength })
+                .ToDictionary(hit => hit.Id, hit =>
+                    (hit.Position > 9 ? "…" : string.Empty)
+                    + hit.Snippet.Replace('\r', ' ').Replace('\n', ' ').Replace('\t', ' ')
+                    + (Math.Max(1, hit.Position - 8) - 1 + snippetLength < hit.ContentLength ? "…" : string.Empty),
+                    StringComparer.Ordinal);
+        }
+        catch (SqliteException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        finally
+        {
+            // Connections are pooled, so the callback must not outlive this search.
+            SQLitePCL.raw.sqlite3_progress_handler(conn.Handle, 0, null, null);
+        }
     }
 
     public IReadOnlyList<ConversationRow> ListDeletedSince(long timestampMs)

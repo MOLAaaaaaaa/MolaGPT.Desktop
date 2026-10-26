@@ -1,24 +1,18 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using MolaGPT.Core.Chat.Agents.Pi;
+using MolaGPT.Core.Chat.Tools.PythonExecution;
 
 namespace MolaGPT.ViewModels;
 
 /// <summary>
-/// Automatic review of Python runs: a model the user picked answers the
-/// approvals the user would otherwise be asked, and hands back whatever it does
-/// not approve. Read by the reviewer straight from the settings table, so a
-/// change applies to the next run without anything being rebuilt.
+/// The review model for all local tools. Reviewers read the selection from the
+/// settings table on every call.
 /// </summary>
 public sealed partial class SettingsViewModel
 {
-    public const string PythonAutoReviewKey = "python_auto_review_enabled";
-    public const string PythonReviewProviderIdKey = "python_review_provider_id";
-    public const string PythonReviewModelIdKey = "python_review_model_id";
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(PythonAutoReviewNeedsModel))]
-    private bool _pythonAutoReviewEnabled;
+    public const string ReviewProviderIdKey = "python_review_provider_id";
+    public const string ReviewModelIdKey = "python_review_model_id";
 
     private string? _reviewProviderId;
     private string? _reviewModelId;
@@ -29,17 +23,18 @@ public sealed partial class SettingsViewModel
     public ObservableCollection<TitleProviderModelOption> ReviewProviderModels { get; } = new();
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(PythonAutoReviewNeedsModel))]
+    [NotifyPropertyChangedFor(nameof(IsReviewModelMissing))]
     private TitleProviderModelOption? _selectedReviewProviderModel;
 
-    public bool PythonAutoReviewNeedsModel => PythonAutoReviewEnabled && SelectedReviewProviderModel is null;
+    public bool IsReviewModelMissing => SelectedReviewProviderModel is not { } selected
+        || _providerRegistry is null
+        || PythonAutoReviewer.ResolveTarget(_providerRegistry, selected.ProviderId, selected.ModelId) is null;
 
     private void LoadAutoReviewSettings()
     {
         if (_settingsRepo is null) return;
-        if (bool.TryParse(_settingsRepo.Get(PythonAutoReviewKey), out var enabled)) PythonAutoReviewEnabled = enabled;
-        _reviewProviderId = _settingsRepo.Get(PythonReviewProviderIdKey);
-        _reviewModelId = _settingsRepo.Get(PythonReviewModelIdKey);
+        _reviewProviderId = _settingsRepo.Get(ReviewProviderIdKey);
+        _reviewModelId = _settingsRepo.Get(ReviewModelIdKey);
     }
 
     public void RefreshReviewProviderModels()
@@ -77,12 +72,10 @@ public sealed partial class SettingsViewModel
         {
             _loadingSettings = wasLoading;
         }
-    }
 
-    partial void OnPythonAutoReviewEnabledChanged(bool value)
-    {
-        if (_loadingSettings || _settingsRepo is null) return;
-        _settingsRepo.Set(PythonAutoReviewKey, value.ToString());
+        // Whether the saved model resolves depends on the registry, not only on which
+        // option is selected, so an unchanged selection can still flip.
+        OnPropertyChanged(nameof(IsReviewModelMissing));
     }
 
     partial void OnSelectedReviewProviderModelChanged(TitleProviderModelOption? value)
@@ -92,7 +85,7 @@ public sealed partial class SettingsViewModel
         if (value is null) return;
         _reviewProviderId = value.ProviderId;
         _reviewModelId = value.ModelId;
-        SetOrRemove(PythonReviewProviderIdKey, _reviewProviderId);
-        SetOrRemove(PythonReviewModelIdKey, _reviewModelId);
+        SetOrRemove(ReviewProviderIdKey, _reviewProviderId);
+        SetOrRemove(ReviewModelIdKey, _reviewModelId);
     }
 }

@@ -46,12 +46,6 @@ public static class MolaGptProviderIds
         || string.Equals(providerId, LocalTools, StringComparison.OrdinalIgnoreCase);
 }
 
-public static class ProviderKindExtensions
-{
-    public static bool IsMolaGptAccount(this ProviderKind kind) =>
-        kind is ProviderKind.MolaGptProxy or ProviderKind.MolaGptLocalTools;
-}
-
 /// <summary>
 /// Explicit, user-facing app mode. This is the UI-layer truth source for the
 /// three-way sidebar slider, derived from the active provider rather than

@@ -352,6 +352,48 @@ public sealed class CloudSyncService
         }, ct).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyDictionary<string, string>> SearchConversationsAsync(string keyword, CancellationToken ct = default)
+    {
+        var jwt = _auth.CurrentJwt;
+        if (string.IsNullOrWhiteSpace(jwt)) return new Dictionary<string, string>();
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(DetailFetchTimeout);
+        JsonObject result;
+        try
+        {
+            result = await PostSyncAsync(jwt, new JsonObject
+            {
+                ["action"] = "search_conversations",
+                ["keyword"] = keyword,
+                ["title_only"] = false
+            }, timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            throw new TimeoutException("云端搜索超时，请稍后重试。", ex);
+        }
+
+        ct.ThrowIfCancellationRequested();
+        if (!string.Equals(jwt, _auth.CurrentJwt, StringComparison.Ordinal))
+            return new Dictionary<string, string>();
+
+        var results = result["results"] as JsonArray
+            ?? throw new InvalidOperationException("云端搜索返回格式错误。");
+        var matches = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var hit in results.OfType<JsonObject>())
+        {
+            var id = hit["conversation"]?["id"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(id)) continue;
+            var snippet = (hit["matched_messages"] as JsonArray)?.OfType<JsonObject>()
+                .Select(message => message["content"]?.GetValue<string>())
+                .FirstOrDefault(content => content?.Contains(keyword, StringComparison.OrdinalIgnoreCase) == true)
+                ?? string.Empty;
+            matches[id] = snippet.Replace('\r', ' ').Replace('\n', ' ').Replace('\t', ' ');
+        }
+        return matches;
+    }
+
     public async Task<bool> FetchConversationToLocalAsync(string conversationId, CancellationToken ct = default)
     {
         var jwt = _auth.CurrentJwt;

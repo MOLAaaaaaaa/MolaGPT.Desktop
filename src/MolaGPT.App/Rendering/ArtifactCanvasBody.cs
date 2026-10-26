@@ -291,7 +291,7 @@ public sealed class ArtifactCanvasBody : UserControl
                 var html = item.RenderKind == ArtifactRenderKind.Html
                     ? CanvasSandbox.BuildHtml(source, theme)
                     : CanvasSandbox.BuildMermaid(source, theme);
-                _ = ShowWebAsync(OriginKey(item), html, generation);
+                _ = ShowWebAsync(OriginKey(item), html, generation, item.RenderKind == ArtifactRenderKind.Mermaid);
                 return;
             }
             case ArtifactRenderKind.Svg:
@@ -327,12 +327,14 @@ public sealed class ArtifactCanvasBody : UserControl
             _webMode = false;
             if (_web is not null)
             {
+                _web.AllowSuspend = false;
                 _web.IsVisible = false;
                 _web.Unpark();
             }
 
             _sandbox.Blank();
         }
+        if (_web is not null) _web.AllowSuspend = true;
 
         _trafficBar.IsVisible = false;
         Track(content as ImageMarkupView);
@@ -340,7 +342,7 @@ public sealed class ArtifactCanvasBody : UserControl
         UpdateToolbar();
     }
 
-    private async Task ShowWebAsync(string originKey, string html, int generation)
+    private async Task ShowWebAsync(string originKey, string html, int generation, bool staticPreview)
     {
         _webMode = true;
         _webReady = false;
@@ -357,6 +359,7 @@ public sealed class ArtifactCanvasBody : UserControl
             _stage.Children.Add(_web);
         }
 
+        _web.AllowSuspend = false;
         _web.SetBackground(ThemeColor("Color.Bg.Primary", Colors.White));
 
         // A page already on screen stays there until its successor has loaded.
@@ -388,6 +391,7 @@ public sealed class ArtifactCanvasBody : UserControl
             await loaded;
             if (generation != _generation) return;
             _webReady = true;
+            _web.AllowSuspend = staticPreview;
             UpdateToolbar();
         }
         catch (Exception ex)

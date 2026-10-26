@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Net;
@@ -76,29 +77,14 @@ public sealed class ImageGenerationTool
     {
         Validate(options, prompt);
 
-        // Size and style that this dialect has no field for are folded into the
-        // prompt here, once, so every caller gets the same behaviour.
         var effectivePrompt = ImagePromptComposer.Compose(options, prompt, isEdit: false);
 
+        if (options.ProviderType == "gemini")
+            return await GenerateViaGeminiAsync(options, effectivePrompt, null, null, ct).ConfigureAwait(false);
         if (ImageApiFormat.IsChatImage(options.Format))
             return await GenerateViaChatAsync(options, effectivePrompt, inputImage: null, inputMime: null, ct).ConfigureAwait(false);
 
-        var endpoint = NetworkSecurity.CombineEndpoint(
-            options.BaseUrl!, DefaultPath(options.GenerationPath, "v1/images/generations"), "图像服务接入地址");
-        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
-        {
-            Content = JsonContent.Create(BuildRequestBody(options, effectivePrompt))
-        };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
-        OpenRouterAttribution.Apply(request, options.BaseUrl);
-
-        using var http = _httpFactory();
-        using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
-        await ChatApiErrorHelper.EnsureSuccessAsync(response, "图像生成", ct).ConfigureAwait(false);
-
-        await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-        return await ParseImagesAsync(http, doc.RootElement, ct).ConfigureAwait(false);
+        return await GenerateViaImagesAsync(options, effectivePrompt, null, null, ct).ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<GeneratedImage>> EditAsync(
@@ -116,10 +102,16 @@ public sealed class ImageGenerationTool
 
         var effectivePrompt = ImagePromptComposer.Compose(options, prompt, isEdit: true);
 
-        // Chat-completions dialects (OpenRouter / nano-banana) edit through the
-        // same endpoint as generation, with the source image carried inline.
+        if (options.ProviderType == "gemini")
+            return await GenerateViaGeminiAsync(options, effectivePrompt, imageBytes, imageMime, ct).ConfigureAwait(false);
         if (ImageApiFormat.IsChatImage(options.Format))
             return await GenerateViaChatAsync(options, effectivePrompt, imageBytes, imageMime, ct).ConfigureAwait(false);
+
+        var dialect = ImagesDialectFor(options);
+        if (dialect == ImagesDialect.Zhipu)
+            throw new InvalidOperationException("当前图像接口不支持图像编辑。");
+        if (dialect != ImagesDialect.OpenAi)
+            return await GenerateViaImagesAsync(options, effectivePrompt, imageBytes, imageMime, ct).ConfigureAwait(false);
 
         var endpoint = NetworkSecurity.CombineEndpoint(
             options.BaseUrl!, DefaultPath(options.EditPath, "v1/images/edits"), "图像服务接入地址");
@@ -138,8 +130,7 @@ public sealed class ImageGenerationTool
         {
             Content = content
         };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
-        OpenRouterAttribution.Apply(request, options.BaseUrl);
+        ApplyHeaders(request, options);
 
         using var http = _httpFactory();
         using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
@@ -258,26 +249,79 @@ public sealed class ImageGenerationTool
         return images;
     }
 
-    private static Dictionary<string, object> BuildRequestBody(ImageGenerationOptions options, string prompt)
+    private async Task<IReadOnlyList<GeneratedImage>> GenerateViaImagesAsync(
+        ImageGenerationOptions options, string prompt, byte[]? inputImage, string? inputMime, CancellationToken ct)
+    {
+        var editing = inputImage is { Length: > 0 };
+        var path = editing && ImagesDialectFor(options) == ImagesDialect.Xai
+            ? DefaultPath(options.EditPath, "v1/images/edits")
+            : DefaultPath(options.GenerationPath, ImageApiFormat.DefaultImagesPath(options.ProviderType, options.BaseUrl));
+        var endpoint = NetworkSecurity.CombineEndpoint(options.BaseUrl!, path, "图像服务接入地址");
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = JsonContent.Create(BuildRequestBody(options, prompt, inputImage, inputMime))
+        };
+        ApplyHeaders(request, options);
+        using var http = _httpFactory();
+        using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
+        await ChatApiErrorHelper.EnsureSuccessAsync(response, editing ? "图像编辑" : "图像生成", ct).ConfigureAwait(false);
+        await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+        return await ParseImagesAsync(http, doc.RootElement, ct).ConfigureAwait(false);
+    }
+
+    private static Dictionary<string, object> BuildRequestBody(
+        ImageGenerationOptions options, string prompt, byte[]? inputImage, string? inputMime)
     {
         var body = new Dictionary<string, object>
         {
             ["model"] = options.Model!.Trim(),
-            ["prompt"] = prompt.Trim(),
-            ["n"] = 1
+            ["prompt"] = prompt.Trim()
         };
-
-        if (!string.IsNullOrWhiteSpace(options.Size))
-            body["size"] = options.Size.Trim();
-
-        // GPT Image models return b64_json by default. DALL-E still needs the
-        // explicit flag if we want local bytes instead of a temporary URL.
-        if (IsDallE(options.Model))
-            body["response_format"] = "b64_json";
-
-        // Only DALL·E 3 has a style field; for everything else the composer has
-        // already put the style in the prompt, and sending it here too would
-        // ask twice.
+        var size = options.Size.Trim();
+        var reference = inputImage is { Length: > 0 }
+            ? $"data:{inputMime ?? "image/png"};base64,{Convert.ToBase64String(inputImage)}" : null;
+        switch (ImagesDialectFor(options))
+        {
+            case ImagesDialect.OpenRouter:
+                body["n"] = 1;
+                if (ImagePromptComposer.AspectRatio(size) is { } ratio) body["aspect_ratio"] = ratio;
+                body["resolution"] = Resolution(size);
+                if (reference is not null) body["input_references"] = new[] { new { type = "image_url", image_url = new { url = reference } } };
+                break;
+            case ImagesDialect.Xai:
+                body["n"] = 1;
+                if (ImagePromptComposer.AspectRatio(size) is { } xaiRatio) body["aspect_ratio"] = xaiRatio;
+                body["resolution"] = MaxEdge(size) >= 1600 ? "2k" : "1k";
+                body["response_format"] = "b64_json";
+                if (reference is not null) body["image"] = new { type = "image_url", url = reference };
+                break;
+            case ImagesDialect.Seedream:
+                body["size"] = SeedreamSize(size);
+                body["response_format"] = "b64_json";
+                body["watermark"] = false;
+                if (reference is not null) body["image"] = reference;
+                break;
+            case ImagesDialect.SiliconFlow:
+                if (options.Model?.Contains("qwen-image-edit", StringComparison.OrdinalIgnoreCase) != true)
+                    body["image_size"] = size;
+                if (reference is not null) body["image"] = reference;
+                break;
+            case ImagesDialect.RefsInBody:
+                body["n"] = 1;
+                body["size"] = size;
+                if (reference is not null) body["image"] = reference;
+                break;
+            case ImagesDialect.Zhipu:
+                body["size"] = size;
+                break;
+            default:
+                body["n"] = 1;
+                body["size"] = size;
+                if (options.Model?.Contains("gpt-image", StringComparison.OrdinalIgnoreCase) != true)
+                    body["response_format"] = "b64_json";
+                break;
+        }
         if (ImagePromptComposer.Describe(options, isEdit: false).Style == ImageParameterChannel.Parameter
             && !string.IsNullOrWhiteSpace(options.Style))
         {
@@ -287,12 +331,56 @@ public sealed class ImageGenerationTool
         return body;
     }
 
+    private enum ImagesDialect { OpenAi, OpenRouter, Xai, Seedream, SiliconFlow, RefsInBody, Zhipu }
+
+    private static ImagesDialect ImagesDialectFor(ImageGenerationOptions options)
+    {
+        var host = Uri.TryCreate(options.BaseUrl, UriKind.Absolute, out var uri) ? uri.Host.ToLowerInvariant() : string.Empty;
+        var model = options.Model ?? string.Empty;
+        var id = model[(model.LastIndexOf('/') + 1)..].ToLowerInvariant();
+        if (ImageApiFormat.IsOpenRouter(options.BaseUrl)) return ImagesDialect.OpenRouter;
+        if (host.EndsWith("siliconflow.cn") || host.EndsWith("siliconflow.com")) return ImagesDialect.SiliconFlow;
+        if (host == "api.x.ai" || id.StartsWith("grok-imagine") || id.StartsWith("grok-2-image")) return ImagesDialect.Xai;
+        if (host.EndsWith("bigmodel.cn") || id.StartsWith("cogview") || id.StartsWith("glm-image")) return ImagesDialect.Zhipu;
+        if (host.EndsWith("volces.com") || id.Contains("seedream")) return ImagesDialect.Seedream;
+        return id.StartsWith("qwen-image") || id.StartsWith("wan2") || id.StartsWith("wanx")
+            ? ImagesDialect.RefsInBody : ImagesDialect.OpenAi;
+    }
+
+    private static (int Width, int Height)? Dimensions(string size)
+    {
+        var parts = size.Split(['x', 'X', '×']);
+        return parts.Length == 2 && int.TryParse(parts[0], out var w) && int.TryParse(parts[1], out var h) && w > 0 && h > 0
+            ? (w, h) : null;
+    }
+
+    private static int MaxEdge(string size) => Dimensions(size) is { } d ? Math.Max(d.Width, d.Height) : 1024;
+
+    private static string Resolution(string size) => MaxEdge(size) switch { >= 3000 => "4K", >= 1600 => "2K", _ => "1K" };
+
+    private static string SeedreamSize(string size)
+    {
+        if (Dimensions(size) is not { } d || (long)d.Width * d.Height >= 2560 * 1440) return size;
+        var scale = Math.Sqrt(2560d * 1440 / ((long)d.Width * d.Height));
+        return $"{(int)Math.Ceiling(d.Width * scale / 16) * 16}x{(int)Math.Ceiling(d.Height * scale / 16) * 16}";
+    }
+
+    private static void ApplyHeaders(HttpRequestMessage request, ImageGenerationOptions options)
+    {
+        if (options.ProviderType == "gemini") request.Headers.TryAddWithoutValidation("x-goog-api-key", options.ApiKey);
+        else request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
+        OpenRouterAttribution.Apply(request, options.BaseUrl, options.CustomHeaders?.ToArray());
+        if (options.CustomHeaders is not null)
+            foreach (var (name, value) in options.CustomHeaders) request.Headers.TryAddWithoutValidation(name, value);
+    }
+
     private static async Task<IReadOnlyList<GeneratedImage>> ParseImagesAsync(
         HttpClient http,
         JsonElement root,
         CancellationToken ct)
     {
-        if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+        if ((!root.TryGetProperty("data", out var data) && !root.TryGetProperty("images", out data))
+            || data.ValueKind != JsonValueKind.Array)
             return Array.Empty<GeneratedImage>();
 
         var rootMime = MimeFromOutputFormat(ReadString(root, "output_format"));
@@ -302,12 +390,19 @@ public sealed class ImageGenerationTool
             var revisedPrompt = ReadString(item, "revised_prompt");
             if (ReadString(item, "b64_json") is { Length: > 0 } b64)
             {
-                images.Add(new GeneratedImage(Convert.FromBase64String(b64), rootMime, revisedPrompt));
+                images.Add(new GeneratedImage(Convert.FromBase64String(b64), ReadString(item, "media_type") ?? rootMime, revisedPrompt));
                 continue;
             }
 
             if (ReadString(item, "url") is not { Length: > 0 } url)
                 continue;
+
+            // Some relays put a data URL where a link is expected.
+            if (TryDecodeDataUrl(url, out var inline, out var inlineMime))
+            {
+                images.Add(new GeneratedImage(inline, inlineMime, revisedPrompt));
+                continue;
+            }
 
             using var response = await http.GetAsync(url, ct).ConfigureAwait(false);
             await ChatApiErrorHelper.EnsureSuccessAsync(response, "图像下载", ct).ConfigureAwait(false);
@@ -331,7 +426,7 @@ public sealed class ImageGenerationTool
         CancellationToken ct)
     {
         var endpoint = NetworkSecurity.CombineEndpoint(
-            options.BaseUrl!, DefaultPath(options.GenerationPath, "v1/chat/completions"), "图像服务接入地址");
+            options.BaseUrl!, DefaultPath(options.ChatPath ?? options.GenerationPath, "v1/chat/completions"), "图像服务接入地址");
 
         object messageContent;
         if (inputImage is { Length: > 0 })
@@ -359,13 +454,19 @@ public sealed class ImageGenerationTool
             ["modalities"] = new[] { "image", "text" },
             ["stream"] = false
         };
+        var imageConfig = new Dictionary<string, object>();
+        if (ImagePromptComposer.AspectRatio(options.Size) is { } ratio) imageConfig["aspect_ratio"] = ratio;
+        if (ImageApiFormat.IsOpenRouter(options.BaseUrl) || options.Model?.Contains("gemini-2.5", StringComparison.OrdinalIgnoreCase) != true)
+            imageConfig["image_size"] = Resolution(options.Size);
+        body["image_config"] = imageConfig;
+        if (!ImageApiFormat.IsOpenRouter(options.BaseUrl))
+            body["extra_body"] = new { google = new { image_config = imageConfig } };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {
             Content = JsonContent.Create(body)
         };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
-        OpenRouterAttribution.Apply(request, options.BaseUrl);
+        ApplyHeaders(request, options);
 
         using var http = _httpFactory();
         using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
@@ -373,10 +474,58 @@ public sealed class ImageGenerationTool
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-        return ParseChatImages(doc.RootElement);
+        return await ParseChatImagesAsync(http, doc.RootElement, ct).ConfigureAwait(false);
     }
 
-    private static IReadOnlyList<GeneratedImage> ParseChatImages(JsonElement root)
+    private async Task<IReadOnlyList<GeneratedImage>> GenerateViaGeminiAsync(
+        ImageGenerationOptions options, string prompt, byte[]? inputImage, string? inputMime, CancellationToken ct)
+    {
+        var model = options.Model!.Trim();
+        if (model.StartsWith("models/", StringComparison.OrdinalIgnoreCase)) model = model[7..];
+        var path = DefaultPath(options.ChatPath ?? options.GenerationPath, ImageApiFormat.DefaultChatPath("gemini"))
+            .Replace("{model}", Uri.EscapeDataString(model), StringComparison.Ordinal)
+            .Replace(":streamGenerateContent", ":generateContent", StringComparison.Ordinal);
+        var endpoint = NetworkSecurity.CombineEndpoint(options.BaseUrl!, path, "图像服务接入地址");
+        var parts = new List<object>();
+        if (inputImage is { Length: > 0 })
+            parts.Add(new { inlineData = new { mimeType = inputMime ?? "image/png", data = Convert.ToBase64String(inputImage) } });
+        parts.Add(new { text = prompt.Trim() });
+        var imageConfig = new Dictionary<string, object>();
+        if (ImagePromptComposer.AspectRatio(options.Size) is { } ratio) imageConfig["aspectRatio"] = ratio;
+        if (!model.Contains("gemini-2.5", StringComparison.OrdinalIgnoreCase)) imageConfig["imageSize"] = Resolution(options.Size);
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = JsonContent.Create(new
+            {
+                contents = new[] { new { role = "user", parts } },
+                generationConfig = new { responseModalities = new[] { "TEXT", "IMAGE" }, imageConfig }
+            })
+        };
+        ApplyHeaders(request, options);
+        using var http = _httpFactory();
+        using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
+        await ChatApiErrorHelper.EnsureSuccessAsync(response, "图像生成", ct).ConfigureAwait(false);
+        await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+        var images = new List<GeneratedImage>();
+        if (!doc.RootElement.TryGetProperty("candidates", out var candidates) || candidates.ValueKind != JsonValueKind.Array)
+            return images;
+        foreach (var candidate in candidates.EnumerateArray())
+        {
+            if (!candidate.TryGetProperty("content", out var content)
+                || !content.TryGetProperty("parts", out var outputParts) || outputParts.ValueKind != JsonValueKind.Array) continue;
+            foreach (var part in outputParts.EnumerateArray())
+            {
+                if (!part.TryGetProperty("inlineData", out var inline) && !part.TryGetProperty("inline_data", out inline)) continue;
+                if (ReadString(inline, "data") is not { Length: > 0 } b64) continue;
+                images.Add(new GeneratedImage(Convert.FromBase64String(b64),
+                    ReadString(inline, "mimeType") ?? ReadString(inline, "mime_type") ?? "image/png", null));
+            }
+        }
+        return images;
+    }
+
+    private static async Task<IReadOnlyList<GeneratedImage>> ParseChatImagesAsync(HttpClient http, JsonElement root, CancellationToken ct)
     {
         var images = new List<GeneratedImage>();
         if (!root.TryGetProperty("choices", out var choices) || choices.ValueKind != JsonValueKind.Array)
@@ -386,24 +535,54 @@ public sealed class ImageGenerationTool
         {
             if (!choice.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object)
                 continue;
-            if (!message.TryGetProperty("images", out var imgs) || imgs.ValueKind != JsonValueKind.Array)
-                continue;
-
-            foreach (var img in imgs.EnumerateArray())
+            var urls = new List<string>();
+            if (message.TryGetProperty("images", out var imgs) && imgs.ValueKind == JsonValueKind.Array)
             {
-                var url = img.ValueKind == JsonValueKind.Object
-                          && img.TryGetProperty("image_url", out var imageUrl)
-                          && imageUrl.ValueKind == JsonValueKind.Object
-                          && imageUrl.TryGetProperty("url", out var urlProp)
-                          && urlProp.ValueKind == JsonValueKind.String
-                    ? urlProp.GetString()
-                    : null;
+                foreach (var img in imgs.EnumerateArray())
+                    if (ImageUrl(img) is { Length: > 0 } url) urls.Add(url);
+            }
+            if (urls.Count == 0 && message.TryGetProperty("content", out var content))
+            {
+                if (content.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var part in content.EnumerateArray())
+                    {
+                        if (ImageUrl(part) is { Length: > 0 } url) urls.Add(url);
+                        if (ReadString(part, "text") is { } text) AddTextImages(text, urls);
+                    }
+                }
+                else if (content.ValueKind == JsonValueKind.String) AddTextImages(content.GetString()!, urls);
+            }
+            foreach (var url in urls.Distinct(StringComparer.Ordinal))
+            {
                 if (TryDecodeDataUrl(url, out var bytes, out var mime))
                     images.Add(new GeneratedImage(bytes, mime, RevisedPrompt: null));
+                else if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https")
+                {
+                    using var response = await http.GetAsync(uri, ct).ConfigureAwait(false);
+                    await ChatApiErrorHelper.EnsureSuccessAsync(response, "图像下载", ct).ConfigureAwait(false);
+                    images.Add(new GeneratedImage(await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false),
+                        response.Content.Headers.ContentType?.MediaType ?? "image/png", null));
+                }
             }
         }
 
         return images;
+    }
+
+    private static string? ImageUrl(JsonElement image)
+    {
+        if (image.ValueKind == JsonValueKind.String) return image.GetString();
+        if (image.ValueKind != JsonValueKind.Object) return null;
+        if (image.TryGetProperty("image_url", out var url))
+            return url.ValueKind == JsonValueKind.String ? url.GetString() : ReadString(url, "url");
+        return ReadString(image, "url");
+    }
+
+    private static void AddTextImages(string text, List<string> urls)
+    {
+        foreach (Match match in Regex.Matches(text, @"!\[[^\]]*\]\(([^\s]+?)\)")) urls.Add(match.Groups[1].Value);
+        if (urls.Count == 0 && text.TrimStart().StartsWith("data:image/", StringComparison.OrdinalIgnoreCase)) urls.Add(text.Trim());
     }
 
     private static bool TryDecodeDataUrl(string? url, out byte[] bytes, out string mimeType)
@@ -448,6 +627,9 @@ public sealed class ImageGenerationTool
             throw new InvalidOperationException("请填写图像服务的 API Key。");
         if (string.IsNullOrWhiteSpace(options.Model))
             throw new InvalidOperationException("请选择图像模型。");
+        if (options.ProviderType == "gemini" && options.Model.Trim().StartsWith("imagen", StringComparison.OrdinalIgnoreCase)
+            || options.ProviderType == "gemini" && options.Model.Trim().StartsWith("models/imagen", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Gemini API 已不再支持 Imagen，请选择 Gemini 图像模型。");
         if (string.IsNullOrWhiteSpace(prompt))
             throw new InvalidOperationException("请输入图像描述。");
     }

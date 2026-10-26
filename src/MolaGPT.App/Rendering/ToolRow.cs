@@ -14,7 +14,7 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
 
     private sealed record HeaderState(string Label, string Preview, string Count, string Status,
         bool Successful, bool Error, bool Background, bool Stop, string Glyph, bool Group, string ErrorDetail,
-        bool Shimmer, bool Spinner);
+        bool Shimmer, bool Spinner, string ApprovalNote);
 
     public ToolRow(MessageViewModel message, ToolCallViewModel tool, int segment)
         : base(message, $"{message.RowKey()}:tool:{tool.Id}")
@@ -61,6 +61,9 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
         }
     }
     public bool HasErrorDetail => IsError && ErrorDetail.Length > 0;
+    public string ApprovalNote => string.Join("\n", _tools.Where(tool => tool.HasApprovalNote)
+        .Select(tool => tool.ApprovalNote).Distinct());
+    public bool HasApprovalNote => _tools.Any(tool => tool.HasApprovalNote);
     public ObservableCollection<ToolRow> GroupItems { get; } = new();
     public Action? OnUserExpanded { get; set; }
     public bool AnimateEntrance { get; set; }
@@ -191,7 +194,7 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
     {
         var next = new HeaderState(DisplayLabel, HeaderArgPreview, CountText, StatusText,
             IsSuccessful, IsError, IsBackgroundRunning, CanStop, IconGlyph, IsGroup, ErrorDetail,
-            IsShimmering, ShowsSpinner);
+            IsShimmering, ShowsSpinner, ApprovalNote);
         if (next == _header) return;
         if (_header is { } previous && (previous.Shimmer || previous.Spinner) && next.Successful)
         {
@@ -203,7 +206,7 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
                      nameof(CountText), nameof(StatusText), nameof(IsSuccessful), nameof(IsError),
                      nameof(IsBackgroundRunning), nameof(CanStop), nameof(IconGlyph),
                      nameof(IsGroup), nameof(CallCount), nameof(ErrorDetail), nameof(HasErrorDetail),
-                     nameof(IsShimmering), nameof(ShowsSpinner) })
+                     nameof(IsShimmering), nameof(ShowsSpinner), nameof(ApprovalNote), nameof(HasApprovalNote) })
             Notify(name);
     }
 
