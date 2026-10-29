@@ -2169,6 +2169,10 @@ public partial class SettingsWindow : MolaContentWindow
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         ApplyProviderAuthentication(request, entry);
         ApplyProviderCustomHeaders(request, entry);
+        // Anthropic relays may use Bearer authentication for their model catalog.
+        if (entry.Type == "anthropic" && !string.IsNullOrWhiteSpace(entry.ApiKey)
+            && !request.Headers.Contains("Authorization"))
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", entry.ApiKey);
         using var response = await http.SendAsync(request);
         var body = await response.Content.ReadAsStringAsync();
         if (!response.IsSuccessStatusCode)

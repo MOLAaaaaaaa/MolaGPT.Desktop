@@ -44,7 +44,7 @@ public partial class SettingsWindow
         ["PAGE_Mcp"] = "MCP 工具 插件 服务器 Model Context Protocol",
         ["PAGE_Skills"] = "技能 skill SKILL.md 导入",
         ["PAGE_Approval"] = "隐私和安全 权限 审批 审批模式 按需审批 自动审批 完全权限 审批模型 授权 确认 始终允许 浏览器 Python",
-        ["PAGE_Agent"] = "远程 手机 移动端 Bridge 桥接 Agent Claude Code Codex",
+        ["PAGE_Agent"] = "远程 手机 移动端 网页 Web 浏览器 设备 配对 Bridge 桥接 Agent Claude Code Codex",
     };
 
     private readonly List<SearchEntry> _searchIndex = [];

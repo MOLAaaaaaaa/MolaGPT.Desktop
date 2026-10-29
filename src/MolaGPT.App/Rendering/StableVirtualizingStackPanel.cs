@@ -325,7 +325,8 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
     {
         var cache = viewport.Height * CacheScreens;
         var top = Math.Max(0, viewport.Top - cache);
-        var bottom = Math.Min(_positions[^1], viewport.Bottom + cache);
+        // Row heights are still estimates here; RangeFor clamps the item indices.
+        var bottom = viewport.Bottom + cache;
         return new Rect(viewport.X, top, viewport.Width, Math.Max(0, bottom - top));
     }
 

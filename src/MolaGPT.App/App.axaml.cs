@@ -249,7 +249,7 @@ public partial class App : Application
                 else _ = StopAgentRelayAsync();
             }
 
-            // Phones control MolaGPT conversations while switched on: over the account
+            // Remote clients control MolaGPT conversations while switched on: over the account
             // relay while signed in, and over the account-less link always.
             var remoteWork = _services.GetRequiredService<RemoteControlHost>();
             var remoteWorkSettings = _services.GetRequiredService<RemoteWorkSettingsViewModel>();
@@ -263,7 +263,7 @@ public partial class App : Application
                 OfferRemoteWork();
             };
             // A code is typed at this desk, so its result shows on the settings page.
-            // Account pairing happens from the phone alone; say so here.
+            // Same-account clients pair automatically; announce the new device here.
             remoteWork.Paired += (device, viaAccount) =>
             {
                 if (!viaAccount) return;
@@ -271,7 +271,7 @@ public partial class App : Application
                 {
                     Key = "remote-pair",
                     Kind = NotifyKind.Info,
-                    Title = "新手机已配对",
+                    Title = "新设备已配对",
                     Body = $"「{device}」可查看和控制本机对话",
                     ActionText = "管理",
                     Action = () => window.OpenAgentSettings(),
@@ -304,7 +304,7 @@ public partial class App : Application
                 }
             }
 
-            // Signed in but never switched on: say once that the phone can pick these up.
+            // Signed in but never switched on: offer remote control once.
             void OfferRemoteWork()
             {
                 if (!settings.IsLoggedIn || !settings.ShowAccountFeatures || remoteWorkSettings.IsEnabled) return;
@@ -313,8 +313,8 @@ public partial class App : Application
                 {
                     Key = "remote-hint",
                     Kind = NotifyKind.Info,
-                    Title = "在手机上继续对话",
-                    Body = "开启远程控制后，用同一账号登录的手机可以继续本机的 Work 和 BYOK 对话。",
+                    Title = "在手机或网页端继续对话",
+                    Body = "开启后，可在手机或网页端通过同一账号继续本机的 Work 和 BYOK 对话。",
                     ActionText = "去开启",
                     Action = () => window.OpenAgentSettings(),
                     Sticky = true

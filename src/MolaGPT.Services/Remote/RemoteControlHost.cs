@@ -186,6 +186,8 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             if (e.PropertyName is nameof(ComposerViewModel.EnableNetwork) or nameof(ComposerViewModel.EnableThinking)
                 or nameof(ComposerViewModel.ReasoningEffort))
                 PushSettingsOnScreen();
+            // The approval mode is one for the whole app, so every watched conversation hears it.
+            if (e.PropertyName == nameof(ComposerViewModel.ApprovalMode)) PushSettingsToAll();
         };
         _chat.PropertyChanged += (_, e) =>
         {
@@ -352,7 +354,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
     private JsonObject HandleAccountPair(JsonObject args)
     {
         var phoneKey = Text(args, "pub") ?? throw new RemoteError("bad_request", "缺少配对数据");
-        var device = Text(args, "device") is { Length: > 0 } name ? name[..Math.Min(name.Length, 60)] : "手机";
+        var device = Text(args, "device") is { Length: > 0 } name ? name[..Math.Min(name.Length, 60)] : "远程设备";
         var deviceId = Text(args, "deviceId");
 
         string desktopKey;
@@ -641,7 +643,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             else if (sessionPairId is null && op == "pair")
             {
                 // Codes typed at this desk pair over the anonymous link now.
-                throw new RemoteError("no_pairing", "请更新手机端后重新配对");
+                throw new RemoteError("no_pairing", "请更新客户端后重新配对");
             }
             else
             {
@@ -667,6 +669,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
                     "approve" => (Approve(args), null),
                     "models" => (await ModelsAsync().ConfigureAwait(false), null),
                     "configure" => (await ConfigureAsync(args).ConfigureAwait(false), null),
+                    "approval_mode" => (await ApprovalModeAsync(args).ConfigureAwait(false), null),
                     _ => throw new RemoteError("unknown_op", "电脑端版本不支持此操作，请更新")
                 };
             }
@@ -854,7 +857,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             var row = stored?.Row ?? _conversations.Get(conversationId);
             if (row is not { DeletedAt: null }) throw new RemoteError("not_found", "对话不存在");
             var readOnly = stored is null ? "对话模型不可用"
-                : stored.Provider is not PiWorkProvider ? "此对话不支持手机端操作"
+                : stored.Provider is not PiWorkProvider ? "此对话不支持远程操作"
                 : stored.IsAtmosphereMode ? "角色扮演对话仅支持在电脑端继续"
                 : null;
             var busy = _composer.IsConversationBusy(conversationId);
@@ -1198,7 +1201,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             throw new RemoteError("bad_request", "缺少文件摘要");
         if (size <= 0) throw new RemoteError("empty", $"{name} 是空文件");
         if (size > MaxUploadBytes)
-            throw new RemoteError("too_large", $"{name} 超过 {MaxUploadBytes / 1024 / 1024} MB，无法从手机发送");
+            throw new RemoteError("too_large", $"{name} 超过 {MaxUploadBytes / 1024 / 1024} MB，无法远程发送");
 
         // A conversation still being drafted is described by the model the phone picked.
         var draft = _conversations.Get(conversationId) is null
@@ -1352,7 +1355,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
                 : _composer.DescribeNewRemoteConversation(Text(draft, "providerId"), Text(draft, "modelId"), Text(draft, "personaId"));
             return Task.CompletedTask;
         }).ConfigureAwait(false);
-        return settings ?? throw new RemoteError("unsupported", "此对话不支持手机端操作");
+        return settings ?? throw new RemoteError("unsupported", "此对话不支持远程操作");
     }
 
     private static JsonObject StagedJson(Upload upload, Attachment attachment) => new()
@@ -1527,7 +1530,63 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
         catch (Exception ex) { Log($"settings: {ex.Message}"); }
     }
 
-    private static JsonObject? SettingsJson(RemoteConversationSettings? settings) => settings is null ? null : new JsonObject
+    /// <summary>Runs on the UI thread.</summary>
+    private void PushSettingsToAll()
+    {
+        List<string> watched;
+        lock (_gate) watched = _subscriptions.Values.SelectMany(mine => mine.Keys).Distinct(StringComparer.Ordinal).ToList();
+        foreach (var conversationId in watched)
+        {
+            try
+            {
+                if (SettingsJson(_composer.DescribeRemoteSettings(conversationId)) is { } settings)
+                    Push(conversationId, "settings", settings);
+            }
+            catch (Exception ex) { Log($"settings: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>
+    /// Sets the app-wide approval mode, as the composer's mode menu does. Full access is
+    /// confirmed on the phone before it is sent; automatic review needs a review model.
+    /// </summary>
+    private async Task<JsonObject> ApprovalModeAsync(JsonObject args)
+    {
+        var mode = Text(args, "mode") switch
+        {
+            "approval" => ToolPermissionMode.Approval,
+            "auto" => ToolPermissionMode.AutoReview,
+            "full" => ToolPermissionMode.FullAccess,
+            _ => throw new RemoteError("bad_request", "未知的审批模式")
+        };
+        JsonObject? approval = null;
+        await _onUi(() =>
+        {
+            if (mode == ToolPermissionMode.AutoReview && !_composer.IsAutoReviewSelectable)
+                throw new RemoteError("no_reviewer", _composer.ReviewModelMissingText);
+            _composer.SetApprovalMode(mode);
+            approval = ApprovalJson(visible: true);
+            return Task.CompletedTask;
+        }).ConfigureAwait(false);
+        Log($"approval mode {mode} by remote");
+        return new JsonObject { ["approval"] = approval };
+    }
+
+    private JsonObject ApprovalJson(bool visible) => new()
+    {
+        ["visible"] = visible,
+        ["mode"] = _composer.ApprovalMode switch
+        {
+            ToolPermissionMode.FullAccess => "full",
+            ToolPermissionMode.AutoReview => "auto",
+            _ => "approval"
+        },
+        ["reviewModel"] = _composer.ReviewModelLabel,
+        ["reviewMissing"] = _composer.IsReviewModelMissing ? _composer.ReviewModelMissingText : null,
+        ["autoSelectable"] = _composer.IsAutoReviewSelectable
+    };
+
+    private JsonObject? SettingsJson(RemoteConversationSettings? settings) => settings is null ? null : new JsonObject
     {
         ["providerId"] = settings.Provider.Id,
         ["modelId"] = settings.Model.Id,
@@ -1546,7 +1605,9 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
         {
             ["images"] = settings.AcceptsImages,
             ["files"] = settings.AcceptsOpaqueFiles
-        }
+        },
+        // Local tools, and so approvals, only run for models that call tools.
+        ["approval"] = ApprovalJson(settings.Model.SupportsToolCalling)
     };
 
     private static string Family(IChatProvider provider) =>

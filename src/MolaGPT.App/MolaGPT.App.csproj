@@ -23,6 +23,12 @@
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <Platforms>AnyCPU;x64</Platforms>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <!-- Since .NET 8 a RID no longer implies self-contained, so a bare
+         `dotnet publish -r win-x64` produced a build that only starts on a
+         machine with .NET 10 installed; everyone else got Windows' "install
+         .NET" dialog after setup. Any RID-specific publish now carries the
+         runtime, and installer/MolaGPT.iss refuses a folder that does not. -->
+    <SelfContained Condition="'$(RuntimeIdentifier)' != ''">true</SelfContained>
     <NoWarn>$(NoWarn);NU1608</NoWarn>
   </PropertyGroup>
 

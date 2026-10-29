@@ -170,7 +170,7 @@
                   </Grid>
                 </ListBoxItem>
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="常规" />
-                <!-- 紧跟账号：手机远控走账号配对，是这台电脑之外最常用的入口。 -->
+                <!-- 紧跟账号：同账号远控入口。 -->
                 <ListBoxItem Name="PART_AgentNav" Content="远程控制" Tag="PAGE_Agent" />
                 <ListBoxItem Name="PART_AppearanceNav" Tag="PAGE_Appearance" AutomationProperties.Name="外观">
                   <StackPanel Orientation="Horizontal" Spacing="7">
@@ -2642,7 +2642,7 @@
                 <Grid ColumnDefinitions="*,Auto">
                   <StackPanel Grid.Column="0">
                     <TextBlock Classes="pagetitle" Text="远程控制" />
-                    <TextBlock Classes="pagesubtitle" Text="在手机端查看和控制本机对话及 Agent 会话。" />
+                    <TextBlock Classes="pagesubtitle" Text="在手机或网页端继续本机的 MolaGPT 对话。" />
                   </StackPanel>
                   <Button Grid.Column="1"
                           Classes="outline"
@@ -2661,7 +2661,7 @@
                     <StackPanel>
                       <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                         <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
-                          <TextBlock Classes="rowtitle" Text="允许手机控制对话" />
+                          <TextBlock Classes="rowtitle" Text="允许远程控制对话" />
                           <TextBlock Classes="hint" Text="{Binding StatusText}" />
                         </StackPanel>
                         <Button Grid.Column="1"
@@ -2676,7 +2676,7 @@
                         <Border Classes="divider" />
                         <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                           <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
-                            <TextBlock Classes="rowtitle" Text="已配对手机" />
+                            <TextBlock Classes="rowtitle" Text="已配对设备" />
                             <TextBlock Classes="hint" Text="暂无" IsVisible="{Binding !HasPhones}" />
                             <TextBlock Classes="hint"
                                        Text="{Binding Error}"
@@ -2688,7 +2688,7 @@
                                   VerticalAlignment="Center"
                                   IsEnabled="{Binding CanBeginPairing}"
                                   Command="{Binding BeginPairingCommand}"
-                                  Content="配对新手机" />
+                                  Content="使用配对码" />
                         </Grid>
 
                         <StackPanel IsVisible="{Binding IsPairing}">
@@ -2718,7 +2718,7 @@
                             <StackPanel Grid.Column="0" Margin="0,0,20,0">
                               <TextBlock Classes="rowtitle"
                                          Text="{Binding ConfirmName, StringFormat='「{0}」请求配对'}" />
-                              <TextBlock Classes="hint" Text="确认与手机上的校验码一致" />
+                              <TextBlock Classes="hint" Text="确认与另一端的校验码一致" />
                               <SelectableTextBlock Margin="0,6,0,0"
                                                    FontSize="28"
                                                    FontWeight="SemiBold"

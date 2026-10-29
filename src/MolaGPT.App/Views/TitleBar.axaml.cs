@@ -181,7 +181,7 @@ public partial class TitleBar : UserControl
     public void SetRemotePhoneConnected(bool connected)
     {
         PART_RemoteDot.IsVisible = connected;
-        ToolTip.SetTip(PART_AgentStatus, connected ? "远程控制 · 手机已连接" : "远程控制");
+        ToolTip.SetTip(PART_AgentStatus, connected ? "远程控制 · 设备已连接" : "远程控制");
     }
 
     public void SetAccountState(bool loggedIn, string? username)
