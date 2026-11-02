@@ -28,6 +28,7 @@ public sealed class ChatToolHost : IChatToolHost
     private readonly IApprovalModeSource? _modeSource;
     private readonly IToolGrantStore? _grants;
     private readonly IToolAutoReviewer? _reviewer;
+    private readonly MolaAccountSearchClient? _accountSearch;
 
     /// <summary>Each turn's tool calls so far, which automatic review reads as
     /// background. Keyed by the turn's request, so a record goes with its turn.</summary>
@@ -47,8 +48,10 @@ public sealed class ChatToolHost : IChatToolHost
         ISubagentRunner? subagents = null,
         IApprovalModeSource? modeSource = null,
         IToolGrantStore? grants = null,
-        IToolAutoReviewer? reviewer = null)
+        IToolAutoReviewer? reviewer = null,
+        MolaAccountSearchClient? accountSearch = null)
     {
+        _accountSearch = accountSearch;
         _memory = memory;
         _tasks = tasks;
         _subagents = subagents;
@@ -200,7 +203,7 @@ public sealed class ChatToolHost : IChatToolHost
             if (context.LocalHttpClient is null)
                 return ToolError("Local HTTP client is unavailable.");
             return await LocalToolRegistry.ExecuteAsync(
-                toolName, argumentsJson, options, context.LocalHttpClient, ct).ConfigureAwait(false);
+                toolName, argumentsJson, options, context.LocalHttpClient, ct, _accountSearch).ConfigureAwait(false);
         }
 
         if (string.Equals(toolName, VisionProxyTool.ToolName, StringComparison.Ordinal))

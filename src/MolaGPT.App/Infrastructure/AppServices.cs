@@ -347,6 +347,11 @@ internal static class AppServices
             () => new OneShotCompletionClient(
                 sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok)),
             sp.GetRequiredService<PersonaListViewModel>()));
+        // MolaGPT's built-in search for signed-in accounts; goes through the MolaGPT client
+        // so it carries the same User-Agent and device cookie as the rest of the account's traffic.
+        services.AddSingleton(sp => new MolaAccountSearchClient(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredService<MolaGptAuthService>()));
         services.AddSingleton<IChatToolHost, ChatToolHost>();
 
         // ---- view models ---------------------------------------------------

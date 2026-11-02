@@ -254,7 +254,13 @@ public sealed class MolaGptProxyProvider : IChatProvider
                 // object is a different thing — a window with nothing spent in it.
                 WindowDays: (int)(ParseDouble(cr["window_days"]) ?? 1),
                 RecoversAt: cr["recovers_at"]?.GetValue<string>(),
-                ByModelTokens: cr["by_model_tokens"] is JsonObject bmt ? ParseIntDict(bmt) : null);
+                ByModelTokens: cr["by_model_tokens"] is JsonObject bmt ? ParseIntDict(bmt) : null,
+                WebSearch: cr["web_search"] is JsonObject ws && ws["name"]?.GetValue<string>() is { Length: > 0 } wsName
+                    ? new MolaGptWebSearchUsage(
+                        wsName,
+                        (int)(ParseDouble(ws["calls"]) ?? 0),
+                        ParseDouble(ws["uses"]) is { } wsUses ? (int)wsUses : null)
+                    : null);
         }
 
         // Per-model limits live under user.limits OR config.registered_user_limits
@@ -450,6 +456,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
             ["use_thinking"] = request.UseThinking ?? false,
             ["reasoning_effort"] = request.ReasoningEffort ?? "medium",
             ["enabled_tools"] = enabledTools,
+            ["client_features"] = new { subagents = 1 },
             ["privacy_mode"] = false
         };
         // Unlike the BYOK providers this path keeps privacy_mode: it is MolaGPT's
@@ -501,6 +508,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         var thinkSplitter = new InlineThinkSplitter();
         var toolSynthesizer = new ToolCallContentSynthesizer();
         var responseMapper = new ResponseStreamEventMapper();
+        string? turnFinishReason = null;
 
         await foreach (var ev in SseStreamReader.ReadAsync(stream, ct))
         {
@@ -516,7 +524,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
                     yield return new ChatChunk(
                         DeltaText: string.IsNullOrEmpty(tail.Visible) ? null : tail.Visible,
                         DeltaThinking: string.IsNullOrEmpty(tail.Thinking) ? null : tail.Thinking,
-                        FinishReason: "stop");
+                        Usage: null);
+                yield return new ChatChunk(FinishReason: turnFinishReason ?? "stop");
                 yield break;
             }
             if (string.IsNullOrEmpty(ev.Data)) continue;
@@ -528,6 +537,10 @@ public sealed class MolaGptProxyProvider : IChatProvider
                 var root = doc.RootElement;
                 if (ChatApiErrorHelper.TryExtractStreamingError(root, out var streamError))
                     throw new InvalidOperationException(streamError);
+                if (root.TryGetProperty("molagpt_subagents", out var subagents))
+                {
+                    chunk = new ChatChunk(Subagents: JsonNode.Parse(subagents.GetRawText())!.AsObject(), RawJson: ev.Data);
+                }
                 if (TryParseSources(root, out var sources))
                 {
                     chunk = new ChatChunk(Sources: sources, RawJson: ev.Data);
@@ -563,6 +576,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
                             // cross-channel de-duplication.
                             string? thinking = ReasoningExtractor.Extract(delta);
                             string? finish = choice.TryGetProperty("finish_reason", out var f) && f.ValueKind == JsonValueKind.String ? f.GetString() : null;
+                            if (finish is not null && finish != "tool_calls") turnFinishReason = finish;
                             var finalizeToolUi = finish == "tool_calls" || (toolSynthesizer.HasOpenBlocks && (!string.IsNullOrEmpty(text) || !string.IsNullOrEmpty(thinking)));
                             if (finalizeToolUi)
                             {
@@ -582,7 +596,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
                                     thinking = string.IsNullOrEmpty(thinking) ? split.Thinking : thinking + split.Thinking;
                             }
 
-                            chunk = new ChatChunk(DeltaText: text, DeltaThinking: thinking, FinishReason: finish, Usage: TryParseUsage(root), RawJson: ev.Data);
+                            chunk = new ChatChunk(DeltaText: text, DeltaThinking: thinking, Usage: TryParseUsage(root), RawJson: ev.Data);
                         }
                     }
                 }
@@ -1163,6 +1177,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         var thinkSplitter = new InlineThinkSplitter();
         var toolSynthesizer = new ToolCallContentSynthesizer();
         var responseMapper = new ResponseStreamEventMapper();
+        string? turnFinishReason = null;
 
         await foreach (var ev in SseStreamReader.ReadAsync(stream, ct))
         {
@@ -1176,7 +1191,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
                     yield return new ChatChunk(
                         DeltaText: string.IsNullOrEmpty(tail.Visible) ? null : tail.Visible,
                         DeltaThinking: string.IsNullOrEmpty(tail.Thinking) ? null : tail.Thinking,
-                        FinishReason: "stop");
+                        Usage: null);
+                yield return new ChatChunk(FinishReason: turnFinishReason ?? "stop");
                 yield break;
             }
             if (string.IsNullOrEmpty(ev.Data)) continue;
@@ -1188,6 +1204,10 @@ public sealed class MolaGptProxyProvider : IChatProvider
                 var root = doc.RootElement;
                 if (ChatApiErrorHelper.TryExtractStreamingError(root, out var streamError))
                     throw new InvalidOperationException(streamError);
+                if (root.TryGetProperty("molagpt_subagents", out var subagents))
+                {
+                    chunk = new ChatChunk(Subagents: JsonNode.Parse(subagents.GetRawText())!.AsObject(), RawJson: ev.Data);
+                }
                 if (TryParseSources(root, out var sources))
                     chunk = new ChatChunk(Sources: sources, RawJson: ev.Data);
                 if (responseMapper.TryMap(root, out var responseText, out var responseThinking))
@@ -1218,6 +1238,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
                             string? text = ExtractContentText(delta);
                             string? thinking = ReasoningExtractor.Extract(delta);
                             string? finish = choice.TryGetProperty("finish_reason", out var f) && f.ValueKind == JsonValueKind.String ? f.GetString() : null;
+                            if (finish is not null && finish != "tool_calls") turnFinishReason = finish;
                             var finalizeToolUi = finish == "tool_calls" || (toolSynthesizer.HasOpenBlocks && (!string.IsNullOrEmpty(text) || !string.IsNullOrEmpty(thinking)));
                             if (finalizeToolUi)
                             {
@@ -1232,7 +1253,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
                                 if (!string.IsNullOrEmpty(split.Thinking))
                                     thinking = string.IsNullOrEmpty(thinking) ? split.Thinking : thinking + split.Thinking;
                             }
-                            chunk = new ChatChunk(DeltaText: text, DeltaThinking: thinking, FinishReason: finish, Usage: TryParseUsage(root), RawJson: ev.Data);
+                            chunk = new ChatChunk(DeltaText: text, DeltaThinking: thinking, Usage: TryParseUsage(root), RawJson: ev.Data);
                         }
                     }
                 }
@@ -1294,12 +1315,12 @@ public sealed class MolaGptProxyProvider : IChatProvider
             }
         }
 
-        if (string.IsNullOrEmpty(text)
-            && root.TryGetProperty("raw_sse", out var rawNode)
+        if (root.TryGetProperty("raw_sse", out var rawNode)
             && rawNode.ValueKind == JsonValueKind.String)
         {
-            return await ParseCompletedRawSseAsync(rawNode.GetString() ?? string.Empty, sources, ct)
+            var parsed = await ParseCompletedRawSseAsync(rawNode.GetString() ?? string.Empty, sources, ct)
                 .ConfigureAwait(false);
+            return parsed with { Text = string.IsNullOrEmpty(parsed.Text) ? text : parsed.Text };
         }
 
         return new CompletedStreamData(text, sources);
@@ -1312,6 +1333,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
     {
         var text = new StringBuilder();
         IReadOnlyList<SourceReference>? sources = fallbackSources;
+        JsonObject? subagentBatches = null;
         await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(rawSse));
         var thinkSplitter = new InlineThinkSplitter();
         var toolSynthesizer = new ToolCallContentSynthesizer();
@@ -1333,6 +1355,11 @@ public sealed class MolaGptProxyProvider : IChatProvider
             {
                 using var doc = JsonDocument.Parse(ev.Data);
                 var root = doc.RootElement;
+                if (root.TryGetProperty("molagpt_subagents", out var frame))
+                {
+                    subagentBatches = ServerSubagents.Merge(subagentBatches, JsonNode.Parse(frame.GetRawText())!.AsObject());
+                    continue;
+                }
                 if (TryParseSources(root, out var parsedSources))
                 {
                     sources = parsedSources;
@@ -1387,7 +1414,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         AppendVisibleText(text, toolSynthesizer.FinalizeOpenBlocks());
         var finalTail = thinkSplitter.Flush();
         AppendVisibleText(text, finalTail.Visible);
-        return new CompletedStreamData(text.ToString(), sources);
+        return new CompletedStreamData(text.ToString(), sources, ServerSubagents.Finish(subagentBatches));
     }
 
     private static void AppendVisibleText(StringBuilder builder, string? value)
@@ -1398,7 +1425,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
 }
 
 public sealed record StreamSessionStatus(string Status, int ChunksCount, long TotalBytes);
-public sealed record CompletedStreamData(string Text, IReadOnlyList<SourceReference>? Sources);
+public sealed record CompletedStreamData(string Text, IReadOnlyList<SourceReference>? Sources, JsonObject? Subagents = null);
 public sealed record MolaGptPreparedAttachments(IReadOnlyList<Attachment> Attachments, string? SystemHint);
 internal sealed record MolaGptUploadResult(string FileName, string? Url, string FilePathOnHost);
 internal sealed record MolaGptSandboxEntry(string TypeLabel, string FileName, string SandboxPath, string? Url);
@@ -1454,6 +1481,14 @@ public sealed record MolaGptModelStatus(
 }
 
 /// <summary>
+/// MolaGPT Web Search draws from the same pool as the models but is not one, so it
+/// has no entry in the per-model limits. <paramref name="Uses"/> is how many more
+/// calls the balance buys (null when searches are free); <paramref name="Calls"/>
+/// is what this window has already spent. Points themselves are never exposed.
+/// </summary>
+public sealed record MolaGptWebSearchUsage(string Name, int Calls, int? Uses);
+
+/// <summary>
 /// The shared credit pool that replaced the per-model request/token quotas.
 /// Every model draws from the same balance, so switching models does not
 /// restore anything — the only per-model difference is the burn rate
@@ -1479,7 +1514,8 @@ public sealed record MolaGptCredits(
     int BaseTokensPerCredit,
     int WindowDays = 1,
     string? RecoversAt = null,
-    IReadOnlyDictionary<string, int>? ByModelTokens = null)
+    IReadOnlyDictionary<string, int>? ByModelTokens = null,
+    MolaGptWebSearchUsage? WebSearch = null)
 {
     public bool Exhausted => Remaining <= 0;
 

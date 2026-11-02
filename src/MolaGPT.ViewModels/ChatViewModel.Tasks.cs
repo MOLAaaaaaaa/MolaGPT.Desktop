@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Chat;
@@ -130,6 +131,7 @@ public sealed partial class ChatViewModel
     {
         ConversationTasks.Clear();
         RefreshSubagents();
+        RefreshServerSubagents();
         if (_tasks is not null && !string.IsNullOrEmpty(ConversationId))
         {
             foreach (var task in _tasks.List(ConversationId!).Where(t => t.IsRunning))
@@ -143,7 +145,7 @@ public sealed partial class ChatViewModel
     {
         var agents = _tasks is not null && !string.IsNullOrEmpty(ConversationId)
             ? _tasks.ListAgents(ConversationId!) : [];
-        foreach (var item in Subagents.Where(item => agents.All(agent => agent.Id != item.Id)).ToArray())
+        foreach (var item in Subagents.Where(item => !item.IsServer && agents.All(agent => agent.Id != item.Id)).ToArray())
         {
             item.Dispose();
             Subagents.Remove(item);
@@ -163,6 +165,37 @@ public sealed partial class ChatViewModel
             else
                 item.UpdateTask(agent.LatestTaskId is { } taskId ? _tasks!.Find(ConversationId!, taskId) : null);
         }
+    }
+
+    public void RefreshServerSubagents()
+    {
+        var current = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        var snapshots = _pendingOlderMessages.Select(message => message.Subagents)
+            .Concat(Messages.Select(message => message.ServerSubagents));
+        foreach (var snapshot in snapshots)
+            if (snapshot is { } batches)
+                foreach (var batch in batches)
+                    foreach (var agent in batch.Value!.AsArray().OfType<JsonObject>())
+                        current["server:" + batch.Key + ":" + ServerSubagents.Text(agent, "id")] = agent;
+        foreach (var item in Subagents.Where(item => item.IsServer && !current.ContainsKey(item.Id)).ToArray())
+        {
+            item.Dispose();
+            Subagents.Remove(item);
+        }
+        foreach (var (id, agent) in current)
+        {
+            var item = Subagents.FirstOrDefault(item => item.Id == id);
+            if (item is null) Subagents.Add(new SubagentViewModel(id, agent));
+            else item.UpdateServer(agent);
+        }
+        UpdateTaskClock();
+    }
+
+    public void InspectServerSubagent(string batch)
+    {
+        RefreshServerSubagents();
+        var agent = Subagents.FirstOrDefault(item => item.Id.StartsWith("server:" + batch + ":", StringComparison.Ordinal));
+        if (agent is not null) SubagentInspectRequested?.Invoke(agent.Id);
     }
 
     private void RestoreSubagents(string conversationId, IReadOnlyList<PreparedMessage> messages, string? providerId)
@@ -278,7 +311,7 @@ public sealed partial class ChatViewModel
 
     private void UpdateTaskClock()
     {
-        if (ConversationTasks.Count == 0)
+        if (ConversationTasks.Count == 0 && !Subagents.Any(a => a.IsRunning))
         {
             _taskClock?.Dispose();
             _taskClock = null;

@@ -56,6 +56,7 @@ public partial class SettingsWindow : MolaContentWindow
     private readonly Func<HttpClient>? _byokHttpFactory;
     private readonly ProviderRegistry? _providerRegistry;
     private readonly IChatToolHost? _toolHost;
+    private readonly MolaAccountSearchClient? _accountSearch;
     private readonly PiByokProviderFactory? _piByokProviderFactory;
     private readonly Func<Task>? _agentRuntimeInstalled;
     private readonly Action? _agentRuntimeRemoving;
@@ -177,8 +178,10 @@ public partial class SettingsWindow : MolaContentWindow
         MemoryPageViewModel? memoryPage = null,
         MolaGptProxyProvider? proxy = null,
         PythonRuntimeSetup? pythonSetup = null,
-        PersonalDataService? personalData = null)
+        PersonalDataService? personalData = null,
+        MolaAccountSearchClient? accountSearch = null)
     {
+        _accountSearch = accountSearch;
         _settings = settings;
         _accountEntryWasNew = !settings.AccountEntrySeen;
         _auth = auth;
@@ -377,6 +380,8 @@ public partial class SettingsWindow : MolaContentWindow
             }
             else if (args.PropertyName == nameof(SettingsViewModel.PythonToolExecutablePath))
                 RefreshPythonBrowseButton();
+            else if (args.PropertyName == nameof(SettingsViewModel.WebSearchProvider))
+                UpdateSearchStatusHint();
         };
         _settings.PropertyChanged += settingsChanged;
         Closed += (_, _) => _settings.PropertyChanged -= settingsChanged;
@@ -643,18 +648,13 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void BuildSearchProviderChoices()
     {
-        var ids = new[] { "duckduckgo", "tavily", "exa" };
-        PART_SearchProvider.ItemsSource = new[] { "DuckDuckGo（免密钥）", "Tavily", "Exa" };
-        PART_SearchProvider.SelectedIndex =
-            Math.Max(0, Array.IndexOf(ids, SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider)));
         UpdateSearchStatusHint();
 
         PART_SearchProvider.SelectionChanged += (_, _) =>
         {
-            if (PART_SearchProvider.SelectedIndex >= 0)
+            if (PART_SearchProvider.SelectedItem is ComboBoxItem { Tag: string provider })
             {
-                _settings.WebSearchProvider = ids[PART_SearchProvider.SelectedIndex];
-                UpdateSearchStatusHint();
+                _settings.WebSearchProvider = provider;
             }
         };
     }
@@ -797,24 +797,65 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void UpdateSearchStatusHint()
     {
-        PART_SearchProviderHint.Text = "DuckDuckGo 免费无需密钥；Tavily / Exa 需 API Key。";
-        PART_SearchStatus.Text = SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider) switch
+        var provider = SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider);
+        PART_SearchProvider.SelectedItem = PART_SearchProvider.Items.OfType<ComboBoxItem>()
+            .First(item => Equals(item.Tag, provider));
+        var maxResults = provider == "molagpt" ? 6 : 10;
+        PART_SearchMaxResults.Maximum = maxResults;
+        PART_SearchKeyRows.IsVisible = provider != "molagpt";
+        PART_SearchProviderHint.Text = provider switch
         {
-            "tavily" => "Tavily 使用其搜索 API；网页阅读由本机抓取。",
-            "exa" => "Exa 使用其搜索 API 并请求正文摘要；网页阅读由本机抓取。",
-            _ => "DuckDuckGo 无需 API Key，但稳定性与结果质量取决于页面可访问性。"
+            "molagpt" => "MolaGPT 提供的开箱即用的搜索服务，登录后可用。无需 API Key，将使用少量账户额度。",
+            "duckduckgo" => "免费使用，无需 API Key。",
+            _ => "使用自备 API Key。"
         };
+        PART_SearchStatus.Text = provider switch
+        {
+            "molagpt" => _accountSearch is { IsSignedIn: true } account
+                ? $"当前登录账号：{account.Username}"
+                : "请登录 MolaGPT 账号。",
+            _ => string.Empty
+        };
+    }
+
+    private async Task TestMolaSearchAsync()
+    {
+        if (_accountSearch is null || !_accountSearch.IsSignedIn)
+        {
+            PART_SearchStatus.Text = "请登录 MolaGPT 账号。";
+            return;
+        }
+
+        try
+        {
+            var response = await _accountSearch.SearchAsync(
+                [new MolaSearchQuery("MolaGPT", "general", null, null, false)], 1, 200, CancellationToken.None);
+            PART_SearchStatus.Text = response.Credits is { } credits
+                ? $"搜索可用 ，剩余 {credits.Remaining:0.#} 点"
+                : "搜索可用。";
+        }
+        catch (MolaSearchException ex)
+        {
+            PART_SearchStatus.Text = ex.Message;
+        }
     }
 
     private async void OnTestSearch(object? sender, RoutedEventArgs e)
     {
-        if (_byokHttpFactory is null) return;
+        var molaSearch = SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider) == "molagpt";
+        if (!molaSearch && _byokHttpFactory is null) return;
 
         PART_TestSearch.IsEnabled = false;
-        PART_TestSearch.Content = "测试中...";
-        PART_SearchStatus.Text = "正在发送一次测试搜索...";
+        PART_TestSearch.Content = "测试中…";
+        PART_SearchStatus.Text = "正在测试搜索…";
         try
         {
+            if (molaSearch)
+            {
+                await TestMolaSearchAsync();
+                return;
+            }
+
             var options = new LocalToolOptions(
                 Network: true,
                 WebPage: false,
@@ -823,23 +864,23 @@ public partial class SettingsWindow : MolaContentWindow
                 SearchBaseUrl: _settings.WebSearchBaseUrl,
                 SearchMaxResults: Math.Clamp(_settings.WebSearchMaxResults, 1, 10),
                 WebPageMaxCharacters: Math.Clamp(_settings.WebPageMaxCharacters, 1000, 30000));
-            using var http = _byokHttpFactory();
+            using var http = _byokHttpFactory!();
             var result = await LocalToolRegistry.ExecuteAsync(
                 "search_web", "{\"query\":\"MolaGPT\"}", options, http, CancellationToken.None);
             using var document = JsonDocument.Parse(result);
             var ok = document.RootElement.TryGetProperty("success", out var success)
                      && success.ValueKind == JsonValueKind.True;
             PART_SearchStatus.Text = ok
-                ? "连接成功，搜索服务可用。"
-                : "连接失败，请检查 API Key 或接入地址。";
+                ? "搜索可用。"
+                : "搜索不可用，请检查 API Key 或接口地址。";
         }
         catch (Exception ex)
         {
-            PART_SearchStatus.Text = "连接失败：" + ex.Message;
+            PART_SearchStatus.Text = "搜索失败：" + ex.Message;
         }
         finally
         {
-            PART_TestSearch.Content = "测试连接";
+            PART_TestSearch.Content = "测试搜索";
             PART_TestSearch.IsEnabled = true;
         }
     }

@@ -499,7 +499,8 @@ public static partial class MolaGptMarkupSplitter
             if (statusIndex < 0) continue;
 
             var status = units[statusIndex];
-            if (string.IsNullOrWhiteSpace(status.Inner)) continue;
+            if (string.IsNullOrWhiteSpace(status.Inner)
+                || status.Tag?.Contains("tool-subagent-blockquote", StringComparison.OrdinalIgnoreCase) == true) continue;
 
             units[i] = units[i] with { StatusText = status.Inner };
             units.RemoveAt(statusIndex);

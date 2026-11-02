@@ -206,7 +206,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private bool _enableCompletionNotification = true;
     [ObservableProperty] private bool _enableTrayIcon;
     [ObservableProperty] private TrayCloseBehavior _trayCloseBehavior = TrayCloseBehavior.Ask;
-    [ObservableProperty] private string _webSearchProvider = "duckduckgo";
+    [ObservableProperty] private string _webSearchProvider = "molagpt";
     [ObservableProperty] private string? _webSearchBaseUrl;
     [ObservableProperty] private string? _webSearchApiKey;
     [ObservableProperty] private int _webSearchMaxResults = 6;
@@ -315,11 +315,12 @@ public sealed partial class SettingsViewModel : ObservableObject
             var ui = SynchronizationContext.Current;
             providerRegistry.Changed += (_, _) =>
             {
-                if (ui is null || SynchronizationContext.Current == ui) RefreshReviewProviderModels();
-                else ui.Post(_ => RefreshReviewProviderModels(), null);
+                if (ui is null || SynchronizationContext.Current == ui) { RefreshReviewProviderModels(); RefreshSelectionModels(); }
+                else ui.Post(_ => { RefreshReviewProviderModels(); RefreshSelectionModels(); }, null);
             };
         }
         Reload();
+        PropertyChanged += PersistSelectionSetting;
     }
 
     public void Reload()
@@ -353,6 +354,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         RefreshTitleProviderModels();
         RefreshSubagentProviderModels();
         RefreshReviewProviderModels();
+        RefreshSelectionModels();
         RefreshMemoryProviderModels();
         RefreshVisionProviderModels();
         RefreshImageGenerationProviderModels();
@@ -402,6 +404,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             LoadResponsePostProcessing();
             LoadMemorySettings();
             LoadAutoReviewSettings();
+            LoadSelectionSettings();
             if (bool.TryParse(_settingsRepo.Get(TracksEnabledKey), out var tracksEnabled))
                 TracksEnabled = tracksEnabled;
             if (bool.TryParse(_settingsRepo.Get(CompletionNotificationKey), out var completionNotification))
@@ -427,10 +430,10 @@ public sealed partial class SettingsViewModel : ObservableObject
             {
                 CornerStyle = cornerStyle;
             }
-            WebSearchProvider = _settingsRepo.Get(WebSearchProviderKey) ?? "duckduckgo";
+            WebSearchProvider = NormalizeWebSearchProvider(_settingsRepo.Get(WebSearchProviderKey));
             WebSearchBaseUrl = _settingsRepo.Get(WebSearchBaseUrlKey) ?? DefaultWebSearchBaseUrl(WebSearchProvider);
             if (int.TryParse(_settingsRepo.Get(WebSearchMaxResultsKey), out var maxResults))
-                WebSearchMaxResults = Math.Clamp(maxResults, 1, 10);
+                WebSearchMaxResults = Math.Clamp(maxResults, 1, WebSearchProvider == "molagpt" ? 6 : 10);
             if (int.TryParse(_settingsRepo.Get(WebPageMaxCharactersKey), out var maxChars))
                 WebPageMaxCharacters = Math.Clamp(maxChars, 1000, 30000);
             AutoTitleEnabled = !bool.TryParse(
@@ -700,6 +703,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         var provider = NormalizeWebSearchProvider(value);
+        WebSearchMaxResults = Math.Clamp(WebSearchMaxResults, 1, provider == "molagpt" ? 6 : 10);
         _settingsRepo.Set(WebSearchProviderKey, provider);
         WebSearchBaseUrl = DefaultWebSearchBaseUrl(provider);
         WebSearchApiKey = _credentialStore?.LoadSecret(WebSearchSecretPrefix + provider);
@@ -727,7 +731,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     partial void OnWebSearchMaxResultsChanged(int value)
     {
         if (_loadingSettings || _settingsRepo is null) return;
-        WebSearchMaxResults = Math.Clamp(value, 1, 10);
+        WebSearchMaxResults = Math.Clamp(value, 1, NormalizeWebSearchProvider(WebSearchProvider) == "molagpt" ? 6 : 10);
         _settingsRepo.Set(WebSearchMaxResultsKey, WebSearchMaxResults.ToString());
     }
 
@@ -998,11 +1002,14 @@ public sealed partial class SettingsViewModel : ObservableObject
         SetOrRemove(PythonToolDeniedPathPrefixesKey, value);
     }
 
+    /// <summary>An unset provider means MolaGPT's built-in search; only a name that is
+    /// no longer offered falls back to DuckDuckGo, the one that needs nothing.</summary>
     public static string NormalizeWebSearchProvider(string? provider) =>
         string.IsNullOrWhiteSpace(provider)
-            ? "duckduckgo"
+            ? "molagpt"
             : provider.Trim().ToLowerInvariant() switch
             {
+                "molagpt" => "molagpt",
                 "tavily" => "tavily",
                 "exa" => "exa",
                 _ => "duckduckgo"
@@ -1045,6 +1052,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         RefreshTitleProviderModels();
         RefreshSubagentProviderModels();
         RefreshReviewProviderModels();
+        RefreshSelectionModels();
         RefreshMemoryProviderModels();
         RefreshImageGenerationProviderModels();
 
@@ -1417,6 +1425,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         RefreshTitleProviderModels();
         RefreshSubagentProviderModels();
         RefreshReviewProviderModels();
+        RefreshSelectionModels();
         RefreshMemoryProviderModels();
         RefreshImageGenerationProviderModels();
 

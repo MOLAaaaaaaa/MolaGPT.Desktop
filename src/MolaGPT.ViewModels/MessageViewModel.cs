@@ -93,6 +93,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string? _providerLabel;
     [ObservableProperty] private Usage? _usage;
     [ObservableProperty] private IReadOnlyList<SourceReference>? _sources;
+    [ObservableProperty] private JsonObject? _serverSubagents;
     [ObservableProperty] private IReadOnlyList<AttachmentChip>? _attachments;
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasArtifactRefs))]
@@ -899,6 +900,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         ThinkingElapsedSeconds = 0;
         Usage = null;
         Sources = null;
+        ServerSubagents = null;
         RetryAttempts = attempts;
         RetryCurrentIndex = attempts.Count - 1;
     }
@@ -917,6 +919,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         BeginRetryAttempt();
         Content = previous.Content;
         Thinking = previous.Thinking;
+        ServerSubagents = (JsonObject?)previous.Subagents?.DeepClone();
         if (previous.ToolCalls is not null)
             foreach (var tool in previous.ToolCalls) ApplyToolDelta(tool);
         if (previous.ThinkingSegments is not null) RestoreThinkingSegments(previous.ThinkingSegments);
@@ -968,7 +971,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             GenerationSeconds,
             PersonaId,
             PersonaName,
-            FinishReason);
+            FinishReason, (JsonObject?)ServerSubagents?.DeepClone());
     }
 
     [RelayCommand(CanExecute = nameof(CanPreviousAttempt))]
@@ -1011,6 +1014,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         PersonaName = attempt.PersonaName;
         Usage = attempt.Usage;
         Sources = attempt.Sources;
+        ServerSubagents = (JsonObject?)attempt.Subagents?.DeepClone();
         WasStopped = attempt.WasStopped;
         FinishReason = attempt.FinishReason;
         if (attempt.ToolCalls is { Count: > 0 })
@@ -1529,7 +1533,8 @@ public sealed record MessageAttempt(
     double? GenerationSeconds = null,
     string? PersonaId = null,
     string? PersonaName = null,
-    string? FinishReason = null);
+    string? FinishReason = null,
+    JsonObject? Subagents = null);
 /// <summary>
 /// Lightweight representation of a sent attachment, kept on the message
 /// view-model after the original <see cref="MolaGPT.Core.Models.Attachment"/>

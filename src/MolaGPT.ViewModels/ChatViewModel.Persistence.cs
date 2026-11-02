@@ -33,7 +33,7 @@ public sealed partial class ChatViewModel
     private static MessagePersistenceSnapshot CapturePersistenceSnapshot(MessageViewModel vm)
     {
         var current = vm.CaptureRetryAttempt(includePendingThinking: true);
-        current = current with { Sources = current.Sources?.ToArray() };
+        current = current with { Sources = current.Sources?.ToArray(), Subagents = (JsonObject?)current.Subagents?.DeepClone() };
         return new MessagePersistenceSnapshot(
             current,
             vm.ProviderLabel,
@@ -76,6 +76,7 @@ public sealed partial class ChatViewModel
         if (!string.IsNullOrWhiteSpace(snapshot.CompactionReason))
             meta["compaction_reason"] = snapshot.CompactionReason;
 
+        if (current.Subagents is not null) meta["subagents"] = current.Subagents.DeepClone();
         if (current.Sources is { Count: > 0 })
             meta["sources"] = BuildSourcesJson(current.Sources);
         if (snapshot.ArtifactRefs is { Count: > 0 })
@@ -186,6 +187,7 @@ public sealed partial class ChatViewModel
     private static MessageAttempt CloneAttempt(MessageAttempt attempt) => attempt with
     {
         Sources = attempt.Sources?.ToArray(),
+        Subagents = (JsonObject?)attempt.Subagents?.DeepClone(),
         ThinkingSegments = attempt.ThinkingSegments?.ToArray(),
         ToolCalls = attempt.ToolCalls?.ToArray()
     };

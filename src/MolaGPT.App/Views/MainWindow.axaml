@@ -321,7 +321,7 @@
                             </StackPanel>
                           </Border>
                         </Grid>
-                        <TextBlock Text="{Binding Model}" Classes="muted" FontSize="11"
+                        <TextBlock Text="{Binding Subtitle}" Classes="muted" FontSize="11"
                                    TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                         <TextBlock Text="{Binding CurrentAction}" Classes="muted" FontSize="11"
                                    TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
@@ -361,7 +361,7 @@
                 </StackPanel>
                 <Button Grid.Column="2" Classes="toolchip" Content="停止"
                         Command="{Binding SelectedSubagent.StopCommand}"
-                        IsVisible="{Binding SelectedSubagent.IsRunning}" />
+                        IsVisible="{Binding SelectedSubagent.CanStop}" />
               </Grid>
               <ScrollViewer Grid.Row="1" Name="PART_SubagentScroll"
                             VerticalScrollBarVisibility="Auto"

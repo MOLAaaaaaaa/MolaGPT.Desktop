@@ -20,7 +20,8 @@ public sealed record ChatChunk(
     CompactionDelta? Compaction = null,
     ContextUsageDelta? ContextUsage = null,
     RolePromptTrace? PromptTrace = null,
-    InjectedMessageDelta? Injected = null);
+    InjectedMessageDelta? Injected = null,
+    System.Text.Json.Nodes.JsonObject? Subagents = null);
 
 /// <summary>
 /// A user-role message the agent took in mid-run: a message the user sent while the

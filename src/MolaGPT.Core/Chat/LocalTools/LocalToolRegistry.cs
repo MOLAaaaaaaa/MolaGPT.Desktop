@@ -32,7 +32,11 @@ public static partial class LocalToolRegistry
     public static IReadOnlyList<object> BuildOpenAiToolDefinitions(LocalToolOptions options)
     {
         var tools = new List<object>();
-        if (options.Network)
+        if (options.Network && NormalizeSearchProvider(options.SearchProvider) == "molagpt")
+        {
+            tools.Add(BuildMolaSearchDefinition());
+        }
+        else if (options.Network)
         {
             tools.Add(new
             {
@@ -182,18 +186,83 @@ public static partial class LocalToolRegistry
         return tools;
     }
 
+    /// <summary>
+    /// The same <c>search_web</c> contract MolaGPT's own backend offers its models. The
+    /// server routes by language, topic and freshness, so the model is asked for those
+    /// fields instead of a bare keyword — that is what the routing was tuned against.
+    /// </summary>
+    private static object BuildMolaSearchDefinition() => new
+    {
+        type = "function",
+        function = new
+        {
+            name = "search_web",
+            description = "在网络上并行搜索资料，支持一次提交 1 至 5 组查询（可混合中英文）。适合查新闻、实时资料、产品/库/文档状态、事实核验。"
+                          + "topic 用于区分通用网页、新闻、金融、论文和技术资料。可选 time_range 和 country；country 仅在 general 时生效，只是地域偏好。"
+                          + "需要图片或视觉比对时设置 include_images 为 true。",
+            parameters = new
+            {
+                type = "object",
+                properties = new
+                {
+                    queries = new
+                    {
+                        type = "array",
+                        description = "一组 1~5 个搜索对象。每项必须包含 query 和 topic。",
+                        minItems = 1,
+                        maxItems = 5,
+                        items = new
+                        {
+                            type = "object",
+                            properties = new
+                            {
+                                query = new { type = "string", description = "搜索关键词" },
+                                topic = new
+                                {
+                                    type = "string",
+                                    @enum = new[] { "general", "news", "finance", "paper", "technology" },
+                                    description = "**必填**。根据查询内容选择最合适的分类：\n"
+                                                  + "- paper：学术论文/研究/综述/学位论文/会议论文等学术内容\n"
+                                                  + "- technology：编程问题/技术原理/API用法/安全研究/源码分析/库文档等技术内容\n"
+                                                  + "- news：新闻/时事/最新动态/突发事件\n"
+                                                  + "- finance：股票/财报/经济数据/金融市场\n"
+                                                  + "- general：日常生活/百科知识/事实查询/购物/旅游等其他通用查询"
+                                },
+                                time_range = new
+                                {
+                                    type = "string",
+                                    @enum = new[] { "day", "week", "month", "year" },
+                                    description = "时间范围过滤。day=24h；week=7天；month=30天；year=1年"
+                                },
+                                include_images = new { type = "boolean", description = "需要图片或视觉比对时设为 true。" },
+                                country = new
+                                {
+                                    type = "string",
+                                    description = "优先返回特定国家的结果，仅在 topic=general 时使用；填英文国家名小写（如 china、united states、japan）"
+                                }
+                            },
+                            required = new[] { "query", "topic" }
+                        }
+                    }
+                },
+                required = new[] { "queries" }
+            }
+        }
+    };
+
     public static async Task<string> ExecuteAsync(
         string toolName,
         string argumentsJson,
         LocalToolOptions options,
         HttpClient http,
-        CancellationToken ct)
+        CancellationToken ct,
+        MolaAccountSearchClient? accountSearch = null)
     {
         try
         {
             return toolName switch
             {
-                "search_web" => await SearchWebAsync(argumentsJson, options, http, ct).ConfigureAwait(false),
+                "search_web" => await SearchWebAsync(argumentsJson, options, http, ct, accountSearch).ConfigureAwait(false),
                 "web_fetch" => await ScrapeWebPageAsync(argumentsJson, options, http, ct).ConfigureAwait(false),
                 "read_file" => await Task.Run(() => ExecuteReadFile(argumentsJson, options, ct), ct).ConfigureAwait(false),
                 "glob_files" => await Task.Run(() => ExecuteGlob(argumentsJson, options, ct), ct).ConfigureAwait(false),
@@ -286,12 +355,141 @@ public static partial class LocalToolRegistry
         root is { ValueKind: JsonValueKind.Object } e
         && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
 
+    private static readonly HashSet<string> MolaTopics = ["general", "news", "finance", "paper", "technology"];
+    private static readonly HashSet<string> MolaTimeRanges = ["day", "week", "month", "year"];
+
+    private static IReadOnlyList<MolaSearchQuery> ParseMolaSearchQueries(string argumentsJson)
+    {
+        using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(argumentsJson) ? "{}" : argumentsJson);
+        var root = doc.RootElement;
+        var queries = new List<MolaSearchQuery>();
+
+        static string? Pick(string? value, HashSet<string> allowed) =>
+            value?.Trim().ToLowerInvariant() is { } v && allowed.Contains(v) ? v : null;
+
+        if (root.TryGetProperty("queries", out var array) && array.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in array.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.String)
+                {
+                    if (!string.IsNullOrWhiteSpace(item.GetString()))
+                        queries.Add(new MolaSearchQuery(item.GetString()!.Trim(), null, null, null, false));
+                }
+                else if (item.ValueKind == JsonValueKind.Object && ReadString(item, "query") is { } query
+                         && !string.IsNullOrWhiteSpace(query))
+                {
+                    var country = ReadString(item, "country")?.Trim().ToLowerInvariant();
+                    queries.Add(new MolaSearchQuery(
+                        query.Trim(),
+                        Pick(ReadString(item, "topic"), MolaTopics),
+                        Pick(ReadString(item, "time_range"), MolaTimeRanges),
+                        string.IsNullOrEmpty(country) ? null : country,
+                        item.TryGetProperty("include_images", out var images) && images.ValueKind == JsonValueKind.True));
+                }
+
+                if (queries.Count >= MaxSearchQueries) break;
+            }
+        }
+
+        if (queries.Count == 0 && ReadString(root, "query") is { } legacy && !string.IsNullOrWhiteSpace(legacy))
+            queries.Add(new MolaSearchQuery(legacy.Trim(), null, null, null, false));
+
+        if (queries.Count == 0)
+            throw new InvalidOperationException("search_web requires queries[0].query or query.");
+
+        return queries.DistinctBy(q => q.Query, StringComparer.OrdinalIgnoreCase).Take(MaxSearchQueries).ToArray();
+    }
+
+    /// <summary>
+    /// Runs the call through MolaGPT's account search and hands back the same shape the
+    /// other providers produce, so citation numbering and the search cards work unchanged.
+    /// Signed out, expired and out-of-allowance all come back as a tool error whose text
+    /// tells the user what to do — the model relays it instead of retrying.
+    /// </summary>
+    private static async Task<string> SearchMolaAccountAsync(
+        string argumentsJson,
+        LocalToolOptions options,
+        MolaAccountSearchClient? client,
+        CancellationToken ct)
+    {
+        if (client is null || !client.IsSignedIn)
+            return SerializeToolResult(new { success = false, error = MolaAccountSearchClient.NotSignedInMessage });
+
+        var queries = ParseMolaSearchQueries(argumentsJson);
+        var snippetMax = options.SearchSnippetMaxCharacters > 0
+            ? options.SearchSnippetMaxCharacters
+            : MaxSearchSnippetCharacters;
+        MolaAccountSearchResponse response;
+        try
+        {
+            response = await client.SearchAsync(queries, Math.Clamp(options.SearchMaxResults, 1, 6), snippetMax, ct)
+                .ConfigureAwait(false);
+        }
+        catch (MolaSearchException ex)
+        {
+            return SerializeToolResult(new { success = false, error = ex.Message });
+        }
+
+        var mapped = new List<object>();
+        var allQueriesFailed = true;
+        foreach (var query in response.Queries.EnumerateArray())
+        {
+            var results = new List<object>();
+            if (query.TryGetProperty("results", out var hits) && hits.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var hit in hits.EnumerateArray())
+                {
+                    var url = ReadString(hit, "url");
+                    if (string.IsNullOrWhiteSpace(url)) continue;
+                    var entry = new Dictionary<string, object?>
+                    {
+                        ["title"] = ReadString(hit, "title") ?? url,
+                        ["url"] = url,
+                        ["snippet"] = TrimSnippet(ReadString(hit, "snippet"), options)
+                    };
+                    if (ReadString(hit, "published_date") is { Length: > 0 } published)
+                        entry["published_date"] = published;
+                    results.Add(entry);
+                }
+            }
+
+            var item = new Dictionary<string, object?>
+            {
+                ["query"] = ReadString(query, "query") ?? string.Empty,
+                ["provider"] = "molagpt",
+                ["results"] = results
+            };
+            if (query.TryGetProperty("images", out var images) && images.ValueKind == JsonValueKind.Array)
+                item["images"] = images.Clone();
+            var error = ReadString(query, "error");
+            if (!string.IsNullOrWhiteSpace(error))
+                item["error"] = error;
+            if (string.IsNullOrWhiteSpace(error) || results.Count > 0)
+                allQueriesFailed = false;
+            mapped.Add(item);
+        }
+
+        return SerializeToolResult(new
+        {
+            success = !(mapped.Count > 0 && allQueriesFailed),
+            error = mapped.Count > 0 && allQueriesFailed ? "搜索服务暂时不可用，请稍后重试。" : null,
+            source = "local_search_web",
+            provider = "molagpt",
+            queries = mapped
+        });
+    }
+
     private static async Task<string> SearchWebAsync(
         string argumentsJson,
         LocalToolOptions options,
         HttpClient http,
-        CancellationToken ct)
+        CancellationToken ct,
+        MolaAccountSearchClient? accountSearch = null)
     {
+        if (NormalizeSearchProvider(options.SearchProvider) == "molagpt")
+            return await SearchMolaAccountAsync(argumentsJson, options, accountSearch, ct).ConfigureAwait(false);
+
         var queries = ParseSearchQueries(argumentsJson);
         var provider = NormalizeSearchProvider(options.SearchProvider);
 
@@ -594,6 +792,7 @@ public static partial class LocalToolRegistry
             ? "duckduckgo"
             : provider.Trim().ToLowerInvariant() switch
             {
+                "molagpt" => "molagpt",
                 "tavily" => "tavily",
                 "exa" => "exa",
                 _ => "duckduckgo"

@@ -798,6 +798,7 @@ public sealed partial class ChatViewModel : ObservableObject
             double? firstTokenSeconds = null;
             double? generationSeconds = null;
             string? compactionReason = null;
+            JsonObject? serverSubagents = null;
             if (!string.IsNullOrEmpty(row.Meta))
             {
                 try
@@ -817,6 +818,8 @@ public sealed partial class ChatViewModel : ObservableObject
                     }
                     usage = ParseUsage(doc.RootElement, "response_stats");
                     sources = ParseSources(doc.RootElement);
+                    if (doc.RootElement.TryGetProperty("subagents", out var sa))
+                        serverSubagents = Core.Chat.ServerSubagents.Finish(JsonNode.Parse(sa.GetRawText())!.AsObject());
                     attachments = ParseAttachments(doc.RootElement);
                     artifactRefs = ParseArtifactRefs(doc.RootElement);
                     contentPartsJson = ParseContentPartsJson(doc.RootElement);
@@ -900,7 +903,7 @@ public sealed partial class ChatViewModel : ObservableObject
                 generationSeconds,
                 personaId,
                 personaName,
-                row.ParentId) { ArtifactRefs = artifactRefs, FinishReason = finishReason });
+                row.ParentId) { ArtifactRefs = artifactRefs, FinishReason = finishReason, Subagents = serverSubagents });
         }
 
         return prepared;
@@ -935,6 +938,7 @@ public sealed partial class ChatViewModel : ObservableObject
             PersonaAvatar = _personas?.Find(prepared.PersonaId)?.Avatar,
             Usage = prepared.Usage,
             Sources = prepared.Sources,
+            ServerSubagents = prepared.Subagents,
             Attachments = prepared.Attachments,
             ArtifactRefs = prepared.ArtifactRefs,
             ContentPartsJson = prepared.ContentPartsJson,
@@ -1004,6 +1008,7 @@ public sealed partial class ChatViewModel : ObservableObject
     {
         public IReadOnlyList<ArtifactRefChip>? ArtifactRefs { get; init; }
         public string? FinishReason { get; init; }
+        public JsonObject? Subagents { get; init; }
     }
 
     /// <summary>
@@ -1335,6 +1340,7 @@ public sealed partial class ChatViewModel : ObservableObject
             ["sources"] = attempt.Sources is null ? (JsonNode?)null : BuildSourcesJson(attempt.Sources),
             ["stopped"] = attempt.WasStopped ? true : (JsonNode?)null
         };
+        if (attempt.Subagents is not null) result["subagents"] = attempt.Subagents.DeepClone();
         if (attempt.FinishReason is { Length: > 0 } finish && finish != "stop")
             result["finish_reason"] = finish;
         if (BuildTurnTimingJson(attempt.FirstTokenSeconds, attempt.GenerationSeconds) is { } timing)
@@ -1819,7 +1825,8 @@ public sealed partial class ChatViewModel : ObservableObject
                 generationSeconds,
                 item.TryGetProperty("persona_id", out var personaId) && personaId.ValueKind == JsonValueKind.String ? personaId.GetString() : null,
                 item.TryGetProperty("persona_name", out var personaName) && personaName.ValueKind == JsonValueKind.String ? personaName.GetString() : null,
-                ReadString(item, "finish_reason")));
+                ReadString(item, "finish_reason"),
+                item.TryGetProperty("subagents", out var sa) ? Core.Chat.ServerSubagents.Finish(JsonNode.Parse(sa.GetRawText())!.AsObject()) : null));
         }
 
         var current = ReadInt(retry, "current") ?? Math.Max(0, attempts.Count - 1);

@@ -1685,7 +1685,8 @@ public sealed class CloudSyncService
                 }
             }
 
-            if (ShouldKeepDsAnalysisInVisibleContent(unit))
+            if (unit.Contains("tool-subagent-blockquote", StringComparison.OrdinalIgnoreCase)
+                || ShouldKeepDsAnalysisInVisibleContent(unit))
                 AppendVisible(unit);
             else
                 AppendTool(unit);

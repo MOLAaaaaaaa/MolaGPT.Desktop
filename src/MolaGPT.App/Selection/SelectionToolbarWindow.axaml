@@ -1,0 +1,66 @@
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="MolaGPT.App.Selection.SelectionToolbarWindow"
+        Title="划词工具条" SizeToContent="WidthAndHeight" CanResize="False"
+        WindowDecorations="None" ShowActivated="False" ShowInTaskbar="False" Topmost="True"
+        Background="{DynamicResource Brush.Bg.Elevated}" Foreground="{DynamicResource Brush.Text.Secondary}"
+        FontFamily="{DynamicResource Font.UI}">
+
+  <!-- 不透明窗口，外轮廓由 DWM 裁切圆角。 -->
+  <Window.Styles>
+    <Style Selector="Button.tb">
+      <Setter Property="Height" Value="30" />
+      <Setter Property="Padding" Value="10,0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="Button.tb:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Button.tb:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+    <Style Selector="Button.tb:pressed, Button.tb.pressed">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+  </Window.Styles>
+
+  <Border BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1"
+          Padding="3"
+          Background="{DynamicResource Brush.Bg.Elevated}">
+    <StackPanel Orientation="Horizontal" Spacing="2">
+      <Button Classes="tb" Tag="翻译" Click="OnAction" AutomationProperties.Name="翻译">
+        <StackPanel Orientation="Horizontal" Spacing="5">
+          <Path Width="14" Height="14" VerticalAlignment="Center" Stretch="Uniform" StrokeLineCap="Round" StrokeJoin="Round" StrokeThickness="1.5"
+                Stroke="{Binding $parent[Button].Foreground}"
+                Data="M2 5h5M4.5 3v2c0 2-1.2 4-2.8 5M6.5 11c1-1 1.9-2.4 2.4-4M8.8 13l2.4-5.5L13.6 13M9.6 11.2h3.2" />
+          <TextBlock Text="翻译" VerticalAlignment="Center" />
+        </StackPanel>
+      </Button>
+      <Button Classes="tb" Tag="解释" Click="OnAction" AutomationProperties.Name="解释">
+        <StackPanel Orientation="Horizontal" Spacing="5">
+          <Path Width="14" Height="14" VerticalAlignment="Center" Stretch="Uniform" StrokeLineCap="Round" StrokeJoin="Round" StrokeThickness="1.5"
+                Stroke="{Binding $parent[Button].Foreground}"
+                Data="M6 12.5a4.5 4.5 0 1 1 4 0c-.5.4-.7 1-.7 1.5H6.7c0-.5-.2-1.1-.7-1.5zM6.7 15.5h2.6" />
+          <TextBlock Text="解释" VerticalAlignment="Center" />
+        </StackPanel>
+      </Button>
+      <Button Classes="tb" Tag="问 AI" Click="OnAction" AutomationProperties.Name="问 AI">
+        <StackPanel Orientation="Horizontal" Spacing="5">
+          <Path Width="14" Height="14" VerticalAlignment="Center" Stretch="Uniform" StrokeLineCap="Round" StrokeJoin="Round" StrokeThickness="1.5"
+                Stroke="{Binding $parent[Button].Foreground}"
+                Data="M13.5 9.5a1.5 1.5 0 0 0 1.5-1.5V4a1.5 1.5 0 0 0-1.5-1.5h-11A1.5 1.5 0 0 0 1 4v4a1.5 1.5 0 0 0 1.5 1.5H4v3l3.5-3h6z" />
+          <TextBlock Text="问 AI" VerticalAlignment="Center" />
+        </StackPanel>
+      </Button>
+      <Border Width="1" Height="14" Background="{DynamicResource Brush.Divider}" VerticalAlignment="Center" />
+      <Button Classes="tb" Tag="复制" Click="OnAction" AutomationProperties.Name="复制">
+        <StackPanel Orientation="Horizontal" Spacing="5">
+          <TextBlock Classes="icon" Text="&#xE8C8;" FontSize="12" VerticalAlignment="Center" />
+          <TextBlock Text="复制" VerticalAlignment="Center" />
+        </StackPanel>
+      </Button>
+    </StackPanel>
+  </Border>
+</Window>

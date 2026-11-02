@@ -46,6 +46,7 @@ public partial class App : Application
 
     private string? _pendingUpdateInstallerPath;
     private NotificationRouter? _notificationRouter;
+    private Selection.SelectionAssistantService? _selectionAssistant;
     private NotificationCenter? _notifications;
     private long _lastBackgroundTrimTicks;
     private bool _backgroundMode;
@@ -183,6 +184,8 @@ public partial class App : Application
                  _services.GetRequiredService<PersonalDataService>());
             window.RemoteWork = _services.GetRequiredService<RemoteWorkSettingsViewModel>();
             desktop.MainWindow = window;
+            _selectionAssistant = new Selection.SelectionAssistantService(settings, providers,
+                _services.GetRequiredService<IHttpClientFactory>(), window);
 
             // One router owns "banner, Windows toast, or wait" for every source.
             // The workbench counts as the current conversation while it is open,
@@ -352,6 +355,7 @@ public partial class App : Application
             desktop.ShutdownRequested += (_, _) =>
             {
                 window.PropertyChanged -= OnMainWindowPropertyChanged;
+                _selectionAssistant?.Dispose();
                 main.Composer.SaveInProgressMessages();
                 _backgroundCheck?.Dispose();
                 cloudSync.StopPeriodicSync();

@@ -51,6 +51,7 @@ public partial class SettingsWindow
         PART_AccountStatus.Text = loggedIn ? name : "MolaGPT 账号";
         PART_AccountAction.IsVisible = !loggedIn;
         PART_AccountBadgeDot.IsVisible = loggedIn;
+        UpdateSearchStatusHint();
         PART_UsageSection.IsVisible = loggedIn && _proxy is not null;
         PART_LogoutSection.IsVisible = loggedIn && _auth is not null;
 
@@ -180,6 +181,24 @@ public partial class SettingsWindow
                 Detail =credits.TokensFor(row.Id, status.TokensUsage) is var usedTokens && usedTokens > 0
                     ? $"{credits.SpentLabel} {FormatTokens(usedTokens)}"
                     : string.Empty
+            });
+        }
+
+        // Search shares the balance but is not a model, so it never appears in the
+        // per-model limits; give it its own row so its spend is visible too.
+        if (credits.WebSearch is { } search)
+        {
+            var free = search.Uses is null;
+            var exhausted = search.Uses is <= 0;
+            _accountModels.Add(new AccountModelRow
+            {
+                Name = search.Name,
+                RightText = free ? "不消耗额度" : exhausted ? "额度不足" : $"约 {search.Uses} 次",
+                HasRightText = true,
+                RightIsSuccess = free,
+                RightIsError = exhausted,
+                Opacity = exhausted ? 0.55 : 1,
+                Detail = search.Calls > 0 ? $"{credits.SpentLabel} {search.Calls} 次" : string.Empty
             });
         }
 

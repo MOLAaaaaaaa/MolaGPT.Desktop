@@ -106,6 +106,71 @@ public sealed class OneShotCompletionClient
         ThinkingParamKind? thinkingKind = null,
         CancellationToken ct = default)
     {
+        using var resp = await SendRequestAsync(target, modelId, messages, stream: false,
+            temperature, maxTokens, useThinking, thinkingKind, ct).ConfigureAwait(false);
+        await ChatApiErrorHelper.EnsureSuccessAsync(resp, target.DisplayName, ct).ConfigureAwait(false);
+
+        if (target.StreamOnly)
+            return await ReadResponsesStreamAsync(resp, target.DisplayName, onDelta: null, ct).ConfigureAwait(false);
+
+        return await ReadJsonAnswerAsync(resp, target.Api, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Same call as <see cref="CompleteAsync"/>, but asks the endpoint for a
+    /// streamed answer and reports each text piece through <paramref name="onDelta"/>
+    /// as it arrives. The callback fires on a thread-pool thread — callers showing
+    /// deltas in UI must marshal them. Returns the assembled answer, identical to
+    /// what the non-streamed call would have produced.
+    ///
+    /// An endpoint that silently ignores <c>stream</c> (some gateways do) answers
+    /// with an ordinary JSON document; that is detected by content type and the
+    /// whole text is delivered as a single delta, so the caller never stalls
+    /// waiting for events that do not exist.
+    /// </summary>
+    public async Task<string> CompleteStreamAsync(
+        OneShotTarget target,
+        string modelId,
+        IReadOnlyList<ChatMessage> messages,
+        Action<string>? onDelta = null,
+        double? temperature = null,
+        int? maxTokens = null,
+        bool? useThinking = null,
+        ThinkingParamKind? thinkingKind = null,
+        CancellationToken ct = default)
+    {
+        using var resp = await SendRequestAsync(target, modelId, messages, stream: true,
+            temperature, maxTokens, useThinking, thinkingKind, ct).ConfigureAwait(false);
+        await ChatApiErrorHelper.EnsureSuccessAsync(resp, target.DisplayName, ct).ConfigureAwait(false);
+
+        if (!IsEventStream(resp))
+        {
+            var text = await ReadJsonAnswerAsync(resp, target.Api, ct, validateCompletion: true).ConfigureAwait(false);
+            if (text.Length > 0) onDelta?.Invoke(text);
+            return text;
+        }
+
+        return target.Api switch
+        {
+            OneShotWireApi.OpenAiResponses => await ReadResponsesStreamAsync(resp, target.DisplayName, onDelta, ct).ConfigureAwait(false),
+            _ => await ReadEventStreamAsync(resp, target.Api, target.DisplayName, onDelta, ct).ConfigureAwait(false),
+        };
+    }
+
+    /// <summary>Build the body and send the request. <paramref name="stream"/> asks
+    /// for the wire's streaming dialect: a flag for the OpenAI/Anthropic shapes,
+    /// the <c>:streamGenerateContent?alt=sse</c> method swap for Google.</summary>
+    private async Task<HttpResponseMessage> SendRequestAsync(
+        OneShotTarget target,
+        string modelId,
+        IReadOnlyList<ChatMessage> messages,
+        bool stream,
+        double? temperature,
+        int? maxTokens,
+        bool? useThinking,
+        ThinkingParamKind? thinkingKind,
+        CancellationToken ct)
+    {
         var body = target.Api switch
         {
             OneShotWireApi.AnthropicMessages => BuildAnthropicBody(modelId, messages, temperature, maxTokens),
@@ -116,16 +181,25 @@ public sealed class OneShotCompletionClient
         ApplyThinking(body, target.Api, modelId, useThinking, thinkingKind, target.Endpoint);
         CustomRequestParams.ApplyBody(body, target.ExtraBody);
         foreach (var key in target.DropBodyKeys ?? []) body.Remove(key);
-        if (target.StreamOnly)
+        if (stream || target.StreamOnly)
         {
-            body["stream"] = true;
-            body["store"] = false;
+            // Google's dialect lives in the URL, not the body.
+            if (target.Api != OneShotWireApi.GoogleGenerativeAi) body["stream"] = true;
+            if (target.Api == OneShotWireApi.OpenAiResponses || target.StreamOnly) body["store"] = false;
         }
         var nativeGoogle = target.Api == OneShotWireApi.GoogleGenerativeAi;
         if (GeminiRequestParams.Applies(modelId, nativeGoogle, target.Endpoint))
             GeminiRequestParams.Apply(body, modelId, nativeGoogle, useThinking: useThinking);
 
-        using var req = new HttpRequestMessage(HttpMethod.Post, target.Endpoint)
+        var endpoint = target.Endpoint;
+        if (stream && target.Api == OneShotWireApi.GoogleGenerativeAi)
+        {
+            if (!endpoint.Contains(":streamGenerateContent", StringComparison.Ordinal))
+                endpoint = endpoint.Replace(":generateContent", ":streamGenerateContent", StringComparison.Ordinal);
+            endpoint += endpoint.Contains('?', StringComparison.Ordinal) ? "&alt=sse" : "?alt=sse";
+        }
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {
             Content = JsonContent.Create(body, options: RelaxedJson)
         };
@@ -147,20 +221,37 @@ public sealed class OneShotCompletionClient
                 req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
             }
         }
-        OpenRouterAttribution.Apply(req, target.Endpoint, target.Headers);
+        OpenRouterAttribution.Apply(req, endpoint, target.Headers);
         CustomRequestParams.ApplyHeaders(req, target.Headers);
 
-        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct)
+        return await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct)
             .ConfigureAwait(false);
-        await ChatApiErrorHelper.EnsureSuccessAsync(resp, target.DisplayName, ct).ConfigureAwait(false);
+    }
 
-        if (target.StreamOnly)
-            return await ReadResponsesStreamAsync(resp, target.DisplayName, ct).ConfigureAwait(false);
+    private static bool IsEventStream(HttpResponseMessage resp) =>
+        resp.Content.Headers.ContentType?.MediaType?.Contains("event-stream", StringComparison.OrdinalIgnoreCase) == true;
 
+    private static async Task<string> ReadJsonAnswerAsync(
+        HttpResponseMessage resp, OneShotWireApi api, CancellationToken ct, bool validateCompletion = false)
+    {
         await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-
-        return target.Api switch
+        if (validateCompletion)
+        {
+            var root = doc.RootElement;
+            if (api == OneShotWireApi.OpenAiResponses && root.TryGetProperty("status", out var status)
+                && status.GetString() != "completed")
+                throw new InvalidOperationException("回答未完整生成，请重试或提高输出上限。");
+            if (api == OneShotWireApi.AnthropicMessages && root.TryGetProperty("stop_reason", out var stop))
+                ValidateStopReason(stop.GetString(), "模型");
+            var key = api == OneShotWireApi.GoogleGenerativeAi ? "candidates" : "choices";
+            var reasonKey = api == OneShotWireApi.GoogleGenerativeAi ? "finishReason" : "finish_reason";
+            if (root.TryGetProperty(key, out var choices) && choices.ValueKind == JsonValueKind.Array)
+                foreach (var choice in choices.EnumerateArray())
+                    if (choice.TryGetProperty(reasonKey, out var reason) && reason.ValueKind == JsonValueKind.String)
+                        ValidateStopReason(reason.GetString(), "模型");
+        }
+        return api switch
         {
             OneShotWireApi.AnthropicMessages => ReadAnthropicText(doc.RootElement),
             OneShotWireApi.OpenAiResponses => ReadResponsesText(doc.RootElement),
@@ -407,36 +498,140 @@ public sealed class OneShotCompletionClient
     /// <c>output</c>, having streamed every item already.
     /// </summary>
     private static async Task<string> ReadResponsesStreamAsync(
-        HttpResponseMessage response, string displayName, CancellationToken ct)
+        HttpResponseMessage response, string displayName, Action<string>? onDelta, CancellationToken ct)
     {
         await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        using var reader = new StreamReader(stream);
         var streamed = new System.Text.StringBuilder();
-        while (await reader.ReadLineAsync(ct).ConfigureAwait(false) is { } line)
+        await foreach (var ev in Sse.SseStreamReader.ReadAsync(stream, ct))
         {
-            if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
-            var data = line[5..].Trim();
-            if (data.Length == 0 || data == "[DONE]") continue;
-            using var doc = JsonDocument.Parse(data);
-            var root = doc.RootElement;
-            var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
-            if (type == "response.output_text.delta"
-                && root.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.String)
-                streamed.Append(delta.GetString());
-            if (type == "response.completed" && root.TryGetProperty("response", out var completed))
+            if (ev.IsDone || string.IsNullOrEmpty(ev.Data)) continue;
+            var doc = JsonDocument.Parse(ev.Data);
+            using (doc)
             {
-                var text = ReadResponsesText(completed);
-                return text.Length > 0 ? text : streamed.ToString().Trim();
-            }
-            if (type is "response.failed" or "error")
-            {
-                var error = root.TryGetProperty("response", out var failed) && failed.TryGetProperty("error", out var e) ? e
-                    : root.TryGetProperty("error", out var direct) ? direct : root;
-                var message = error.TryGetProperty("message", out var m) ? m.GetString() : null;
-                throw new InvalidOperationException($"{displayName}失败：{message ?? data}");
+                var root = doc.RootElement;
+                var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
+                if (type == "response.output_text.delta"
+                    && root.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.String)
+                {
+                    var piece = delta.GetString()!;
+                    streamed.Append(piece);
+                    onDelta?.Invoke(piece);
+                }
+                if (type == "response.completed" && root.TryGetProperty("response", out var completed))
+                {
+                    var text = ReadResponsesText(completed);
+                    return text.Length > 0 ? text : streamed.ToString().Trim();
+                }
+                if (type == "response.incomplete")
+                    throw new InvalidOperationException($"{displayName}的回答未完整生成，请重试或提高输出上限。");
+                if (type is "response.failed" or "error")
+                {
+                    var error = root.TryGetProperty("response", out var failed) && failed.TryGetProperty("error", out var e) ? e
+                        : root.TryGetProperty("error", out var direct) ? direct : root;
+                    var message = error.TryGetProperty("message", out var m) ? m.GetString() : null;
+                    throw new InvalidOperationException($"{displayName}失败：{message ?? ev.Data}");
+                }
             }
         }
         throw new InvalidOperationException($"{displayName}的回答没有结束就中断了。");
+    }
+
+    /// <summary>
+    /// The streamed answer for the dialects whose events carry only increments:
+    /// each <c>data:</c> frame contributes its text to the running total. The
+    /// Responses dialect has its own reader (<see cref="ReadResponsesStreamAsync"/>)
+    /// because the terminal frame, not the tail of the stream, is authoritative.
+    /// </summary>
+    private static async Task<string> ReadEventStreamAsync(
+        HttpResponseMessage response, OneShotWireApi api, string displayName,
+        Action<string>? onDelta, CancellationToken ct)
+    {
+        await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        var streamed = new System.Text.StringBuilder();
+        await foreach (var ev in Sse.SseStreamReader.ReadAsync(stream, ct))
+        {
+            if (ev.IsDone && api == OneShotWireApi.OpenAiCompletions)
+                return streamed.ToString();
+            if (ev.IsDone || string.IsNullOrEmpty(ev.Data)) continue;
+            var doc = JsonDocument.Parse(ev.Data);
+            using (doc)
+            {
+                var root = doc.RootElement;
+                if (ChatApiErrorHelper.TryExtractStreamingError(root, out var streamError))
+                    throw new InvalidOperationException($"{displayName}失败：{streamError}");
+                var piece = api switch
+                {
+                    // A stream event is a whole GenerateContentResponse in
+                    // miniature — the non-streamed reader walks the same shape.
+                    OneShotWireApi.GoogleGenerativeAi => ReadGoogleText(root, trim: false),
+                    OneShotWireApi.AnthropicMessages => ExtractAnthropicDelta(root),
+                    _ => ExtractCompletionsDelta(root),
+                };
+                if (!string.IsNullOrEmpty(piece))
+                {
+                    streamed.Append(piece);
+                    onDelta?.Invoke(piece);
+                }
+
+                if (api == OneShotWireApi.AnthropicMessages)
+                {
+                    var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
+                    if (type == "message_delta" && root.TryGetProperty("delta", out var delta)
+                        && delta.TryGetProperty("stop_reason", out var stopReason)
+                        && stopReason.GetString() is { } reason && reason is not ("end_turn" or "stop_sequence"))
+                        ValidateStopReason(reason, displayName);
+                    if (type == "message_stop") return streamed.ToString();
+                }
+                else
+                {
+                    var key = api == OneShotWireApi.GoogleGenerativeAi ? "candidates" : "choices";
+                    var finishKey = api == OneShotWireApi.GoogleGenerativeAi ? "finishReason" : "finish_reason";
+                    if (root.TryGetProperty(key, out var choices) && choices.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var choice in choices.EnumerateArray())
+                        {
+                            if (!choice.TryGetProperty(finishKey, out var finish) || finish.ValueKind != JsonValueKind.String) continue;
+                            var reason = finish.GetString();
+                            if (string.IsNullOrEmpty(reason) || reason == "FINISH_REASON_UNSPECIFIED") continue;
+                            ValidateStopReason(reason, displayName);
+                            return streamed.ToString();
+                        }
+                    }
+                }
+            }
+        }
+        throw new InvalidOperationException($"{displayName}的回答没有结束就中断了。");
+    }
+
+    private static void ValidateStopReason(string? reason, string displayName)
+    {
+        if (reason is null or "stop" or "STOP" or "end_turn" or "stop_sequence") return;
+        throw new InvalidOperationException($"{displayName}的回答未完整生成（{reason}）。");
+    }
+
+    private static string? ExtractCompletionsDelta(JsonElement root)
+    {
+        if (!root.TryGetProperty("choices", out var choices) || choices.ValueKind != JsonValueKind.Array)
+            return null;
+        var sb = new System.Text.StringBuilder();
+        foreach (var choice in choices.EnumerateArray())
+        {
+            if (!choice.TryGetProperty("delta", out var delta) || delta.ValueKind != JsonValueKind.Object) continue;
+            if (!delta.TryGetProperty("content", out var content)) continue;
+            if (content.ValueKind == JsonValueKind.String) sb.Append(content.GetString());
+            else if (content.ValueKind == JsonValueKind.Array) sb.Append(ConcatTextParts(content, "text", "text"));
+        }
+        return sb.Length > 0 ? sb.ToString() : null;
+    }
+
+    private static string? ExtractAnthropicDelta(JsonElement root)
+    {
+        if (!root.TryGetProperty("type", out var type) || type.GetString() != "content_block_delta") return null;
+        if (!root.TryGetProperty("delta", out var delta)) return null;
+        if (!delta.TryGetProperty("type", out var dt) || dt.GetString() != "text_delta") return null;
+        return delta.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String
+            ? text.GetString()
+            : null;
     }
 
     private static string ReadResponsesText(JsonElement root)
@@ -455,7 +650,7 @@ public sealed class OneShotCompletionClient
         return string.Concat(parts).Trim();
     }
 
-    private static string ReadGoogleText(JsonElement root)
+    private static string ReadGoogleText(JsonElement root, bool trim = true)
     {
         if (!root.TryGetProperty("candidates", out var candidates) || candidates.ValueKind != JsonValueKind.Array)
             return string.Empty;
@@ -475,7 +670,7 @@ public sealed class OneShotCompletionClient
                     text.Append(value.GetString());
             }
         }
-        return text.ToString().Trim();
+        return trim ? text.ToString().Trim() : text.ToString();
     }
 
     /// <summary>Concatenate the <paramref name="textField"/> of every part whose

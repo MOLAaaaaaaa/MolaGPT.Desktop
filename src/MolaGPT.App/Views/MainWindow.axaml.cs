@@ -15,6 +15,7 @@ using MolaGPT.App.Rendering;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents.Pi;
+using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.Browser;
@@ -1031,6 +1032,8 @@ public partial class MainWindow : MolaWindow
     {
         var loggedIn = !string.IsNullOrEmpty(_auth.CurrentJwt);
         _settings.IsLoggedIn = loggedIn;
+        if (!loggedIn && SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider) == "molagpt")
+            _settings.WebSearchProvider = "duckduckgo";
         _settings.MolaGptUsername = loggedIn ? _auth.CurrentUsername : null;
         PART_TitleBar.SetAccountState(loggedIn, _auth.CurrentUsername);
         _settingsWindow?.RefreshAccountUi();
@@ -1155,7 +1158,8 @@ public partial class MainWindow : MolaWindow
             _imageGenerationTool, _pythonRuntime, _piSidecar, _notifications, _skills, _browserActivity,
             () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory,
             ActivateAgentRuntimeAsync, DeactivateAgentRuntime, _personalization, _memoryPage, _proxy,
-            _pythonSetup, _personalData);
+            _pythonSetup, _personalData,
+            new MolaAccountSearchClient(_httpClientFactory.CreateClient(HttpClientNames.MolaGpt), _auth));
         if (RemoteWork is { } remoteWork) window.AttachRemoteWork(remoteWork);
         window.AccountRequested += async (_, _) =>
         {

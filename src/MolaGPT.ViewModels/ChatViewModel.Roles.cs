@@ -380,6 +380,7 @@ public sealed partial class ChatViewModel
             return;
         }
         message.PersonaAvatar = _personas?.Find(message.PersonaId)?.Avatar;
+        RefreshServerSubagents();
         AnnounceHistoryEdit();
     }
 

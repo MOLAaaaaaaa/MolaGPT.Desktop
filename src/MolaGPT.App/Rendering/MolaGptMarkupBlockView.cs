@@ -3,6 +3,12 @@ using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.VisualTree;
+using System.ComponentModel;
+using System.Text.Json.Nodes;
+using MolaGPT.Core.Chat;
+using MolaGPT.ViewModels;
+using MolaGPT.App.Views;
 using MolaGPT.Presentation;
 
 namespace MolaGPT.App.Rendering;
@@ -10,6 +16,17 @@ namespace MolaGPT.App.Rendering;
 /// <summary>Native Avalonia view for the tool markup embedded in MolaGPT deltas.</summary>
 public sealed class MolaGptMarkupBlockView : ContentControl
 {
+    public static readonly StyledProperty<MessageViewModel?> MessageProperty =
+        AvaloniaProperty.Register<MolaGptMarkupBlockView, MessageViewModel?>(nameof(Message));
+
+    public MessageViewModel? Message
+    {
+        get => GetValue(MessageProperty);
+        set => SetValue(MessageProperty, value);
+    }
+
+    private string? _subagentBatch;
+    private TextBlock? _subagentLabel;
     private const int PythonPreviewLines = 10;
     private const double PythonPreviewHeight = 180;
 
@@ -35,6 +52,13 @@ public sealed class MolaGptMarkupBlockView : ContentControl
     static MolaGptMarkupBlockView()
     {
         BlockProperty.Changed.AddClassHandler<MolaGptMarkupBlockView>((view, _) => view.Rebuild());
+        MessageProperty.Changed.AddClassHandler<MolaGptMarkupBlockView>((view, change) =>
+        {
+            if (!view._attached) return;
+            if (change.OldValue is MessageViewModel old) old.PropertyChanged -= view.OnMessageChanged;
+            if (change.NewValue is MessageViewModel next) next.PropertyChanged += view.OnMessageChanged;
+            view.UpdateSubagentSummary();
+        });
     }
 
     public MolaGptMarkupBlockView()
@@ -46,6 +70,7 @@ public sealed class MolaGptMarkupBlockView : ContentControl
     {
         base.OnAttachedToVisualTree(e);
         _attached = true;
+        if (Message is { } message) message.PropertyChanged += OnMessageChanged;
         ActualThemeVariantChanged += OnThemeChanged;
         Rebuild();
     }
@@ -54,6 +79,7 @@ public sealed class MolaGptMarkupBlockView : ContentControl
     {
         ActualThemeVariantChanged -= OnThemeChanged;
         _attached = false;
+        if (Message is { } message) message.PropertyChanged -= OnMessageChanged;
         base.OnDetachedFromVisualTree(e);
     }
 
@@ -62,6 +88,15 @@ public sealed class MolaGptMarkupBlockView : ContentControl
     private void Rebuild(bool recreate = false)
     {
         if (!_attached) return;
+
+        if (!recreate && _subagentBatch is not null && Block is { } current
+            && ServerSubagents.Batch(current.Unit.Source) == _subagentBatch)
+        {
+            UpdateSubagentSummary();
+            return;
+        }
+        _subagentBatch = null;
+        _subagentLabel = null;
 
         if (!recreate
             && Block is { Unit: { Kind: MarkupUnitKind.DsAnalysis } unit }
@@ -92,6 +127,23 @@ public sealed class MolaGptMarkupBlockView : ContentControl
 
     private Control BuildToolStatus(MolaGptMarkupSplitter.MarkupUnit unit)
     {
+        if (ServerSubagents.Batch(unit.Source) is { } batch)
+        {
+            _subagentBatch = batch;
+            _subagentLabel = new TextBlock { FontSize = 13, Foreground = Brush("Brush.Text.Muted"), VerticalAlignment = VerticalAlignment.Center };
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7 };
+            row.Children.Add(new TextBlock { Text = "\uE716", FontFamily = Font("Font.Icon"), VerticalAlignment = VerticalAlignment.Center });
+            row.Children.Add(_subagentLabel);
+            var button = new Button { Content = row, HorizontalAlignment = HorizontalAlignment.Left };
+            button.Classes.Add("toolchip");
+            button.Click += (_, _) =>
+            {
+                if (this.FindAncestorOfType<TranscriptView>()?.DataContext is ChatViewModel chat)
+                    chat.InspectServerSubagent(batch);
+            };
+            UpdateSubagentSummary();
+            return button;
+        }
         var isSearch = unit.Tag?.Contains("tool-search-blockquote", StringComparison.OrdinalIgnoreCase) == true;
         var title = string.IsNullOrWhiteSpace(unit.Inner)
             ? isSearch ? "正在联网搜索" : "工具运行中"
@@ -113,6 +165,21 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         }
 
         return Card(stack);
+    }
+
+    private void OnMessageChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MessageViewModel.ServerSubagents)) UpdateSubagentSummary();
+    }
+
+    private void UpdateSubagentSummary()
+    {
+        if (_subagentLabel is null || _subagentBatch is null) return;
+        var agents = (Message?.ServerSubagents?[_subagentBatch] as JsonArray)?.OfType<JsonObject>().ToArray() ?? [];
+        var running = agents.Any(a => ServerSubagents.Text(a, "status") == "running");
+        var completed = agents.Count(a => ServerSubagents.Text(a, "status") == "completed");
+        _subagentLabel.Text = agents.Length == 0 ? "子代理任务" : $"{agents.Length} 个子代理 · {(running ? "运行中" : $"{completed} 个已完成")}";
+        Shimmer.SetIsActive(_subagentLabel, running);
     }
 
     /// <summary>

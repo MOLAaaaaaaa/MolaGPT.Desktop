@@ -309,6 +309,7 @@ public static class ToolDeltaBuilder
             ? "DuckDuckGo"
             : provider.Trim().ToLowerInvariant() switch
             {
+                "molagpt" => "MolaGPT Web Search",
                 "tavily" => "Tavily",
                 "exa" => "Exa",
                 _ => "DuckDuckGo"

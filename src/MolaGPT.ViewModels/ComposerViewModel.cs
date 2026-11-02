@@ -1202,6 +1202,8 @@ public sealed partial class ComposerViewModel : ObservableObject
                 {
                     task.AssistantMessage.ReplaceContent(data.Text);
                     task.CompletedSuccessfully = true;
+                    task.AssistantMessage.ServerSubagents = data.Subagents;
+                    _chat.RefreshServerSubagents();
                     if (data.Sources is { Count: > 0 })
                         task.AssistantMessage.Sources = data.Sources;
                 }
@@ -1538,7 +1540,7 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         // FullContent: a follow-up sent while the previous answer is still being
         // revealed must carry the whole answer, not the part already on screen.
-        return message.FullContent;
+        return ServerSubagents.Expand(message.FullContent, message.ServerSubagents);
     }
 
     /// <summary>
@@ -2165,6 +2167,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         {
             if (continuation) assistantMsg.BeginContinuationAttempt();
             else assistantMsg.BeginRetryAttempt();
+            _chat.RefreshServerSubagents();
         }
         // Sync the assistant bubble's model/provider labels to whatever is
         // active *now*, not whatever produced the previous attempt — the
@@ -2419,6 +2422,11 @@ public sealed partial class ComposerViewModel : ObservableObject
                 RewritePythonArtifactMarkdownLinks(assistantMsg);
                 if (isCurrentConversation) _chat.RefreshArtifacts(autoOpenNewFiles: true);
             }
+        }
+        if (chunk.Subagents is { } frame)
+        {
+            assistantMsg.ServerSubagents = ServerSubagents.Merge(assistantMsg.ServerSubagents, frame);
+            _chat.RefreshServerSubagents();
         }
         if (chunk.Sources is { Count: > 0 })
             assistantMsg.Sources = chunk.Sources;
@@ -2705,6 +2713,8 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     private void PrepareCompletedResponse(BackgroundStreamTask streamContext, string? failureMessage)
     {
+        streamContext.AssistantMessage.ServerSubagents = ServerSubagents.Finish(streamContext.AssistantMessage.ServerSubagents);
+        _chat.RefreshServerSubagents();
         RewritePythonArtifactMarkdownLinks(streamContext.AssistantMessage);
         _pythonArtifactContexts.Remove(streamContext.AssistantMessage);
 

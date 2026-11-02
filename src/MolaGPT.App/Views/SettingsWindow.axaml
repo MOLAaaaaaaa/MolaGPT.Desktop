@@ -182,6 +182,7 @@
                 <ListBoxItem Content="对话" Tag="PAGE_Chat" />
                 <ListBoxItem Content="任务与子 Agent" Tag="PAGE_Tasks" />
                 <ListBoxItem Content="通知与托盘" Tag="PAGE_System" />
+                <ListBoxItem Content="划词助手" Tag="PAGE_Selection" />
                 <ListBoxItem Content="网络代理" Tag="PAGE_Network" />
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="隐私和安全" />
                 <ListBoxItem Name="PART_ApprovalNav" Content="权限与审批" Tag="PAGE_Approval" />
@@ -1819,43 +1820,52 @@
               <StackPanel Name="PAGE_Search" IsVisible="False">
                 <TextBlock Classes="pagetitle" Text="联网搜索" />
                 <TextBlock Classes="pagesubtitle"
-                           Text="用于自定义模型的联网搜索能力，仅对支持工具调用的 BYOK 模型生效。" />
+                           Text="适用于支持工具调用的自定义模型与 Work。" />
 
                 <TextBlock Classes="section" Text="搜索服务" Margin="2,4,2,8" />
                 <Border Classes="settingscard">
                   <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,220">
                       <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
-                        <TextBlock Classes="rowtitle" Text="提供方" />
+                        <TextBlock Classes="rowtitle" Text="服务商" />
                         <TextBlock Name="PART_SearchProviderHint" Classes="hint" />
                       </StackPanel>
                       <ComboBox Grid.Column="1" Name="PART_SearchProvider" Classes="settingsinput"
-                                HorizontalAlignment="Stretch" VerticalAlignment="Center" />
+                                HorizontalAlignment="Stretch" VerticalAlignment="Center">
+                        <ComboBoxItem Tag="molagpt" IsEnabled="{Binding IsLoggedIn}">
+                          <TextBlock Text="MolaGPT Web Search" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                        </ComboBoxItem>
+                        <ComboBoxItem Tag="duckduckgo" Content="DuckDuckGo" />
+                        <ComboBoxItem Tag="tavily" Content="Tavily" />
+                        <ComboBoxItem Tag="exa" Content="Exa" />
+                      </ComboBox>
                     </Grid>
-                    <Border Classes="divider" />
-                    <StackPanel Classes="fieldrow">
-                      <TextBlock Classes="label" Text="接口地址" />
-                      <TextBox Name="PART_SearchBaseUrl" Classes="settingsinput"
-                               Text="{Binding WebSearchBaseUrl, Mode=TwoWay}"
-                               PlaceholderText="留空使用默认" />
-                    </StackPanel>
-                    <Border Classes="divider" />
-                    <StackPanel Classes="fieldrow">
-                      <TextBlock Classes="label" Text="API Key" />
-                      <Border Name="PART_SearchApiKeyFrame" Classes="input">
-                        <Grid ColumnDefinitions="*,Auto">
-                          <TextBox Grid.Column="0" Name="PART_SearchApiKey"
-                                   Text="{Binding WebSearchApiKey, Mode=TwoWay}"
-                                   PasswordChar="•" PlaceholderText="部分服务不需要"
-                                   Background="Transparent" BorderThickness="0" Padding="0"
-                                   VerticalContentAlignment="Center" />
-                          <Button Grid.Column="1" Name="PART_RevealSearchKey" Classes="inlineaction"
-                                  Width="28" Height="26" ToolTip.Tip="显示 / 隐藏">
-                            <TextBlock Classes="icon" Text="&#xE7B3;" FontSize="12" />
-                          </Button>
-                        </Grid>
-                      </Border>
-                      <TextBlock Classes="hint" Text="保存在本机凭据库，不随对话上传。" />
+                    <StackPanel Name="PART_SearchKeyRows">
+                      <Border Classes="divider" />
+                      <StackPanel Classes="fieldrow">
+                        <TextBlock Classes="label" Text="接口地址" />
+                        <TextBox Name="PART_SearchBaseUrl" Classes="settingsinput"
+                                 Text="{Binding WebSearchBaseUrl, Mode=TwoWay}"
+                                 PlaceholderText="留空使用默认" />
+                      </StackPanel>
+                      <Border Classes="divider" />
+                      <StackPanel Classes="fieldrow">
+                        <TextBlock Classes="label" Text="API Key" />
+                        <Border Name="PART_SearchApiKeyFrame" Classes="input">
+                          <Grid ColumnDefinitions="*,Auto">
+                            <TextBox Grid.Column="0" Name="PART_SearchApiKey"
+                                     Text="{Binding WebSearchApiKey, Mode=TwoWay}"
+                                     PasswordChar="•" PlaceholderText="部分服务不需要"
+                                     Background="Transparent" BorderThickness="0" Padding="0"
+                                     VerticalContentAlignment="Center" />
+                            <Button Grid.Column="1" Name="PART_RevealSearchKey" Classes="inlineaction"
+                                    Width="28" Height="26" ToolTip.Tip="显示 / 隐藏">
+                              <TextBlock Classes="icon" Text="&#xE7B3;" FontSize="12" />
+                            </Button>
+                          </Grid>
+                        </Border>
+                        <TextBlock Classes="hint" Text="API Key 将被加密保存。" />
+                      </StackPanel>
                     </StackPanel>
                   </StackPanel>
                 </Border>
@@ -1864,14 +1874,14 @@
                 <Border Classes="settingscard">
                   <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,160">
-                      <TextBlock Grid.Column="0" Classes="rowtitle" Text="每次搜索返回条数" VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="0" Classes="rowtitle" Text="查询结果上限" VerticalAlignment="Center" />
                       <NumericUpDown Grid.Column="1" Name="PART_SearchMaxResults" Classes="settingsinput"
                                       Value="{Binding WebSearchMaxResults, Mode=TwoWay}"
-                                      Minimum="1" Maximum="20" Increment="1" />
+                                      Minimum="1" Maximum="10" Increment="1" />
                     </Grid>
                     <Border Classes="divider" />
                     <Grid Classes="settingrow" ColumnDefinitions="*,160">
-                      <TextBlock Grid.Column="0" Classes="rowtitle" Text="单页正文最大字符数" VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="0" Classes="rowtitle" Text="网页正文字符上限" VerticalAlignment="Center" />
                       <NumericUpDown Grid.Column="1" Name="PART_SearchMaxCharacters" Classes="settingsinput"
                                       Value="{Binding WebPageMaxCharacters, Mode=TwoWay}"
                                       Minimum="1000" Maximum="200000" Increment="1000" />
@@ -1881,7 +1891,7 @@
                       <TextBlock Grid.Column="0" Name="PART_SearchStatus" Classes="hint"
                                  Margin="0,0,16,0" VerticalAlignment="Center" />
                       <Button Grid.Column="1" Name="PART_TestSearch" Classes="outline"
-                              Content="测试连接" Padding="14,7" />
+                               Content="测试搜索" Padding="14,7" />
                     </Grid>
                   </StackPanel>
                 </Border>
@@ -2345,6 +2355,125 @@
                                Text="浏览器使用在当前浏览器配置文件中进行，使用已登录的账号；浏览器中的任务标签归入 MolaGPT 标签组，可随时手动关闭。" />
                   </StackPanel>
                 </Border>
+              </StackPanel>
+
+              <StackPanel Name="PAGE_Selection" IsVisible="False">
+                <TextBlock Classes="pagetitle" Text="划词助手" />
+                <TextBlock Classes="pagesubtitle" Text="选中文字，快速翻译、解释或向 MolaGPT 提问。" />
+                <Border Classes="settingscard">
+                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                    <StackPanel Margin="0,0,20,0">
+                      <TextBlock Classes="rowtitle" Text="启用划词助手" />
+                      <TextBlock Classes="hint" Text="在其他应用中使用划词工具条。" />
+                    </StackPanel>
+                    <ToggleButton Grid.Column="1" Classes="settingtoggle" IsChecked="{Binding SelectionEnabled, Mode=TwoWay}" AutomationProperties.Name="启用划词助手" />
+                  </Grid>
+                </Border>
+                <StackPanel IsEnabled="{Binding SelectionEnabled}">
+                  <TextBlock Classes="section" Text="触发与暂停" />
+                  <Border Classes="settingscard">
+                    <StackPanel>
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                        <StackPanel Margin="0,0,20,0">
+                          <TextBlock Classes="rowtitle" Text="游戏模式" />
+                          <TextBlock Classes="hint" Text="列表中的游戏位于前台时，暂停划词和全局快捷键。" />
+                        </StackPanel>
+                        <ToggleButton Grid.Column="1" Classes="settingtoggle" IsChecked="{Binding SelectionGameMode, Mode=TwoWay}" AutomationProperties.Name="游戏模式" />
+                      </Grid>
+                      <Border Classes="divider" />
+                      <Expander Header="游戏列表" Classes="settingssection" Margin="16,10,16,12">
+                        <StackPanel Margin="0,10,0,0" Spacing="8">
+                          <TextBlock Classes="hint" Text="MolaGPT 内部维护了一个游戏列表，您可编辑和添加它。每行输入一个游戏进程名，例如 cs2.exe。" />
+                          <TextBox Classes="settingsinput" AcceptsReturn="True" MinHeight="130" MaxHeight="240" Text="{Binding SelectionGameProcesses, Mode=TwoWay}" AutomationProperties.Name="游戏列表" />
+                          <Button Classes="textlink" Content="恢复默认列表" HorizontalAlignment="Left" Click="OnResetSelectionGames" />
+                        </StackPanel>
+                      </Expander>
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                        <StackPanel Margin="0,0,20,0">
+                          <TextBlock Classes="rowtitle" Text="全屏时暂停自动划词" />
+                          <TextBlock Classes="hint" Text="全屏应用中选择文本后不显示工具条。" />
+                        </StackPanel>
+                        <ToggleButton Grid.Column="1" Classes="settingtoggle" IsChecked="{Binding SelectionPauseFullscreen, Mode=TwoWay}" AutomationProperties.Name="全屏时暂停自动划词" />
+                      </Grid>
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                        <StackPanel Margin="0,0,20,0">
+                          <TextBlock Classes="rowtitle" Text="仅快捷键触发" />
+                          <TextBlock Classes="hint" Text="仅快捷键显示划词助手工具条。" />
+                        </StackPanel>
+                        <ToggleButton Grid.Column="1" Classes="settingtoggle" IsChecked="{Binding SelectionHotkeyOnly, Mode=TwoWay}" AutomationProperties.Name="仅快捷键触发" />
+                      </Grid>
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,300">
+                        <StackPanel Margin="0,0,20,0" VerticalAlignment="Center">
+                          <TextBlock Classes="rowtitle" Text="工具条位置" />
+                          <TextBlock Classes="hint" Text="选择划词工具条相对于选区的显示位置。" />
+                        </StackPanel>
+                        <ComboBox Grid.Column="1" Classes="settingsinput" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                  x:CompileBindings="False"
+                                  SelectedValue="{Binding SelectionPopupPosition, Mode=TwoWay}"
+                                  SelectedValueBinding="{Binding Tag}" AutomationProperties.Name="工具条位置">
+                          <ComboBoxItem Content="右下角" Tag="bottom-right" />
+                          <ComboBoxItem Content="左下角" Tag="bottom-left" />
+                          <ComboBoxItem Content="右上角" Tag="top-right" />
+                          <ComboBoxItem Content="左上角" Tag="top-left" />
+                        </ComboBox>
+                      </Grid>
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,300">
+                        <StackPanel Margin="0,0,20,0" VerticalAlignment="Center">
+                          <TextBlock Classes="rowtitle" Text="全局快捷键" />
+                          <TextBlock Classes="hint" Text="点击输入框后按下想使用的组合键。" />
+                        </StackPanel>
+                        <TextBox Grid.Column="1" Classes="settingsinput" VerticalAlignment="Center" IsReadOnly="True" Text="{Binding SelectionHotkeyLabel}" KeyDown="OnSelectionHotkeyKeyDown" PlaceholderText="点击后按下组合键" AutomationProperties.Name="划词快捷键" />
+                      </Grid>
+                      <TextBlock Classes="hint" Margin="16,0,16,12" Text="{Binding SelectionHotkeyStatus}" IsVisible="{Binding SelectionHasHotkeyError}" TextWrapping="Wrap" Foreground="{DynamicResource Brush.Warning.Foreground}" />
+                    </StackPanel>
+                  </Border>
+                  <TextBlock Classes="section" Text="模型与翻译" />
+                  <Border Classes="settingscard">
+                    <StackPanel>
+                      <Grid Classes="settingrow" ColumnDefinitions="*,300">
+                        <StackPanel Margin="0,0,20,0" VerticalAlignment="Center">
+                          <TextBlock Classes="rowtitle" Text="划词模型" />
+                          <TextBlock Classes="hint" Text="选择划词助手各功能默认使用的模型。" />
+                        </StackPanel>
+                        <ComboBox Grid.Column="1" Classes="settingsinput" HorizontalAlignment="Stretch" VerticalAlignment="Center" ItemsSource="{Binding SelectionModels}" SelectedItem="{Binding SelectedSelectionModel, Mode=TwoWay}" PlaceholderText="选择模型" AutomationProperties.Name="划词模型">
+                          <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:TitleProviderModelOption"><TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" /></DataTemplate></ComboBox.ItemTemplate>
+                        </ComboBox>
+                      </Grid>
+                      <TextBlock Classes="hint" Margin="16,0,16,12" IsVisible="{Binding SelectionModelMissing}" Text="选择模型后可使用翻译、解释和提问。" />
+                      <Border Classes="divider" />
+                      <Grid Classes="settingrow" ColumnDefinitions="*,300">
+                        <StackPanel Margin="0,0,20,0" VerticalAlignment="Center">
+                          <TextBlock Classes="rowtitle" Text="翻译目标语言" />
+                          <TextBlock Classes="hint" Text="选择划词助手的默认翻译目标语言。" />
+                        </StackPanel>
+                        <TextBox Grid.Column="1" Classes="settingsinput" VerticalAlignment="Center" Text="{Binding SelectionLanguage, Mode=TwoWay}" PlaceholderText="简体中文" AutomationProperties.Name="翻译目标语言" />
+                      </Grid>
+                    </StackPanel>
+                  </Border>
+                  <TextBlock Classes="section" Text="取词与应用" />
+                  <Border Classes="settingscard">
+                    <StackPanel>
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                        <StackPanel Margin="0,0,20,0">
+                          <TextBlock Classes="rowtitle" Text="使用剪贴板取词" />
+                          <TextBlock Classes="hint" TextWrapping="Wrap" Text="快捷键取词失败时将尝试使用剪贴板取词。" />
+                        </StackPanel>
+                        <ToggleButton Grid.Column="1" Classes="settingtoggle" IsChecked="{Binding SelectionClipboardFallback, Mode=TwoWay}" AutomationProperties.Name="使用剪贴板取词" />
+                      </Grid>
+                      <Border Classes="divider" />
+                      <StackPanel Classes="fieldrow">
+                        <TextBlock Classes="rowtitle" Text="排除自动划词的应用" />
+                        <TextBlock Classes="hint" Text="每行输入一个进程名，例如 game.exe。" TextWrapping="Wrap" />
+                        <TextBox Classes="settingsinput" Margin="0,8,0,0" AcceptsReturn="True" MinHeight="130" MaxHeight="240" Text="{Binding SelectionExcludedApps, Mode=TwoWay}" AutomationProperties.Name="划词排除应用" />
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+                </StackPanel>
+                <TextBlock Classes="hint" Margin="4,12,4,0" Text="部分应用或以管理员身份运行的程序可能无法读取选区。" />
               </StackPanel>
 
               <StackPanel Name="PAGE_Approval" IsVisible="False">

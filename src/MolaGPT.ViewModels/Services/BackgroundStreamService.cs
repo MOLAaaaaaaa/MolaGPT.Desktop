@@ -149,6 +149,7 @@ public sealed class BackgroundStreamService
                     {
                         task.AssistantMessage.ReplaceContent(data.Text);
                         task.CompletedSuccessfully = true;
+                        task.AssistantMessage.ServerSubagents = data.Subagents;
                         if (data.Sources is { Count: > 0 })
                             task.AssistantMessage.Sources = data.Sources;
                     }

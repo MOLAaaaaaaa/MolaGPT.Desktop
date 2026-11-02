@@ -428,6 +428,8 @@ public sealed partial class MainViewModel : ObservableObject
         {
             OnPropertyChanged(nameof(IsArtifactPanelAvailable));
             OnPropertyChanged(nameof(IsArtifactHandleVisible));
+            if (SelectedSubagent is { } selected && !Chat.Subagents.Contains(selected))
+                SelectedSubagent = null;
             if (!Chat.HasSubagents && SubagentPanelSelected)
             {
                 SubagentPanelSelected = false;
