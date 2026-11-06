@@ -47,17 +47,23 @@
           </StackPanel>
 
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"
-                      Spacing="12" Margin="0,26,0,0">
-            <Button Name="PART_CheckUpdate" Classes="primary" Padding="18,9">
+                      Spacing="10" Margin="0,26,0,0">
+            <Button Name="PART_CheckUpdate" Classes="primary" Padding="16,9">
               <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="8">
                 <TextBlock Classes="icon" Text="&#xE895;" />
                 <TextBlock Name="PART_CheckUpdateText" Text="检查更新" />
               </StackPanel>
             </Button>
-            <Button Name="PART_GitHub" Classes="outline" Padding="18,9">
+            <Button Name="PART_GitHub" Classes="outline" Padding="16,9">
               <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="8">
-                <TextBlock Classes="icon" Text="&#xE774;" />
-                <TextBlock Text="GitHub 主页" />
+                <TextBlock Classes="icon" Text="&#xE734;" />
+                <TextBlock Text="GitHub Star" />
+              </StackPanel>
+            </Button>
+            <Button Name="PART_Support" Classes="outline" Padding="16,9">
+              <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="8">
+                <TextBlock Classes="icon" Text="&#xEB51;" Foreground="{DynamicResource Brush.Primary}" />
+                <TextBlock Text="支持 MolaGPT" />
               </StackPanel>
             </Button>
           </StackPanel>

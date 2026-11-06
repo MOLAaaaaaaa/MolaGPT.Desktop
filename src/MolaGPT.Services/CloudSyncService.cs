@@ -26,7 +26,7 @@ public sealed class CloudSyncService
     private const string BoundAccountKey = "cloud_sync.bound_account";
     private const string DetailRefreshPrefix = "cloud_sync.detail_refresh.";
     private const string DetailParserVersionPrefix = "cloud_sync.detail_parser_version.";
-    private const string DetailParserVersion = "2026-06-12.local-timeline-offsets-v2";
+    private const string DetailParserVersion = "2026-11-05.tool-call-identity-v3";
     private const string ConversationSyncPrefix = "cloud_sync.conversation_timestamp.";
     private const string ConversationMetadataPrefix = "cloud_sync.metadata.";
     private const string TitleGeneratedPrefix = "cloud_sync.ai_title_generated.";
@@ -1498,6 +1498,7 @@ public sealed class CloudSyncService
     {
         "completed" or "complete" or "success" or "succeeded" => "completed",
         "error" or "failed" or "failure" => "error",
+        "cancelled" or "canceled" => "cancelled",
         _ => "analyzing"
     };
 
@@ -1546,6 +1547,9 @@ public sealed class CloudSyncService
 
     private static LocalTimelineParse ParseWebTimelineForLocal(string source)
     {
+        source = Regex.Replace(source,
+            """(<DSanalysis\b[^>]*data-tool-type=["']mcp["'][^>]*>(?:(?!</DSanalysis>)[\s\S])*?</DSanalysis>)\s*<blockquote\b(?=[^>]*class=["']tool-status completed["'])(?![^>]*data-tool-call)[^>]*>\s*<p>处理中(?:\.\.\.|…)</p>\s*</blockquote>""",
+            "$1", RegexOptions.IgnoreCase);
         var visible = new StringBuilder();
         var thinkingSegments = new JsonArray();
         var toolCalls = new JsonArray();
@@ -1611,6 +1615,11 @@ public sealed class CloudSyncService
 
         void AppendTool(string unit)
         {
+            if (unit.Contains("data-tool-call=", StringComparison.OrdinalIgnoreCase))
+            {
+                AppendVisible(unit);
+                return;
+            }
             if (StartsWithIgnoreCase(unit, 0, "<DSanalysis")
                 && lastTimelineItemWasTool
                 && TryMergeDsAnalysisWithPreviousTool(unit, toolCalls))
@@ -1685,7 +1694,8 @@ public sealed class CloudSyncService
                 }
             }
 
-            if (unit.Contains("tool-subagent-blockquote", StringComparison.OrdinalIgnoreCase)
+            if (unit.Contains("data-tool-call=", StringComparison.OrdinalIgnoreCase)
+                || unit.Contains("tool-subagent-blockquote", StringComparison.OrdinalIgnoreCase)
                 || ShouldKeepDsAnalysisInVisibleContent(unit))
                 AppendVisible(unit);
             else
@@ -1711,7 +1721,7 @@ public sealed class CloudSyncService
 
     private static bool ShouldKeepDsAnalysisInVisibleContent(string unit)
     {
-        return DsDataToolType(unit) is "python" or "mcp" or "image-action";
+        return DsDataToolType(unit) is "python" or "mcp" or "image-action" or "code-search";
     }
 
     private static string? DsDataToolType(string unit)
@@ -1746,7 +1756,7 @@ public sealed class CloudSyncService
         {
             ["id"] = "cloud-tool-" + timelineIndex,
             ["name"] = name,
-            ["status"] = phase == "error" ? "error" : phase == "completed" ? "completed" : "running",
+            ["status"] = phase == "error" ? "error" : phase == "cancelled" ? "cancelled" : phase == "completed" ? "completed" : "running",
             ["label"] = label,
             ["content_offset"] = contentOffset,
             ["timeline_index"] = timelineIndex,
@@ -1783,7 +1793,7 @@ public sealed class CloudSyncService
         var name = DsToolName(unit);
         var phase = ExtractToolPhase(unit);
         previous["name"] = name;
-        previous["status"] = phase == "error" ? "error" : phase == "completed" ? "completed" : "running";
+        previous["status"] = phase == "error" ? "error" : phase == "cancelled" ? "cancelled" : phase == "completed" ? "completed" : "running";
         if (name == "web_fetch")
         {
             if (string.IsNullOrWhiteSpace(ReadString(previous, "label")))
@@ -1909,6 +1919,7 @@ public sealed class CloudSyncService
     private static string ExtractToolPhase(string unit)
     {
         var lower = unit.ToLowerInvariant();
+        if (Regex.IsMatch(lower, """(?:class|data-analysis-phase)=["'][^"']*\bcancelled\b""")) return "cancelled";
         if (lower.Contains("data-analysis-phase=\"error\"") || lower.Contains(" tool-status error") || lower.Contains(" error\"")) return "error";
         return "completed";
     }

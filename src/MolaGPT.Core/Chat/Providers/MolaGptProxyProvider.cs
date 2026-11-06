@@ -376,7 +376,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
 
         var uploadedImages = imageIndexes.Count == 0
             ? new Dictionary<int, MolaGptUploadResult>()
-            : await UploadImagesBatchAsync(baseUri, imageIndexes, conversationId, ct).ConfigureAwait(false);
+            : await UploadImagesBatchAsync(baseUri, jwt, imageIndexes, conversationId, ct).ConfigureAwait(false);
 
         for (var i = 0; i < attachments.Count; i++)
         {
@@ -613,6 +613,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
 
     private async Task<Dictionary<int, MolaGptUploadResult>> UploadImagesBatchAsync(
         Uri baseUri,
+        string jwt,
         IReadOnlyList<(Attachment Attachment, int Index)> images,
         string conversationId,
         CancellationToken ct)
@@ -628,40 +629,51 @@ public sealed class MolaGptProxyProvider : IChatProvider
                 "图片超过 MolaGPT 公网图片上传 10MB 限制：" + string.Join("；", oversized));
         }
 
-        using var form = new MultipartFormDataContent();
-        foreach (var (attachment, _) in images)
-        {
-            var content = new ByteArrayContent(attachment.Bytes);
-            content.Headers.ContentType = new MediaTypeHeaderValue(attachment.MimeType);
-            AddFilePart(form, content, "files[]", EnsureImageFileName(attachment));
-        }
-        form.Add(new StringContent(conversationId), "conversation_id");
-
-        using var response = await _http.PostAsync(endpoint, form, ct).ConfigureAwait(false);
-        await ChatApiErrorHelper.EnsureSuccessAsync(response, "MolaGPT 图片上传", ct).ConfigureAwait(false);
-
-        var root = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: ct).ConfigureAwait(false)
-            ?? throw new InvalidOperationException("图片上传失败：服务器响应为空。");
-        if (root["success"]?.GetValue<bool>() != true || root["files"] is not JsonArray files)
-            throw new InvalidOperationException(BuildImageUploadErrorMessage(root, "图片上传失败。"));
-
         var result = new Dictionary<int, MolaGptUploadResult>();
-        var fileNodes = files.OfType<JsonObject>().ToList();
-        for (var i = 0; i < Math.Min(images.Count, fileNodes.Count); i++)
+        foreach (var batch in images.Chunk(3))
         {
-            var file = fileNodes[i];
-            if (file["success"]?.GetValue<bool>() != true)
-                continue;
-            var url = file["url"]?.GetValue<string>();
-            var filename = file["filename"]?.GetValue<string>();
-            var filePath = file["filePathOnHost"]?.GetValue<string>();
-            if (string.IsNullOrWhiteSpace(filename) || string.IsNullOrWhiteSpace(filePath))
-                continue;
-            result[images[i].Index] = new MolaGptUploadResult(filename!, url, filePath!);
-        }
+            using var form = new MultipartFormDataContent();
+            foreach (var (attachment, _) in batch)
+            {
+                var content = new ByteArrayContent(attachment.Bytes);
+                content.Headers.ContentType = new MediaTypeHeaderValue(attachment.MimeType);
+                AddFilePart(form, content, "files[]", EnsureImageFileName(attachment));
+            }
+            form.Add(new StringContent(conversationId), "conversation_id");
 
-        if (result.Count != images.Count)
-            throw new InvalidOperationException(BuildImageUploadErrorMessage(root, "部分图片上传失败。"));
+            using var req = new HttpRequestMessage(HttpMethod.Post, endpoint) { Content = form };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+            using var response = await _http.SendAsync(req, ct).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                _auth.Logout();
+                throw new MolaGptAuthExpiredException();
+            }
+            await ChatApiErrorHelper.EnsureSuccessAsync(response, "MolaGPT 图片上传", ct).ConfigureAwait(false);
+
+            var root = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: ct).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("图片上传失败：服务器响应为空。");
+            if (root["success"]?.GetValue<bool>() != true || root["files"] is not JsonArray files)
+                throw new InvalidOperationException(BuildImageUploadErrorMessage(root, "图片上传失败。"));
+
+            var uploadedBeforeBatch = result.Count;
+            var fileNodes = files.OfType<JsonObject>().ToList();
+            for (var i = 0; i < Math.Min(batch.Length, fileNodes.Count); i++)
+            {
+                var file = fileNodes[i];
+                if (file["success"]?.GetValue<bool>() != true)
+                    continue;
+                var url = file["url"]?.GetValue<string>();
+                var filename = file["filename"]?.GetValue<string>();
+                var filePath = file["filePathOnHost"]?.GetValue<string>();
+                if (string.IsNullOrWhiteSpace(filename) || string.IsNullOrWhiteSpace(filePath))
+                    continue;
+                result[batch[i].Index] = new MolaGptUploadResult(filename!, url, filePath!);
+            }
+
+            if (result.Count - uploadedBeforeBatch != batch.Length)
+                throw new InvalidOperationException(BuildImageUploadErrorMessage(root, "部分图片上传失败。"));
+        }
 
         return result;
     }

@@ -211,7 +211,7 @@ public partial class TranscriptView : UserControl
         if (sender is Control { Tag: string id } && id.Length > 0) _chat.SaveActivePersona(id);
     }
 
-    private bool CanAutoCollapseTools() => _followBottom && !_wheelAnimating && !_jumping
+    internal bool CanAutoCollapseTools() => _followBottom && !_wheelAnimating && !_jumping
         && !_selectionDragging && _selection is null && _pressedBlock is null
         && !this.GetVisualDescendants().OfType<ToolRunView>().Any(view => view.IsPointerOver);
 

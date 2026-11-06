@@ -62,6 +62,7 @@ public partial class MainWindow : MolaWindow
     private readonly PersonalizationViewModel _personalization;
     private readonly MemoryPageViewModel _memoryPage;
     private readonly PersonalDataService _personalData;
+    private readonly SponsorsService _sponsors;
 
     /// <summary>Set by the app once remote control exists; shown in 设置 → 远程控制.</summary>
     public MolaGPT.Desktop.Services.Remote.RemoteWorkSettingsViewModel? RemoteWork
@@ -85,6 +86,7 @@ public partial class MainWindow : MolaWindow
     private bool _sidebarCollapsed;
     private SettingsWindow? _settingsWindow;
     private AboutWindow? _aboutWindow;
+    private SupportWindow? _supportWindow;
     private ImageGenerationWorkbenchView? _imageWorkbench;
     private Task<bool>? _agentRuntimeSetupTask;
     private bool _agentRuntimeActivated;
@@ -142,7 +144,8 @@ public partial class MainWindow : MolaWindow
         PiByokProviderFactory piByokProviderFactory,
         PersonalizationViewModel personalization,
         MemoryPageViewModel memoryPage,
-        PersonalDataService personalData)
+        PersonalDataService personalData,
+        SponsorsService sponsors)
     {
         _main = main;
         _main.CopyTextRequested += OnCopyTextRequested;
@@ -174,6 +177,7 @@ public partial class MainWindow : MolaWindow
         _personalization = personalization;
         _memoryPage = memoryPage;
         _personalData = personalData;
+        _sponsors = sponsors;
         _pythonSetup = new PythonRuntimeSetup(pythonRuntime, settings, notifications);
         _composer.EnsureAgentRuntimeAsync = EnsureAgentRuntimeForSendAsync;
 
@@ -1144,6 +1148,15 @@ public partial class MainWindow : MolaWindow
         _settingsWindow?.OpenBrowserPage();
     }
 
+    internal void OpenSelectionSettings()
+    {
+        if (!IsVisible) Show();
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+        OpenSettings(openAgent: false);
+        _settingsWindow?.OpenSelectionPage();
+    }
+
     private void OpenSettings(bool openAgent)
     {
         if (_settingsWindow is { } existing)
@@ -1165,6 +1178,7 @@ public partial class MainWindow : MolaWindow
         {
             if (await OpenLoginAsync(window)) window.RefreshAccountUi();
         };
+        window.SupportRequested += (_, _) => OpenSupport(window);
         window.Closed += (_, _) => _settingsWindow = null;
         _settingsWindow = window;
         if (openAgent) window.OpenAgentPage();
@@ -1179,9 +1193,23 @@ public partial class MainWindow : MolaWindow
             return;
         }
 
-        _aboutWindow = new AboutWindow(_updateCheck);
+        _aboutWindow = new AboutWindow(_updateCheck, _settings);
+        _aboutWindow.SupportRequested += (_, _) => OpenSupport(_aboutWindow);
         _aboutWindow.Closed += (_, _) => _aboutWindow = null;
         _aboutWindow.Show(this);
+    }
+
+    internal void OpenSupport(Window? owner = null)
+    {
+        if (_supportWindow is { } existing)
+        {
+            existing.Activate();
+            return;
+        }
+
+        _supportWindow = new SupportWindow(_sponsors, _settings);
+        _supportWindow.Closed += (_, _) => _supportWindow = null;
+        _supportWindow.Show(owner is { IsVisible: true } ? owner : this);
     }
 
     private void NewConversation()

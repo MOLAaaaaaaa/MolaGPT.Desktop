@@ -43,6 +43,7 @@ public partial class App : Application
     private Task? _agentRelayTask;
     private const string UpdateNotificationKey = "app-update";
     private const string CloudSyncNotificationKey = "cloud-sync";
+    private const string CommunityNotificationKey = "community-prompt";
 
     private string? _pendingUpdateInstallerPath;
     private NotificationRouter? _notificationRouter;
@@ -65,6 +66,7 @@ public partial class App : Application
         {
             UrlSchemeRegistrar.EnsureRegistered();
             _services = AppServices.Build();
+            Resources["ServerToolActions"] = _services.GetRequiredService<ServerToolActions>();
             _services.GetRequiredService<MolaGptDatabase>().EnsureSchema();
             CdnProxy.ConfigureProxy(_services.GetRequiredService<AppProxy>().General);
             _services.GetRequiredService<PersonalDataService>().UpgradeCredentialStorage();
@@ -181,7 +183,8 @@ public partial class App : Application
                  _services.GetRequiredService<PiByokProviderFactory>(),
                  _services.GetRequiredService<PersonalizationViewModel>(),
                  _services.GetRequiredService<MemoryPageViewModel>(),
-                 _services.GetRequiredService<PersonalDataService>());
+                 _services.GetRequiredService<PersonalDataService>(),
+                 _services.GetRequiredService<SponsorsService>());
             window.RemoteWork = _services.GetRequiredService<RemoteWorkSettingsViewModel>();
             desktop.MainWindow = window;
             _selectionAssistant = new Selection.SelectionAssistantService(settings, providers,
@@ -345,6 +348,11 @@ public partial class App : Application
             _ = Task.Run(SweepOrphanedAttachments);
             _ = Task.Run(CatchUpMemoryIndex);
             WireMemoryNotifications(notifications);
+            WireCommunityPrompts(
+                _services.GetRequiredService<BackgroundStreamService>(),
+                settings,
+                notifications,
+                window);
             Dispatcher.UIThread.Post(
                 () => _ = RunStartupAccountRefreshAsync(
                     auth, providers, proxy, localTools, accountSession, window),
@@ -679,6 +687,54 @@ public partial class App : Application
         if (_services is null) return;
         _services.GetRequiredService<MemoryConsolidator>().Completed += (_, report) =>
             notifications.Success("记忆整理完成", report.Describe(), key: "memory-consolidation");
+    }
+
+    private static void WireCommunityPrompts(
+        BackgroundStreamService streams,
+        SettingsViewModel settings,
+        NotificationCenter notifications,
+        MainWindow window)
+    {
+        streams.TaskCompleted += (_, _) => Dispatcher.UIThread.Post(() =>
+        {
+            var count = settings.CompletedTurnCount + 1;
+            settings.CompletedTurnCount = count;
+
+            if (!window.IsActive || !window.IsVisible || window.WindowState == WindowState.Minimized)
+                return;
+
+            if (count >= 5 && !settings.GitHubStarPromptShown)
+            {
+                settings.GitHubStarPromptShown = true;
+                notifications.Notify(new AppNotification
+                {
+                    Key = CommunityNotificationKey,
+                    Kind = NotifyKind.Info,
+                    Title = "觉得 MolaGPT Desktop 好用？",
+                    Body = "欢迎在 GitHub 点亮 Star，让更多人发现这个开源项目。",
+                    ActionText = "前往 Star",
+                    Action = () => CommunityLinks.TryOpenBrowser(CommunityLinks.GitHubUrl),
+                    Sticky = true
+                });
+                return;
+            }
+
+            if (count >= 15 && !settings.AfdianSupportPromptShown)
+            {
+                settings.AfdianSupportPromptShown = true;
+                if (settings.IsDonor) return;
+                notifications.Notify(new AppNotification
+                {
+                    Key = CommunityNotificationKey,
+                    Kind = NotifyKind.Info,
+                    Title = "支持 MolaGPT 持续维护",
+                    Body = "可通过爱发电赞助项目，¥66/月档位可解锁捐赠者专属模型与更高额度。",
+                    ActionText = "查看方案",
+                    Action = () => window.OpenSupport(),
+                    Sticky = true
+                });
+            }
+        });
     }
 
     private void SweepOrphanedAttachments()

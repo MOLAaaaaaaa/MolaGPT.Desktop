@@ -4,6 +4,12 @@ namespace MolaGPT.App.Views;
 
 public partial class SettingsWindow
 {
+    internal void OpenSelectionPage()
+    {
+        PART_Nav.SelectedItem = PART_SelectionNav;
+        ShowSelectedPage();
+    }
+
     private void OnResetSelectionGames(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
         => _settings.SelectionGameProcesses = MolaGPT.ViewModels.SettingsViewModel.DefaultSelectionGameProcesses;
 

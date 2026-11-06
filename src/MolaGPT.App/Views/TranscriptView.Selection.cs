@@ -547,7 +547,7 @@ public partial class TranscriptView
     /// the constraints it last had is what the layout pass would do for it
     /// anyway, just before we need it rather than after.
     /// </summary>
-    private static void EnsureLayout(Layoutable block)
+    internal static void EnsureLayout(Layoutable block)
     {
         if (block.IsMeasureValid && block.IsArrangeValid) return;
         if (LayoutInformation.GetPreviousMeasureConstraint(block) is { } constraint)
@@ -809,7 +809,7 @@ public partial class TranscriptView
     /// a spreadsheet reads back as a table — a line break between items of one
     /// list, and a blank line between everything else.
     /// </summary>
-    private static string Separator(SelectableTextBlock previous, SelectableTextBlock next)
+    internal static string Separator(SelectableTextBlock previous, SelectableTextBlock next)
     {
         var table = previous.FindAncestorOfType<MarkdownTableView>();
         if (table is not null && ReferenceEquals(table, next.FindAncestorOfType<MarkdownTableView>()))
@@ -833,7 +833,7 @@ public partial class TranscriptView
     /// source pill as one placeholder character; copied as-is, that placeholder
     /// is what a pasted sentence would have where its formula was.
     /// </summary>
-    private static void AppendPlainText(StringBuilder target, SelectableTextBlock block, int start, int end)
+    internal static void AppendPlainText(StringBuilder target, SelectableTextBlock block, int start, int end)
     {
         if (block.Inlines is not { Count: > 0 } inlines)
         {

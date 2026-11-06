@@ -1,7 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:r="clr-namespace:MolaGPT.App.Rendering"
         x:Class="MolaGPT.App.Selection.SelectionResultWindow" Title="划词助手"
-        Width="400" MinWidth="320" MinHeight="220" MaxHeight="620" SizeToContent="Height"
+        Width="410" MinWidth="320" MinHeight="220" MaxHeight="620" SizeToContent="Height"
         WindowDecorations="BorderOnly" ExtendClientAreaToDecorationsHint="True"
         CanResize="True" ShowInTaskbar="False" Topmost="True"
         Background="{DynamicResource Brush.Bg.Elevated}" Foreground="{DynamicResource Brush.Text.Primary}"
@@ -10,12 +10,31 @@
   <!-- 弹窗是另一个面：不继承 MolaWindow（不抢通知宿主、不算应用前台），
        但外观对齐主窗口。不透明底 + DWM 圆角——swap chain 不出透明。 -->
   <Window.Styles>
+    <Style Selector="Button.send">
+      <Setter Property="Width" Value="28" />
+      <Setter Property="Height" Value="28" />
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="TextBox.compose">
+      <Setter Property="MinHeight" Value="50" />
+      <Setter Property="Padding" Value="4,4,4,4" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <Style Selector="TextBox.compose:pointerover, TextBox.compose:focus">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style Selector="TextBox.compose /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
     <Style Selector="Border.composerbox:focus-within">
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
     </Style>
     <Style Selector="Button.winicon, ToggleButton.winicon">
-      <Setter Property="Width" Value="30" />
-      <Setter Property="Height" Value="30" />
+      <Setter Property="Width" Value="28" />
+      <Setter Property="Height" Value="28" />
+      <Setter Property="Padding" Value="0" />
       <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
     </Style>
     <Style Selector="Button.winicon:pointerover /template/ Border#PART_Root, ToggleButton.winicon:pointerover /template/ Border#PART_Root">
@@ -36,9 +55,31 @@
     <Style Selector="Button.winicon.close:pointerover">
       <Setter Property="Foreground" Value="White" />
     </Style>
+    <Style Selector="Button.modetab">
+      <Setter Property="Height" Value="24" />
+      <Setter Property="Padding" Value="8,0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Xs}" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="Button.modetab:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Button.modetab:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+    <Style Selector="Button.modetab.active /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+    </Style>
+    <Style Selector="Button.modetab.active">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
     <Style Selector="Button.langchip">
       <Setter Property="Height" Value="22" />
-      <Setter Property="Padding" Value="9,0" />
+      <Setter Property="Padding" Value="8,0" />
       <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
       <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
@@ -50,6 +91,53 @@
     </Style>
     <Style Selector="Button.langchip:pointerover">
       <Setter Property="Foreground" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+    <Style Selector="Button.promptpill">
+      <Setter Property="Height" Value="26" />
+      <Setter Property="Padding" Value="10,0" />
+      <Setter Property="Margin" Value="0,0,6,6" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="Button.promptpill:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+    <Style Selector="Button.promptpill:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+    <Style Selector="Button.composerchip, ToggleButton.composerchip">
+      <Setter Property="Height" Value="24" />
+      <Setter Property="MinHeight" Value="24" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="Padding" Value="8,0" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="Button.composerchip:pointerover /template/ Border#PART_Root, ToggleButton.composerchip:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border.Strong}" />
+    </Style>
+    <Style Selector="Button.composerchip:pointerover, ToggleButton.composerchip:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+    <Style Selector="ToggleButton.composerchip:checked /template/ Border#PART_Root, Button.composerchip.on /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Tint}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary.Border}" />
+    </Style>
+    <Style Selector="ToggleButton.composerchip:checked, Button.composerchip.on">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
     </Style>
     <Style Selector="Button.actionchip">
       <Setter Property="Height" Value="26" />
@@ -118,29 +206,48 @@
     <Grid RowDefinitions="Auto,Auto,*,Auto,Auto,Auto,Auto">
 
       <!-- 标题栏（拖动区） -->
-      <Border Name="TitleBar" Height="42" Padding="12,0,6,0"
+      <Border Name="TitleBar" Height="42" Padding="10,0,6,0" Background="Transparent"
               BorderBrush="{DynamicResource Brush.Divider}" BorderThickness="0,0,0,1"
               PointerPressed="OnTitlePressed">
-        <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto" ColumnSpacing="7">
-          <Border Width="22" Height="22" CornerRadius="{DynamicResource Radius.Sm}" VerticalAlignment="Center"
-                  Background="{DynamicResource Brush.Primary.Tint}">
+        <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto,Auto" ColumnSpacing="6">
+          <Border Name="BadgeBox" Width="22" Height="22" CornerRadius="{DynamicResource Radius.Sm}" VerticalAlignment="Center"
+                  Background="{DynamicResource Brush.Primary.Tint}" IsVisible="False">
             <Path Name="BadgeIcon" Width="13" Height="13" Stretch="Uniform"
                   Stroke="{DynamicResource Brush.Primary}" StrokeThickness="1.5"
                   StrokeLineCap="Round" StrokeJoin="Round" />
           </Border>
-          <TextBlock Name="ActionTitle" Grid.Column="1" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
+          <TextBlock Name="ActionTitle" Grid.Column="1" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" IsVisible="False" />
+
+          <!-- 模式分段切换（翻译 / 解释 / 问 AI） -->
+          <Border Name="ModeTabs" Grid.Column="0" Grid.ColumnSpan="2" VerticalAlignment="Center"
+                  Background="{DynamicResource Brush.Bg.Primary}" BorderBrush="{DynamicResource Brush.Divider}"
+                  BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}" Padding="2">
+            <StackPanel Orientation="Horizontal" Spacing="2">
+              <Button Name="TabTranslate" Classes="modetab" Tag="翻译" Content="翻译" Click="OnModeTabClick" />
+              <Button Name="TabExplain" Classes="modetab" Tag="解释" Content="解释" Click="OnModeTabClick" />
+              <Button Name="TabAsk" Classes="modetab" Tag="问 AI" Content="问 AI" Click="OnModeTabClick" />
+            </StackPanel>
+          </Border>
+
           <Button Name="LangChip" Grid.Column="2" Classes="langchip" VerticalAlignment="Center"
-                  IsVisible="False" Click="OnLangChip" ToolTip.Tip="切换目标语言" AutomationProperties.Name="翻译目标语言">
+                  IsVisible="False" Click="OnLangChip" ToolTip.Tip="切换翻译目标语言" AutomationProperties.Name="翻译目标语言">
             <StackPanel Orientation="Horizontal" Spacing="5">
+              <Ellipse Name="LangAutoDot" Width="5" Height="5" Fill="{DynamicResource Brush.Success}" VerticalAlignment="Center" IsVisible="False" />
               <TextBlock Classes="icon" Text="&#xE774;" FontSize="10" VerticalAlignment="Center" />
               <TextBlock Name="LangText" FontSize="11.5" VerticalAlignment="Center" />
+              <TextBlock Classes="icon" Text="&#xE70D;" FontSize="8" Opacity="0.7" VerticalAlignment="Center" />
             </StackPanel>
           </Button>
-          <ToggleButton Name="PinButton" Grid.Column="4" Classes="winicon" VerticalAlignment="Center"
-                        ToolTip.Tip="固定 · 切换应用时保留窗口" AutomationProperties.Name="固定窗口">
+
+          <Button Name="SettingsButton" Grid.Column="4" Classes="winicon" VerticalAlignment="Center"
+                  Click="OnOpenSettings" ToolTip.Tip="划词助手设置" AutomationProperties.Name="划词助手设置">
+            <TextBlock Classes="icon" Text="&#xE713;" FontSize="12" />
+          </Button>
+          <ToggleButton Name="PinButton" Grid.Column="5" Classes="winicon" VerticalAlignment="Center"
+                        ToolTip.Tip="固定 · 切换应用时保留窗口并承接新划词" AutomationProperties.Name="固定窗口">
             <TextBlock Classes="icon" Text="&#xE718;" FontSize="12" />
           </ToggleButton>
-          <Button Grid.Column="5" Classes="winicon close" VerticalAlignment="Center"
+          <Button Grid.Column="6" Classes="winicon close" VerticalAlignment="Center"
                   Click="OnClose" ToolTip.Tip="关闭 (Esc)" AutomationProperties.Name="关闭划词助手">
             <TextBlock Classes="icon" Text="&#xE711;" FontSize="12" />
           </Button>
@@ -166,7 +273,18 @@
 
       <!-- 回答区 -->
       <ScrollViewer Name="AnswerScroll" Grid.Row="2" Padding="16,10,16,4" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
-        <StackPanel Name="Answers" Spacing="18" />
+        <StackPanel Spacing="12">
+          <!-- 问 AI 初始态快捷提问胶囊 -->
+          <StackPanel Name="QuickPromptsPanel" IsVisible="False" Spacing="6" Margin="0,2,0,0">
+            <TextBlock Text="快捷提问" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource Brush.Text.Muted}" />
+            <WrapPanel Orientation="Horizontal">
+              <Button Classes="promptpill" Tag="请简明解释原文的含义和必要的背景。" Click="OnQuickPromptClick" Content="解释含义" />
+              <Button Classes="promptpill" Tag="请提炼原文的核心要点。" Click="OnQuickPromptClick" Content="总结要点" />
+              <Button Classes="promptpill" Tag="请润色并改写原文，使其表达更清晰精炼。" Click="OnQuickPromptClick" Content="润色改写" />
+            </WrapPanel>
+          </StackPanel>
+          <StackPanel Name="Answers" Spacing="18" />
+        </StackPanel>
       </ScrollViewer>
 
       <!-- 流式状态行 -->
@@ -194,31 +312,70 @@
       </Border>
 
       <!-- 回答动作行 -->
-      <StackPanel Name="ActionRow" Grid.Row="5" IsVisible="False" Orientation="Horizontal" Margin="11,4,11,0">
+      <StackPanel Name="ActionRow" Grid.Row="5" IsVisible="False" Orientation="Horizontal" Spacing="2" Margin="11,4,11,0">
         <Button Classes="actionchip" Click="OnCopy" AutomationProperties.Name="复制回答">
           <StackPanel Orientation="Horizontal" Spacing="5">
             <TextBlock Classes="icon" Text="&#xE8C8;" FontSize="11" VerticalAlignment="Center" />
             <TextBlock Name="CopyLabel" Text="复制回答" FontSize="12" VerticalAlignment="Center" />
           </StackPanel>
         </Button>
+        <Button Name="RegenerateButton" Classes="actionchip" Click="OnRegenerate" AutomationProperties.Name="重新生成">
+          <StackPanel Orientation="Horizontal" Spacing="5">
+            <TextBlock Classes="icon" Text="&#xE72C;" FontSize="11" VerticalAlignment="Center" />
+            <TextBlock Text="重新生成" FontSize="12" VerticalAlignment="Center" />
+          </StackPanel>
+        </Button>
       </StackPanel>
 
-      <!-- 追问：与主聊 composer 同构（borderless TextBox + send/stop 换位） -->
-      <Border Name="ComposerBox" Grid.Row="6" Classes="composerbox" Margin="14,8,14,12"
+      <!-- 追问与模型/推理控制栏（与主聊 composer 同构） -->
+      <Border Name="ComposerBox" Grid.Row="6" Classes="composerbox" Margin="12,6,12,10"
               CornerRadius="{DynamicResource Radius.Lg}" Background="{DynamicResource Brush.Bg.Secondary}"
-              BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" Padding="12,6,7,6">
-        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-          <TextBox Name="Question" PlaceholderText="就选中内容继续提问…" AcceptsReturn="True"
-                   TextWrapping="Wrap" MaxHeight="96" FontSize="14" KeyDown="OnQuestionKeyDown" />
-          <Panel Grid.Column="1" VerticalAlignment="Bottom">
-            <Button Name="SendButton" Classes="send" Click="OnSend" ToolTip.Tip="发送 (Enter)" AutomationProperties.Name="发送问题">
-              <TextBlock Classes="icon" Text="&#xE724;" FontSize="13" Foreground="{DynamicResource Brush.Text.OnPrimary}" />
-            </Button>
-            <Button Name="StopButton" Classes="send stop" IsVisible="False" Click="OnCancel" ToolTip.Tip="停止" AutomationProperties.Name="停止回答">
-              <TextBlock Classes="icon" Text="&#xE71A;" FontSize="13" Foreground="{DynamicResource Brush.Text.OnPrimary}" />
-            </Button>
-          </Panel>
-        </Grid>
+              BorderBrush="{DynamicResource Brush.Border}" BorderThickness="1" Padding="10,7,8,7">
+        <StackPanel Spacing="6">
+          <TextBox Name="Question" Classes="compose" PlaceholderText="就选中内容继续提问…" AcceptsReturn="True"
+                   TextWrapping="Wrap" MinHeight="50" MaxHeight="120" FontSize="13.5" KeyDown="OnQuestionKeyDown" />
+          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
+            <WrapPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button Name="ModelChip" Classes="composerchip" Margin="0,0,6,0" Click="OnModelChip"
+                      ToolTip.Tip="选择划词模型" AutomationProperties.Name="选择划词模型">
+                <StackPanel Orientation="Horizontal" Spacing="5">
+                  <TextBlock Classes="icon" Text="&#xE99A;" FontSize="11" VerticalAlignment="Center" />
+                  <TextBlock Name="ModelChipText" Text="选择模型" MaxWidth="148" TextTrimming="CharacterEllipsis"
+                             TextWrapping="NoWrap" VerticalAlignment="Center" />
+                  <TextBlock Classes="icon" Text="&#xE70D;" FontSize="8" Opacity="0.7" VerticalAlignment="Center" />
+                </StackPanel>
+              </Button>
+
+              <StackPanel Name="ReasoningPill" Orientation="Horizontal" Spacing="6" IsVisible="False">
+                <ToggleButton Name="ThinkingToggle" Classes="composerchip" Click="OnThinkingToggled"
+                              ToolTip.Tip="开启推理：复杂问题先推理后回答" AutomationProperties.Name="开启推理">
+                  <StackPanel Orientation="Horizontal" Spacing="5">
+                    <TextBlock Classes="icon" Text="&#xE82F;" FontSize="11" VerticalAlignment="Center" />
+                    <TextBlock Text="推理" VerticalAlignment="Center" />
+                  </StackPanel>
+                </ToggleButton>
+                <Button Name="EffortButton" Classes="composerchip" Click="OnEffortClick" IsVisible="False"
+                        ToolTip.Tip="调整推理强度" AutomationProperties.Name="调整推理强度">
+                  <StackPanel Orientation="Horizontal" Spacing="5">
+                    <TextBlock Name="EffortPrefixIcon" Classes="icon" Text="&#xE82F;" FontSize="11" VerticalAlignment="Center" IsVisible="False" />
+                    <TextBlock Name="EffortPrefixText" Text="推理" VerticalAlignment="Center" IsVisible="False" />
+                    <TextBlock Name="EffortLabel" VerticalAlignment="Center" />
+                    <TextBlock Classes="icon" Text="&#xE70D;" FontSize="8" Opacity="0.7" VerticalAlignment="Center" />
+                  </StackPanel>
+                </Button>
+              </StackPanel>
+            </WrapPanel>
+
+            <Panel Grid.Column="1" VerticalAlignment="Center">
+              <Button Name="SendButton" Classes="send" Click="OnSend" ToolTip.Tip="发送 (Enter)" AutomationProperties.Name="发送问题">
+                <TextBlock Classes="icon" Text="&#xE724;" FontSize="13" Foreground="{DynamicResource Brush.Text.OnPrimary}" />
+              </Button>
+              <Button Name="StopButton" Classes="send stop" IsVisible="False" Click="OnCancel" ToolTip.Tip="停止" AutomationProperties.Name="停止回答">
+                <TextBlock Classes="icon" Text="&#xE71A;" FontSize="13" Foreground="{DynamicResource Brush.Text.OnPrimary}" />
+              </Button>
+            </Panel>
+          </Grid>
+        </StackPanel>
       </Border>
     </Grid>
   </Border>

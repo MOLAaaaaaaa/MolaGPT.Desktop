@@ -3,7 +3,10 @@ using System.Globalization;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using MolaGPT.Core.Auth;
+
 using MolaGPT.Core.Chat.Providers;
+using MolaGPT.Desktop.Services;
+
 
 namespace MolaGPT.App.Views;
 
@@ -30,6 +33,12 @@ public partial class SettingsWindow
         PART_AccountAction.Click += (_, _) => AccountRequested?.Invoke(this, EventArgs.Empty);
         PART_Logout.Click += OnLogoutClick;
         PART_RefreshUsage.Click += (_, _) => _ = RefreshUsageAsync(force: true);
+        PART_OpenSupport.Click += (_, _) => SupportRequested?.Invoke(this, EventArgs.Empty);
+        PART_OpenGitHubStar.Click += (_, _) =>
+        {
+            _settings.GitHubStarPromptShown = true;
+            CommunityLinks.TryOpenBrowser(CommunityLinks.GitHubUrl);
+        };
     }
 
     internal void OpenAccountPage()
@@ -65,6 +74,7 @@ public partial class SettingsWindow
         }
 
         PART_AccountDetail.Text = "登录后可在桌面端使用 MolaGPT 的模型、对话同步与个性化记忆。";
+        _settings.IsDonor = false;
         PART_CloudSyncStatus.Text = string.Empty;
         _usageFetchedAt = null;
         _usageRequest++;
@@ -118,6 +128,7 @@ public partial class SettingsWindow
             PART_AccountNavName.Text = status.Username;
         }
 
+        _settings.IsDonor = status.IsDonor;
         PART_AccountDetail.Text = status.Unlimited ? "无限制账户" : status.IsDonor ? "捐赠用户" : "已注册用户";
         ShowUsageStatus(null);
 

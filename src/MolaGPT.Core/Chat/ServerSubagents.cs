@@ -25,6 +25,8 @@ public static partial class ServerSubagents
             if (existing is null) agents.Add(item.DeepClone());
             else foreach (var field in item) existing[field.Key] = field.Value?.DeepClone();
         }
+        if (frame["waiting"] is JsonValue waiting)
+            foreach (var agent in agents.OfType<JsonObject>()) agent["batch_waiting"] = waiting.DeepClone();
         return merged;
     }
 
@@ -33,11 +35,14 @@ public static partial class ServerSubagents
         if (batches is null) return null;
         var result = (JsonObject)batches.DeepClone();
         foreach (var agent in result.SelectMany(b => b.Value!.AsArray()).OfType<JsonObject>())
+        {
+            agent.Remove("batch_waiting");
             if (Text(agent, "status") == "running")
             {
                 agent["status"] = "stopped";
                 agent["ended_at"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             }
+        }
         return result;
     }
 

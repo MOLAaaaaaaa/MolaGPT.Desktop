@@ -33,6 +33,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string HideAccountFeaturesKey = "hide_account_features";
     private const string AccountEntrySeenKey = "account_entry_seen";
     private const string PythonSetupOfferedKey = "python_setup_offered";
+    private const string CompletedTurnCountKey = "completed_turn_count";
+    private const string GitHubStarPromptShownKey = "github_star_prompt_shown";
+    private const string AfdianSupportPromptShownKey = "afdian_support_prompt_shown";
+    private const string IsDonorCachedKey = "molagpt_is_donor";
     private const string AutoCompactionKey = "auto_compaction";
     private const string BackgroundTaskWakeKey = "background_task_wake";
     private const string RunningTaskSendModeKey = "running_task_send_mode";
@@ -125,6 +129,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// <summary>The one-time "install Python?" offer after the agent runtime
     /// first lands has been shown. Persisted so a reinstall does not ask again.</summary>
     [ObservableProperty] private bool _pythonSetupOffered;
+    [ObservableProperty] private int _completedTurnCount;
+    [ObservableProperty] private bool _gitHubStarPromptShown;
+    [ObservableProperty] private bool _afdianSupportPromptShown;
+    [ObservableProperty] private bool _isDonor;
     [ObservableProperty] private ThemeMode _themeMode = ThemeMode.System;
     [ObservableProperty] private bool _enterToSend = true;
 
@@ -390,6 +398,14 @@ public sealed partial class SettingsViewModel : ObservableObject
                                || _settingsRepo.Get(HideAccountFeaturesKey) is not null;
             if (bool.TryParse(_settingsRepo.Get(PythonSetupOfferedKey), out var pythonOffered))
                 PythonSetupOffered = pythonOffered;
+            if (int.TryParse(_settingsRepo.Get(CompletedTurnCountKey), out var completedTurns) && completedTurns > 0)
+                CompletedTurnCount = completedTurns;
+            if (bool.TryParse(_settingsRepo.Get(GitHubStarPromptShownKey), out var starShown))
+                GitHubStarPromptShown = starShown;
+            if (bool.TryParse(_settingsRepo.Get(AfdianSupportPromptShownKey), out var afdianShown))
+                AfdianSupportPromptShown = afdianShown;
+            if (bool.TryParse(_settingsRepo.Get(IsDonorCachedKey), out var isDonorCached))
+                IsDonor = isDonorCached;
             if (bool.TryParse(_settingsRepo.Get(AutoCompactionKey), out var autoCompaction))
                 AutoCompactionEnabled = autoCompaction;
             if (bool.TryParse(_settingsRepo.Get(BackgroundTaskWakeKey), out var taskWake))
@@ -606,6 +622,30 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(PythonSetupOfferedKey, value.ToString());
+    }
+
+    partial void OnCompletedTurnCountChanged(int value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(CompletedTurnCountKey, value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    partial void OnGitHubStarPromptShownChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(GitHubStarPromptShownKey, value.ToString());
+    }
+
+    partial void OnAfdianSupportPromptShownChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(AfdianSupportPromptShownKey, value.ToString());
+    }
+
+    partial void OnIsDonorChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(IsDonorCachedKey, value.ToString());
     }
 
     partial void OnAutoCompactionEnabledChanged(bool value)

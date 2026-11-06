@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Avalonia.Controls;
 using MolaGPT.Desktop.Services;
+using MolaGPT.ViewModels;
 
 namespace MolaGPT.App.Views;
 
@@ -8,13 +9,17 @@ public sealed record AboutDependency(string Name, string Description, string Lic
 
 public partial class AboutWindow : MolaContentWindow
 {
-    private const string GitHubUrl = "https://github.com/MOLAaaaaaaa/MolaGPT.Desktop";
+
     private readonly UpdateCheckService _updateCheck;
+    private readonly SettingsViewModel? _settings;
     private string? _updateUrl;
 
-    public AboutWindow(UpdateCheckService updateCheck)
+    public event EventHandler? SupportRequested;
+
+    public AboutWindow(UpdateCheckService updateCheck, SettingsViewModel? settings = null)
     {
         _updateCheck = updateCheck;
+        _settings = settings;
         InitializeComponent();
 
         PART_Version.Text = $"版本 {UpdateCheckService.CurrentDisplayVersion}";
@@ -23,7 +28,12 @@ public partial class AboutWindow : MolaContentWindow
 
         PART_Close.Click += (_, _) => Close();
         PART_CheckUpdate.Click += CheckUpdate;
-        PART_GitHub.Click += (_, _) => OpenUrl(GitHubUrl);
+        PART_GitHub.Click += (_, _) =>
+        {
+            if (_settings is not null) _settings.GitHubStarPromptShown = true;
+            OpenUrl(CommunityLinks.GitHubUrl);
+        };
+        PART_Support.Click += (_, _) => SupportRequested?.Invoke(this, EventArgs.Empty);
         PART_UpdateAction.Click += (_, _) => OpenUrl(_updateUrl);
     }
 

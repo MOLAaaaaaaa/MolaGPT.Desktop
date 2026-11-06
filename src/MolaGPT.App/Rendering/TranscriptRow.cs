@@ -179,7 +179,8 @@ public sealed class MarkupRow : TranscriptRow, INotifyPropertyChanged
 
     public MarkupRow(MessageViewModel message, MarkupUnitBlock block, int segment)
         : base(message,
-            $"{message.RowKey()}:{segment}:markup:{block.SourceStart}:{block.UnitKind}:{block.Unit.Tag?.ToLowerInvariant()}")
+            block.Unit.ToolCallId is { } callId ? $"{message.RowKey()}:tool:{callId}"
+                : $"{message.RowKey()}:{segment}:markup:{block.SourceStart}:{block.UnitKind}:{block.Unit.Tag?.ToLowerInvariant()}")
         => _block = block;
 
     public MarkupUnitBlock Block

@@ -6,7 +6,9 @@ using Avalonia.Controls;
 using Avalonia.Input.Platform;
 using Avalonia.Threading;
 using MolaGPT.App.Infrastructure;
+using MolaGPT.App.Views;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Models;
 using MolaGPT.Core.Net;
@@ -148,11 +150,6 @@ internal sealed class SelectionAssistantService : IDisposable
     private void QueueCapture(Point point, nint hwnd, bool explicitTrigger)
     {
         if (hwnd == 0 || IsOwn(hwnd)) return;
-        if (_resultPinned)
-        {
-            if (explicitTrigger) Dispatcher.UIThread.Post(() => _result?.Activate());
-            return;
-        }
         var version = Interlocked.Increment(ref _version);
         Interlocked.Exchange(ref _pending, new(point, hwnd, explicitTrigger, version));
         lock (_signalGate) _signal?.Set();
@@ -202,7 +199,11 @@ internal sealed class SelectionAssistantService : IDisposable
                     if (text is null && !Current())
                     {
                         if (request.Explicit && Relevant()) Dispatcher.UIThread.Post(() =>
-                        { if (Relevant()) ShowCaptureFailure(request.Point, "取词超时，请重试。"); });
+                        {
+                            if (!Relevant()) return;
+                            if (_resultPinned && _result is { IsVisible: true }) _result.Activate();
+                            else ShowCaptureFailure(request.Point, "取词超时，请重试。");
+                        });
                         continue;
                     }
                     var result = text;
@@ -210,7 +211,11 @@ internal sealed class SelectionAssistantService : IDisposable
                     {
                         if (!Relevant()) return;
                         if (result is not null) ShowToolbar(result);
-                        else if (request.Explicit) ShowCaptureFailure(request.Point, "未读取到选中文字。");
+                        else if (request.Explicit)
+                        {
+                            if (_resultPinned && _result is { IsVisible: true }) _result.Activate();
+                            else ShowCaptureFailure(request.Point, "未读取到选中文字。");
+                        }
                     });
                 }
                 catch (Exception ex) when (ex is COMException or InvalidOperationException or ArgumentException)
@@ -250,7 +255,6 @@ internal sealed class SelectionAssistantService : IDisposable
 
     private void ShowToolbar(SelectionText selection)
     {
-        if (_result is { IsVisible: true, IsPinned: true }) return;
         _selection = selection;
         Interlocked.Increment(ref _toolbarVersion);
         if (_toolbar is null)
@@ -264,10 +268,33 @@ internal sealed class SelectionAssistantService : IDisposable
         _hook?.SetToolbarVisible(true);
     }
 
+    private IReadOnlyList<SelectionModelChoice> BuildModelChoices(out SelectionModelChoice? selected)
+    {
+        var list = new List<SelectionModelChoice>();
+        foreach (var provider in _providers.Providers.OfType<PiWorkProvider>())
+            foreach (var model in provider.Models)
+                list.Add(new(provider.Id, model.Id, model.DisplayName, provider.DisplayName, model));
+        var chosen = _settings.SelectedSelectionModel;
+        selected = chosen is { ProviderId: { } p, ModelId: { } m }
+            ? list.FirstOrDefault(x => x.ProviderId == p && x.ModelId == m)
+            : null;
+        return list;
+    }
+
+    private void OpenSelectionSettings()
+    {
+        if (_mainWindow is MainWindow mw) mw.OpenSelectionSettings();
+    }
+
     private async void ExecuteAction(string action)
     {
         var selection = _selection;
         HideToolbar();
+        if (action == "设置")
+        {
+            OpenSelectionSettings();
+            return;
+        }
         if (selection is null) return;
         if (action == "复制")
         {
@@ -275,29 +302,50 @@ internal sealed class SelectionAssistantService : IDisposable
             catch (Exception ex) { ShowCaptureFailure(selection.Anchor, ex.Message); }
             return;
         }
-        if (_result is { IsPinned: true, IsVisible: true }) { _result.Activate(); return; }
-        _result?.Close();
-        // Resolve provider/model per window, so changing settings never mixes models mid-conversation.
-        var chosen = _settings.SelectedSelectionModel;
         var language = string.IsNullOrWhiteSpace(_settings.SelectionLanguage) ? "简体中文" : _settings.SelectionLanguage.Trim();
-        _result = new SelectionResultWindow(selection.Text, action, language, async (messages, onDelta, ct) =>
+        if (_result is { IsPinned: true, IsVisible: true } pinnedWindow)
         {
-            var found = chosen is { ProviderId: { } p, ModelId: { } m } ? _providers.FindModel(p, m) : null;
+            pinnedWindow.LoadSelection(selection.Text, action, language);
+            pinnedWindow.Activate();
+            return;
+        }
+        _result?.Close();
+        var models = BuildModelChoices(out var selectedModel);
+        _result = new SelectionResultWindow(selection.Text, action, language, models, selectedModel, async (messages, reqOptions, onDelta, ct) =>
+        {
+            var providerId = reqOptions.ProviderId ?? _settings.SelectedSelectionModel?.ProviderId;
+            var modelId = reqOptions.ModelId ?? _settings.SelectedSelectionModel?.ModelId;
+            var found = providerId is not null && modelId is not null ? _providers.FindModel(providerId, modelId) : null;
             if (found is null || found.Value.Provider is not IOneShotTarget targetProvider
                 || targetProvider.DescribeOneShot(found.Value.Model.Id) is not { } target)
-                throw new InvalidOperationException("请在设置 → 划词助手中选择可用模型。");
+                throw new InvalidOperationException("请在下方选择模型，或在设置 → 划词助手中配置可用模型。");
             if (messages.Sum(x => x.AsText().Length) > 48000)
                 throw new InvalidOperationException("本次问答内容较长，请重新划词开始新的问答。");
             var clientName = MolaGptProviderIds.IsMolaGptAccount(found.Value.Provider.Id) ? HttpClientNames.MolaGpt : HttpClientNames.Byok;
             using var http = _http.CreateClient(clientName);
-            return await new OneShotCompletionClient(http).CompleteStreamAsync(target, found.Value.Model.Id, messages,
+            var model = found.Value.Model;
+            return await new OneShotCompletionClient(http).CompleteStreamAsync(
+                target,
+                model.Id,
+                messages,
                 onDelta: onDelta,
-                maxTokens: 4096, useThinking: false,
-                thinkingKind: found.Value.Model.ThinkingConfig?.Kind ?? ThinkingParamKindInference.InferFromModelId(found.Value.Model.Id), ct: ct);
+                maxTokens: 4096,
+                useThinking: reqOptions.UseThinking,
+                thinkingKind: model.ThinkingConfig?.Kind ?? ThinkingParamKindInference.InferFromModelId(model.Id),
+                reasoningEffort: reqOptions.ReasoningEffort,
+                thinkingConfig: model.ThinkingConfig,
+                ct: ct);
         });
         var resultWindow = _result;
         resultWindow.PinChanged += pinned => _resultPinned = pinned;
-        resultWindow.LanguageChanged += language => _settings.SelectionLanguage = language;
+        resultWindow.LanguageChanged += lang => _settings.SelectionLanguage = lang;
+        resultWindow.ModelChanged += choice =>
+        {
+            _settings.RefreshSelectionModels();
+            var match = _settings.SelectionModels.FirstOrDefault(x => x.ProviderId == choice.ProviderId && x.ModelId == choice.ModelId);
+            if (match is not null) _settings.SelectedSelectionModel = match;
+        };
+        resultWindow.SettingsRequested += OpenSelectionSettings;
         resultWindow.Closed += (_, _) => { if (_result == resultWindow) _resultPinned = false; };
         Place(_result, selection.Anchor);
         _result.Show();
@@ -307,7 +355,9 @@ internal sealed class SelectionAssistantService : IDisposable
     {
         if (_result is { IsVisible: true, IsPinned: true }) return;
         _result?.Close();
-        _result = new SelectionResultWindow("", "问 AI", "简体中文", (_, _, _) => Task.FromException<string>(new InvalidOperationException(message)));
+        _result = new SelectionResultWindow("", "问 AI", "简体中文", [], null,
+            (_, _, _, _) => Task.FromException<string>(new InvalidOperationException(message)));
+        _result.SettingsRequested += OpenSelectionSettings;
         _result.ShowMessage(message);
         Place(_result, point);
         _result.Show();

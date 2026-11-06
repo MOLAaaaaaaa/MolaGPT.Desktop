@@ -10,6 +10,8 @@ using MolaGPT.Core.Chat;
 using MolaGPT.ViewModels;
 using MolaGPT.App.Views;
 using MolaGPT.Presentation;
+using Avalonia.Platform.Storage;
+using MolaGPT.Desktop.Services;
 
 namespace MolaGPT.App.Rendering;
 
@@ -39,10 +41,21 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         set => SetValue(BlockProperty, value);
     }
 
+    public static readonly StyledProperty<bool> DetailsOnlyProperty =
+        AvaloniaProperty.Register<MolaGptMarkupBlockView, bool>(nameof(DetailsOnly));
+
+    public bool DetailsOnly
+    {
+        get => GetValue(DetailsOnlyProperty);
+        set => SetValue(DetailsOnlyProperty, value);
+    }
+
+
     private bool _attached;
     private Expander? _pythonExpander;
     private SelectableTextBlock? _pythonText;
     private Button? _pythonToggle;
+    private TextBlock? _pythonError;
     private string? _pythonHeaderState;
     private bool _pythonWasClosed;
     private bool _pythonExpansionWasChosen;
@@ -52,12 +65,13 @@ public sealed class MolaGptMarkupBlockView : ContentControl
     static MolaGptMarkupBlockView()
     {
         BlockProperty.Changed.AddClassHandler<MolaGptMarkupBlockView>((view, _) => view.Rebuild());
+        DetailsOnlyProperty.Changed.AddClassHandler<MolaGptMarkupBlockView>((view, _) => view.Rebuild(recreate: true));
         MessageProperty.Changed.AddClassHandler<MolaGptMarkupBlockView>((view, change) =>
         {
             if (!view._attached) return;
             if (change.OldValue is MessageViewModel old) old.PropertyChanged -= view.OnMessageChanged;
             if (change.NewValue is MessageViewModel next) next.PropertyChanged += view.OnMessageChanged;
-            view.UpdateSubagentSummary();
+            view.Rebuild();
         });
     }
 
@@ -98,7 +112,7 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         _subagentBatch = null;
         _subagentLabel = null;
 
-        if (!recreate
+        if (!DetailsOnly && !recreate
             && Block is { Unit: { Kind: MarkupUnitKind.DsAnalysis } unit }
             && string.Equals(unit.Tag, "python", StringComparison.OrdinalIgnoreCase)
             && UpdatePythonAnalysis(unit))
@@ -108,8 +122,40 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         }
 
         ClearPythonAnalysis();
-        Content = Block is { } block ? Build(block) : null;
+        var block = Block;
+        if (block is not null && Message?.ServerToolResults.TryGetValue(block.Unit.ToolCallId ?? block.Key, out var retry) == true)
+            block = block with { Unit = retry };
+        Content = block is not null ? DetailsOnly ? BuildDetails(block.Unit) : Build(block) : null;
         IsVisible = Content is not null;
+    }
+
+    private Control BuildDetails(MolaGptMarkupSplitter.MarkupUnit unit)
+    {
+        if (ServerSubagents.Batch(unit.Source) is not null) return BuildToolStatus(unit);
+        if (unit.Kind == MarkupUnitKind.ImageErrorCard) unit = unit with { ErrorText = unit.Inner };
+        var stack = new StackPanel { Spacing = 8, Margin = new Thickness(0, 10, 0, 0) };
+        if (unit.Kind == MarkupUnitKind.DsAnalysis && ShouldRenderAnalysis(unit) && !string.IsNullOrWhiteSpace(unit.Inner))
+            stack.Children.Add(new ScrollViewer
+            {
+                MaxHeight = 620,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Content = new ItemsControl { ItemsSource = MessageDocumentParser.Parse(unit.Inner).Blocks }
+            });
+        if (unit.SearchChips is { Count: > 0 } chips)
+        {
+            var wrap = new WrapPanel();
+            foreach (var chip in chips) wrap.Children.Add(BuildSearchChip(chip));
+            stack.Children.Add(wrap);
+        }
+        if (unit.SteelMetaItems is { Count: > 0 } items)
+        {
+            var wrap = new WrapPanel();
+            foreach (var item in items)
+                wrap.Children.Add(Chip(new TextBlock { Text = item.Text, FontSize = 12, Foreground = Brush("Brush.Text.Secondary") }));
+            stack.Children.Add(wrap);
+        }
+        AddToolDetails(stack, unit);
+        return stack;
     }
 
     private Control? Build(MarkupUnitBlock block) => block.Unit.Kind switch
@@ -151,10 +197,12 @@ public sealed class MolaGptMarkupBlockView : ContentControl
 
         var stack = new StackPanel { Spacing = 10 };
         stack.Children.Add(BuildHeader(
-            title,
-            isSearch ? "\uE721" : "\uE90F",
-            StatusText(unit.ToolVariant),
-            unit.ToolVariant == MolaGptMarkupSplitter.Variant.Error));
+            DisplayLabel(unit, title),
+            ToolIcon(unit, isSearch ? "\uE721" : "\uE90F"),
+            StatusText(DisplayPhase(unit)),
+            unit.ToolVariant == MolaGptMarkupSplitter.Variant.Error,
+            unit.Metadata));
+        AddToolDetails(stack, unit);
 
         if (isSearch && unit.SearchChips is { Count: > 0 } chips)
         {
@@ -170,6 +218,7 @@ public sealed class MolaGptMarkupBlockView : ContentControl
     private void OnMessageChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(MessageViewModel.ServerSubagents)) UpdateSubagentSummary();
+        if (e.PropertyName == nameof(MessageViewModel.IsStreaming)) Rebuild();
     }
 
     private void UpdateSubagentSummary()
@@ -178,8 +227,9 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         var agents = (Message?.ServerSubagents?[_subagentBatch] as JsonArray)?.OfType<JsonObject>().ToArray() ?? [];
         var running = agents.Any(a => ServerSubagents.Text(a, "status") == "running");
         var completed = agents.Count(a => ServerSubagents.Text(a, "status") == "completed");
-        _subagentLabel.Text = agents.Length == 0 ? "子代理任务" : $"{agents.Length} 个子代理 · {(running ? "运行中" : $"{completed} 个已完成")}";
-        Shimmer.SetIsActive(_subagentLabel, running);
+        var waiting = agents.Any(a => a["batch_waiting"]?.GetValue<bool>() == true) && Message?.IsStreaming == true;
+        _subagentLabel.Text = waiting ? $"正在等待 {agents.Length} 个子代理" : agents.Length == 0 ? "子代理任务" : $"{agents.Length} 个子代理 · {(running ? "运行中" : $"{completed} 个已完成")}";
+        Shimmer.SetIsActive(_subagentLabel, running || waiting);
     }
 
     /// <summary>
@@ -200,11 +250,11 @@ public sealed class MolaGptMarkupBlockView : ContentControl
             HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
             Header = BuildHeader(
-                AnalysisTitle(unit.Tag),
-                AnalysisIcon(unit.Tag),
-                unit.IsClosed ? "已完成" : "运行中",
-                string.Equals(unit.AnalysisPhase, "error", StringComparison.OrdinalIgnoreCase),
-                unit.StatusText)
+                DisplayLabel(unit, AnalysisTitle(unit.Tag)),
+                ToolIcon(unit, AnalysisIcon(unit.Tag)),
+                StatusText(DisplayPhase(unit)),
+                DisplayPhase(unit) == MolaGptMarkupSplitter.Variant.Error,
+                unit.Metadata ?? (unit.ToolCallId is null ? unit.StatusText : null))
         };
         expander.Classes.Add("toolbody");
 
@@ -235,7 +285,10 @@ public sealed class MolaGptMarkupBlockView : ContentControl
             LoadBody();
         }
 
-        return Card(expander, maxWidth: 900);
+        var card = new StackPanel { Spacing = 8 };
+        card.Children.Add(expander);
+        AddToolDetails(card, unit);
+        return Card(card, maxWidth: 900);
     }
 
     private Control BuildPythonAnalysis(MolaGptMarkupSplitter.MarkupUnit unit)
@@ -273,6 +326,7 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         _pythonExpander = expander;
         _pythonText = text;
         _pythonToggle = toggle;
+        _pythonError = new TextBlock { FontSize = 12, Foreground = Brush("Brush.Error"), TextWrapping = TextWrapping.Wrap };
         _pythonWasClosed = unit.IsClosed;
         UpdatePythonPayload(PythonPreview(unit.Inner));
         UpdatePythonHeader(unit);
@@ -283,7 +337,10 @@ public sealed class MolaGptMarkupBlockView : ContentControl
                 _pythonExpansionWasChosen = true;
         };
 
-        return Card(expander, maxWidth: 900);
+        var card = new StackPanel { Spacing = 8 };
+        card.Children.Add(expander);
+        card.Children.Add(_pythonError);
+        return Card(card, maxWidth: 900);
     }
 
     private bool UpdatePythonAnalysis(MolaGptMarkupSplitter.MarkupUnit unit)
@@ -321,16 +378,21 @@ public sealed class MolaGptMarkupBlockView : ContentControl
     {
         if (_pythonExpander is null) return;
 
-        var state = string.Join('\n', unit.IsClosed, unit.AnalysisPhase, unit.StatusText);
+        if (_pythonError is not null)
+        {
+            _pythonError.Text = unit.ErrorText;
+            _pythonError.IsVisible = !string.IsNullOrWhiteSpace(unit.ErrorText);
+        }
+        var state = string.Join('\n', unit.IsClosed, unit.AnalysisPhase, unit.StatusText, DisplayPhase(unit), unit.Metadata);
         if (string.Equals(_pythonHeaderState, state, StringComparison.Ordinal)) return;
 
         _pythonHeaderState = state;
         _pythonExpander.Header = BuildHeader(
-            AnalysisTitle(unit.Tag),
-            AnalysisIcon(unit.Tag),
-            unit.IsClosed ? "已完成" : "运行中",
-            string.Equals(unit.AnalysisPhase, "error", StringComparison.OrdinalIgnoreCase),
-            unit.StatusText);
+            DisplayLabel(unit, AnalysisTitle(unit.Tag)),
+            ToolIcon(unit, AnalysisIcon(unit.Tag)),
+            StatusText(DisplayPhase(unit)),
+            DisplayPhase(unit) == MolaGptMarkupSplitter.Variant.Error,
+            unit.Metadata ?? (unit.ToolCallId is null ? unit.StatusText : null));
     }
 
     private void ClearPythonAnalysis()
@@ -338,6 +400,7 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         _pythonExpander = null;
         _pythonText = null;
         _pythonToggle = null;
+        _pythonError = null;
         _pythonHeaderState = null;
         _pythonWasClosed = false;
         _pythonExpansionWasChosen = false;
@@ -367,23 +430,30 @@ public sealed class MolaGptMarkupBlockView : ContentControl
     /// still carries the status line the splitter folded into it, so the status
     /// card is drawn on its own rather than disappearing with the body.
     /// </summary>
-    private Control? BuildAbsorbedStatus(MolaGptMarkupSplitter.MarkupUnit unit) =>
-        string.IsNullOrWhiteSpace(unit.StatusText)
-            ? null
-            : Card(BuildHeader(
-                unit.StatusText!,
-                AnalysisIcon(unit.Tag),
-                unit.IsClosed ? "已完成" : "运行中",
-                string.Equals(unit.AnalysisPhase, "error", StringComparison.OrdinalIgnoreCase)));
+    private Control? BuildAbsorbedStatus(MolaGptMarkupSplitter.MarkupUnit unit)
+    {
+        if (string.IsNullOrWhiteSpace(unit.StatusText)) return null;
+        var stack = new StackPanel { Spacing = 8 };
+        stack.Children.Add(BuildHeader(
+                DisplayLabel(unit, unit.StatusText!),
+                ToolIcon(unit, AnalysisIcon(unit.Tag)),
+                StatusText(DisplayPhase(unit)),
+                DisplayPhase(unit) == MolaGptMarkupSplitter.Variant.Error,
+                unit.Metadata));
+        AddToolDetails(stack, unit);
+        return Card(stack);
+    }
 
     private Control BuildSteelStep(MolaGptMarkupSplitter.MarkupUnit unit)
     {
         var stack = new StackPanel { Spacing = 10 };
         stack.Children.Add(BuildHeader(
-            string.IsNullOrWhiteSpace(unit.Inner) ? "执行步骤" : unit.Inner!,
-            "\uE90F",
-            StatusText(unit.ToolVariant),
-            unit.ToolVariant == MolaGptMarkupSplitter.Variant.Error));
+            DisplayLabel(unit, string.IsNullOrWhiteSpace(unit.Inner) ? "执行步骤" : unit.Inner!),
+            ToolIcon(unit, "\uE774"),
+            StatusText(DisplayPhase(unit)),
+            unit.ToolVariant == MolaGptMarkupSplitter.Variant.Error,
+            unit.Metadata));
+        AddToolDetails(stack, unit);
 
         if (unit.SteelMetaItems is { Count: > 0 } items)
         {
@@ -429,14 +499,16 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         grid.Children.Add(iconTile);
 
         var titles = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
-        titles.Children.Add(new TextBlock
+        var titleText = new TextBlock
         {
             Text = title,
             FontSize = 13,
             FontWeight = FontWeight.Medium,
             TextWrapping = TextWrapping.Wrap,
             Foreground = Brush("Brush.Text.Primary")
-        });
+        };
+        Shimmer.SetIsActive(titleText, status == "运行中");
+        titles.Children.Add(titleText);
 
         if (!string.IsNullOrWhiteSpace(subtitle))
         {
@@ -540,13 +612,14 @@ public sealed class MolaGptMarkupBlockView : ContentControl
     }.WithRadius("Radius.Md");
 
     private static bool ShouldRenderAnalysis(MolaGptMarkupSplitter.MarkupUnit unit) =>
-        unit.Tag?.ToLowerInvariant() is "python" or "mcp" or "image-action";
+        unit.Tag?.ToLowerInvariant() is "python" or "mcp" or "image-action" or "code-search";
 
     private static string AnalysisTitle(string? type) => type?.ToLowerInvariant() switch
     {
         "python" => "分析过程",
         "mcp" => "连接器调用",
         "image-action" => "图片处理",
+        "code-search" => "项目代码检索",
         _ => "工具过程"
     };
 
@@ -555,6 +628,7 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         "python" => "\uE943",
         "mcp" => "\uE8F1",
         "image-action" => "\uEB9F",
+        "code-search" => "\uE721",
         _ => "\uE90F"
     };
 
@@ -563,8 +637,87 @@ public sealed class MolaGptMarkupBlockView : ContentControl
         MolaGptMarkupSplitter.Variant.Completed or MolaGptMarkupSplitter.Variant.Success => "已完成",
         MolaGptMarkupSplitter.Variant.Error => "出错",
         MolaGptMarkupSplitter.Variant.Info => "信息",
+        MolaGptMarkupSplitter.Variant.Cancelled => "已停止",
         _ => "运行中"
     };
+
+    private MolaGptMarkupSplitter.Variant DisplayPhase(MolaGptMarkupSplitter.MarkupUnit unit)
+    {
+        if (unit.ToolCallId is not null)
+        {
+            if (Message?.IsStreaming == true && unit.PresentationPending) return MolaGptMarkupSplitter.Variant.Analyzing;
+            if (Message is { IsStreaming: false } && unit.ToolVariant == MolaGptMarkupSplitter.Variant.Analyzing)
+                return MolaGptMarkupSplitter.Variant.Cancelled;
+            return unit.ToolVariant;
+        }
+        if (unit.Kind != MarkupUnitKind.DsAnalysis) return unit.ToolVariant;
+        return unit.AnalysisPhase switch
+        {
+            "error" => MolaGptMarkupSplitter.Variant.Error,
+            "cancelled" => MolaGptMarkupSplitter.Variant.Cancelled,
+            _ => unit.IsClosed ? MolaGptMarkupSplitter.Variant.Completed : MolaGptMarkupSplitter.Variant.Analyzing
+        };
+    }
+
+    private string DisplayLabel(MolaGptMarkupSplitter.MarkupUnit unit, string fallback) =>
+        Message is { IsStreaming: false } && unit.ToolCallId is not null && unit.ToolVariant == MolaGptMarkupSplitter.Variant.Analyzing
+            ? "操作已停止"
+            : Message?.IsStreaming == true && unit.PresentationPending ? unit.RunningText ?? fallback : unit.StatusText ?? fallback;
+
+    internal static string ToolIcon(MolaGptMarkupSplitter.MarkupUnit unit, string fallback) => unit.ToolIcon switch
+    {
+        "book" => "\uE736", "search" or "code-search" => "\uE721", "code" => "\uE943",
+        "eye" => "\uE890", "crop" => "\uE7A8", "image" => "\uEB9F", "skill" => "\uE734",
+        "memory" => "\uE8F1", "erase" => "\uE74D", "import" => "\uE8B5", "web" => "\uE774",
+        "camera" => "\uE722", "download" => "\uE896", "click" => "\uE8B0", "list" => "\uE8FD",
+        "pdf" => "\uEA90", _ => fallback
+    };
+
+    private void AddToolDetails(StackPanel stack, MolaGptMarkupSplitter.MarkupUnit unit)
+    {
+        if (!string.IsNullOrWhiteSpace(unit.ErrorText))
+            stack.Children.Add(new TextBlock { Text = unit.ErrorText, FontSize = 12, TextWrapping = TextWrapping.Wrap, Foreground = Brush("Brush.Error") });
+        AddToolActions(stack, unit);
+    }
+
+    private void AddToolActions(StackPanel stack, MolaGptMarkupSplitter.MarkupUnit unit)
+    {
+        if (unit.RetryTicket is null && unit.FileTicket is null) return;
+        var button = new Button { Content = unit.RetryTicket is null ? "下载文件" : "重试" };
+        var error = new TextBlock { FontSize = 12, Foreground = Brush("Brush.Error"), TextWrapping = TextWrapping.Wrap };
+        button.Click += async (_, _) =>
+        {
+            button.IsEnabled = false;
+            error.Text = null;
+            try
+            {
+                var actions = (ServerToolActions)Application.Current!.Resources["ServerToolActions"]!;
+                using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+                if (unit.RetryTicket is { } ticket)
+                {
+                    button.Content = "正在重试";
+                    var html = await actions.RetryAsync(ticket, timeout.Token);
+                    var result = MolaGptMarkupSplitter.Split(html).Single(u => u.Kind != MarkupUnitKind.Markdown && u.ToolCallId == unit.ToolCallId)
+                        with { PresentationPending = false };
+                    Message!.ServerToolResults[unit.ToolCallId ?? Block!.Key] = result;
+                    if (DataContext is ToolRow row) row.UpdateMarkupResult(result);
+                    Rebuild(recreate: true);
+                }
+                else
+                {
+                    var file = await TopLevel.GetTopLevel(this)!.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+                    { Title = "保存文件", SuggestedFileName = unit.Filename, FileTypeChoices = [FilePickerFileTypes.All] });
+                    if (file is null) return;
+                    await using var stream = await file.OpenWriteAsync();
+                    await actions.DownloadAsync(unit.FileTicket!, stream, timeout.Token);
+                }
+            }
+            catch (Exception ex) { error.Text = ex.Message; }
+            finally { button.IsEnabled = true; button.Content = unit.RetryTicket is null ? "下载文件" : "重试"; }
+        };
+        stack.Children.Add(button);
+        stack.Children.Add(error);
+    }
 
     private IBrush? Brush(string key) =>
         this.TryFindResource(key, ActualThemeVariant, out var value) ? value as IBrush : null;

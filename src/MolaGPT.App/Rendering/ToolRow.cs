@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using MolaGPT.ViewModels;
+using MolaGPT.Presentation;
 
 namespace MolaGPT.App.Rendering;
 
@@ -11,6 +12,8 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
     private bool _bodyLoaded;
     private bool _isArchived;
     private HeaderState? _header;
+    private MarkupUnitBlock? _markup;
+    private IReadOnlyDictionary<string, MarkupUnitBlock> _markups = new Dictionary<string, MarkupUnitBlock>();
 
     private sealed record HeaderState(string Label, string Preview, string Count, string Status,
         bool Successful, bool Error, bool Background, bool Stop, string Glyph, bool Group, string ErrorDetail,
@@ -24,14 +27,49 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
     }
 
     public ToolCallViewModel Tool => _tools[0];
+    public MarkupUnitBlock? Markup => _markup;
+    public bool HasMarkup => _markup is not null;
+    public bool ShowStandardBody => !HasMarkup || Tool.HasArguments || Tool.HasResultPreview;
+    public void SetMarkups(IReadOnlyDictionary<string, MarkupUnitBlock> markups)
+    {
+        _markups = markups;
+        SetMarkup(markups.GetValueOrDefault(Tool.Id));
+        foreach (var item in GroupItems) item.SetMarkup(markups.GetValueOrDefault(item.Tool.Id));
+    }
+    public void SetMarkup(MarkupUnitBlock? markup)
+    {
+        if (Equals(_markup, markup)) return;
+        _markup = markup;
+        Notify(nameof(Markup));
+        Notify(nameof(HasMarkup));
+        Notify(nameof(ShowStandardBody));
+        Refresh();
+    }
+    public void UpdateMarkupResult(MolaGptMarkupSplitter.MarkupUnit unit)
+    {
+        if (_markup is null) return;
+        Tool.Label = unit.StatusText ?? unit.Inner ?? Tool.Label;
+        Tool.Detail = unit.ErrorText ?? unit.Metadata;
+        Tool.Status = unit.ToolVariant switch
+        {
+            MolaGptMarkupSplitter.Variant.Completed or MolaGptMarkupSplitter.Variant.Success => "completed",
+            MolaGptMarkupSplitter.Variant.Error => "error",
+            MolaGptMarkupSplitter.Variant.Cancelled => "cancelled",
+            _ => "running"
+        };
+        SetMarkup(_markup with { Unit = unit });
+    }
     public int CallCount => _tools.Count;
     internal IEnumerable<string> ToolIds => _tools.Select(tool => tool.Id);
     public bool IsGroup => _tools.Count > 1;
     public string DisplayLabel => Tool.DisplayLabel;
-    public string HeaderArgPreview => Tool.HeaderArgPreview;
-    public bool HasHeaderArgPreview => Tool.HasHeaderArgPreview;
+    public string HeaderArgPreview => _markup?.Unit.Metadata
+        ?? _markup?.Unit.SearchChips?.FirstOrDefault()?.Text ?? Tool.HeaderArgPreview;
+    public bool HasHeaderArgPreview => !string.IsNullOrEmpty(HeaderArgPreview);
     public string CountText => IsGroup ? $"+{_tools.Count - 1}" : string.Empty;
-    public string IconGlyph => Tool.DisplayIconGlyph;
+    public string IconGlyph => _markup is { } markup
+        ? MolaGptMarkupBlockView.ToolIcon(markup.Unit,
+            Tool.Name == "generate_image" ? "\uEB9F" : Tool.DisplayIconGlyph) : Tool.DisplayIconGlyph;
     public bool IsSuccessful => _tools.All(IsToolSuccessful);
     public bool IsError => _tools.Any(IsToolError);
     public bool IsBackgroundRunning => _tools.Any(tool => tool.IsBackgroundRunning);
@@ -156,6 +194,7 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
         {
             if (i < GroupItems.Count && ReferenceEquals(GroupItems[i].Tool, _tools[i])) continue;
             var child = new ToolRow(Message, _tools[i], i) { OnUserExpanded = () => OnUserExpanded?.Invoke() };
+            child.SetMarkup(_markups.GetValueOrDefault(_tools[i].Id));
             if (i < GroupItems.Count)
             {
                 GroupItems[i].Dispose();
@@ -177,6 +216,8 @@ public sealed class ToolRow : TranscriptRow, INotifyPropertyChanged, IDisposable
 
     private void OnToolChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName is nameof(ToolCallViewModel.ArgumentsJson) or nameof(ToolCallViewModel.ResultPreviewJson))
+            Notify(nameof(ShowStandardBody));
         if (e.PropertyName is nameof(ToolCallViewModel.Status) or nameof(ToolCallViewModel.ArgumentsJson)
             or nameof(ToolCallViewModel.ResultPreviewJson) or nameof(ToolCallViewModel.TaskState)
             or nameof(ToolCallViewModel.Name) or nameof(ToolCallViewModel.Detail))

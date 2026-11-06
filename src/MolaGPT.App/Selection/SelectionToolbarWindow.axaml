@@ -15,6 +15,9 @@
       <Setter Property="FontSize" Value="12" />
       <Setter Property="FontWeight" Value="Medium" />
     </Style>
+    <Style Selector="Button.tb.icononly">
+      <Setter Property="Padding" Value="8,0" />
+    </Style>
     <Style Selector="Button.tb:pointerover /template/ Border#PART_Root">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
     </Style>
@@ -49,6 +52,7 @@
       <Button Classes="tb" Tag="问 AI" Click="OnAction" AutomationProperties.Name="问 AI">
         <StackPanel Orientation="Horizontal" Spacing="5">
           <Path Width="14" Height="14" VerticalAlignment="Center" Stretch="Uniform" StrokeLineCap="Round" StrokeJoin="Round" StrokeThickness="1.5"
+                RenderTransform="translate(0, 1.5px)"
                 Stroke="{Binding $parent[Button].Foreground}"
                 Data="M13.5 9.5a1.5 1.5 0 0 0 1.5-1.5V4a1.5 1.5 0 0 0-1.5-1.5h-11A1.5 1.5 0 0 0 1 4v4a1.5 1.5 0 0 0 1.5 1.5H4v3l3.5-3h6z" />
           <TextBlock Text="问 AI" VerticalAlignment="Center" />
@@ -60,6 +64,9 @@
           <TextBlock Classes="icon" Text="&#xE8C8;" FontSize="12" VerticalAlignment="Center" />
           <TextBlock Text="复制" VerticalAlignment="Center" />
         </StackPanel>
+      </Button>
+      <Button Classes="tb icononly" Tag="设置" Click="OnAction" ToolTip.Tip="划词助手设置" AutomationProperties.Name="划词助手设置">
+        <TextBlock Classes="icon" Text="&#xE713;" FontSize="12" VerticalAlignment="Center" />
       </Button>
     </StackPanel>
   </Border>

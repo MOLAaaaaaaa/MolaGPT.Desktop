@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using MolaGPT.ViewModels;
+using MolaGPT.Presentation;
 
 namespace MolaGPT.App.Rendering;
 
@@ -47,7 +48,8 @@ public sealed class ToolRunRow : TranscriptRow, INotifyPropertyChanged, IDisposa
         && (_settled || RetiredToolIds is not null || _followingProseCharacters >= ProseCollapseCharacters)
         && Entries.Any(entry => !entry.IsArchived && entry.IsSuccessful);
 
-    public void Sync(IReadOnlyList<IReadOnlyList<ToolCallViewModel>> groups, bool animateNewEntries)
+    public void Sync(IReadOnlyList<IReadOnlyList<ToolCallViewModel>> groups, bool animateNewEntries,
+        IReadOnlyDictionary<string, MarkupUnitBlock> markup)
     {
         _syncing = true;
         try
@@ -74,6 +76,7 @@ public sealed class ToolRunRow : TranscriptRow, INotifyPropertyChanged, IDisposa
                     if (previousIndex != i) Entries.Move(previousIndex, i);
                 }
                 existing.SyncTools(tools);
+                existing.SetMarkups(markup);
                 if (existing.IsArchived && !existing.IsSuccessful) existing.IsArchived = false;
             }
             while (Entries.Count > groups.Count)

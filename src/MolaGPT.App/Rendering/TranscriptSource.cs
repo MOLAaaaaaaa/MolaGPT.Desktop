@@ -35,6 +35,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         /// <summary>Last parse per text block index, so streaming can re-parse
         /// only the tail rather than the whole body.</summary>
         public readonly Dictionary<int, RenderDocument> Documents = new();
+        public readonly Dictionary<string, ToolCallViewModel> WebTools = new();
     }
 
     private readonly ChatViewModel _chat;
@@ -236,6 +237,11 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
     private void OnMessagePropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (sender is not MessageViewModel message) return;
+        if (e.PropertyName == nameof(MessageViewModel.ThinkingSegments))
+        {
+            MarkDirty(message);
+            return;
+        }
         if (e.PropertyName is not { } name || Array.IndexOf(RebuildTriggers, name) < 0) return;
         MarkDirty(message);
     }
@@ -296,10 +302,10 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         foreach (var run in pending) run.TryAutoCollapse(allowed);
     }
 
-    private static int CountProseCharacters(RenderDocument document)
+    internal static int CountProseCharacters(IEnumerable<RenderBlock> blocks)
     {
         var count = 0;
-        foreach (var block in document.Blocks)
+        foreach (var block in blocks)
         {
             var markdown = block switch
             {
@@ -415,6 +421,13 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         var seenRuns = new HashSet<string>();
         var followingProse = new Dictionary<ToolRunRow, int>();
         var pendingTools = new List<IReadOnlyList<ToolCallViewModel>>();
+        var markupTools = new Dictionary<string, MarkupUnitBlock>();
+        var thinkingTools = message.ToolCalls.Count > 0 ? WebToolPresentation.ThinkingTools(message) : null;
+        var seenWebCalls = new HashSet<string>(StringComparer.Ordinal);
+        var completeWebCalls = message.DisplayBlocks.Count > 1 && message.Content.Contains("data-tool-call=", StringComparison.OrdinalIgnoreCase)
+            ? MolaGptMarkupSplitter.Split(message.Content).Where(unit => unit.ToolCallId is not null)
+                .ToDictionary(unit => unit.ToolCallId!, StringComparer.Ordinal)
+            : null;
         ToolRunRow? precedingRun = null;
 
         void FlushTools()
@@ -444,7 +457,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
                 _building = true;
                 try
                 {
-                    run!.Sync(owned, animateNewEntries: !messageDone);
+                    run!.Sync(owned, animateNewEntries: !messageDone, markupTools);
                     run.UpdateContext(messageDone, 0);
                     if (initial && messageDone) run.TryAutoCollapse(allowed: true, initial: true);
                 }
@@ -463,30 +476,64 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
             var block = message.DisplayBlocks[i];
             if (block.Tool is { } tool)
             {
-                pendingTools.Add([tool]);
+                if (tool.Name is "tool" or "tool_status" && tool.Status is "completed" or "success"
+                    && tool.Label is "处理中..." or "处理中…" && i > 0)
+                {
+                    var previous = message.DisplayBlocks[i - 1];
+                    if (previous.Tool is { Name: "mcp", Status: "completed" or "success" }
+                        || previous.IsText && MolaGptMarkupSplitter.Split(previous.Text ?? string.Empty).LastOrDefault()
+                            is { Kind: MarkupUnitKind.DsAnalysis, Tag: "mcp", IsClosed: true }) continue;
+                }
+                if (thinkingTools?.TryGetValue(tool.Id, out var thinkingMarkup) == true) markupTools[tool.Id] = thinkingMarkup.Markup;
+                WebToolPresentation.Add(pendingTools, [tool]);
                 continue;
             }
             if (block.ToolGroup is { } group && group.Items.Count > 0)
             {
-                pendingTools.Add(group.Items.ToArray());
+                foreach (var item in group.Items)
+                    if (thinkingTools?.TryGetValue(item.Id, out var thinkingMarkup) == true) markupTools[item.Id] = thinkingMarkup.Markup;
+                WebToolPresentation.Add(pendingTools, group.Items.ToArray());
                 continue;
             }
-            FlushTools();
-
             if (block.IsText)
             {
                 segment.Documents.TryGetValue(i, out var previous);
                 var document = MessageDocumentParser.ParseIncremental(previous, block.Text);
                 segment.Documents[i] = document;
-                if (precedingRun is { NeedsProseSignal: true } && followingProse[precedingRun] < 240)
-                    followingProse[precedingRun] += CountProseCharacters(document);
-
                 foreach (var renderBlock in document.Blocks)
                 {
+                    if (WebToolPresentation.HandleSpecial(renderBlock, pendingTools, markupTools)) continue;
+                    if (renderBlock is MarkupUnitBlock markup && WebToolPresentation.IsTool(markup))
+                    {
+                        var unit = markup.Unit;
+                        if (unit.ToolCallId is { } callId)
+                        {
+                            if (!seenWebCalls.Add(callId)) continue;
+                            if (completeWebCalls?.GetValueOrDefault(callId) is { } complete)
+                            {
+                                unit = complete;
+                                markup = markup with { Unit = complete };
+                            }
+                        }
+                        if (message.ServerToolResults.TryGetValue(unit.ToolCallId ?? markup.Key, out var result))
+                        {
+                            unit = result;
+                            markup = markup with { Unit = result };
+                        }
+                        var id = unit.ToolCallId is { } identity ? $"web:{identity}" : $"web:{i}:{markup.SourceStart}";
+                        var presentationPending = !messageDone && unit.PresentationPending && i == message.DisplayBlocks.Count - 1;
+                        var webTool = WebToolPresentation.Update(message, markup, segment.WebTools, id, messageDone, presentationPending);
+                        markupTools[id] = markup;
+                        WebToolPresentation.Add(pendingTools, [webTool]);
+                        continue;
+                    }
+                    FlushTools();
+                    if (precedingRun is { NeedsProseSignal: true } && followingProse[precedingRun] < 240)
+                        followingProse[precedingRun] += CountProseCharacters([renderBlock]);
                     switch (renderBlock)
                     {
-                        case MarkupUnitBlock markup:
-                            rows.Add(new MarkupRow(message, markup, i));
+                        case MarkupUnitBlock otherMarkup:
+                            rows.Add(new MarkupRow(message, otherMarkup, i));
                             break;
                         case CodeBlock code when FenceArtifactCapture.IsUiFence(code):
                             rows.Add(new UiBlockRow(message, code, i, messageDone));
@@ -506,10 +553,13 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
             }
             else if (block.Thinking is { } thinking)
             {
+                FlushTools();
                 rows.Add(new ThinkingRow(message, thinking, i));
             }
         }
         FlushTools();
+        foreach (var id in segment.WebTools.Keys.Where(id => !markupTools.ContainsKey(id)).ToArray())
+            segment.WebTools.Remove(id);
         _building = true;
         try
         {
@@ -539,6 +589,15 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         {
             foreach (var key in segment.Documents.Keys.Where(k => k >= message.DisplayBlocks.Count).ToList())
                 segment.Documents.Remove(key);
+        }
+
+        // Thinking and prose can live in a later display segment than the card.
+        var hasLaterActivity = false;
+        for (var index = rows.Count - 1; index >= 0; index--)
+        {
+            if (rows[index] is MarkupRow markup && hasLaterActivity && markup.Block.Unit.PresentationPending)
+                markup.Refresh(markup.Block with { Unit = markup.Block.Unit with { PresentationPending = false } });
+            if (rows[index] is MarkupRow or ThinkingRow or ProseRow or ToolRunRow) hasLaterActivity = true;
         }
 
         // Both flags are the view model's own rules, the same ones the WPF

@@ -51,6 +51,7 @@ internal sealed class AccountSessionCoordinator : IDisposable
 
         _settings.IsLoggedIn = false;
         _settings.MolaGptUsername = null;
+        _settings.IsDonor = false;
         _registry.Unregister(MolaGptProviderIds.Proxy);
         _registry.Unregister(MolaGptProviderIds.LocalTools);
         _cloudSync.CleanupLocalPlaceholdersForLogout();

@@ -317,6 +317,7 @@ public sealed partial class MainViewModel : ObservableObject
                         return;
                     }
                     _molaGptStatus = (status, DateTimeOffset.UtcNow);
+                    Settings.IsDonor = status.IsDonor;
                     usage.ShowCredits(status, Chat.ActiveModel?.Id ?? string.Empty);
                 }
                 catch (OperationCanceledException) { throw; }

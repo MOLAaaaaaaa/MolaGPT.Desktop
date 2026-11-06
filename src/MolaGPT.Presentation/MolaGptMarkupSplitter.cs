@@ -52,7 +52,8 @@ public static partial class MolaGptMarkupSplitter
         Completed,
         Error,
         Info,
-        Success
+        Success,
+        Cancelled
     }
 
     public sealed record MarkupUnit(
@@ -73,7 +74,18 @@ public static partial class MolaGptMarkupSplitter
         // For DSAnalysis: the label of the tool-status blockquote that preceded
         // it, absorbed by MergeToolStatusIntoAnalysis so the pair renders as one
         // card rather than a card followed by a separate fold.
-        string? StatusText = null);
+        string? StatusText = null,
+        string? ToolCallId = null,
+        string? ToolName = null,
+        string? ToolIcon = null,
+        string? RunningText = null,
+        string? Metadata = null,
+        string? ErrorText = null,
+        string? RetryTicket = null,
+        string? FileTicket = null,
+        string? Filename = null,
+        bool PresentationPending = false,
+        int SourceOffset = -1);
 
     public sealed record ToolSearchChip(string Text, IReadOnlyList<string> Badges);
     public sealed record SteelMetaItem(string Text, string? IconClass);
@@ -206,7 +218,8 @@ public static partial class MolaGptMarkupSplitter
                     IsClosed: isClosed,
                     RawInner: inner,
                     SteelIconClass: parsed.IconClass,
-                    SteelMetaItems: parsed.MetaItems));
+                    SteelMetaItems: parsed.MetaItems,
+                    SourceOffset: steelMatch.Index));
                 pos = unitEnd;
             }
             else if (nextStart == imageSkeletonStart && imageSkeletonMatch.Success)
@@ -218,7 +231,8 @@ public static partial class MolaGptMarkupSplitter
                     Tag: "image-gen",
                     ToolVariant: Variant.Analyzing,
                     IsClosed: false,
-                    AnalysisPhase: "analyzing"));
+                    AnalysisPhase: "analyzing",
+                    SourceOffset: imageSkeletonMatch.Index));
                 pos = imageSkeletonMatch.Index + imageSkeletonMatch.Length;
             }
             else if (nextStart == imageErrorStart && imageErrorMatch.Success)
@@ -232,7 +246,8 @@ public static partial class MolaGptMarkupSplitter
                     Inner: message,
                     ToolVariant: Variant.Error,
                     IsClosed: true,
-                    AnalysisPhase: "error"));
+                    AnalysisPhase: "error",
+                    SourceOffset: imageErrorMatch.Index));
                 pos = imageErrorMatch.Index + imageErrorMatch.Length;
             }
             else if (nextStart == bqStart && bqMatch.Success)
@@ -271,7 +286,8 @@ public static partial class MolaGptMarkupSplitter
                     ToolVariant: variant,
                     IsClosed: isClosed,
                     RawInner: inner,
-                    SearchChips: ExtractSearchChips(inner)));
+                    SearchChips: ExtractSearchChips(inner),
+                    SourceOffset: bqMatch.Index));
                 pos = unitEnd;
             }
             else
@@ -310,14 +326,131 @@ public static partial class MolaGptMarkupSplitter
                     Inner: body,
                     IsClosed: isClosed,
                     RawInner: body,
-                    AnalysisPhase: phase));
+                    AnalysisPhase: phase,
+                    SourceOffset: dsMatch.Index));
                 pos = unitEnd;
             }
         }
 
+        CoalesceToolCalls(result);
+        RemoveConnectorFallback(result);
         ApplyImplicitToolStatusPhases(result);
         MergeToolStatusIntoAnalysis(result);
         return result;
+    }
+
+    // Explicit call identity takes precedence over the legacy adjacency rules.
+    private static void CoalesceToolCalls(List<MarkupUnit> units)
+    {
+        var merged = new List<MarkupUnit>();
+        var calls = new Dictionary<string, int>(StringComparer.Ordinal);
+        int precedingCall = -1;
+        foreach (var original in units)
+        {
+            var opening = original.Kind == MarkupUnitKind.SteelStep
+                ? SteelRootOpenRegex().Match(original.Source).Value
+                : original.Source[..(original.Source.IndexOf('>') + 1)];
+            var attrs = ParseAttributes(opening);
+            var id = attrs.GetValueOrDefault("data-tool-call");
+            if (original.Kind == MarkupUnitKind.DsAnalysis && precedingCall >= 0)
+            {
+                var previous = merged[precedingCall];
+                if (previous.ToolCallId is not null && (id is null || id == previous.ToolCallId))
+                {
+                    merged[precedingCall] = previous with
+                    {
+                        Kind = MarkupUnitKind.DsAnalysis, Tag = original.Tag,
+                        Inner = original.Inner, RawInner = original.RawInner,
+                        IsClosed = original.IsClosed, StatusText = previous.StatusText ?? previous.Inner,
+                        Source = previous.Source
+                    };
+                    continue;
+                }
+            }
+            if (original.Kind is MarkupUnitKind.ToolStatus or MarkupUnitKind.SteelStep && id is not null)
+            {
+                var label = original.Inner;
+                var unit = original with
+                {
+                    ToolCallId = id, ToolName = attrs.GetValueOrDefault("data-tool-name"),
+                    ToolIcon = attrs.GetValueOrDefault("data-tool-icon"),
+                    Metadata = ElementText(original.Source, "tool-status-meta"),
+                    ErrorText = ElementText(original.Source, "tool-status-error"),
+                    RetryTicket = ActionTicket(original.Source, "tool-download-retry"),
+                    FileTicket = ActionTicket(original.Source, "tool-retry-file"),
+                    Filename = ActionTicket(original.Source, "tool-retry-file", "data-filename"),
+                    PresentationPending = original.ToolVariant is Variant.Completed or Variant.Success
+                };
+                if (calls.TryGetValue(id, out var index))
+                {
+                    var previous = merged[index];
+                    merged[index] = unit with
+                    {
+                        Kind = previous.Kind, Tag = previous.Tag,
+                        Inner = previous.Kind == MarkupUnitKind.DsAnalysis ? previous.Inner : label,
+                        RawInner = previous.Kind == MarkupUnitKind.DsAnalysis ? previous.RawInner : unit.RawInner,
+                        StatusText = label, RunningText = previous.RunningText ?? previous.StatusText ?? previous.Inner,
+                        Source = previous.Source,
+                        SourceOffset = previous.SourceOffset,
+                        SearchChips = previous.SearchChips, SteelMetaItems = previous.SteelMetaItems,
+                        Metadata = unit.Metadata ?? previous.Metadata,
+                        ErrorText = unit.ErrorText ?? previous.ErrorText,
+                        RetryTicket = unit.RetryTicket ?? previous.RetryTicket,
+                        FileTicket = unit.FileTicket ?? previous.FileTicket,
+                        Filename = unit.Filename ?? previous.Filename
+                    };
+                    precedingCall = index;
+                    continue;
+                }
+                ReleasePresentation(merged);
+                calls[id] = merged.Count;
+                precedingCall = merged.Count;
+                merged.Add(unit with { StatusText = label, RunningText = label });
+                continue;
+            }
+            if (original.Kind != MarkupUnitKind.Markdown || HasVisibleActivity(original.Source))
+            {
+                ReleasePresentation(merged);
+                precedingCall = -1;
+            }
+            merged.Add(original);
+        }
+        units.Clear();
+        units.AddRange(merged);
+    }
+
+    private static void ReleasePresentation(List<MarkupUnit> units)
+    {
+        for (var i = 0; i < units.Count; i++)
+            if (units[i].PresentationPending) units[i] = units[i] with { PresentationPending = false };
+    }
+
+    private static bool HasVisibleActivity(string source) =>
+        ExtractInnerText(source).Any(c => !char.IsWhiteSpace(c) && c is not '\u200B' and not '\uFEFF');
+
+    private static string? ElementText(string source, string className)
+    {
+        var match = Regex.Match(source, """<(?:div|p|span)\b[^>]*class=["'][^"']*\b""" + className + """\b[^"']*["'][^>]*>(.*?)</(?:div|p|span)>""", RegexOptions.Singleline);
+        return match.Success ? ExtractInnerText(match.Groups[1].Value) : null;
+    }
+
+    private static string? ActionTicket(string source, string className, string attribute = "data-tool-ticket")
+    {
+        var match = Regex.Match(source, """<button\b[^>]*class=["'][^"']*\b""" + className + """\b[^"']*["'][^>]*>""");
+        return match.Success ? ParseAttributes(match.Value).GetValueOrDefault(attribute) : null;
+    }
+
+    private static void RemoveConnectorFallback(List<MarkupUnit> units)
+    {
+        for (var i = units.Count - 1; i >= 0; i--)
+        {
+            var unit = units[i];
+            if (unit.Kind != MarkupUnitKind.ToolStatus || unit.ToolCallId is not null
+                || unit.ToolVariant != Variant.Completed || unit.Inner is not ("处理中..." or "处理中…")) continue;
+            var previous = i - 1;
+            while (previous >= 0 && units[previous].Kind == MarkupUnitKind.Markdown && !HasVisibleActivity(units[previous].Source)) previous--;
+            if (previous >= 0 && units[previous] is { Kind: MarkupUnitKind.DsAnalysis, Tag: "mcp", IsClosed: true }) units.RemoveAt(i);
+        }
     }
 
     private static int MinPositive(params int[] values)
@@ -433,7 +566,7 @@ public static partial class MolaGptMarkupSplitter
         // Trim purely whitespace markdown segments to keep the unit list small,
         // but preserve them when they hold visible text or markdown structure.
         if (string.IsNullOrWhiteSpace(slice)) return;
-        result.Add(new MarkupUnit(MarkupUnitKind.Markdown, slice));
+        result.Add(new MarkupUnit(MarkupUnitKind.Markdown, slice, SourceOffset: start));
     }
 
     private static void ApplyImplicitToolStatusPhases(List<MarkupUnit> units)
@@ -442,6 +575,7 @@ public static partial class MolaGptMarkupSplitter
         {
             var unit = units[i];
             if (unit.Kind != MarkupUnitKind.ToolStatus) continue;
+            if (unit.ToolCallId is not null) continue;
             if (unit.ToolVariant is not (Variant.Analyzing or Variant.None)) continue;
 
             var phase = FindFollowingDsPhase(units, i + 1);
@@ -494,6 +628,7 @@ public static partial class MolaGptMarkupSplitter
         for (int i = units.Count - 1; i >= 0; i--)
         {
             if (units[i].Kind != MarkupUnitKind.DsAnalysis) continue;
+            if (units[i].ToolCallId is not null) continue;
 
             var statusIndex = FindPrecedingToolStatus(units, i - 1);
             if (statusIndex < 0) continue;
@@ -553,7 +688,8 @@ public static partial class MolaGptMarkupSplitter
             if (title.Success) return ExtractInnerText(title.Groups["inner"].Value);
         }
 
-        return ExtractInnerText(innerHtml);
+        var paragraph = Regex.Match(innerHtml, "<p\\b[^>]*>(.*?)</p>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        return ExtractInnerText(paragraph.Success ? paragraph.Groups[1].Value : innerHtml);
     }
 
     private static IReadOnlyList<ToolSearchChip> ExtractSearchChips(string innerHtml)
@@ -664,6 +800,7 @@ public static partial class MolaGptMarkupSplitter
     private static Variant ParseVariant(string classExtra)
     {
         var lower = classExtra.ToLowerInvariant();
+        if (lower.Contains("cancelled")) return Variant.Cancelled;
         if (lower.Contains("analyzing")) return Variant.Analyzing;
         if (lower.Contains("completed")) return Variant.Completed;
         if (lower.Contains("error")) return Variant.Error;

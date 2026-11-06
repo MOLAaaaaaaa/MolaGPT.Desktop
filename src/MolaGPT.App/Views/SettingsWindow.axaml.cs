@@ -427,6 +427,7 @@ public partial class SettingsWindow : MolaContentWindow
     }
 
     public event EventHandler? AccountRequested;
+    public event EventHandler? SupportRequested;
 
     private void MarkAccountEntrySeen()
     {

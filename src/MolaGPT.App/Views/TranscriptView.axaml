@@ -339,6 +339,7 @@
     <DataTemplate DataType="r:ThinkingRow">
       <Border Classes="assistantcol">
         <r:ThinkBlockView Source="{Binding Segment.Source}"
+                          Message="{Binding Message}"
                           IsThinking="{Binding Segment.IsThinking}"
                           ElapsedSeconds="{Binding Segment.ElapsedSeconds}"
                           IsExpanded="{Binding Segment.IsExpanded, Mode=TwoWay}"
@@ -361,6 +362,7 @@
             <DataTemplate x:Key="ToolBodyTemplate" x:DataType="r:ToolRow">
               <StackPanel Margin="24,0,4,8">
               <Grid IsVisible="{Binding !IsGroup}">
+              <Grid IsVisible="{Binding ShowStandardBody}">
               <StackPanel Spacing="8" Margin="0,10,0,0" IsVisible="{Binding !Tool.IsTaskCard}">
                 <!-- search_web: one chip per query -->
                 <ItemsControl ItemsSource="{Binding Tool.ArgsView.SearchQueries}"
@@ -468,6 +470,9 @@
                              FontFamily="{DynamicResource Font.Mono}" FontSize="11" />
                 </ScrollViewer>
               </StackPanel>
+              </Grid>
+              <r:MolaGptMarkupBlockView Block="{Binding Markup}" Message="{Binding Message}"
+                                        DetailsOnly="True" IsVisible="{Binding HasMarkup}" />
               </Grid>
               <ItemsControl ItemsSource="{Binding GroupItems}" IsVisible="{Binding IsGroup}"
                             Margin="0,4,0,0" />

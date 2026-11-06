@@ -118,6 +118,10 @@ internal static class AppServices
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
             sp.GetRequiredService<MolaGptAuthService>()));
 
+        services.AddSingleton(sp => new ServerToolActions(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredService<MolaGptAuthService>()));
+
         services.AddSingleton(sp => new CloudSyncService(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
             sp.GetRequiredService<MolaGptAuthService>(),
@@ -475,6 +479,8 @@ internal static class AppServices
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
             Environment.GetEnvironmentVariable("MOLAGPT_PYTHON_RUNTIME_MANIFEST_URL")));
         services.AddSingleton<NotificationCenter>();
+        services.AddSingleton(sp => new SponsorsService(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt)));
 
         var provider = services.BuildServiceProvider(new ServiceProviderOptions
         {

@@ -50,7 +50,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [GeneratedRegex("<DSanalysis\\b(?=[^>]*\\bdata-tool-type\\s*=\\s*['\"]image-gen['\"])[^>]*>[\\s\\S]*?</DSanalysis>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ImageGenDsAnalysisRegex();
 
-    [GeneratedRegex("<DSanalysis\\b(?=[^>]*\\bdata-tool-type\\s*=\\s*['\"](?!(?:python|mcp|image-action)['\"])[^'\"]+['\"])[^>]*>[\\s\\S]*?</DSanalysis>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex("<DSanalysis\\b(?=[^>]*\\bdata-tool-type\\s*=\\s*['\"](?!(?:python|mcp|image-action|code-search)['\"])[^'\"]+['\"])[^>]*>[\\s\\S]*?</DSanalysis>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex HiddenDsAnalysisRegex();
 
     [GeneratedRegex("<DSanalysis\\b[^>]*>\\s*</DSanalysis>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
@@ -136,6 +136,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string? _pendingDetail;
     public ObservableCollection<ToolCallViewModel> ToolCalls { get; } = new();
     public ObservableCollection<ThinkingSegmentViewModel> ThinkingSegments { get; } = new();
+    public Dictionary<string, MolaGptMarkupSplitter.MarkupUnit> ServerToolResults { get; } = new();
     public ObservableCollection<MessageDisplayBlockViewModel> DisplayBlocks { get; } = new();
 
     /// <summary>True while the model is still emitting reasoning chunks.
@@ -500,6 +501,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     /// <summary>Whether the active segment currently shows anything. Tracked so a
     /// delta only rebuilds the display blocks when that answer changes.</summary>
     private bool _activeThinkingVisible;
+    private bool _activeThinkingHasToolMarker;
     private readonly SynchronizationContext? _syncContext;
     private ThinkingSegmentViewModel? _activeThinkingSegment;
     private int _nextDisplaySequence;
@@ -519,6 +521,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         _syncContext = SynchronizationContext.Current;
         ToolCalls.CollectionChanged += (_, _) =>
         {
+            _activeThinkingHasToolMarker = _activeThinkingSegment?.Source.Contains("data-tool-call", StringComparison.OrdinalIgnoreCase) == true;
             OnPropertyChanged(nameof(HasToolCalls));
             RebuildDisplayBlocks();
         };
@@ -819,6 +822,10 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
 
         if (_activeThinkingSegment is not { } segment) return;
         segment.Append(text);
+        if (!_activeThinkingHasToolMarker && text.Contains('>'))
+            _activeThinkingHasToolMarker = segment.Source.Contains("data-tool-call", StringComparison.OrdinalIgnoreCase);
+        if (_activeThinkingHasToolMarker && (ToolCalls.Count > 0 || ThinkingSegments.Count > 1))
+            OnPropertyChanged(nameof(ThinkingSegments));
 
         // Visibility can only move when a marker character is in play: a
         // construct that hides a segment has to open with '<' and close with
@@ -1259,7 +1266,29 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             runName = null;
         }
 
-        foreach (var tool in ToolCalls
+        var webCallMarkers = ToolCalls.Count > 0 && content.Contains("data-tool-call", StringComparison.OrdinalIgnoreCase)
+            ? Regex.Matches(content, "data-tool-call\\s*=\\s*['\"](?<id>[^'\"]+)['\"]", RegexOptions.IgnoreCase)
+            : null;
+        bool IsEmbeddedDuplicate(ToolCallViewModel tool)
+        {
+            if (webCallMarkers is null) return false;
+            if (webCallMarkers.Cast<Match>().Any(marker => marker.Groups["id"].Value == tool.Id)) return true;
+            if (!tool.Id.StartsWith("cloud-tool-", StringComparison.Ordinal)) return false;
+            Match? before = null;
+            foreach (Match marker in webCallMarkers)
+            {
+                if (marker.Index < tool.ContentOffset) { before = marker; continue; }
+                if (before is null || before.Groups["id"].Value != marker.Groups["id"].Value) return false;
+                var start = content.LastIndexOf('<', before.Index);
+                var end = content.IndexOf('>', before.Index);
+                if (start < 0 || end < 0) return false;
+                var name = Regex.Match(content[start..(end + 1)], "data-tool-name\\s*=\\s*['\"](?<name>[^'\"]+)['\"]", RegexOptions.IgnoreCase).Groups["name"].Value;
+                return name == tool.Name || tool.Name == "web_fetch" && name is "steel_browser" or "browser";
+            }
+            return false;
+        }
+
+        foreach (var tool in ToolCalls.Where(tool => !IsEmbeddedDuplicate(tool))
                      .Cast<object>()
                      .Concat(ThinkingSegments)
                      .OrderBy(GetBlockContentOffset)
@@ -1370,6 +1399,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
 
     private ThinkingSegmentViewModel CreateThinkingSegmentAt(int contentOffset)
     {
+        _activeThinkingHasToolMarker = false;
         var segment = new ThinkingSegmentViewModel
         {
             ContentOffset = Math.Max(0, contentOffset),
@@ -2075,6 +2105,8 @@ public sealed partial class ToolCallViewModel : ObservableObject
             "preparing" => "准备调用",
             "running" => "运行中",
             "completed" => "已完成",
+            "cancelled" => "已停止",
+            "info" => "信息",
             "error" => "出错",
             "failed" => "失败",
             _ => Status

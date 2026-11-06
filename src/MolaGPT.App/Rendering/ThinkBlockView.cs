@@ -9,7 +9,13 @@ using Avalonia.Input.Platform;      // ClipboardExtensions.SetTextAsync
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Transformation;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using MolaGPT.Presentation;
+using MolaGPT.ViewModels;
+using MolaGPT.App.Views;
 
 namespace MolaGPT.App.Rendering;
 
@@ -43,6 +49,15 @@ public sealed class ThinkBlockView : TemplatedControl
 
     public static readonly StyledProperty<bool> IsExpandedProperty =
         AvaloniaProperty.Register<ThinkBlockView, bool>(nameof(IsExpanded), true);
+
+    public static readonly StyledProperty<MessageViewModel?> MessageProperty =
+        AvaloniaProperty.Register<ThinkBlockView, MessageViewModel?>(nameof(Message));
+
+    public MessageViewModel? Message
+    {
+        get => GetValue(MessageProperty);
+        set => SetValue(MessageProperty, value);
+    }
 
     public string? Source
     {
@@ -80,20 +95,46 @@ public sealed class ThinkBlockView : TemplatedControl
     /// <summary>The blocks <see cref="_body"/>'s children were built from, index
     /// for index. Compared against the next parse to find what actually changed.</summary>
     private readonly List<RenderBlock> _rendered = new();
+    private readonly Dictionary<string, ToolCallViewModel> _webTools = new();
+    private readonly Dictionary<string, ToolRunRow> _toolRuns = new();
+    private readonly DispatcherTimer _toolFoldTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
+    private static readonly ConditionalWeakTable<ThinkingSegmentViewModel, ToolChoices> s_toolChoices = new();
+    private ThinkingSegmentViewModel? _choiceSegment;
+
+    private sealed class ToolChoices
+    {
+        public HashSet<string> OpenRuns { get; } = new();
+        public HashSet<string> OpenEntries { get; } = new();
+    }
+
+    private sealed record ThinkingToolBlock : RenderBlock
+    {
+        public required ToolRunRow Row { get; init; }
+    }
 
     /// <summary>Last parse, so a delta re-parses only the trailing blocks.</summary>
     private RenderDocument? _document;
     private bool _bodyStale = true;
+    private bool _attached;
+    private bool _hasEmbeddedCalls;
 
     static ThinkBlockView()
     {
         IsThinkingProperty.Changed.AddClassHandler<ThinkBlockView>((x, e) =>
         {
             x.UpdateStatus();
+            x.Invalidate();
         });
         ElapsedSecondsProperty.Changed.AddClassHandler<ThinkBlockView>((x, _) => x.UpdateStatus());
         SourceProperty.Changed.AddClassHandler<ThinkBlockView>((x, _) => x.Invalidate());
         IsExpandedProperty.Changed.AddClassHandler<ThinkBlockView>((x, _) => x.ApplyExpanded());
+        MessageProperty.Changed.AddClassHandler<ThinkBlockView>((x, change) =>
+        {
+            if (x._attached && change.OldValue is MessageViewModel old) old.PropertyChanged -= x.OnMessageChanged;
+            x.ClearBody();
+            if (x._attached && change.NewValue is MessageViewModel next) next.PropertyChanged += x.OnMessageChanged;
+            if (x.IsExpanded) x.BuildBody();
+        });
     }
 
     public ThinkBlockView()
@@ -182,6 +223,7 @@ public sealed class ThinkBlockView : TemplatedControl
         VisualChildren.Add(_shell);
 
         BuildContextMenu();
+        _toolFoldTimer.Tick += OnToolFoldTick;
         ApplyExpanded();
     }
 
@@ -194,8 +236,10 @@ public sealed class ThinkBlockView : TemplatedControl
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
+        _attached = true;
         ApplyBrushes();
         ActualThemeVariantChanged += OnVariantChanged;
+        if (Message is { } message) message.PropertyChanged += OnMessageChanged;
 
         // The block templates are shared with the transcript's own rows and are
         // therefore found by walking up from here. A body built before the card
@@ -207,7 +251,62 @@ public sealed class ThinkBlockView : TemplatedControl
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnDetachedFromVisualTree(e);
+        _attached = false;
         ActualThemeVariantChanged -= OnVariantChanged;
+        if (Message is { } message) message.PropertyChanged -= OnMessageChanged;
+        ClearBody();
+    }
+
+    private void OnMessageChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_hasEmbeddedCalls
+            && (e.PropertyName is nameof(MessageViewModel.HasToolCalls) or nameof(MessageViewModel.ThinkingSegments)
+                or nameof(MessageViewModel.Content) or nameof(MessageViewModel.IsStreaming)
+                or nameof(MessageViewModel.IsRevealing)))
+            Invalidate();
+    }
+
+    private void ClearBody()
+    {
+        _toolFoldTimer.Stop();
+        SaveToolChoices();
+        foreach (var run in _toolRuns.Values) run.Dispose();
+        _toolRuns.Clear();
+        _webTools.Clear();
+        _document = null;
+        _hasEmbeddedCalls = false;
+        _rendered.Clear();
+        _body.Children.Clear();
+        _bodyStale = true;
+        _choiceSegment = null;
+    }
+
+    private void OnToolFoldTick(object? sender, EventArgs e)
+    {
+        var pending = _toolRuns.Values.Where(run => run.NeedsAutoCollapse).ToArray();
+        if (pending.Length == 0) { _toolFoldTimer.Stop(); return; }
+        var allowed = this.FindAncestorOfType<TranscriptView>()?.CanAutoCollapseTools() ?? true;
+        foreach (var run in pending) run.TryAutoCollapse(allowed);
+    }
+
+    private void SaveToolChoices()
+    {
+        if (_choiceSegment is null || _toolRuns.Count == 0) return;
+        var choices = s_toolChoices.GetOrCreateValue(_choiceSegment);
+        choices.OpenRuns.Clear();
+        choices.OpenEntries.Clear();
+        void SaveEntry(ToolRow entry)
+        {
+            if (entry.IsExpanded) choices.OpenEntries.Add(entry.Tool.Id);
+            foreach (var child in entry.GroupItems) SaveEntry(child);
+        }
+        foreach (var run in _toolRuns.Values)
+        {
+            if (run.IsExpanded)
+                foreach (var entry in run.Entries)
+                    foreach (var id in entry.ToolIds) choices.OpenRuns.Add(id);
+            foreach (var entry in run.Entries) SaveEntry(entry);
+        }
     }
 
     private void OnVariantChanged(object? sender, EventArgs e) => ApplyBrushes();
@@ -306,9 +405,7 @@ public sealed class ThinkBlockView : TemplatedControl
 
         if (Source is not { Length: > 0 } source)
         {
-            _document = null;
-            _rendered.Clear();
-            _body.Children.Clear();
+            ClearBody();
             AnimationPerformanceTrace.ThinkingBodyBuilt(traceStarted, 0, 0);
             return;
         }
@@ -316,11 +413,122 @@ public sealed class ThinkBlockView : TemplatedControl
         // Incremental, not Parse: a full re-read of the whole segment on every
         // delta is quadratic over a segment that streams for a minute.
         _document = MessageDocumentParser.ParseIncremental(_document, source);
-        SyncBody(_document.Blocks);
+        _hasEmbeddedCalls = _document.Blocks.OfType<MarkupUnitBlock>().Any(block => block.Unit.ToolCallId is not null);
+        SyncBody(BuildToolRuns(_document.Blocks));
         AnimationPerformanceTrace.ThinkingBodyBuilt(
             traceStarted,
             source.Length,
             _document.Blocks.Count);
+    }
+
+    private IReadOnlyList<RenderBlock> BuildToolRuns(IReadOnlyList<RenderBlock> blocks)
+    {
+        if (Message is not { } message) return blocks;
+        SaveToolChoices();
+        _choiceSegment = (DataContext as ThinkingRow)?.Segment;
+        var choices = _choiceSegment is null ? null : s_toolChoices.GetOrCreateValue(_choiceSegment);
+        var result = new List<RenderBlock>();
+        var pending = new List<IReadOnlyList<ToolCallViewModel>>();
+        var markups = new Dictionary<string, MarkupUnitBlock>();
+        var seenRuns = new HashSet<string>();
+        var seenCalls = new HashSet<string>();
+        var bodyCalls = message.Content.Contains("data-tool-call", StringComparison.OrdinalIgnoreCase)
+            ? MolaGptMarkupSplitter.Split(message.Content).Where(unit => unit.ToolCallId is not null)
+                .Select(unit => unit.ToolCallId!).ToHashSet(StringComparer.Ordinal)
+            : null;
+        var thinkingCalls = message.ThinkingSegments.Count > 1 ? WebToolPresentation.ThinkingTools(message) : null;
+        var following = new Dictionary<ToolRunRow, int>();
+        ToolRunRow? preceding = null;
+        var done = !message.IsStreaming && !message.IsRevealing;
+
+        void Flush()
+        {
+            while (pending.Count > 0)
+            {
+                var first = pending[0][0].Id;
+                var initial = !_toolRuns.TryGetValue(first, out var run);
+                if (initial) _toolRuns[first] = run = new ToolRunRow(message, first);
+                var owned = new List<IReadOnlyList<ToolCallViewModel>>();
+                var later = new List<IReadOnlyList<ToolCallViewModel>>();
+                var pastBoundary = false;
+                foreach (var group in pending)
+                {
+                    var split = pastBoundary ? 0 : run!.RetiredToolIds is { } retired
+                        ? group.TakeWhile(tool => retired.Contains(tool.Id)).Count() : group.Count;
+                    if (split > 0) owned.Add(split == group.Count ? group : group.Take(split).ToArray());
+                    if (split == group.Count) continue;
+                    pastBoundary = true;
+                    later.Add(group.Skip(split).ToArray());
+                }
+                run!.Sync(owned, animateNewEntries: !done, markups);
+                run.UpdateContext(done, 0);
+                if (done) run.TryAutoCollapse(allowed: true, initial: initial);
+                if (initial && choices is not null)
+                {
+                    if (owned.SelectMany(group => group).Any(tool => choices.OpenRuns.Contains(tool.Id)))
+                        run.IsExpanded = true;
+                    void RestoreEntry(ToolRow entry)
+                    {
+                        if (choices.OpenEntries.Contains(entry.Tool.Id)) entry.IsExpanded = true;
+                        foreach (var child in entry.GroupItems) RestoreEntry(child);
+                    }
+                    foreach (var entry in run.Entries) RestoreEntry(entry);
+                }
+                result.Add(new ThinkingToolBlock { Key = first, SourceStart = 0, SourceLength = 0, Row = run });
+                seenRuns.Add(first);
+                following[run] = 0;
+                preceding = run;
+                pending.Clear();
+                pending.AddRange(later);
+            }
+        }
+
+        foreach (var block in blocks)
+        {
+            if (WebToolPresentation.HandleSpecial(block, pending, markups)) continue;
+            if (block is MarkupUnitBlock markup && WebToolPresentation.IsTool(markup))
+            {
+                var unit = markup.Unit;
+                if (unit.ToolCallId is { } callId && (!seenCalls.Add(callId)
+                    || bodyCalls?.Contains(callId) == true || message.ToolCalls.Any(tool => tool.Id == callId)))
+                    continue;
+                if (unit.ToolCallId is { } idAcrossSegments && thinkingCalls?.TryGetValue(idAcrossSegments, out var whole) == true)
+                {
+                    if (_choiceSegment is not null && !ReferenceEquals(_choiceSegment, whole.Owner)) continue;
+                    markup = markup with { Unit = unit = whole.Markup.Unit };
+                }
+                if (message.ServerToolResults.TryGetValue(unit.ToolCallId ?? markup.Key, out var retry))
+                    markup = markup with { Unit = unit = retry };
+                var id = unit.ToolCallId is { } identity ? $"think:{identity}" : $"think:{markup.SourceStart}";
+                var tool = WebToolPresentation.Update(message, markup, _webTools, id, done,
+                    !done && unit.PresentationPending);
+                markups[id] = markup;
+                WebToolPresentation.Add(pending, [tool]);
+                continue;
+            }
+            Flush();
+            if (preceding is { NeedsProseSignal: true } && following[preceding] < 240)
+                following[preceding] += TranscriptSource.CountProseCharacters([block]);
+            result.Add(block);
+        }
+        Flush();
+        foreach (var (run, characters) in following)
+        {
+            run.UpdateContext(done, characters);
+            if (run.NeedsAutoCollapse)
+            {
+                run.TryAutoCollapse(this.FindAncestorOfType<TranscriptView>()?.CanAutoCollapseTools() ?? true);
+                if (run.NeedsAutoCollapse) _toolFoldTimer.Start();
+            }
+        }
+        foreach (var key in _toolRuns.Keys.Where(key => !seenRuns.Contains(key)).ToArray())
+        {
+            _toolRuns[key].Dispose();
+            _toolRuns.Remove(key);
+        }
+        foreach (var key in _webTools.Keys.Where(key => !markups.ContainsKey(key)).ToArray())
+            _webTools.Remove(key);
+        return result;
     }
 
     /// <summary>
@@ -354,6 +562,13 @@ public sealed class ThinkBlockView : TemplatedControl
                 continue;
             }
 
+            if (block is ThinkingToolBlock toolBlock)
+            {
+                if (_body.Children[i] is not ToolRunView toolView || !ReferenceEquals(toolView.DataContext, toolBlock.Row))
+                    _body.Children[i] = BuildChild(block);
+                _rendered[i] = block;
+                continue;
+            }
             if (string.Equals(_rendered[i].Key, block.Key, StringComparison.Ordinal)) continue;
 
             if (_rendered[i].GetType() == block.GetType())
@@ -379,6 +594,7 @@ public sealed class ThinkBlockView : TemplatedControl
     /// </summary>
     private Control BuildChild(RenderBlock block)
     {
+        if (block is ThinkingToolBlock toolBlock) return new ToolRunView { DataContext = toolBlock.Row };
         if (this.FindDataTemplate(block)?.Build(block) is { } templated)
         {
             templated.DataContext = block;

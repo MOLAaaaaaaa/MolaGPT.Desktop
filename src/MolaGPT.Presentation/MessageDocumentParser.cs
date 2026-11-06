@@ -114,6 +114,15 @@ public static partial class MessageDocumentParser
             return Parse(body, ct);
 
         var cutIndex = Math.Max(0, previous.Blocks.Count - IncrementalTailBlocks);
+        for (var index = 0; index < cutIndex; index++)
+        {
+            if (previous.Blocks[index] is MarkupUnitBlock { Unit: { ToolCallId: not null } unit }
+                && (unit.ToolVariant == MolaGptMarkupSplitter.Variant.Analyzing || unit.PresentationPending))
+            {
+                cutIndex = index;
+                break;
+            }
+        }
         var cutOffset = previous.Blocks[cutIndex].SourceStart;
         // Several image rows can belong to one Markdown paragraph; reparse that paragraph as a unit.
         while (cutIndex > 0 && previous.Blocks[cutIndex - 1].SourceStart == cutOffset)
@@ -167,13 +176,7 @@ public static partial class MessageDocumentParser
             var unit = units[index];
             ct.ThrowIfCancellationRequested();
 
-            // Split partitions the input, so a running sum over unit sources
-            // gives each unit's offset. Guard anyway: if a future splitter change
-            // breaks that, fall back to searching rather than emitting offsets
-            // that index the wrong text.
-            var start = body.AsSpan(offset).StartsWith(unit.Source)
-                ? offset
-                : body.IndexOf(unit.Source, offset, StringComparison.Ordinal);
+            var start = unit.SourceOffset;
             if (start < 0) start = offset;
             offset = start + unit.Source.Length;
 
@@ -186,7 +189,7 @@ public static partial class MessageDocumentParser
                     HasFollowingContent = HasFollowingContent(units, index),
                     SourceStart = start,
                     SourceLength = unit.Source.Length,
-                    Key = MakeKey($"unit-{unit.Kind}", unit.Source, seen)
+                    Key = unit.ToolCallId is { } callId ? $"tool-{callId}" : MakeKey($"unit-{unit.Kind}", unit.Source, seen)
                 });
         }
 

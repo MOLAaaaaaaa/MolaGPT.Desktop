@@ -182,7 +182,7 @@
                 <ListBoxItem Content="对话" Tag="PAGE_Chat" />
                 <ListBoxItem Content="任务与子 Agent" Tag="PAGE_Tasks" />
                 <ListBoxItem Content="通知与托盘" Tag="PAGE_System" />
-                <ListBoxItem Content="划词助手" Tag="PAGE_Selection" />
+                <ListBoxItem Name="PART_SelectionNav" Content="划词助手" Tag="PAGE_Selection" />
                 <ListBoxItem Content="网络代理" Tag="PAGE_Network" />
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="隐私和安全" />
                 <ListBoxItem Name="PART_ApprovalNav" Content="权限与审批" Tag="PAGE_Approval" />
@@ -424,6 +424,39 @@
                               Padding="12,6"
                               IsEnabled="{Binding IsLoggedIn}"
                               Click="OnManageTracksClick" />
+                    </Grid>
+                  </StackPanel>
+                </Border>
+
+                <TextBlock Classes="section" Text="支持与开源" />
+                <Border Classes="settingscard">
+                  <StackPanel>
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                        <TextBlock Classes="rowtitle" Text="支持 MolaGPT" />
+                        <TextBlock Classes="hint"
+                                   Text="通过爱发电支持项目维护；¥66/月档位可进入「捐赠者」用户组，解锁专属模型与更高可用额度。" />
+                      </StackPanel>
+                      <Button Grid.Column="1"
+                              Name="PART_OpenSupport"
+                              Classes="outline"
+                              Content="查看方案"
+                              Padding="12,6"
+                              VerticalAlignment="Center" />
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                        <TextBlock Classes="rowtitle" Text="GitHub 开源仓库" />
+                        <TextBlock Classes="hint"
+                                   Text="MolaGPT Desktop 已在 GitHub 开源，欢迎点亮 Star。" />
+                      </StackPanel>
+                      <Button Grid.Column="1"
+                              Name="PART_OpenGitHubStar"
+                              Classes="outline"
+                              Content="前往 Star"
+                              Padding="12,6"
+                              VerticalAlignment="Center" />
                     </Grid>
                   </StackPanel>
                 </Border>

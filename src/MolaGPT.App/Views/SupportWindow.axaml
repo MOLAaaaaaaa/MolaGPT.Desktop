@@ -1,0 +1,168 @@
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        xmlns:svc="clr-namespace:MolaGPT.Desktop.Services;assembly=MolaGPT.Services"
+        x:Class="MolaGPT.App.Views.SupportWindow"
+        Title="支持 MolaGPT"
+        Width="548" Height="648"
+        CanResize="False"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        FontFamily="{DynamicResource Font.UI}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+  <views:MolaContentWindow.Header>
+    <Border Name="PART_Header"
+            Padding="24,14"
+            Background="Transparent"
+            BorderBrush="{DynamicResource Brush.Divider}"
+            BorderThickness="0,0,0,1">
+      <Grid>
+        <TextBlock Text="支持 MolaGPT" FontSize="{DynamicResource Font.Size.Heading}"
+                   FontWeight="Bold" VerticalAlignment="Center" />
+        <Button Name="PART_Close" Classes="headericon"
+                HorizontalAlignment="Right" ToolTip.Tip="关闭">
+          <TextBlock Classes="icon" Text="&#xE711;" />
+        </Button>
+      </Grid>
+    </Border>
+  </views:MolaContentWindow.Header>
+
+  <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <StackPanel Margin="32,22,32,28">
+      <TextBlock Text="如果 MolaGPT 对你有帮助，欢迎支持项目的服务器、模型 API 与后续开发。"
+                 Classes="secondary"
+                 TextWrapping="Wrap"
+                 Margin="0,0,0,18" />
+
+      <TextBlock Text="爱发电方案" Classes="section" Margin="0,0,0,10" />
+
+      <Button Name="PART_Plan6" Classes="supportoption" Margin="0,0,0,10">
+        <Grid ColumnDefinitions="*,Auto">
+          <StackPanel Grid.Column="0" Spacing="4" Margin="0,0,14,0">
+            <TextBlock Text="小小的赞助 · ¥6 / 月" FontWeight="SemiBold"
+                       FontSize="{DynamicResource Font.Size.Body}" />
+            <TextBlock Text="请我喝杯咖啡，分担服务器与日常维护成本"
+                       Classes="muted" TextWrapping="Wrap"
+                       FontSize="{DynamicResource Font.Size.Small}" />
+          </StackPanel>
+          <TextBlock Grid.Column="1" Classes="icon" Text="&#xE8A7;" FontSize="13"
+                     VerticalAlignment="Center"
+                     Foreground="{DynamicResource Brush.Text.Muted}" />
+        </Grid>
+      </Button>
+
+      <Button Name="PART_Plan66" Classes="supportoption" Margin="0,0,0,12">
+        <Grid ColumnDefinitions="*,Auto">
+          <StackPanel Grid.Column="0" Spacing="4" Margin="0,0,14,0">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <TextBlock Text="超级大的赞助 · ¥66 / 月" FontWeight="SemiBold"
+                         FontSize="{DynamicResource Font.Size.Body}"
+                         VerticalAlignment="Center" />
+              <Border Background="{DynamicResource Brush.Primary.Soft}"
+                      BorderBrush="{DynamicResource Brush.Primary.Border}"
+                      BorderThickness="1"
+                      CornerRadius="{DynamicResource Radius.Pill}"
+                      Padding="8,2" VerticalAlignment="Center">
+                <TextBlock Text="捐赠者权益"
+                           FontSize="11" FontWeight="SemiBold"
+                           Foreground="{DynamicResource Brush.Primary.Hover}" />
+              </Border>
+            </StackPanel>
+            <TextBlock Text="进入「捐赠者」用户组，使用专属模型与更高可用额度。发电时请备注 MolaGPT 用户名，或发电后加群联系我开通。"
+                       Classes="muted" TextWrapping="Wrap"
+                       FontSize="{DynamicResource Font.Size.Small}" />
+          </StackPanel>
+          <TextBlock Grid.Column="1" Classes="icon" Text="&#xE8A7;" FontSize="13"
+                     VerticalAlignment="Center"
+                     Foreground="{DynamicResource Brush.Primary}" />
+        </Grid>
+      </Button>
+
+      <Grid ColumnDefinitions="*,10,*">
+        <Button Grid.Column="0" Name="PART_AfdianHome" Classes="outline" HorizontalAlignment="Stretch"
+                HorizontalContentAlignment="Center" Padding="14,8">
+          <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="7">
+            <TextBlock Classes="icon" Text="&#xEB51;" Foreground="{DynamicResource Brush.Primary}" />
+            <TextBlock Text="前往爱发电主页" />
+          </StackPanel>
+        </Button>
+        <Button Grid.Column="2" Name="PART_GitHubStar" Classes="outline" HorizontalAlignment="Stretch"
+                HorizontalContentAlignment="Center" Padding="14,8">
+          <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="7">
+            <TextBlock Classes="icon" Text="&#xE734;" />
+            <TextBlock Text="GitHub 点亮 Star" />
+          </StackPanel>
+        </Button>
+      </Grid>
+
+      <Grid ColumnDefinitions="*,Auto,Auto" Margin="0,26,0,8">
+        <TextBlock Grid.Column="0" Text="感谢名单" Classes="section" VerticalAlignment="Center" />
+        <TextBlock Grid.Column="1" Name="PART_SponsorStats" Classes="muted"
+                   FontSize="{DynamicResource Font.Size.XSmall}"
+                   VerticalAlignment="Center" Margin="0,0,6,0" />
+        <Button Grid.Column="2" Name="PART_RefreshSponsors" Classes="inlineaction"
+                ToolTip.Tip="刷新感谢名单" VerticalAlignment="Center">
+          <TextBlock Classes="icon" Text="&#xE72C;" FontSize="12" />
+        </Button>
+      </Grid>
+
+      <TextBlock Name="PART_SponsorStatus" Classes="muted"
+                 FontSize="{DynamicResource Font.Size.Small}"
+                 Margin="2,6,2,6" IsVisible="False" TextWrapping="Wrap" />
+
+      <Border Name="PART_SponsorListCard"
+              BorderBrush="{DynamicResource Brush.Border}"
+              BorderThickness="1" CornerRadius="{DynamicResource Radius.Lg}"
+              ClipToBounds="True" IsVisible="False">
+        <ItemsControl Name="PART_SponsorList">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="svc:SponsorItem">
+              <Border BorderBrush="{DynamicResource Brush.Divider}"
+                      BorderThickness="0,0,0,1" Padding="16,11">
+                <Grid ColumnDefinitions="*,Auto">
+                  <StackPanel Grid.Column="0" Margin="0,0,14,0" Spacing="2">
+                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold"
+                               TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                    <TextBlock Text="{Binding DonateDateText, StringFormat='捐赠日期：{0}'}"
+                               Classes="muted"
+                               FontSize="{DynamicResource Font.Size.XSmall}" />
+                  </StackPanel>
+                  <Border Grid.Column="1"
+                          Background="{DynamicResource Brush.Bg.Tertiary}"
+                          BorderBrush="{DynamicResource Brush.Border.Subtle}"
+                          BorderThickness="1" CornerRadius="{DynamicResource Radius.Sm}"
+                          Padding="9,4" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding PlanName}" Classes="secondary"
+                               FontSize="{DynamicResource Font.Size.XSmall}" />
+                  </Border>
+                </Grid>
+              </Border>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+
+  <Window.Styles>
+    <Style Selector="TextBlock.section">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.XSmall}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+    </Style>
+    <Style Selector="Button.supportoption">
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="16,13" />
+    </Style>
+    <Style Selector="Button.supportoption:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Primary}" />
+    </Style>
+  </Window.Styles>
+</views:MolaContentWindow>
