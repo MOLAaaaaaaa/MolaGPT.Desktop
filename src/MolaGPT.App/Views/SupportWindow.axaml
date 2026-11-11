@@ -35,14 +35,22 @@
                  TextWrapping="Wrap"
                  Margin="0,0,0,18" />
 
-      <TextBlock Text="爱发电方案" Classes="section" Margin="0,0,0,10" />
+      <TextBlock Text="支持方案" Classes="section" Margin="0,0,0,10" />
 
-      <Button Name="PART_Plan6" Classes="supportoption" Margin="0,0,0,10">
+      <TextBlock Name="PART_ProductsStatus" Classes="muted" Text="正在加载支持方案…" Margin="2,0,2,12" />
+      <StackPanel Name="PART_ProductsActions" Orientation="Horizontal" Spacing="10" Margin="0,0,0,12" IsVisible="False">
+        <Button Name="PART_RetryProducts" Classes="outline" Content="重试" />
+        <Button Name="PART_OpenMembership" Classes="outline" Content="打开支持中心" />
+      </StackPanel>
+      <ItemsControl Name="PART_Products">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="svc:MembershipProduct">
+      <Button Classes="supportoption" Margin="0,0,0,10" Click="OnProductClick">
         <Grid ColumnDefinitions="*,Auto">
           <StackPanel Grid.Column="0" Spacing="4" Margin="0,0,14,0">
-            <TextBlock Text="小小的赞助 · ¥6 / 月" FontWeight="SemiBold"
+            <TextBlock Text="{Binding Title}" FontWeight="SemiBold"
                        FontSize="{DynamicResource Font.Size.Body}" />
-            <TextBlock Text="请我喝杯咖啡，分担服务器与日常维护成本"
+            <TextBlock Text="享有对应可用模型和使用额度。"
                        Classes="muted" TextWrapping="Wrap"
                        FontSize="{DynamicResource Font.Size.Small}" />
           </StackPanel>
@@ -51,40 +59,16 @@
                      Foreground="{DynamicResource Brush.Text.Muted}" />
         </Grid>
       </Button>
-
-      <Button Name="PART_Plan66" Classes="supportoption" Margin="0,0,0,12">
-        <Grid ColumnDefinitions="*,Auto">
-          <StackPanel Grid.Column="0" Spacing="4" Margin="0,0,14,0">
-            <StackPanel Orientation="Horizontal" Spacing="8">
-              <TextBlock Text="超级大的赞助 · ¥66 / 月" FontWeight="SemiBold"
-                         FontSize="{DynamicResource Font.Size.Body}"
-                         VerticalAlignment="Center" />
-              <Border Background="{DynamicResource Brush.Primary.Soft}"
-                      BorderBrush="{DynamicResource Brush.Primary.Border}"
-                      BorderThickness="1"
-                      CornerRadius="{DynamicResource Radius.Pill}"
-                      Padding="8,2" VerticalAlignment="Center">
-                <TextBlock Text="捐赠者权益"
-                           FontSize="11" FontWeight="SemiBold"
-                           Foreground="{DynamicResource Brush.Primary.Hover}" />
-              </Border>
-            </StackPanel>
-            <TextBlock Text="进入「捐赠者」用户组，使用专属模型与更高可用额度。发电时请备注 MolaGPT 用户名，或发电后加群联系我开通。"
-                       Classes="muted" TextWrapping="Wrap"
-                       FontSize="{DynamicResource Font.Size.Small}" />
-          </StackPanel>
-          <TextBlock Grid.Column="1" Classes="icon" Text="&#xE8A7;" FontSize="13"
-                     VerticalAlignment="Center"
-                     Foreground="{DynamicResource Brush.Primary}" />
-        </Grid>
-      </Button>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
 
       <Grid ColumnDefinitions="*,10,*">
         <Button Grid.Column="0" Name="PART_AfdianHome" Classes="outline" HorizontalAlignment="Stretch"
                 HorizontalContentAlignment="Center" Padding="14,8">
           <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="7">
             <TextBlock Classes="icon" Text="&#xEB51;" Foreground="{DynamicResource Brush.Primary}" />
-            <TextBlock Text="前往爱发电主页" />
+            <TextBlock Text="前往爱发电" />
           </StackPanel>
         </Button>
         <Button Grid.Column="2" Name="PART_GitHubStar" Classes="outline" HorizontalAlignment="Stretch"
@@ -124,7 +108,7 @@
                   <StackPanel Grid.Column="0" Margin="0,0,14,0" Spacing="2">
                     <TextBlock Text="{Binding Name}" FontWeight="SemiBold"
                                TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-                    <TextBlock Text="{Binding DonateDateText, StringFormat='捐赠日期：{0}'}"
+                    <TextBlock Text="{Binding DonateDateText, StringFormat='支持日期：{0}'}"
                                Classes="muted"
                                FontSize="{DynamicResource Font.Size.XSmall}" />
                   </StackPanel>

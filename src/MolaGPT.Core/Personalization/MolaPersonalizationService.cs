@@ -287,7 +287,6 @@ public sealed class MolaPersonalizationService
         var message = NonBlank(resp["message"]?.GetValue<string>());
         if (message is null && resp["expired"] is JsonValue e && e.TryGetValue<bool>(out var expired) && expired)
         {
-            _auth.Logout();
             return PersonalizationResult.Fail("登录已过期，请重新登录");
         }
         return PersonalizationResult.Fail(message);
@@ -317,7 +316,7 @@ public sealed class MolaPersonalizationService
             using var resp = await _http.SendAsync(req, token).ConfigureAwait(false);
             if (resp.StatusCode == HttpStatusCode.Unauthorized)
             {
-                _auth.Logout();
+                _auth.LogoutIfCurrent(jwt);
                 return new JsonObject { ["success"] = false, ["expired"] = true };
             }
             var root = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: token).ConfigureAwait(false);

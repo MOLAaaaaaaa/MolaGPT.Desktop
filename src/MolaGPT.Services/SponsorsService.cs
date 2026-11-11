@@ -9,8 +9,6 @@ public static class CommunityLinks
 {
     public const string GitHubUrl = "https://github.com/MOLAaaaaaaa/MolaGPT.Desktop";
     public const string AfdianHomeUrl = "https://afdian.com/a/molagpt";
-    public const string AfdianPlan6Url = "https://afdian.com/order/create?plan_id=c459a9a2558011f0ab0d52540025c377&product_type=0";
-    public const string AfdianPlan66Url = "https://afdian.com/order/create?plan_id=a01180ce558011f099fd52540025c377&product_type=0";
 
     public static bool TryOpenBrowser(string? url)
     {

@@ -25,6 +25,7 @@ public partial class SettingsWindow
     private MolaGptProxyProvider? _proxy;
     private DateTime? _usageFetchedAt;
     private int _usageRequest;
+    private long _usageSessionGeneration = -1;
 
     private void InitializeAccountPage(MolaGptProxyProvider? proxy)
     {
@@ -34,6 +35,7 @@ public partial class SettingsWindow
         PART_Logout.Click += OnLogoutClick;
         PART_RefreshUsage.Click += (_, _) => _ = RefreshUsageAsync(force: true);
         PART_OpenSupport.Click += (_, _) => SupportRequested?.Invoke(this, EventArgs.Empty);
+        Activated += (_, _) => RefreshAccountUi();
         PART_OpenGitHubStar.Click += (_, _) =>
         {
             _settings.GitHubStarPromptShown = true;
@@ -51,6 +53,16 @@ public partial class SettingsWindow
     {
         var loggedIn = _auth is null ? _settings.IsLoggedIn : !string.IsNullOrEmpty(_auth.CurrentJwt);
         var username = _auth?.CurrentUsername ?? _settings.MolaGptUsername;
+        var generation = _auth?.SessionGeneration ?? 0;
+        if (_usageSessionGeneration != generation)
+        {
+            _usageSessionGeneration = generation;
+            _usageFetchedAt = null;
+            _usageRequest++;
+            _accountModels.Clear();
+            _settings.IsDonor = false;
+            PART_RefreshUsage.IsEnabled = true;
+        }
 
         _settings.IsLoggedIn = loggedIn;
         _settings.MolaGptUsername = loggedIn ? username : null;
@@ -87,6 +99,7 @@ public partial class SettingsWindow
         if (!force && _usageFetchedAt is { } at && DateTime.UtcNow - at < UsageFreshFor) return;
 
         var request = ++_usageRequest;
+        var generation = _auth?.SessionGeneration ?? 0;
         _usageFetchedAt = DateTime.UtcNow;
         PART_RefreshUsage.IsEnabled = false;
         if (_accountModels.Count == 0) ShowUsageStatus("正在加载用量…");
@@ -98,13 +111,13 @@ public partial class SettingsWindow
         }
         catch (MolaGptAuthExpiredException)
         {
-            if (request != _usageRequest) return;
+            if (request != _usageRequest || generation != (_auth?.SessionGeneration ?? 0)) return;
             ShowUsageEmpty("登录已过期，请重新登录。");
             return;
         }
         catch (Exception ex)
         {
-            if (request != _usageRequest) return;
+            if (request != _usageRequest || generation != (_auth?.SessionGeneration ?? 0)) return;
             // Let the next visit try again instead of holding a failure for 30s.
             _usageFetchedAt = null;
             ShowUsageEmpty($"无法获取用量：{ex.Message}");
@@ -115,7 +128,7 @@ public partial class SettingsWindow
             if (request == _usageRequest) PART_RefreshUsage.IsEnabled = true;
         }
 
-        if (request != _usageRequest) return;
+        if (request != _usageRequest || generation != (_auth?.SessionGeneration ?? 0)) return;
         if (status is null)
         {
             ShowUsageEmpty("尚未登录。");
@@ -129,7 +142,10 @@ public partial class SettingsWindow
         }
 
         _settings.IsDonor = status.IsDonor;
-        PART_AccountDetail.Text = status.Unlimited ? "无限制账户" : status.IsDonor ? "捐赠用户" : "已注册用户";
+        PART_AccountDetail.Text = status.Unlimited ? "无限制账户" : status.IsDonor ? "支持者" : "已注册用户";
+        if (status.Membership is { } membership && !status.Unlimited)
+            PART_AccountDetail.Text = membership.TierLabel
+                + (membership.ExpiryLabel.Length == 0 ? string.Empty : " · " + membership.ExpiryLabel);
         ShowUsageStatus(null);
 
         if (status.Credits is { } credits && !status.Unlimited)
@@ -316,8 +332,17 @@ public partial class SettingsWindow
         // LoggedOut reaches MainWindow, which refreshes the title bar and calls
         // back into RefreshAccountUi; calling it here too keeps this page right
         // even when nothing is listening.
-        _auth.Logout();
-        RefreshAccountUi();
+        PART_Logout.IsEnabled = false;
+        try
+        {
+            if (!await _auth.LogoutRemoteAsync())
+                _notifications?.Warning("会话撤销未确认", "请联系管理员撤销旧会话。");
+            RefreshAccountUi();
+        }
+        finally
+        {
+            PART_Logout.IsEnabled = true;
+        }
     }
 }
 

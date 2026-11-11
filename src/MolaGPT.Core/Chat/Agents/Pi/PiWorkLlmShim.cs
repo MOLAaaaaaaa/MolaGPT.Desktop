@@ -50,7 +50,7 @@ public sealed class PiWorkLlmShim : IDisposable
         HttpClient Http,
         string Endpoint,
         Func<CancellationToken, Task<string?>> TokenProvider,
-        Action? OnUnauthorized = null,
+        Action<string?>? OnUnauthorized = null,
         IReadOnlyList<KeyValuePair<string, string>>? Headers = null,
         IReadOnlyDictionary<string, JsonElement>? ExtraBody = null,
         AuthStyle Auth = AuthStyle.Bearer,
@@ -238,7 +238,7 @@ public sealed class PiWorkLlmShim : IDisposable
 
                 if (resp.StatusCode == HttpStatusCode.Unauthorized)
                 {
-                    try { target.OnUnauthorized?.Invoke(); }
+                    try { target.OnUnauthorized?.Invoke(token); }
                     catch (Exception ex) { _log?.Invoke("[llm-shim] unauthorized handler: " + ex.Message); }
                 }
                 if (target.ResponseReceived is { } observe)

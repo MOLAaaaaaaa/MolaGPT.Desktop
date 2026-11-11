@@ -184,7 +184,8 @@ public partial class App : Application
                  _services.GetRequiredService<PersonalizationViewModel>(),
                  _services.GetRequiredService<MemoryPageViewModel>(),
                  _services.GetRequiredService<PersonalDataService>(),
-                 _services.GetRequiredService<SponsorsService>());
+                 _services.GetRequiredService<SponsorsService>(),
+                 _services.GetRequiredService<MembershipService>());
             window.RemoteWork = _services.GetRequiredService<RemoteWorkSettingsViewModel>();
             desktop.MainWindow = window;
             _selectionAssistant = new Selection.SelectionAssistantService(settings, providers,
@@ -392,7 +393,8 @@ public partial class App : Application
         AccountSessionCoordinator accountSession,
         MainWindow window)
     {
-        if (string.IsNullOrEmpty(auth.CurrentJwt)) return;
+        var startupJwt = auth.CurrentJwt;
+        if (string.IsNullOrEmpty(startupJwt)) return;
 
         try
         {
@@ -400,7 +402,7 @@ public partial class App : Application
         }
         catch (MolaGptAuthExpiredException)
         {
-            auth.Logout();
+            auth.LogoutIfCurrent(startupJwt);
         }
         catch
         {
@@ -728,8 +730,8 @@ public partial class App : Application
                     Key = CommunityNotificationKey,
                     Kind = NotifyKind.Info,
                     Title = "支持 MolaGPT 持续维护",
-                    Body = "可通过爱发电赞助项目，¥66/月档位可解锁捐赠者专属模型与更高额度。",
-                    ActionText = "查看方案",
+                    Body = "支持项目可解锁更多模型与额度。",
+                    ActionText = "查看支持方案",
                     Action = () => window.OpenSupport(),
                     Sticky = true
                 });
@@ -757,38 +759,52 @@ public partial class App : Application
     {
         if (_services is null
             || !Uri.TryCreate(url, UriKind.Absolute, out var uri)
-            || !string.Equals(uri.Scheme, UrlSchemeRegistrar.Scheme, StringComparison.OrdinalIgnoreCase))
+            || !string.Equals(uri.Scheme, UrlSchemeRegistrar.Scheme, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(uri.Host, "oauth_callback", StringComparison.OrdinalIgnoreCase)
+            || !string.IsNullOrEmpty(uri.UserInfo)
+            || uri.Port != -1 || !string.IsNullOrEmpty(uri.Fragment)
+            || (uri.AbsolutePath.Length != 0 && uri.AbsolutePath != "/")
+            || !LoginWindow.HasPendingExternalLogin)
         {
             return;
         }
 
         string? code = null;
-        string? token = null;
+        string? state = null;
         foreach (var pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
         {
             var separator = pair.IndexOf('=');
             if (separator < 0) continue;
             var key = Uri.UnescapeDataString(pair[..separator]);
             var value = Uri.UnescapeDataString(pair[(separator + 1)..]);
-            if (key == "code") code = value;
-            else if (key == "token") token = value;
+            if (key == "code")
+            {
+                if (code is not null) return;
+                code = value;
+            }
+            else if (key == "state")
+            {
+                if (state is not null) return;
+                state = value;
+            }
         }
 
         var auth = _services.GetRequiredService<MolaGptAuthService>();
         if (!string.IsNullOrEmpty(code))
         {
-            var result = await auth.ExchangeOAuthCodeAsync(code);
+            LoginResult result;
+            try
+            {
+                result = await auth.ExchangeOAuthCodeAsync(code, state);
+            }
+            catch (Exception ex)
+            {
+                LoginWindow.NotifyExternalLoginCompleted(false, $"第三方登录失败：{ex.Message}");
+                return;
+            }
             if (!result.Success)
             {
                 LoginWindow.NotifyExternalLoginCompleted(false, result.ErrorMessage ?? "授权码兑换失败，请重新登录。");
-                return;
-            }
-        }
-        else if (!string.IsNullOrEmpty(token))
-        {
-            if (!auth.ApplyExternalToken(token))
-            {
-                LoginWindow.NotifyExternalLoginCompleted(false, "第三方登录返回的 Token 无法解析，请重试。");
                 return;
             }
         }
@@ -797,6 +813,7 @@ public partial class App : Application
             return;
         }
 
+        var loginJwt = auth.CurrentJwt;
         try
         {
             var proxy = _services.GetRequiredService<MolaGptProxyProvider>();
@@ -807,7 +824,7 @@ public partial class App : Application
         }
         catch (MolaGptAuthExpiredException ex)
         {
-            auth.Logout();
+            auth.LogoutIfCurrent(loginJwt);
             LoginWindow.NotifyExternalLoginCompleted(false, $"账号验证失败：{ex.Message}");
             return;
         }

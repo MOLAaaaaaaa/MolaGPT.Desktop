@@ -131,7 +131,7 @@ public sealed class MolaGptLocalToolsRegistrar
                 endpoint,
                 _ => Task.FromResult(_auth.CurrentJwt),
                 request.ModelId,
-                OnUnauthorized: () => _auth.Logout()));
+                OnUnauthorized: failedJwt => _auth.LogoutIfCurrent(failedJwt)));
 
         if (_activePi is { } current && current.TryUpdateConfig(config))
         {

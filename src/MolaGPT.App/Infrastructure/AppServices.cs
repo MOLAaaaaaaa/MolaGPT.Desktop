@@ -64,6 +64,7 @@ internal static class AppServices
         // stay constant for the process lifetime.
         services.AddSingleton<CookieContainer>();
         services.AddTransient<MolaDeviceCookieHandler>();
+        services.AddTransient<MolaAccountAuthHandler>();
 
         // Loaded here rather than by the settings page: the first request can leave
         // before anyone opens it, and it must already know the user's proxy.
@@ -75,7 +76,9 @@ internal static class AppServices
             return proxy;
         });
 
-        services.AddHttpClient(HttpClientNames.MolaGpt, (_, client) =>
+        foreach (var clientName in new[] { HttpClientNames.MolaGpt, "molagpt-auth" })
+        {
+            var clientBuilder = services.AddHttpClient(clientName, (_, client) =>
             {
                 client.Timeout = Timeout.InfiniteTimeSpan;
                 client.DefaultRequestHeaders.UserAgent.Clear();
@@ -92,12 +95,15 @@ internal static class AppServices
             {
                 CookieContainer = sp.GetRequiredService<CookieContainer>(),
                 UseCookies = true,
-                AllowAutoRedirect = true,
+                AllowAutoRedirect = false,
                 AutomaticDecompression = DecompressionMethods.All,
                 Proxy = sp.GetRequiredService<AppProxy>().Official,
                 UseProxy = true
             })
             .SetHandlerLifetime(TimeSpan.FromHours(24));
+            if (clientName == HttpClientNames.MolaGpt)
+                clientBuilder.AddHttpMessageHandler<MolaAccountAuthHandler>();
+        }
 
         services.AddHttpClient(HttpClientNames.Byok, client =>
             {
@@ -110,7 +116,7 @@ internal static class AppServices
 
         // ---- auth / providers ---------------------------------------------
         services.AddSingleton(sp => new MolaGptAuthService(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient("molagpt-auth"),
             sp.GetRequiredService<CredentialStore>()));
 
         services.AddSingleton<ProviderRegistry>();
@@ -146,7 +152,7 @@ internal static class AppServices
 
         // ---- local tool gateway (Work mode) --------------------------------
         services.AddSingleton(sp => new PiSidecarRuntimeManager(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
             Environment.GetEnvironmentVariable("MOLAGPT_PI_SIDECAR_MANIFEST_URL")));
         services.AddSingleton(sp => new PiWorkSidecarLocator(
             () => sp.GetRequiredService<PiSidecarRuntimeManager>().GetCompatibleInstalled()));
@@ -481,6 +487,9 @@ internal static class AppServices
         services.AddSingleton<NotificationCenter>();
         services.AddSingleton(sp => new SponsorsService(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt)));
+        services.AddSingleton(sp => new MembershipService(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredService<MolaGptAuthService>()));
 
         var provider = services.BuildServiceProvider(new ServiceProviderOptions
         {

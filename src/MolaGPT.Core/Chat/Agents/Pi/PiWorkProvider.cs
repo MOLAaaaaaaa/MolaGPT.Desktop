@@ -1384,7 +1384,7 @@ public sealed record PiProviderCreds(
     string Model,
     string Api = "openai-completions",
     bool Reasoning = false,
-    Action? OnUnauthorized = null,
+    Action<string?>? OnUnauthorized = null,
     IReadOnlyList<KeyValuePair<string, string>>? Headers = null,
     IReadOnlyDictionary<string, JsonElement>? ExtraBody = null,
     PiWorkLlmShim.AuthStyle Auth = PiWorkLlmShim.AuthStyle.Bearer,

@@ -433,14 +433,14 @@
                   <StackPanel>
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
                       <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
-                        <TextBlock Classes="rowtitle" Text="支持 MolaGPT" />
+                        <TextBlock Classes="rowtitle" Text="MolaGPT 支持者" />
                         <TextBlock Classes="hint"
-                                   Text="通过爱发电支持项目维护；¥66/月档位可进入「捐赠者」用户组，解锁专属模型与更高可用额度。" />
+                                   Text="查看支持期限、可用模型和额度。" />
                       </StackPanel>
                       <Button Grid.Column="1"
                               Name="PART_OpenSupport"
                               Classes="outline"
-                              Content="查看方案"
+                               Content="管理支持"
                               Padding="12,6"
                               VerticalAlignment="Center" />
                     </Grid>

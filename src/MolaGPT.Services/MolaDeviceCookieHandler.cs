@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
 using MolaGPT.Core.Auth;
+using MolaGPT.Core.Net;
 
 namespace MolaGPT.Desktop.Services;
 
@@ -33,6 +34,11 @@ public sealed class MolaDeviceCookieHandler : DelegatingHandler
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        if (request.Headers.Authorization is not null)
+            NetworkSecurity.RequireMolaGptAccountOrigin(
+                request.RequestUri ?? throw new InvalidOperationException("MolaGPT 请求地址为空。"),
+                "MolaGPT 账户请求");
+
         // A reset/early response is safe to retry for read-only requests. Do not
         // retry POST here: the server may have accepted it before the connection
         // was closed, so repeating it could duplicate a chat or sync operation.

@@ -62,7 +62,6 @@ public sealed class MolaGptProxyProvider : IChatProvider
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         if (resp.StatusCode == HttpStatusCode.Unauthorized)
         {
-            _auth.Logout();
             throw new MolaGptAuthExpiredException();
         }
         resp.EnsureSuccessStatusCode();
@@ -107,6 +106,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
     /// </summary>
     public async Task<IReadOnlyList<ProviderModel>> FetchLocalToolsModelsAsync(CancellationToken ct = default)
     {
+        var generation = _auth.SessionGeneration;
         var jwt = _auth.CurrentJwt;
         if (string.IsNullOrEmpty(jwt)) return Array.Empty<ProviderModel>();
 
@@ -117,12 +117,14 @@ public sealed class MolaGptProxyProvider : IChatProvider
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         if (resp.StatusCode == HttpStatusCode.Unauthorized)
         {
-            _auth.Logout();
+            _auth.LogoutIfCurrent(jwt);
             throw new MolaGptAuthExpiredException();
         }
         resp.EnsureSuccessStatusCode();
 
         var root = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: ct).ConfigureAwait(false);
+        if (generation != _auth.SessionGeneration)
+            throw new OperationCanceledException("账户已切换，原请求已取消。");
         var modelsObj = root?["models"]?.AsObject();
         if (modelsObj is null) return Array.Empty<ProviderModel>();
 
@@ -201,6 +203,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
     /// </summary>
     public async Task<MolaGptStatus?> FetchStatusAsync(CancellationToken ct = default)
     {
+        var generation = _auth.SessionGeneration;
         var jwt = _auth.CurrentJwt;
         if (string.IsNullOrEmpty(jwt)) return null;
 
@@ -211,12 +214,14 @@ public sealed class MolaGptProxyProvider : IChatProvider
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         if (resp.StatusCode == HttpStatusCode.Unauthorized)
         {
-            _auth.Logout();
+            _auth.LogoutIfCurrent(jwt);
             throw new MolaGptAuthExpiredException();
         }
         resp.EnsureSuccessStatusCode();
 
         var root = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: ct).ConfigureAwait(false);
+        if (generation != _auth.SessionGeneration)
+            throw new OperationCanceledException("账户已切换，原请求已取消。");
         if (root is null) return null;
 
         var user = root["user"]?.AsObject();
@@ -310,7 +315,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
             Limits: limits,
             ModelStatus: modelStatus,
             Credits: credits,
-            PersonalizedMemoryEnabled: personalizedMemoryEnabled);
+            PersonalizedMemoryEnabled: personalizedMemoryEnabled,
+            Membership: user["membership"]?.Deserialize<AccountMembership>());
     }
 
     /// <summary>Reads a JSON number as a double. PHP emits credit values as
@@ -494,7 +500,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
             // mismatch (the UA hashed into the token differs from the UA we
             // just sent). Dropping the token forces the user to re-login,
             // which will also re-issue the UA hash for the new value.
-            _auth.Logout();
+            _auth.LogoutIfCurrent(jwt);
             throw new MolaGptAuthExpiredException();
         }
         await ChatApiErrorHelper.EnsureSuccessAsync(resp, "MolaGPT 对话请求", ct).ConfigureAwait(false);
@@ -646,7 +652,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
             using var response = await _http.SendAsync(req, ct).ConfigureAwait(false);
             if (response.StatusCode == HttpStatusCode.Unauthorized)
             {
-                _auth.Logout();
+                _auth.LogoutIfCurrent(jwt);
                 throw new MolaGptAuthExpiredException();
             }
             await ChatApiErrorHelper.EnsureSuccessAsync(response, "MolaGPT 图片上传", ct).ConfigureAwait(false);
@@ -697,7 +703,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         using var response = await _http.SendAsync(req, ct).ConfigureAwait(false);
         if (response.StatusCode == HttpStatusCode.Unauthorized)
         {
-            _auth.Logout();
+            _auth.LogoutIfCurrent(jwt);
             throw new MolaGptAuthExpiredException();
         }
         await ChatApiErrorHelper.EnsureSuccessAsync(response, "MolaGPT 沙箱文件上传", ct).ConfigureAwait(false);
@@ -842,7 +848,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         if (resp.StatusCode == HttpStatusCode.Unauthorized)
         {
-            _auth.Logout();
+            _auth.LogoutIfCurrent(jwt);
             throw new MolaGptAuthExpiredException();
         }
         await ChatApiErrorHelper.EnsureSuccessAsync(resp, "MolaGPT Routes 路由请求", ct).ConfigureAwait(false);
@@ -930,7 +936,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         var uri = Uri.TryCreate(apiUrl, UriKind.Absolute, out var absolute)
             ? absolute
             : new Uri(baseUri, apiUrl);
-        return NetworkSecurity.RequireHttps(uri, label);
+        return NetworkSecurity.RequireMolaGptAccountOrigin(uri, label);
     }
 
     private static bool IsAutoRouteEndpoint(string apiUrl, string modelId)
@@ -1180,7 +1186,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         using var resp = await _http.SendAsync(httpReq, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         if (resp.StatusCode == HttpStatusCode.Unauthorized)
         {
-            _auth.Logout();
+            _auth.LogoutIfCurrent(jwt);
             throw new MolaGptAuthExpiredException();
         }
         await ChatApiErrorHelper.EnsureSuccessAsync(resp, "MolaGPT 流恢复", ct).ConfigureAwait(false);
@@ -1457,7 +1463,8 @@ public sealed record MolaGptStatus(
     IReadOnlyDictionary<string, MolaGptModelLimit> Limits,
     IReadOnlyDictionary<string, MolaGptModelStatus> ModelStatus,
     MolaGptCredits? Credits = null,
-    bool? PersonalizedMemoryEnabled = null);
+    bool? PersonalizedMemoryEnabled = null,
+    AccountMembership? Membership = null);
 
 public sealed record MolaGptModelLimit(
     string DisplayName,
@@ -1558,7 +1565,8 @@ public sealed record MolaGptCredits(
     /// remaining percentage, and the per-model "约 N 次" estimate.</summary>
     public string TierLabel => Tier switch
     {
-        "donor" => "捐赠者",
+        "premium" => "高级支持者",
+        "donor" => "支持者",
         "new" => "新账号",
         "guest" => "访客",
         _ => "注册用户"

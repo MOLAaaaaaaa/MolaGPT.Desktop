@@ -63,6 +63,8 @@ public partial class MainWindow : MolaWindow
     private readonly MemoryPageViewModel _memoryPage;
     private readonly PersonalDataService _personalData;
     private readonly SponsorsService _sponsors;
+    private readonly MembershipService _membership;
+    private bool _openingMembership;
 
     /// <summary>Set by the app once remote control exists; shown in 设置 → 远程控制.</summary>
     public MolaGPT.Desktop.Services.Remote.RemoteWorkSettingsViewModel? RemoteWork
@@ -145,7 +147,8 @@ public partial class MainWindow : MolaWindow
         PersonalizationViewModel personalization,
         MemoryPageViewModel memoryPage,
         PersonalDataService personalData,
-        SponsorsService sponsors)
+        SponsorsService sponsors,
+        MembershipService membership)
     {
         _main = main;
         _main.CopyTextRequested += OnCopyTextRequested;
@@ -178,6 +181,7 @@ public partial class MainWindow : MolaWindow
         _memoryPage = memoryPage;
         _personalData = personalData;
         _sponsors = sponsors;
+        _membership = membership;
         _pythonSetup = new PythonRuntimeSetup(pythonRuntime, settings, notifications);
         _composer.EnsureAgentRuntimeAsync = EnsureAgentRuntimeForSendAsync;
 
@@ -1011,6 +1015,28 @@ public partial class MainWindow : MolaWindow
         _ = SyncAfterLoginAsync();
     }
 
+    private async Task OpenMembershipAsync(Window owner, string? productKey = null)
+    {
+        if (_openingMembership) return;
+        _openingMembership = true;
+        try
+        {
+            if (!await OpenLoginAsync(owner)) return;
+            var url = await _membership.CreatePortalAsync(productKey);
+            if (!CommunityLinks.TryOpenBrowser(url.AbsoluteUri))
+                throw new InvalidOperationException("无法打开浏览器，请检查默认浏览器设置。");
+        }
+        catch (OperationCanceledException) when (string.IsNullOrEmpty(_auth.CurrentJwt)) { }
+        catch (Exception ex)
+        {
+            _notifications.Error("无法打开支持页面", ex.Message, key: "membership");
+        }
+        finally
+        {
+            _openingMembership = false;
+        }
+    }
+
     private async Task SyncAfterLoginAsync()
     {
         try
@@ -1178,7 +1204,7 @@ public partial class MainWindow : MolaWindow
         {
             if (await OpenLoginAsync(window)) window.RefreshAccountUi();
         };
-        window.SupportRequested += (_, _) => OpenSupport(window);
+        window.SupportRequested += async (_, _) => await OpenMembershipAsync(window);
         window.Closed += (_, _) => _settingsWindow = null;
         _settingsWindow = window;
         if (openAgent) window.OpenAgentPage();
@@ -1207,7 +1233,7 @@ public partial class MainWindow : MolaWindow
             return;
         }
 
-        _supportWindow = new SupportWindow(_sponsors, _settings);
+        _supportWindow = new SupportWindow(_sponsors, _membership, _settings, OpenMembershipAsync);
         _supportWindow.Closed += (_, _) => _supportWindow = null;
         _supportWindow.Show(owner is { IsVisible: true } ? owner : this);
     }

@@ -96,8 +96,7 @@ public sealed class MolaAccountSearchClient(HttpClient http, MolaGptAuthService 
             {
                 // Do not clear a newer session if the user logged in while this
                 // request was in flight.
-                if (string.Equals(auth.CurrentJwt, jwt, StringComparison.Ordinal))
-                    auth.Logout();
+                auth.LogoutIfCurrent(jwt);
                 throw new MolaSearchException(SessionExpiredMessage);
             }
             if (!resp.IsSuccessStatusCode) throw new MolaSearchException(ReadError(text, resp.StatusCode));

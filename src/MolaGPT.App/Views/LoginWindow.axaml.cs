@@ -15,6 +15,7 @@ public partial class LoginWindow : MolaContentWindow
     private readonly ProviderRegistry _registry;
     private readonly MolaGptLocalToolsRegistrar _localToolsRegistrar;
     private bool _waitingForExternal;
+    public static bool HasPendingExternalLogin { get; private set; }
 
     public static event Action<ExternalLoginCompletion>? ExternalLoginCompleted;
 
@@ -44,7 +45,15 @@ public partial class LoginWindow : MolaContentWindow
         PART_Cancel.Click += (_, _) => Close(false);
 
         ExternalLoginCompleted += OnExternalLoginCompleted;
-        Closed += (_, _) => ExternalLoginCompleted -= OnExternalLoginCompleted;
+        Closed += (_, _) =>
+        {
+            if (_waitingForExternal)
+            {
+                HasPendingExternalLogin = false;
+                _auth.CancelOAuth();
+            }
+            ExternalLoginCompleted -= OnExternalLoginCompleted;
+        };
         Opened += (_, _) => PART_Username.Focus();
     }
 
@@ -106,17 +115,21 @@ public partial class LoginWindow : MolaContentWindow
 
     private void StartOAuthFlow(string url)
     {
+        _waitingForExternal = true;
+        HasPendingExternalLogin = true;
         try
         {
-            Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+            Process.Start(new ProcessStartInfo { FileName = _auth.BeginOAuth(url), UseShellExecute = true });
         }
         catch (Exception ex)
         {
+            _waitingForExternal = false;
+            HasPendingExternalLogin = false;
+            _auth.CancelOAuth();
             ShowStatus($"无法打开浏览器：{ex.Message}");
             return;
         }
 
-        _waitingForExternal = true;
         ShowStatus("已在系统浏览器中打开授权页，完成后会自动返回；若未自动返回，可点取消重试。");
         SetBusy(true);
     }
@@ -129,11 +142,15 @@ public partial class LoginWindow : MolaContentWindow
         {
             if (completion.Success)
             {
+                _waitingForExternal = false;
+                HasPendingExternalLogin = false;
                 Close(true);
                 return;
             }
 
             _waitingForExternal = false;
+            HasPendingExternalLogin = false;
+            _auth.CancelOAuth();
             SetBusy(false);
             ShowStatus(completion.Message ?? "第三方登录失败，请重试。");
         });
