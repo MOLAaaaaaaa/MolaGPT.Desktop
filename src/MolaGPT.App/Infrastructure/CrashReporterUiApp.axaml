@@ -1,0 +1,22 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="MolaGPT.App.Infrastructure.CrashReporterUiApp"
+             RequestedThemeVariant="Default">
+
+  <!-- The crash-reporter process loads the same theme as App.axaml, but none of
+       App's startup (services, database, tray, sync): the app it reports on has
+       already died, and whatever killed it may be in that startup path. -->
+  <Application.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceInclude Source="avares://MolaGPT.Desktop/Theme/Tokens.axaml" />
+      </ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+
+  <Application.Styles>
+    <StyleInclude Source="avares://MolaGPT.Desktop/Theme/Fluent.axaml" />
+    <StyleInclude Source="avares://MolaGPT.Desktop/Theme/Controls.axaml" />
+  </Application.Styles>
+
+</Application>

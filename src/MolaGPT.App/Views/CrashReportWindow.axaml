@@ -1,0 +1,145 @@
+<views:MolaContentWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:MolaGPT.App.Views"
+        x:Class="MolaGPT.App.Views.CrashReportWindow"
+        Title="MolaGPT Desktop 崩溃报告"
+        Icon="avares://MolaGPT.Desktop/Assets/app.ico"
+        Width="560"
+        MaxWidth="560"
+        SizeToContent="Height"
+        MaxHeight="760"
+        CanResize="False"
+        WindowStartupLocation="CenterScreen"
+        FontFamily="{DynamicResource Font.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        Foreground="{DynamicResource Brush.Text.Primary}">
+
+  <views:MolaContentWindow.Header>
+    <Border Height="52"
+            Background="{DynamicResource Brush.Bg.Tertiary}"
+            BorderBrush="{DynamicResource Brush.Divider}"
+            BorderThickness="0,0,0,1"
+            Padding="20,0">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Classes="inlinerow" Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBlock Classes="icon" Text="&#xE783;" FontSize="15" Margin="0,0,9,0"
+                     Foreground="{DynamicResource Brush.Error}" />
+          <TextBlock Name="PART_Title" Text="MolaGPT Desktop 意外退出"
+                     FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
+        </StackPanel>
+        <Button Grid.Column="1" Name="PART_HeaderClose" Classes="headericon" ToolTip.Tip="关闭">
+          <TextBlock Classes="icon" Text="&#xE711;" FontSize="14" />
+        </Button>
+      </Grid>
+    </Border>
+  </views:MolaContentWindow.Header>
+
+  <Grid RowDefinitions="*,Auto">
+    <ScrollViewer Grid.Row="0" HorizontalScrollBarVisibility="Disabled">
+      <StackPanel Margin="22,18,22,0" Spacing="14">
+        <TextBlock Classes="secondary" TextWrapping="Wrap" LineHeight="21"
+                   Text="很抱歉打断了你的工作。崩溃报告已保存在本机，不会被自动上传。" />
+
+        <Border Classes="infocard">
+          <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+            <TextBlock Grid.Row="0" Classes="infokey" Text="发生时间" />
+            <TextBlock Grid.Row="0" Grid.Column="1" Classes="infovalue" Name="PART_Time" />
+            <TextBlock Grid.Row="1" Classes="infokey" Text="应用版本" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Classes="infovalue" Name="PART_Version" />
+            <TextBlock Grid.Row="2" Classes="infokey" Text="错误类型" />
+            <TextBlock Grid.Row="2" Grid.Column="1" Classes="infovalue" Name="PART_ErrorType" />
+            <TextBlock Grid.Row="3" Classes="infokey" Text="错误信息" />
+            <SelectableTextBlock Grid.Row="3" Grid.Column="1" Name="PART_Message"
+                                 FontSize="{DynamicResource Font.Size.Small}" TextWrapping="Wrap"
+                                 MaxLines="4" TextTrimming="CharacterEllipsis" Margin="0,0,0,8" />
+            <TextBlock Grid.Row="4" Classes="infokey" Text="诊断数据" />
+            <TextBlock Grid.Row="4" Grid.Column="1" Classes="infovalue" Name="PART_Artifacts" />
+          </Grid>
+        </Border>
+
+        <Expander Name="PART_DetailsExpander" Header="技术详情" HorizontalAlignment="Stretch">
+          <Grid RowDefinitions="Auto,Auto">
+            <TextBox Name="PART_Details" Classes="field" IsReadOnly="True" AcceptsReturn="True"
+                     TextWrapping="NoWrap" Height="200"
+                     FontFamily="{DynamicResource Font.Mono}" FontSize="12"
+                     ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+            <Button Grid.Row="1" Name="PART_Copy" Classes="textlink" Content="复制技术详情"
+                    HorizontalAlignment="Right" Margin="0,8,0,0" />
+          </Grid>
+        </Expander>
+
+        <Border Classes="banner warning">
+          <TextBlock Name="PART_Privacy" TextWrapping="Wrap" />
+        </Border>
+
+        <StackPanel Name="PART_StatusPanel" IsVisible="False" Orientation="Horizontal" Spacing="10">
+          <TextBlock Name="PART_Status" FontSize="{DynamicResource Font.Size.Small}"
+                     TextWrapping="Wrap" VerticalAlignment="Center" />
+          <Button Name="PART_Reveal" Classes="textlink" Content="打开所在文件夹" IsVisible="False"
+                  VerticalAlignment="Center" />
+        </StackPanel>
+      </StackPanel>
+    </ScrollViewer>
+
+    <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto" Margin="22,18,22,20">
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button Name="PART_Export" Classes="outline" Content="导出报告…" Padding="16,7" />
+        <Button Name="PART_Delete" Classes="outline danger" Content="删除报告" Padding="16,7" />
+      </StackPanel>
+      <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8">
+        <Button Name="PART_Close" Classes="outline" Content="关闭" Padding="16,7" />
+        <Button Name="PART_Restart" Classes="pillprimary" Content="重新启动" Padding="16,7" IsDefault="True" />
+      </StackPanel>
+    </Grid>
+  </Grid>
+
+  <Window.Styles>
+    <Style Selector="Border.infocard">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.Secondary}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Divider}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Md}" />
+      <Setter Property="Padding" Value="14,12,14,4" />
+    </Style>
+    <Style Selector="TextBlock.infokey">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
+      <Setter Property="Margin" Value="0,0,16,8" />
+    </Style>
+    <Style Selector="TextBlock.infovalue">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+    <!-- 与 FullAccessConfirmWindow 的 banner.warning 相同 -->
+    <Style Selector="Border.banner">
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="Padding" Value="12,10" />
+    </Style>
+    <Style Selector="Border.banner TextBlock">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="LineHeight" Value="20" />
+    </Style>
+    <Style Selector="Border.banner.warning">
+      <Setter Property="Background" Value="{DynamicResource Brush.Warning.Surface}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Warning.Border}" />
+    </Style>
+    <Style Selector="Border.banner.warning TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Warning.Foreground}" />
+    </Style>
+    <!-- 与 PersonalizationWindow 的 outline.danger 相同；armed = 等待第二次点击确认 -->
+    <Style Selector="Button.outline.danger">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Danger.Foreground}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Danger.Border}" />
+    </Style>
+    <Style Selector="Button.outline.danger:pointerover /template/ Border#PART_Root,
+                     Button.outline.danger.armed /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Danger.Surface}" />
+    </Style>
+    <Style Selector="Button.outline.danger.armed">
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.Error}" />
+    </Style>
+  </Window.Styles>
+</views:MolaContentWindow>
