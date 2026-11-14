@@ -89,6 +89,9 @@ public sealed class BackgroundStreamFailedEventArgs : EventArgs
 public sealed class BackgroundStreamService
 {
     private readonly ConcurrentDictionary<string, BackgroundStreamTask> _tasks = new();
+    private readonly Action<string>? _log;
+
+    public BackgroundStreamService(Action<string>? log = null) => _log = log;
 
     public event EventHandler<BackgroundStreamCompletedEventArgs>? TaskCompleted;
     public event EventHandler<BackgroundStreamFailedEventArgs>? TaskFailed;
@@ -161,7 +164,7 @@ public sealed class BackgroundStreamService
             }
         }
         catch (OperationCanceledException) { }
-        catch { }
+        catch (Exception ex) { _log?.Invoke($"background polling failed type={ex.GetType().Name}"); }
     }
 
     public void StopPolling(BackgroundStreamTask task)

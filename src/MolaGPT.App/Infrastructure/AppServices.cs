@@ -117,7 +117,8 @@ internal static class AppServices
         // ---- auth / providers ---------------------------------------------
         services.AddSingleton(sp => new MolaGptAuthService(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient("molagpt-auth"),
-            sp.GetRequiredService<CredentialStore>()));
+            sp.GetRequiredService<CredentialStore>(),
+            log: line => DiagnosticLog.Write("account", line)));
 
         services.AddSingleton<ProviderRegistry>();
         services.AddSingleton(sp => new MolaGptProxyProvider(
@@ -174,7 +175,7 @@ internal static class AppServices
             line => DiagnosticLog.Write("pi-byok", line),
             sp.GetRequiredService<ChatGptAccount>()));
 
-        services.AddSingleton<BackgroundStreamService>();
+        services.AddSingleton(new BackgroundStreamService(line => DiagnosticLog.Write("sync", line)));
         services.AddSingleton(sp => new McpClientManager(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
             line => DiagnosticLog.Write("mcp", line),

@@ -172,6 +172,10 @@ public sealed class PiWorkLlmShim : IDisposable
 
     private async Task HandleAsync(HttpListenerContext ctx)
     {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var requestId = Guid.NewGuid().ToString("N")[..8];
+        var outcome = "failed";
+        _log?.Invoke($"[llm-shim] request={requestId} started");
         try
         {
             var path = ctx.Request.Url?.AbsolutePath ?? "";
@@ -206,6 +210,7 @@ public sealed class PiWorkLlmShim : IDisposable
             }
             for (var attempt = 0; attempt < 2; attempt++)
             {
+                var attemptStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 target.PromptPrepared?.Invoke(preparedBody);
                 using var upstream = new HttpRequestMessage(HttpMethod.Post, url)
                 {
@@ -235,6 +240,7 @@ public sealed class PiWorkLlmShim : IDisposable
                 using var resp = await target.Http
                     .SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, _cts.Token)
                     .ConfigureAwait(false);
+                _log?.Invoke($"[llm-shim] request={requestId} attempt={attempt + 1} HTTP={(int)resp.StatusCode} headers_ms={System.Diagnostics.Stopwatch.GetElapsedTime(attemptStarted).TotalMilliseconds:F0}");
 
                 if (resp.StatusCode == HttpStatusCode.Unauthorized)
                 {
@@ -254,7 +260,7 @@ public sealed class PiWorkLlmShim : IDisposable
                 if (prefix.UnsupportedImage && PiImageFallback.ReplaceImages(preparedBody) is { } textOnly)
                 {
                     preparedBody = textOnly.ToJsonString(RelaxedJson);
-                    _log?.Invoke("[llm-shim] retrying request without image blocks");
+                    _log?.Invoke($"[llm-shim] request={requestId} retrying without image blocks");
                     continue;
                 }
 
@@ -274,6 +280,7 @@ public sealed class PiWorkLlmShim : IDisposable
                         }
                         catch (Exception ex) when (ex is HttpListenerException or IOException or ObjectDisposedException)
                         {
+                            outcome = "client_disconnected";
                             return;
                         }
                     }
@@ -281,21 +288,31 @@ public sealed class PiWorkLlmShim : IDisposable
                     chunk = buffer.AsMemory(0, read);
                 }
                 while (!chunk.IsEmpty);
+                outcome = resp.IsSuccessStatusCode ? "completed" : "http_error";
                 return;
             }
         }
         catch (CredentialUnavailableException ex)
         {
+            outcome = "credentials_unavailable";
             try { await WriteError(ctx, 401, ex.Message).ConfigureAwait(false); }
             catch { /* client gone */ }
         }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+            outcome = "cancelled";
+        }
         catch (Exception ex)
         {
-            _log?.Invoke("[llm-shim] " + ex.Message);
+            _log?.Invoke($"[llm-shim] request={requestId} failed type={ex.GetType().Name}");
             try { await WriteError(ctx, 502, "shim forward failed: " + ex.Message).ConfigureAwait(false); }
             catch { /* client gone */ }
         }
-        finally { try { ctx.Response.Close(); } catch { /* ignore */ } }
+        finally
+        {
+            _log?.Invoke($"[llm-shim] request={requestId} result={outcome} elapsed_ms={System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}");
+            try { ctx.Response.Close(); } catch { /* ignore */ }
+        }
     }
 
     private static async Task<(byte[] Bytes, bool UnsupportedImage)> ReadResponsePrefixAsync(

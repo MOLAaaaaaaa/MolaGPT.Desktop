@@ -208,6 +208,10 @@ public sealed class PiWorkToolBridge : IDisposable
         string argsJson,
         Action<string>? log)
     {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var callId = Guid.NewGuid().ToString("N")[..8];
+        var outcome = "failed";
+        log?.Invoke($"[tool-bridge] call={callId} tool={name} started");
         using var call = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, bound.Ended.Token);
         var response = ctx.Response;
         var progressEnabled = ctx.Request.Headers["x-mola-progress"] == "1";
@@ -245,21 +249,25 @@ public sealed class PiWorkToolBridge : IDisposable
             var output = progressEnabled && bound.Binding.ProgressDispatcher is { } dispatch
                 ? await dispatch(name, argsJson, activity => updates.Writer.TryWrite(activity), call.Token).ConfigureAwait(false)
                 : await bound.Binding.Dispatcher(name, argsJson, call.Token).ConfigureAwait(false);
-            json = JsonSerializer.Serialize(new { output, failed = ToolDeltaBuilder.IsToolError(output) });
+            var failed = ToolDeltaBuilder.IsToolError(output);
+            outcome = failed ? "failed" : "completed";
+            json = JsonSerializer.Serialize(new { output, failed });
         }
         // The dispatcher may be cancelled through its own turn's token before this
         // call's is, so either counts.
         catch (OperationCanceledException ex)
             when (call.IsCancellationRequested || ex.CancellationToken.IsCancellationRequested)
         {
+            outcome = "cancelled";
             json = JsonSerializer.Serialize(new { output = "工具调用已取消。", error = true });
         }
         catch (Exception ex)
         {
-            log?.Invoke("[tool-bridge] " + ex.Message);
+            log?.Invoke($"[tool-bridge] call={callId} tool={name} error={ex.GetType().Name}");
             json = JsonSerializer.Serialize(new { output = "工具执行失败：" + ex.Message, error = true });
         }
 
+        log?.Invoke($"[tool-bridge] call={callId} tool={name} result={outcome} elapsed_ms={System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}");
         updates.Writer.TryComplete();
         await progress.ConfigureAwait(false);
         stopHeartbeat.Cancel();

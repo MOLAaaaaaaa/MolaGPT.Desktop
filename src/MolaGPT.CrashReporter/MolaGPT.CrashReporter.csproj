@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- A library hosted by MolaGPT.Desktop.exe itself: the app starts a second
+       copy of its own executable with the crash-reporter switch. That process shares
+       the app's self-contained runtime instead of shipping another ~100 MB
+       single-file copy, yet still outlives the crashed process. The crash window
+       itself lives in the app (Views/CrashReportWindow) and is passed in as an
+       ICrashReportPresenter, so it can reuse MolaContentWindow and the theme. -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>MolaGPT.CrashReporter</AssemblyName>
+    <RootNamespace>MolaGPT.CrashReporter</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+</Project>

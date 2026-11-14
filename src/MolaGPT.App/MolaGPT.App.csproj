@@ -75,6 +75,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Crash watcher/UI/CLI: this same exe started with the crash-reporter switch (Program.Main). -->
+    <ProjectReference Include="..\MolaGPT.CrashReporter\MolaGPT.CrashReporter.csproj" />
     <ProjectReference Include="..\MolaGPT.Core\MolaGPT.Core.csproj" />
     <ProjectReference Include="..\MolaGPT.Presentation\MolaGPT.Presentation.csproj" />
     <ProjectReference Include="..\MolaGPT.Storage\MolaGPT.Storage.csproj" />
@@ -117,6 +119,19 @@
     <ItemGroup>
       <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Extension)' == '.pdb'" />
     </ItemGroup>
+  </Target>
+
+  <!-- Keep the matching private symbols and application binaries outside the
+       distributable directory so a release's crash dumps remain diagnosable. -->
+  <PropertyGroup>
+    <CrashSymbolsDirectory Condition="'$(CrashSymbolsDirectory)' == ''">$(MSBuildProjectDirectory)/obj/CrashSymbols/$(Version)/$(SourceRevisionId)/$(RuntimeIdentifier)/</CrashSymbolsDirectory>
+  </PropertyGroup>
+  <Target Name="PreserveCrashSymbols" AfterTargets="Publish">
+    <ItemGroup>
+      <_CrashSymbols Include="$(TargetDir)MolaGPT*.pdb;$(PublishDir)MolaGPT*.dll;$(PublishDir)MolaGPT*.exe" />
+    </ItemGroup>
+    <MakeDir Directories="$(CrashSymbolsDirectory)" />
+    <Copy SourceFiles="@(_CrashSymbols)" DestinationFolder="$(CrashSymbolsDirectory)" SkipUnchangedFiles="true" />
   </Target>
 
   <!-- Built-in Agent Skills shipped next to the app; SkillManager scans <AppDir>/skills. -->

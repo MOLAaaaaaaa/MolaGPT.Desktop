@@ -1,6 +1,5 @@
 using System.Diagnostics;
-using System.Text;
-using System.Threading.Channels;
+using MolaGPT.Desktop.Services;
 
 namespace MolaGPT.App.Rendering;
 
@@ -11,11 +10,9 @@ namespace MolaGPT.App.Rendering;
 /// </summary>
 internal static class AnimationPerformanceTrace
 {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
     private const double SlowLayoutMilliseconds = 8;
 
-    private static readonly Channel<string> Lines = Channel.CreateUnbounded<string>(
-        new UnboundedChannelOptions { SingleReader = true });
     private static readonly Dictionary<RevealPresenter, Session> Reveals =
         new(ReferenceEqualityComparer.Instance);
     private static Session? _wheel;
@@ -23,19 +20,13 @@ internal static class AnimationPerformanceTrace
 
     static AnimationPerformanceTrace()
     {
-        Directory.CreateDirectory(LogDirectory);
-        _ = Task.Run(WriteLinesAsync);
         Write($"trace-start build=Debug pid={Environment.ProcessId}");
     }
 #endif
 
-    public static string LogDirectory => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "MolaGPT");
-
     public static long Timestamp()
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         return Stopwatch.GetTimestamp();
 #else
         return 0;
@@ -44,7 +35,7 @@ internal static class AnimationPerformanceTrace
 
     public static void BeginWheel(string? conversationId, double start, double target, int rows)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (_wheel is not null) WriteSummary(_wheel, "restarted", start);
         _wheel = new Session(++_nextSession, "wheel", conversationId ?? "none", start, target, rows);
 #endif
@@ -52,28 +43,28 @@ internal static class AnimationPerformanceTrace
 
     public static void UpdateWheelTarget(double target)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (_wheel is not null) _wheel.Target = target;
 #endif
     }
 
     public static void WheelFrame(double rawIntervalMilliseconds)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         _wheel?.FrameIntervals.Add(rawIntervalMilliseconds);
 #endif
     }
 
     public static void WheelOffsetWritten()
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (_wheel is not null) _wheel.OffsetWrites++;
 #endif
     }
 
     public static void EndWheel(double end, string reason)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (_wheel is null) return;
         WriteSummary(_wheel, reason, end);
         _wheel = null;
@@ -87,7 +78,7 @@ internal static class AnimationPerformanceTrace
         double start,
         TimeSpan duration)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (Reveals.Remove(owner, out var previous))
             WriteSummary(previous, "interrupted", start);
 
@@ -106,7 +97,7 @@ internal static class AnimationPerformanceTrace
 
     public static void RevealFrame(RevealPresenter owner)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (!Reveals.TryGetValue(owner, out var session)) return;
         var now = Stopwatch.GetTimestamp();
         if (session.LastFrameTimestamp != 0)
@@ -117,7 +108,7 @@ internal static class AnimationPerformanceTrace
 
     public static void SetRevealMode(RevealPresenter owner, bool fadeOnly, double naturalHeight)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (!Reveals.TryGetValue(owner, out var session)) return;
         session.FadeOnly = fadeOnly;
         session.NaturalHeight = naturalHeight;
@@ -126,7 +117,7 @@ internal static class AnimationPerformanceTrace
 
     public static void EndReveal(RevealPresenter owner, double end, string reason)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (!Reveals.Remove(owner, out var session)) return;
         WriteSummary(session, reason, end);
 #endif
@@ -139,7 +130,7 @@ internal static class AnimationPerformanceTrace
         int first,
         int last)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         AddMeasure(_wheel, elapsed);
         foreach (var session in Reveals.Values) AddMeasure(session, elapsed);
@@ -155,7 +146,7 @@ internal static class AnimationPerformanceTrace
 
     public static void PanelArrangeFinished(long started, int itemCount, int realizedCount)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         AddArrange(_wheel, elapsed);
         foreach (var session in Reveals.Values) AddArrange(session, elapsed);
@@ -171,7 +162,7 @@ internal static class AnimationPerformanceTrace
 
     public static void RevealMeasureFinished(RevealPresenter owner, long started)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (!Reveals.TryGetValue(owner, out var session)) return;
         var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         session.RevealMeasureCount++;
@@ -182,18 +173,14 @@ internal static class AnimationPerformanceTrace
 
     public static void ThinkingBodyBuilt(long started, int sourceCharacters, int blockCount)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         if (elapsed < 4) return;
         Write($"thinking-body-build elapsed_ms={elapsed:0.###} chars={sourceCharacters} blocks={blockCount}");
 #endif
     }
 
-#if DEBUG
-    private static string LogPath => Path.Combine(
-        LogDirectory,
-        $"animation-performance-{Environment.ProcessId}.log");
-
+#if MOLAGPT_ANIMATION_TRACE
     private static void AddMeasure(Session? session, double elapsed)
     {
         if (session is null) return;
@@ -251,23 +238,7 @@ internal static class AnimationPerformanceTrace
     private static string Sanitize(string value) =>
         value.Replace(' ', '_').Replace('\r', '_').Replace('\n', '_');
 
-    private static void Write(string message) =>
-        Lines.Writer.TryWrite($"{DateTimeOffset.Now:O} {message}");
-
-    private static async Task WriteLinesAsync()
-    {
-        await using var stream = new FileStream(
-            LogPath,
-            FileMode.Append,
-            FileAccess.Write,
-            FileShare.ReadWrite,
-            4096,
-            useAsync: true);
-        await using var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
-
-        await foreach (var line in Lines.Reader.ReadAllAsync())
-            await writer.WriteLineAsync(line);
-    }
+    private static void Write(string message) => DiagnosticLog.Write("performance", message);
 
     private sealed class Session(
         int id,

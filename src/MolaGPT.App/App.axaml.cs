@@ -303,7 +303,7 @@ public partial class App : Application
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"remote sync: {ex.Message}");
+                    DiagnosticLog.Write("RemoteWork", $"sync failed: {ex.GetType().Name}: {ex.Message}");
                 }
                 finally
                 {
