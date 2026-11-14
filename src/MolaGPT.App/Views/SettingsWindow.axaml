@@ -279,6 +279,8 @@
                           </Grid>
                           <ProgressBar Name="PART_CreditsProgress" Minimum="0" Maximum="1" Height="6"
                                        MinWidth="0" Foreground="{DynamicResource Brush.Primary}" />
+                          <TextBlock Name="PART_CreditsRefresh" Classes="hint" IsVisible="False"
+                                     HorizontalAlignment="Right" Margin="0,6,0,0" />
                           <TextBlock Name="PART_CreditsHint" Classes="hint" IsVisible="False"
                                      TextWrapping="Wrap" Margin="0,6,0,0" />
                         </StackPanel>

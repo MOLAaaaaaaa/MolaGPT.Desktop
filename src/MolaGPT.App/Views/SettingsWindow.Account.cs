@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Threading;
 using MolaGPT.Core.Auth;
 
 using MolaGPT.Core.Chat.Providers;
@@ -26,6 +27,9 @@ public partial class SettingsWindow
     private DateTime? _usageFetchedAt;
     private int _usageRequest;
     private long _usageSessionGeneration = -1;
+    private readonly DispatcherTimer _creditsRefreshTimer = new();
+    private MolaGptCredits? _displayedCredits;
+    private long? _expiredCreditsRefreshAt;
 
     private void InitializeAccountPage(MolaGptProxyProvider? proxy)
     {
@@ -35,6 +39,8 @@ public partial class SettingsWindow
         PART_Logout.Click += OnLogoutClick;
         PART_RefreshUsage.Click += (_, _) => _ = RefreshUsageAsync(force: true);
         PART_OpenSupport.Click += (_, _) => SupportRequested?.Invoke(this, EventArgs.Empty);
+        _creditsRefreshTimer.Tick += (_, _) => UpdateCreditsRefresh();
+        Closed += (_, _) => _creditsRefreshTimer.Stop();
         Activated += (_, _) => RefreshAccountUi();
         PART_OpenGitHubStar.Click += (_, _) =>
         {
@@ -60,6 +66,9 @@ public partial class SettingsWindow
             _usageFetchedAt = null;
             _usageRequest++;
             _accountModels.Clear();
+            _displayedCredits = null;
+            _expiredCreditsRefreshAt = null;
+            _creditsRefreshTimer.Stop();
             _settings.IsDonor = false;
             PART_RefreshUsage.IsEnabled = true;
         }
@@ -90,6 +99,8 @@ public partial class SettingsWindow
         PART_CloudSyncStatus.Text = string.Empty;
         _usageFetchedAt = null;
         _usageRequest++;
+        _displayedCredits = null;
+        _creditsRefreshTimer.Stop();
         _accountModels.Clear();
     }
 
@@ -167,8 +178,10 @@ public partial class SettingsWindow
 
         PART_CreditsTier.Text = credits.TierLabel;
         PART_CreditsWindow.Text = credits.WindowLabel;
-        PART_CreditsProgress.Value = credits.UsedFraction;
+        PART_CreditsProgress.Value = credits.RemainingPercent / 100.0;
         PART_CreditsPanel.IsVisible = credits.Allowance > 0;
+        _displayedCredits = credits.Allowance > 0 ? credits : null;
+        UpdateCreditsRefresh();
         PART_CreditsHint.Text = $"额度已耗尽，{credits.RecoveryLabel}。";
         PART_CreditsHint.IsVisible = credits.Exhausted;
         PART_EstimateHint.IsVisible = true;
@@ -232,9 +245,40 @@ public partial class SettingsWindow
         if (_accountModels.Count == 0) ShowModelsEmpty("当前账户没有可用模型");
     }
 
+    private void UpdateCreditsRefresh()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var label = _displayedCredits?.RefreshLabel(now);
+        PART_CreditsRefresh.Text = label ?? string.Empty;
+        PART_CreditsRefresh.IsVisible = label is not null;
+
+        if (_displayedCredits?.NextRefreshAt is not { } at)
+        {
+            _creditsRefreshTimer.Stop();
+            return;
+        }
+
+        var seconds = at - now.ToUnixTimeSeconds();
+        if (seconds <= 0)
+        {
+            _creditsRefreshTimer.Stop();
+            if (_expiredCreditsRefreshAt != at)
+            {
+                _expiredCreditsRefreshAt = at;
+                _ = RefreshUsageAsync(force: true);
+            }
+            return;
+        }
+
+        _creditsRefreshTimer.Interval = TimeSpan.FromSeconds(Math.Min(60, seconds));
+        _creditsRefreshTimer.Start();
+    }
+
     private void BuildLegacyRows(MolaGptStatus status)
     {
         _accountModels.Clear();
+        _displayedCredits = null;
+        _creditsRefreshTimer.Stop();
         PART_UsageEmpty.IsVisible = false;
         PART_CreditsPanel.IsVisible = false;
         PART_EstimateHint.IsVisible = false;
@@ -302,6 +346,8 @@ public partial class SettingsWindow
     private void ShowUsageEmpty(string message)
     {
         _accountModels.Clear();
+        _displayedCredits = null;
+        _creditsRefreshTimer.Stop();
         PART_TotalRequests.Text = "—";
         PART_TotalTokens.Text = "—";
         PART_CreditsPanel.IsVisible = false;

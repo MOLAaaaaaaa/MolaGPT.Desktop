@@ -55,6 +55,14 @@ public partial class ComposerView : UserControl
                 });
             };
 
+        if (PART_ContextGauge.Flyout is { } usageFlyout)
+        {
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
+            timer.Tick += (_, _) => (DataContext as ComposerViewModel)?.ContextGauge.Usage.RefreshCommand.Execute(null);
+            usageFlyout.Opened += (_, _) => timer.Start();
+            usageFlyout.Closed += (_, _) => timer.Stop();
+        }
+
         // Drop is handled on the whole card, not just the text box: dropping on
         // the padding around the input is the same gesture to a user.
         PART_Shell.AddHandler(DragDrop.DragOverEvent, OnDragOver);

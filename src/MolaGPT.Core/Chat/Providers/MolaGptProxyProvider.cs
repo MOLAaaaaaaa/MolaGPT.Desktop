@@ -187,7 +187,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
     ///   { user: { logged_in, username, type, unlimited, is_donor,
     ///             usage:{model_id:int}, tokens_usage:{model_id:int},
     ///             credits:{enabled, enforcing, tier, used, allowance, remaining,
-    ///                      window_days, recovers_at, by_model_tokens,
+    ///                      window_days, recovers_at, next_refresh_at, by_model_tokens,
     ///                      base_tokens_per_credit} | null,
     ///             limits:{model_id:{daily_limit, daily_tokens_limit, display_name}}},
     ///     model_status:{model_id:{available, remaining, remaining_tokens,
@@ -265,7 +265,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
                         wsName,
                         (int)(ParseDouble(ws["calls"]) ?? 0),
                         ParseDouble(ws["uses"]) is { } wsUses ? (int)wsUses : null)
-                    : null);
+                    : null,
+                NextRefreshAt: cr["next_refresh_at"]?.GetValue<long>());
         }
 
         // Per-model limits live under user.limits OR config.registered_user_limits
@@ -1519,8 +1520,8 @@ public sealed record MolaGptWebSearchUsage(string Name, int Calls, int? Uses);
 /// <param name="WindowDays">Rolling settlement window. 1 = the old midnight
 /// reset; above that the balance is "the last N days combined" and nothing is
 /// zeroed at any point in the day.</param>
-/// <param name="RecoversAt"><c>yyyy-MM-dd</c> on which the oldest spend rolls
-/// out of the window, or null when nothing has been spent.</param>
+/// <param name="RecoversAt"><c>yyyy-MM-dd</c> when an exhausted balance becomes available.</param>
+/// <param name="NextRefreshAt">Unix timestamp of the next change to the available balance.</param>
 /// <param name="ByModelTokens">Per-model tokens over the whole window. The
 /// per-model figures shown next to a "约 N 次" estimate must come from here —
 /// <c>user.tokens_usage</c> only covers today and would mix two scopes.</param>
@@ -1534,9 +1535,24 @@ public sealed record MolaGptCredits(
     int WindowDays = 1,
     string? RecoversAt = null,
     IReadOnlyDictionary<string, int>? ByModelTokens = null,
-    MolaGptWebSearchUsage? WebSearch = null)
+    MolaGptWebSearchUsage? WebSearch = null,
+    long? NextRefreshAt = null)
 {
     public bool Exhausted => Remaining <= 0;
+
+    public string? RefreshLabel(DateTimeOffset now)
+    {
+        if (NextRefreshAt is not { } at) return null;
+        var seconds = at - now.ToUnixTimeSeconds();
+        if (seconds <= 0) return null;
+        var minutes = (seconds + 59) / 60;
+        var days = minutes / 1440;
+        var hours = minutes % 1440 / 60;
+        var rest = minutes % 60;
+        if (days > 0) return $"{days} 天{(hours > 0 ? $" {hours} 小时" : "")}后刷新";
+        if (hours > 0) return $"{hours} 小时{(rest > 0 ? $" {rest} 分钟" : "")}后刷新";
+        return $"{rest} 分钟后刷新";
+    }
 
     /// <summary>True once the pool settles over more than a single day, which
     /// rules out every "明日 0 点重置" phrasing.</summary>

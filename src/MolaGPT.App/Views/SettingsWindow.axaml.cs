@@ -829,11 +829,9 @@ public partial class SettingsWindow : MolaContentWindow
 
         try
         {
-            var response = await _accountSearch.SearchAsync(
+            await _accountSearch.SearchAsync(
                 [new MolaSearchQuery("MolaGPT", "general", null, null, false)], 1, 200, CancellationToken.None);
-            PART_SearchStatus.Text = response.Credits is { } credits
-                ? $"搜索可用 ，剩余 {credits.Remaining:0.#} 点"
-                : "搜索可用。";
+            PART_SearchStatus.Text = "搜索可用。";
         }
         catch (MolaSearchException ex)
         {

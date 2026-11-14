@@ -88,9 +88,9 @@ public sealed partial class PlanUsageViewModel : ObservableObject
             return;
         }
 
-        string? detail = credits.Exhausted ? credits.RecoveryLabel
+        string? detail = credits.RefreshLabel(DateTimeOffset.UtcNow) ?? (credits.Exhausted ? credits.RecoveryLabel
             : credits.IsRolling ? null
-            : "明日 0 点重置";
+            : "明日 0 点重置");
         Rows = [new PlanUsageRow(
             credits.IsRolling ? $"近 {credits.WindowDays} 天" : "今日",
             credits.RemainingPercent,

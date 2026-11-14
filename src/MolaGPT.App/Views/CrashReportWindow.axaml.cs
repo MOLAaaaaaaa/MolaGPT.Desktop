@@ -65,7 +65,6 @@ public sealed partial class CrashReportWindow : MolaContentWindow
     private void Populate(CrashReportRecord report)
     {
         var processExit = report.Source.StartsWith("ProcessExit", StringComparison.Ordinal);
-        if (processExit) PART_Title.Text = "MolaGPT 意外终止";
 
         PART_ErrorType.Text = DescribeErrorType(report, processExit);
         var message = DescribeMessage(report, processExit);
@@ -74,8 +73,8 @@ public sealed partial class CrashReportWindow : MolaContentWindow
         PART_Meta.Text = $"{report.CapturedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)}  ·  v{report.AppVersion}";
         PART_Details.Text = BuildDetails(report);
         PART_Hint.Text = report.MinidumpFileName is not null
-            ? "导出的压缩包含内存转储，可能有对话内容和账号令牌，请只发给信任的开发者。"
-            : "导出的压缩包含错误信息和最近日志，可能有文件路径或对话片段。";
+            ? "导出的压缩包含内存转储，可能包含敏感内容。"
+            : "导出的压缩包含错误信息和日志，可能包含敏感内容。";
     }
 
     private static string DescribeErrorType(CrashReportRecord report, bool processExit)
@@ -149,7 +148,7 @@ public sealed partial class CrashReportWindow : MolaContentWindow
         PART_Details.IsVisible = showDetails;
         PART_DetailsBackIcon.IsVisible = showDetails;
         PART_DetailsChevron.IsVisible = !showDetails;
-        PART_DetailsToggleText.Text = showDetails ? "返回概览" : "技术详情";
+        PART_DetailsToggleText.Text = showDetails ? "返回概览" : "错误详情";
     }
 
     private async void OnExportClick(object? sender, RoutedEventArgs e)

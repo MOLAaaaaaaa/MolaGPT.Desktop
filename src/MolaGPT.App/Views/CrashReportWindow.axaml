@@ -17,7 +17,7 @@
     <Grid ColumnDefinitions="Auto,*,Auto" Margin="28,28,28,8" Background="Transparent">
       <TextBlock Classes="icon" Text="&#xE783;" FontSize="18"
                  Foreground="{DynamicResource Brush.Error}" VerticalAlignment="Center" />
-      <TextBlock Grid.Column="1" Name="PART_Title" Text="MolaGPT 意外退出"
+      <TextBlock Grid.Column="1" Name="PART_Title" Text="布豪！出了点意外！"
                  FontSize="20" FontWeight="SemiBold" Margin="10,0,0,0" VerticalAlignment="Center" />
       <Button Grid.Column="2" Name="PART_HeaderClose" Classes="headericon" ToolTip.Tip="关闭">
         <TextBlock Classes="icon" Text="&#xE711;" />
@@ -27,7 +27,7 @@
 
   <Grid Margin="28,0,28,28" RowDefinitions="Auto,*,Auto,Auto,Auto">
     <TextBlock Grid.Row="0" Classes="muted" TextWrapping="Wrap" Margin="0,0,0,16"
-               Text="很抱歉打断了你的工作。报告只保存在本机，不会自动上传。" />
+               Text="很抱歉，MolaGPT 意外退出了。下方是错误报告，可查看或导出供反馈使用。" />
 
     <!-- 固定槽位内切换「错误概览 / 技术详情」，窗口尺寸全程不变，不触发 DXGI 重绘跳变 -->
     <Panel Grid.Row="1">
@@ -57,7 +57,7 @@
         <StackPanel Orientation="Horizontal" Spacing="5">
           <TextBlock Name="PART_DetailsBackIcon" Classes="icon" Text="&#xE72B;" FontSize="11"
                      VerticalAlignment="Center" IsVisible="False" />
-          <TextBlock Name="PART_DetailsToggleText" Text="技术详情" VerticalAlignment="Center" />
+          <TextBlock Name="PART_DetailsToggleText" Text="错误详情" VerticalAlignment="Center" />
           <TextBlock Name="PART_DetailsChevron" Classes="icon" Text="&#xE70D;" FontSize="10"
                      VerticalAlignment="Center" />
         </StackPanel>

@@ -197,6 +197,9 @@ internal static class CrashReportBootstrap
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+#if DEBUG
+            processStart.Environment.Remove("MOLAGPT_CRASH_TEST");
+#endif
             processStart.ArgumentList.Add(CrashReporterApplication.HostArgument);
             processStart.ArgumentList.Add("--watch");
             processStart.ArgumentList.Add("--pid");
