@@ -7,6 +7,7 @@ namespace MolaGPT.CrashReporter;
 internal sealed class CrashReportStore(string rootDirectory)
 {
     private const int MaxLogBytes = 256 * 1024;
+    private const int MaxRetainedReports = 10;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -31,7 +32,7 @@ internal sealed class CrashReportStore(string rootDirectory)
         catch { return null; }
     }
 
-    public void RecoverPending(string activeSessionId, string? logPath = null)
+    public void RecoverPending(string activeSessionId)
     {
         Cleanup(30);
         if (!Directory.Exists(PendingDirectory)) return;
@@ -43,13 +44,19 @@ internal sealed class CrashReportStore(string rootDirectory)
 
             try
             {
+                if (File.GetLastWriteTimeUtc(path) > DateTime.UtcNow.AddSeconds(-30))
+                    continue;
+
                 var report = JsonSerializer.Deserialize<CrashReportRecord>(File.ReadAllBytes(path), JsonOptions);
                 if (report is not null)
                 {
                     var dumpPath = Path.Combine(PendingDirectory, report.SessionId + ".dmp");
-                    Save(report, logPath, File.Exists(dumpPath) ? dumpPath : null);
+                    Save(report, report.LogDirectory, File.Exists(dumpPath) ? dumpPath : null);
                 }
-                File.Delete(path);
+                else
+                {
+                    TryDelete(path);
+                }
             }
             catch
             {
@@ -58,7 +65,7 @@ internal sealed class CrashReportStore(string rootDirectory)
         }
     }
 
-    public void Save(CrashReportRecord report, string? logPath, string? minidumpPath = null)
+    public CrashReportRecord Save(CrashReportRecord report, string? logPath, string? minidumpPath = null)
     {
         if (!Guid.TryParseExact(report.ReportId, "N", out _)
             || !Guid.TryParseExact(report.SessionId, "N", out _))
@@ -71,38 +78,36 @@ internal sealed class CrashReportStore(string rootDirectory)
         };
         Directory.CreateDirectory(rootDirectory);
         var reportJson = JsonSerializer.SerializeToUtf8Bytes(report, JsonOptions);
-        var reportPath = Path.Combine(rootDirectory, report.ReportId + ".json");
-        var archivePath = Path.Combine(rootDirectory, report.ReportId + ".zip");
-        var temporaryJson = reportPath + ".tmp";
-        var temporaryArchive = archivePath + ".tmp";
+        var reportDirectory = Path.Combine(rootDirectory, report.ReportId);
+        var temporaryDirectory = reportDirectory + "." + Guid.NewGuid().ToString("N") + ".tmp";
 
         var saved = false;
         try
         {
-            File.WriteAllBytes(temporaryJson, reportJson);
-            using (var file = new FileStream(temporaryArchive, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
-            using (var archive = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: false))
+            Directory.CreateDirectory(temporaryDirectory);
+            File.WriteAllBytes(Path.Combine(temporaryDirectory, "report.json"), reportJson);
+            if (report.IncludeApplicationLog && logPath is not null && Directory.Exists(logPath))
             {
-                WriteEntry(archive, "report.json", reportJson);
-                var logBytes = report.IncludeApplicationLog ? ReadLogTail(logPath) : null;
-                if (logBytes is not null) WriteEntry(archive, "app.log", logBytes);
-                if (report.MinidumpFileName is not null && minidumpPath is not null)
+                var destination = Path.Combine(temporaryDirectory, "logs");
+                foreach (var path in Directory.EnumerateFiles(logPath, "*.log"))
                 {
-                    var dump = archive.CreateEntry(report.MinidumpFileName, CompressionLevel.NoCompression);
-                    using var destination = dump.Open();
-                    using var source = new FileStream(minidumpPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-                    source.CopyTo(destination);
+                    var logBytes = ReadLogTail(path);
+                    if (logBytes is null) continue;
+                    Directory.CreateDirectory(destination);
+                    File.WriteAllBytes(Path.Combine(destination, Path.GetFileName(path)), logBytes);
                 }
             }
-
-            File.Move(temporaryJson, reportPath, overwrite: true);
-            File.Move(temporaryArchive, archivePath, overwrite: true);
+            if (report.MinidumpFileName is not null && minidumpPath is not null)
+                File.Copy(minidumpPath, Path.Combine(temporaryDirectory, report.MinidumpFileName), true);
+            if (!Directory.Exists(reportDirectory)) Directory.Move(temporaryDirectory, reportDirectory);
             saved = true;
+            return report;
         }
         finally
         {
-            TryDelete(temporaryJson);
-            TryDelete(temporaryArchive);
+            try { if (Directory.Exists(temporaryDirectory)) Directory.Delete(temporaryDirectory, true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
             if (saved)
             {
                 TryDelete(GetPendingPath(report.SessionId));
@@ -124,6 +129,16 @@ internal sealed class CrashReportStore(string rootDirectory)
             }
             catch { }
         }
+        foreach (var directory in Directory.EnumerateDirectories(rootDirectory))
+        {
+            if (!Guid.TryParseExact(Path.GetFileName(directory), "N", out _)) continue;
+            try
+            {
+                var report = JsonSerializer.Deserialize<CrashReportRecord>(File.ReadAllBytes(Path.Combine(directory, "report.json")), JsonOptions);
+                if (report is not null) reports.Add(report);
+            }
+            catch { }
+        }
 
         return reports.OrderByDescending(static report => report.CapturedAtUtc).ToArray();
     }
@@ -139,11 +154,19 @@ internal sealed class CrashReportStore(string rootDirectory)
     public bool Export(string reportId, string outputPath)
     {
         var source = Path.Combine(rootDirectory, reportId + ".zip");
-        if (!File.Exists(source)) return false;
+        var directory = Path.Combine(rootDirectory, reportId);
+        if (!File.Exists(source) && !Directory.Exists(directory)) return false;
         var destination = Path.GetFullPath(outputPath);
         var parent = Path.GetDirectoryName(destination);
         if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
-        File.Copy(source, destination, overwrite: true);
+        if (Directory.Exists(directory))
+        {
+            using var file = new FileStream(destination, FileMode.Create, FileAccess.ReadWrite, FileShare.None);
+            using var archive = new ZipArchive(file, ZipArchiveMode.Create);
+            foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+                archive.CreateEntryFromFile(path, Path.GetRelativePath(directory, path).Replace('\\', '/'), CompressionLevel.Fastest);
+        }
+        else File.Copy(source, destination, overwrite: true);
         return true;
     }
 
@@ -151,95 +174,44 @@ internal sealed class CrashReportStore(string rootDirectory)
     {
         var reportPath = Path.Combine(rootDirectory, reportId + ".json");
         var archivePath = Path.Combine(rootDirectory, reportId + ".zip");
-        if (!File.Exists(reportPath) && !File.Exists(archivePath)) return false;
+        var directory = Path.Combine(rootDirectory, reportId);
+        if (!File.Exists(reportPath) && !File.Exists(archivePath) && !Directory.Exists(directory)) return false;
+        if (Directory.Exists(directory)) Directory.Delete(directory, true);
         TryDelete(reportPath);
         TryDelete(archivePath);
         return !File.Exists(reportPath) && !File.Exists(archivePath);
-    }
-
-    public void UpdateExitCode(string reportId, int exitCode)
-    {
-        var reportPath = Path.Combine(rootDirectory, reportId + ".json");
-        if (!File.Exists(reportPath)) return;
-        try
-        {
-            var report = JsonSerializer.Deserialize<CrashReportRecord>(File.ReadAllBytes(reportPath), JsonOptions);
-            if (report is null) return;
-            var updated = JsonSerializer.SerializeToUtf8Bytes(report with { ExitCode = exitCode }, JsonOptions);
-            var temporaryPath = reportPath + ".tmp";
-            File.WriteAllBytes(temporaryPath, updated);
-            File.Move(temporaryPath, reportPath, overwrite: true);
-
-            var archivePath = Path.Combine(rootDirectory, reportId + ".zip");
-            if (!File.Exists(archivePath)) return;
-            // ZipArchiveMode.Update buffers every entry (including a large dump) in
-            // memory and rewrites the archive in place; an interruption would corrupt
-            // the only copy of the dump. Stream into a new archive and swap atomically.
-            var temporaryArchive = archivePath + ".tmp";
-            try
-            {
-                using (var source = ZipFile.OpenRead(archivePath))
-                using (var file = new FileStream(temporaryArchive, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
-                using (var destination = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: false))
-                {
-                    WriteEntry(destination, "report.json", updated);
-                    foreach (var entry in source.Entries)
-                    {
-                        if (entry.FullName == "report.json") continue;
-                        var copy = destination.CreateEntry(entry.FullName,
-                            entry.FullName == "crash.dmp" ? CompressionLevel.NoCompression : CompressionLevel.Optimal);
-                        using var from = entry.Open();
-                        using var to = copy.Open();
-                        from.CopyTo(to);
-                    }
-                }
-                File.Move(temporaryArchive, archivePath, overwrite: true);
-            }
-            finally
-            {
-                TryDelete(temporaryArchive);
-            }
-        }
-        catch
-        {
-            // Exit-code enrichment is best effort and must not lose the captured dump.
-        }
-    }
-
-    public string? ExtractMinidump(string reportId)
-    {
-        var archivePath = Path.Combine(rootDirectory, reportId + ".zip");
-        if (!File.Exists(archivePath)) return null;
-
-        using var archive = ZipFile.OpenRead(archivePath);
-        var entry = archive.GetEntry("crash.dmp");
-        if (entry is null || entry.Length == 0) return null;
-        Directory.CreateDirectory(PendingDirectory);
-        var tempPath = Path.Combine(PendingDirectory, $"analysis-{reportId}-{Guid.NewGuid():N}.dmp");
-        try
-        {
-            using (var source = entry.Open())
-            using (var destination = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-                source.CopyTo(destination);
-            return tempPath;
-        }
-        catch
-        {
-            TryDelete(tempPath);
-            throw;
-        }
     }
 
     public int Cleanup(int keepDays)
     {
         var cutoff = DateTimeOffset.UtcNow.AddDays(-keepDays);
         var removed = 0;
-        foreach (var report in List())
+        var reports = List();
+        for (var i = 0; i < reports.Count; i++)
         {
-            if (report.CapturedAtUtc >= cutoff) continue;
-            TryDelete(Path.Combine(rootDirectory, report.ReportId + ".json"));
-            TryDelete(Path.Combine(rootDirectory, report.ReportId + ".zip"));
+            var report = reports[i];
+            if (i < MaxRetainedReports && report.CapturedAtUtc >= cutoff) continue;
+            Delete(report.ReportId);
             removed++;
+        }
+
+        if (Directory.Exists(rootDirectory))
+        {
+            foreach (var path in Directory.EnumerateDirectories(rootDirectory, "*.tmp"))
+            {
+                try { if (Directory.GetLastWriteTimeUtc(path) < cutoff.UtcDateTime) Directory.Delete(path, true); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            foreach (var path in Directory.EnumerateFiles(rootDirectory, "*.tmp"))
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(path) < cutoff.UtcDateTime)
+                        TryDelete(path);
+                }
+                catch { }
+            }
         }
 
         if (Directory.Exists(PendingDirectory))
@@ -249,7 +221,7 @@ internal sealed class CrashReportStore(string rootDirectory)
                 try
                 {
                     if (File.GetLastWriteTimeUtc(path) < cutoff.UtcDateTime
-                        && Path.GetExtension(path) is ".json" or ".dmp")
+                        && Path.GetExtension(path) is ".json" or ".dmp" or ".tmp")
                         TryDelete(path);
                 }
                 catch { }
@@ -259,26 +231,43 @@ internal sealed class CrashReportStore(string rootDirectory)
         return removed;
     }
 
-    private static void WriteEntry(ZipArchive archive, string name, byte[] bytes)
-    {
-        var entry = archive.CreateEntry(name, CompressionLevel.Optimal);
-        using var stream = entry.Open();
-        stream.Write(bytes);
-    }
-
     private static byte[]? ReadLogTail(string? logPath)
     {
         if (string.IsNullOrWhiteSpace(logPath)) return null;
         try
         {
-            using var stream = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            var length = (int)Math.Min(stream.Length, MaxLogBytes);
-            stream.Seek(-length, SeekOrigin.End);
-            var bytes = new byte[length];
-            stream.ReadExactly(bytes);
-            return Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(bytes));
+            var current = ReadFileTail(logPath, MaxLogBytes);
+            var archivePath = logPath + ".1";
+            var currentLength = current?.Length ?? 0;
+            if (currentLength >= MaxLogBytes || !File.Exists(archivePath))
+                return current;
+
+            var previous = ReadFileTail(archivePath, MaxLogBytes - currentLength);
+            if (previous is null or { Length: 0 }) return current;
+            if (current is null or { Length: 0 }) return previous;
+
+            var combined = new byte[previous.Length + current.Length];
+            Buffer.BlockCopy(previous, 0, combined, 0, previous.Length);
+            Buffer.BlockCopy(current, 0, combined, previous.Length, current.Length);
+            return combined;
         }
         catch { return null; }
+    }
+
+    private static byte[]? ReadFileTail(string path, int maxBytes)
+    {
+        if (maxBytes <= 0 || !File.Exists(path)) return null;
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        if (stream.Length == 0) return [];
+        var truncated = stream.Length > maxBytes;
+        var length = (int)Math.Min(stream.Length, maxBytes);
+        stream.Seek(-length, SeekOrigin.End);
+        var bytes = new byte[length];
+        stream.ReadExactly(bytes);
+        if (!truncated) return bytes;
+
+        var newline = Array.IndexOf(bytes, (byte)'\n');
+        return newline >= 0 && newline + 1 < bytes.Length ? bytes[(newline + 1)..] : bytes;
     }
 
     private static void TryDelete(string path)

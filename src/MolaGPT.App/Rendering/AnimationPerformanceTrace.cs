@@ -1,6 +1,5 @@
 using System.Diagnostics;
-using System.Text;
-using System.Threading.Channels;
+using MolaGPT.Desktop.Services;
 
 namespace MolaGPT.App.Rendering;
 
@@ -14,8 +13,6 @@ internal static class AnimationPerformanceTrace
 #if DEBUG
     private const double SlowLayoutMilliseconds = 8;
 
-    private static readonly Channel<string> Lines = Channel.CreateUnbounded<string>(
-        new UnboundedChannelOptions { SingleReader = true });
     private static readonly Dictionary<RevealPresenter, Session> Reveals =
         new(ReferenceEqualityComparer.Instance);
     private static Session? _wheel;
@@ -23,15 +20,9 @@ internal static class AnimationPerformanceTrace
 
     static AnimationPerformanceTrace()
     {
-        Directory.CreateDirectory(LogDirectory);
-        _ = Task.Run(WriteLinesAsync);
         Write($"trace-start build=Debug pid={Environment.ProcessId}");
     }
 #endif
-
-    public static string LogDirectory => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "MolaGPT");
 
     public static long Timestamp()
     {
@@ -190,10 +181,6 @@ internal static class AnimationPerformanceTrace
     }
 
 #if DEBUG
-    private static string LogPath => Path.Combine(
-        LogDirectory,
-        $"animation-performance-{Environment.ProcessId}.log");
-
     private static void AddMeasure(Session? session, double elapsed)
     {
         if (session is null) return;
@@ -251,23 +238,7 @@ internal static class AnimationPerformanceTrace
     private static string Sanitize(string value) =>
         value.Replace(' ', '_').Replace('\r', '_').Replace('\n', '_');
 
-    private static void Write(string message) =>
-        Lines.Writer.TryWrite($"{DateTimeOffset.Now:O} {message}");
-
-    private static async Task WriteLinesAsync()
-    {
-        await using var stream = new FileStream(
-            LogPath,
-            FileMode.Append,
-            FileAccess.Write,
-            FileShare.ReadWrite,
-            4096,
-            useAsync: true);
-        await using var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
-
-        await foreach (var line in Lines.Reader.ReadAllAsync())
-            await writer.WriteLineAsync(line);
-    }
+    private static void Write(string message) => DiagnosticLog.Write("performance", message);
 
     private sealed class Session(
         int id,

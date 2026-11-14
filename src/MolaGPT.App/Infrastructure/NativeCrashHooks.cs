@@ -6,7 +6,6 @@ internal static class NativeCrashHooks
 {
     private static readonly ExceptionFilter Filter = OnNativeException;
     private static Action<IntPtr, uint, uint, ulong>? _capture;
-    private static IntPtr _previousFilter;
 
     public static uint CurrentThreadId => GetCurrentThreadId();
 
@@ -14,7 +13,10 @@ internal static class NativeCrashHooks
     {
         if (!OperatingSystem.IsWindows()) return;
         _capture = capture;
-        _previousFilter = SetUnhandledExceptionFilter(Filter);
+        // Suppress the Windows Error Reporting dialog / WerFault hang; our out-of-process
+        // watcher already captures the minidump and presents the crash window.
+        SetErrorMode(SetErrorMode(0) | 0x0001 | 0x0002);
+        SetUnhandledExceptionFilter(Filter);
     }
 
     private static int OnNativeException(IntPtr exceptionPointers)
@@ -26,17 +28,12 @@ internal static class NativeCrashHooks
             var code = unchecked((uint)Marshal.ReadInt32(record));
             var address = Marshal.ReadIntPtr(record, IntPtr.Size == 8 ? 16 : 12);
             _capture?.Invoke(exceptionPointers, GetCurrentThreadId(), code, unchecked((ulong)address.ToInt64()));
+            return 1; // EXCEPTION_EXECUTE_HANDLER: terminate immediately with the exception code.
         }
         catch
         {
-            // Native failure handling is best effort; continue the OS/runtime termination path.
+            return 0; // EXCEPTION_CONTINUE_SEARCH
         }
-        if (_previousFilter != IntPtr.Zero)
-        {
-            try { return Marshal.GetDelegateForFunctionPointer<ExceptionFilter>(_previousFilter)(exceptionPointers); }
-            catch { }
-        }
-        return 0; // EXCEPTION_CONTINUE_SEARCH
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
@@ -44,6 +41,9 @@ internal static class NativeCrashHooks
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr SetUnhandledExceptionFilter(ExceptionFilter filter);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint SetErrorMode(uint mode);
 
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();

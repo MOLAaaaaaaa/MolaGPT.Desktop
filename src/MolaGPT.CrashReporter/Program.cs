@@ -37,11 +37,9 @@ public static class CrashReporterApplication
             {
                 "--watch" => Watch(store, options, presenter),
                 "--show" => Show(store, options, presenter),
-                "--restart" => Restart(options),
                 "--list" => List(store),
                 "--export" => Export(store, options),
                 "--delete" => Delete(store, options),
-                "--symbolicate" => Symbolicate(store, options),
                 "--cleanup" => Cleanup(store, options),
                 _ => UsageError($"Unknown command: {args[0]}")
             };
@@ -71,8 +69,7 @@ public static class CrashReporterApplication
         if (!Guid.TryParseExact(sessionId, "N", out _)) throw new ArgumentException("--session must be a GUID in N format.");
         var processId = int.Parse(Require(options, "--pid"), CultureInfo.InvariantCulture);
         var version = options.GetValueOrDefault("--app-version") ?? "unknown";
-        var logPath = options.GetValueOrDefault("--log-file");
-        store.RecoverPending(sessionId, logPath);
+        var logPath = options.GetValueOrDefault("--log-directory");
 
         var pipeName = options.GetValueOrDefault("--pipe");
         using var dumpPipe = string.IsNullOrWhiteSpace(pipeName)
@@ -81,13 +78,17 @@ public static class CrashReporterApplication
                 PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         var dumpPath = Path.Combine(store.GetPendingDirectory(), sessionId + ".dmp");
         var dumpTask = dumpPipe is null
-            ? Task.FromResult(false)
-            : ServeDumpRequestAsync(dumpPipe, processId, sessionId, store, logPath, dumpPath);
+            ? Task.FromResult<(bool Requested, string? DumpError)>((false, null))
+            : ServeDumpRequestAsync(dumpPipe, processId, dumpPath);
 
         int? exitCode = null;
+        Task? recoverTask = null;
         try
         {
             using var process = Process.GetProcessById(processId);
+            _ = process.SafeHandle; // Retain a query handle so ExitCode works after WaitForExit().
+            // Defer orphan recovery/cleanup until after the pipe is listening and the process handle is held.
+            recoverTask = Task.Run(() => store.RecoverPending(sessionId));
             process.WaitForExit();
             try { exitCode = process.ExitCode; }
             catch (InvalidOperationException) { }
@@ -95,61 +96,39 @@ public static class CrashReporterApplication
         catch (ArgumentException)
         {
             // The app may have exited before this monitor was scheduled.
+            recoverTask = Task.Run(() => store.RecoverPending(sessionId));
+        }
+
+        if (recoverTask is not null)
+        {
+            try { recoverTask.GetAwaiter().GetResult(); }
+            catch { }
         }
 
         dumpPipe?.Dispose();
-        bool captured;
-        try { captured = dumpTask.GetAwaiter().GetResult(); }
-        catch { captured = false; }
+        (bool dumpRequested, string? dumpError) dumpOutcome;
+        try { dumpOutcome = dumpTask.GetAwaiter().GetResult(); }
+        catch { dumpOutcome = (false, null); }
 
-        if (captured)
-        {
-            // A managed UI may already have handled/deleted the report. Native faults
-            // have no reliable in-process dispatcher: use the independent presenter.
-            var saved = store.List().FirstOrDefault(item => item.ReportId == sessionId);
-            if (exitCode is not null && saved is not null)
-            {
-                store.UpdateExitCode(sessionId, exitCode.Value);
-                saved = saved with { ExitCode = exitCode.Value };
-            }
-            if (saved is not null && !saved.UseInProcessPresentation)
-                Present(store, saved, options, presenter);
-            return 0;
-        }
+        var report = store.ReadPending(sessionId);
+        if (report is not null && dumpOutcome.dumpRequested)
+            report = report with { MinidumpError = dumpOutcome.dumpError };
 
-        CrashReportRecord? report = null;
-        for (var attempt = 0; attempt < 20 && report is null; attempt++)
-        {
-            report = store.ReadPending(sessionId);
-            if (report is null) Thread.Sleep(100);
-        }
-
-        var existing = store.List().FirstOrDefault(item => item.ReportId == sessionId);
-        if (existing is not null)
-        {
-            if (exitCode is not null) store.UpdateExitCode(sessionId, exitCode.Value);
-            if (!existing.UseInProcessPresentation) Present(store, existing, options, presenter);
-            return 0;
-        }
-        if (report is null && exitCode is not null and not 0)
-        {
-            report = CreateExitReport(sessionId, processId, version, exitCode.Value);
-        }
+        if (report is null && exitCode is { } code && IsAbnormalExitCode(code))
+            report = CreateExitReport(sessionId, processId, version, code) with { LogDirectory = logPath };
 
         if (report is not null)
         {
-            store.Save(report with { ExitCode = exitCode }, logPath,
+            var saved = store.Save(report with { ExitCode = exitCode }, report.LogDirectory,
                 File.Exists(dumpPath) ? dumpPath : null);
-            Console.WriteLine($"Crash report {report.ReportId} saved.");
-            Present(store, store.List().First(item => item.ReportId == report.ReportId), options, presenter);
-        }
-        else if (exitCode is not null)
-        {
-            store.UpdateExitCode(sessionId, exitCode.Value);
+            Console.WriteLine($"Crash report {saved.ReportId} saved.");
+            Present(store, saved, options, presenter);
         }
 
         return 0;
     }
+
+    private static bool IsAbnormalExitCode(int exitCode) => exitCode < -1 || exitCode == 3;
 
     private static CrashReportRecord CreateExitReport(string sessionId, int processId, string version, int exitCode) => new()
     {
@@ -192,21 +171,6 @@ public static class CrashReporterApplication
         context.Apply(presenter.Show(context));
     }
 
-    private static int Restart(IReadOnlyDictionary<string, string> options)
-    {
-        var processId = int.Parse(Require(options, "--pid"), CultureInfo.InvariantCulture);
-        var executable = Path.GetFullPath(Require(options, "--executable"));
-        if (!File.Exists(executable)) return UsageError("Restart executable was not found.");
-        try
-        {
-            using var process = Process.GetProcessById(processId);
-            if (!process.WaitForExit(30_000)) return UsageError("Application did not exit before the restart deadline.");
-        }
-        catch (ArgumentException) { }
-        Process.Start(new ProcessStartInfo(executable) { UseShellExecute = false })?.Dispose();
-        return 0;
-    }
-
     private static int Export(CrashReportStore store, IReadOnlyDictionary<string, string> options)
     {
         var reportId = store.ResolveReportId(options.GetValueOrDefault("--id"));
@@ -225,47 +189,9 @@ public static class CrashReporterApplication
         return 0;
     }
 
-    private static int Symbolicate(CrashReportStore store, IReadOnlyDictionary<string, string> options)
-    {
-        var reportId = store.ResolveReportId(options.GetValueOrDefault("--id"));
-        if (reportId is null) return UsageError("No crash reports are available to analyze.");
-        var dumpPath = store.ExtractMinidump(reportId);
-        if (dumpPath is null) return UsageError($"Report has no minidump: {reportId}");
-
-        try
-        {
-            var result = CrashReportSymbolicator.Analyze(dumpPath, options.GetValueOrDefault("--symbol-path"),
-                options.GetValueOrDefault("--dac"));
-            var json = JsonSerializer.Serialize(result, JsonOptions);
-            var output = options.GetValueOrDefault("--output");
-            if (string.IsNullOrWhiteSpace(output))
-            {
-                Console.WriteLine(json);
-            }
-            else
-            {
-                var fullPath = Path.GetFullPath(output);
-                var parent = Path.GetDirectoryName(fullPath);
-                if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
-                File.WriteAllText(fullPath, json);
-                Console.WriteLine(fullPath);
-            }
-
-            return result.HasStackFrames ? 0 : 3;
-        }
-        finally
-        {
-            try { File.Delete(dumpPath); }
-            catch { }
-        }
-    }
-
-    private static async Task<bool> ServeDumpRequestAsync(
+    private static async Task<(bool Requested, string? DumpError)> ServeDumpRequestAsync(
         NamedPipeServerStream pipe,
         int processId,
-        string sessionId,
-        CrashReportStore store,
-        string? logPath,
         string dumpPath)
     {
         try
@@ -274,20 +200,17 @@ public static class CrashReporterApplication
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
             var line = await ReadBoundedLineAsync(pipe, 8192, deadline.Token).ConfigureAwait(false);
-            if (line is null) return false;
+            if (line is null) return (false, null);
             var request = JsonSerializer.Deserialize<CrashCaptureRequest>(line);
-            if (request is null) return false;
+            if (request is null) return (false, null);
             var dump = NativeMiniDumpWriter.TryWrite(processId, dumpPath, request);
-            var report = store.ReadPending(sessionId);
-            if (report is null) return false;
-            store.Save(report with { MinidumpError = dump.Error }, logPath, dump.Success ? dumpPath : null);
             try
             {
-                await writer.WriteLineAsync(JsonSerializer.Serialize(new CrashCaptureResult(true, dump.Success, dump.Error))
+                await writer.WriteLineAsync(JsonSerializer.Serialize(new CrashCaptureResult(dump.Success, dump.Error))
                     .AsMemory(), deadline.Token).ConfigureAwait(false);
             }
-            catch { } // Even if the app timed out, keep the durable archive.
-            return true;
+            catch { } // Even if the app timed out, keep the durable minidump for archiving on exit.
+            return (true, dump.Error);
         }
         catch (IOException)
         {
@@ -298,7 +221,7 @@ public static class CrashReporterApplication
             // The watched process exited before a dump was requested.
         }
         catch (Exception) { }
-        return false;
+        return (false, null);
     }
 
     // StreamReader.ReadLineAsync buffers an unbounded line before any length check.
@@ -341,11 +264,9 @@ public static class CrashReporterApplication
         Console.WriteLine("MolaGPT Crash Reporter (MolaGPT.Desktop.exe --crash-reporter <command>)");
         Console.WriteLine("  --list [--data-dir <path>]");
         Console.WriteLine("  --show [--id <report-id|latest>] [--executable <path>] [--data-dir <path>]");
-        Console.WriteLine("  --restart --pid <pid> --executable <path>");
         Console.WriteLine("  --export [--id <report-id|latest>] --output <path> [--data-dir <path>]");
         Console.WriteLine("  --delete --id <report-id> [--data-dir <path>]");
-        Console.WriteLine("  --symbolicate [--id <report-id|latest>] [--symbol-path <path>] [--dac <path>] [--output <path>] [--data-dir <path>]");
         Console.WriteLine("  --cleanup [--keep-days <days>] [--data-dir <path>]");
-        Console.WriteLine("  --watch --pid <pid> --session <guid-n> --app-version <version> --pipe <name> [--log-file <path>] [--data-dir <path>]");
+        Console.WriteLine("  --watch --pid <pid> --session <guid-n> --app-version <version> --pipe <name> [--log-directory <path>] [--data-dir <path>]");
     }
 }

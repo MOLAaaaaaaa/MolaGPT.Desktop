@@ -15,12 +15,12 @@ public sealed record CrashReportRecord
     public string? StackTrace { get; init; }
     public bool CaptureMinidump { get; init; }
     public bool IncludeApplicationLog { get; init; }
+    public string? LogDirectory { get; init; }
     public string? MinidumpFileName { get; init; }
     public string? MinidumpError { get; init; }
     public uint? FaultingThreadId { get; init; }
     public uint? NativeExceptionCode { get; init; }
     public ulong? NativeExceptionAddress { get; init; }
-    public bool UseInProcessPresentation { get; init; }
     public int? ExitCode { get; init; }
     public required string Runtime { get; init; }
     public required string OperatingSystem { get; init; }

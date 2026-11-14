@@ -124,11 +124,11 @@
   <!-- Keep the matching private symbols and application binaries outside the
        distributable directory so a release's crash dumps remain diagnosable. -->
   <PropertyGroup>
-    <CrashSymbolsDirectory Condition="'$(CrashSymbolsDirectory)' == ''">$(MSBuildProjectDirectory)/obj/CrashSymbols/$(Configuration)/$(RuntimeIdentifier)/</CrashSymbolsDirectory>
+    <CrashSymbolsDirectory Condition="'$(CrashSymbolsDirectory)' == ''">$(MSBuildProjectDirectory)/obj/CrashSymbols/$(Version)/$(SourceRevisionId)/$(RuntimeIdentifier)/</CrashSymbolsDirectory>
   </PropertyGroup>
   <Target Name="PreserveCrashSymbols" AfterTargets="Publish">
     <ItemGroup>
-      <_CrashSymbols Include="$(TargetDir)MolaGPT*.pdb;$(TargetDir)MolaGPT*.dll;$(TargetDir)MolaGPT*.exe" />
+      <_CrashSymbols Include="$(TargetDir)MolaGPT*.pdb;$(PublishDir)MolaGPT*.dll;$(PublishDir)MolaGPT*.exe" />
     </ItemGroup>
     <MakeDir Directories="$(CrashSymbolsDirectory)" />
     <Copy SourceFiles="@(_CrashSymbols)" DestinationFolder="$(CrashSymbolsDirectory)" SkipUnchangedFiles="true" />

@@ -172,6 +172,8 @@ public sealed class PiWorkLlmShim : IDisposable
 
     private async Task HandleAsync(HttpListenerContext ctx)
     {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var requestId = Guid.NewGuid().ToString("N")[..8];
         try
         {
             var path = ctx.Request.Url?.AbsolutePath ?? "";
@@ -235,6 +237,7 @@ public sealed class PiWorkLlmShim : IDisposable
                 using var resp = await target.Http
                     .SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, _cts.Token)
                     .ConfigureAwait(false);
+                _log?.Invoke($"[llm-shim] request={requestId} attempt={attempt + 1} HTTP={(int)resp.StatusCode} headers_ms={System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}");
 
                 if (resp.StatusCode == HttpStatusCode.Unauthorized)
                 {
@@ -295,7 +298,11 @@ public sealed class PiWorkLlmShim : IDisposable
             try { await WriteError(ctx, 502, "shim forward failed: " + ex.Message).ConfigureAwait(false); }
             catch { /* client gone */ }
         }
-        finally { try { ctx.Response.Close(); } catch { /* ignore */ } }
+        finally
+        {
+            _log?.Invoke($"[llm-shim] request={requestId} finished_ms={System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}");
+            try { ctx.Response.Close(); } catch { /* ignore */ }
+        }
     }
 
     private static async Task<(byte[] Bytes, bool UnsupportedImage)> ReadResponsePrefixAsync(

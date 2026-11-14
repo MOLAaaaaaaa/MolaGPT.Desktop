@@ -22,33 +22,30 @@ public sealed partial class CrashReportWindow : MolaContentWindow
 
     public CrashReportAction Result { get; private set; } = CrashReportAction.Exit;
 
-    // Required by the XAML loader / previewer only.
-    public CrashReportWindow() : this(null!) { }
-
     internal CrashReportWindow(CrashReportContext context)
     {
         _context = context;
         InitializeComponent();
         _deleteDisarm = new DispatcherTimer(TimeSpan.FromSeconds(4), DispatcherPriority.Normal, (_, _) => DisarmDelete());
-        if (context is null) return;
 
         Populate(context.Report);
         PART_Restart.IsEnabled = context.CanRestart;
         if (!context.CanRestart) ToolTip.SetTip(PART_Restart, "找不到 MolaGPT 程序文件，无法自动重启。");
 
+        PART_DetailsToggle.Click += (_, _) => ToggleDetails();
         PART_Export.Click += OnExportClick;
         PART_Delete.Click += OnDeleteClick;
         PART_Copy.Click += OnCopyClick;
         PART_Reveal.Click += OnRevealClick;
         PART_Close.Click += (_, _) => Finish(CrashReportAction.Exit);
         PART_HeaderClose.Click += (_, _) => Finish(CrashReportAction.Exit);
+        PART_Restart.Click += (_, _) => Finish(CrashReportAction.Restart);
         KeyDown += (_, args) =>
         {
             if (args.Key != Key.Escape) return;
             Finish(CrashReportAction.Exit);
             args.Handled = true;
         };
-        PART_Restart.Click += (_, _) => Finish(CrashReportAction.Restart);
         Closing += (_, args) =>
         {
             // Don't let a half-written export be abandoned silently by the title bar X.
@@ -67,62 +64,56 @@ public sealed partial class CrashReportWindow : MolaContentWindow
 
     private void Populate(CrashReportRecord report)
     {
-        if (report.Source.StartsWith("ProcessExit", StringComparison.Ordinal))
-            PART_Title.Text = "MolaGPT Desktop 意外终止";
+        var processExit = report.Source.StartsWith("ProcessExit", StringComparison.Ordinal);
+        if (processExit) PART_Title.Text = "MolaGPT 意外终止";
 
-        PART_Time.Text = report.CapturedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-        PART_Version.Text = $"{report.AppVersion}  ·  {report.Architecture}";
-        PART_ErrorType.Text = DescribeErrorType(report);
-        PART_Message.Text = DescribeMessage(report);
-        PART_Artifacts.Text = DescribeArtifacts(report);
+        PART_ErrorType.Text = DescribeErrorType(report, processExit);
+        var message = DescribeMessage(report, processExit);
+        PART_Message.Text = message;
+        PART_MessageScroll.IsVisible = message is not null;
+        PART_Meta.Text = $"{report.CapturedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)}  ·  v{report.AppVersion}";
         PART_Details.Text = BuildDetails(report);
-
-        PART_Privacy.Text = report.MinidumpFileName is not null
-            ? "导出的压缩包包含内存转储和最近的应用日志。内存转储可能含有对话内容、文件路径、账号令牌等个人信息。请只把它发送给你信任的开发者，并在不需要时删除。"
-            : "导出的压缩包包含错误信息和最近的应用日志，其中可能含有文件路径或对话片段。请只把它发送给你信任的开发者。";
+        PART_Hint.Text = report.MinidumpFileName is not null
+            ? "导出的压缩包含内存转储，可能有对话内容和账号令牌，请只发给信任的开发者。"
+            : "导出的压缩包含错误信息和最近日志，可能有文件路径或对话片段。";
     }
 
-    private static string DescribeErrorType(CrashReportRecord report)
+    private static string DescribeErrorType(CrashReportRecord report, bool processExit)
     {
-        if (!string.IsNullOrWhiteSpace(report.ExceptionType)) return report.ExceptionType!;
-        if (report.NativeExceptionCode is { } code) return $"原生异常 0x{code:X8}{NativeCodeName(code)}";
-        if (report.Source.StartsWith("ProcessExit", StringComparison.Ordinal) && report.ExitCode is { } exit)
-            return $"进程退出 0x{unchecked((uint)exit):X8}{NativeCodeName(unchecked((uint)exit))}";
-        return report.Source;
+        if (!string.IsNullOrWhiteSpace(report.ExceptionType))
+        {
+            // 完整命名空间留给技术详情，卡片里只放类名。
+            var type = report.ExceptionType!;
+            var dot = type.LastIndexOf('.');
+            return dot >= 0 && dot < type.Length - 1 ? type[(dot + 1)..] : type;
+        }
+        if (report.NativeExceptionCode is { } code) return DescribeCode("原生崩溃", code);
+        if (processExit && report.ExitCode is { } exit) return DescribeCode("进程异常退出", unchecked((uint)exit));
+        return "未知错误";
     }
 
-    private static string DescribeMessage(CrashReportRecord report)
+    private static string DescribeCode(string prefix, uint code) => NativeCodeName(code) is { } name
+        ? $"{prefix}：{name}"
+        : $"{prefix}（0x{code:X8}）";
+
+    private static string? DescribeMessage(CrashReportRecord report, bool processExit)
     {
-        if (report.Source.StartsWith("ProcessExit", StringComparison.Ordinal))
-            return "应用在没有报告异常的情况下退出，未能捕获更多细节。日志中可能有线索。";
-        if (report.NativeExceptionCode is not null && report.ExceptionType is null)
-            return report.NativeExceptionAddress is { } address
-                ? $"原生代码在地址 0x{address:X} 处发生故障。"
-                : "原生代码发生故障。";
-        return string.IsNullOrWhiteSpace(report.Message) ? "（无错误信息）" : report.Message!;
+        if (processExit) return "没有捕获到异常信息。";
+        if (report.ExceptionType is null) return null;
+        return string.IsNullOrWhiteSpace(report.Message) ? null : report.Message;
     }
 
-    private static string DescribeArtifacts(CrashReportRecord report)
+    private static string? NativeCodeName(uint code) => code switch
     {
-        var parts = new List<string> { "错误信息" };
-        if (report.IncludeApplicationLog) parts.Add("最近日志");
-        var text = string.Join("、", parts);
-        return report.MinidumpFileName is not null
-            ? text + "、内存转储"
-            : text + (string.IsNullOrWhiteSpace(report.MinidumpError) ? "（无内存转储）" : $"（内存转储未捕获：{report.MinidumpError}）");
-    }
-
-    private static string NativeCodeName(uint code) => code switch
-    {
-        0xC0000005 => "（访问冲突）",
-        0xC00000FD => "（栈溢出）",
-        0xC0000409 => "（栈缓冲区溢出 / 快速失败）",
-        0xC0000374 => "（堆损坏）",
-        0xC000001D => "（非法指令）",
-        0xC0000094 => "（整数除零）",
-        0xE0434352 => "（.NET 异常）",
-        0x80000003 => "（断点）",
-        _ => string.Empty
+        0xC0000005 => "访问冲突",
+        0xC00000FD => "栈溢出",
+        0xC0000409 => "快速失败",
+        0xC0000374 => "堆损坏",
+        0xC000001D => "非法指令",
+        0xC0000094 => "整数除零",
+        0xE0434352 => ".NET 异常",
+        0x80000003 => "断点",
+        _ => null
     };
 
     private static string BuildDetails(CrashReportRecord report)
@@ -149,6 +140,16 @@ public sealed partial class CrashReportWindow : MolaContentWindow
         text.Append('\n');
         text.Append(report.StackTrace ?? report.Message ?? string.Empty);
         return text.ToString().TrimEnd();
+    }
+
+    private void ToggleDetails()
+    {
+        var showDetails = !PART_Details.IsVisible;
+        PART_ErrorCard.IsVisible = !showDetails;
+        PART_Details.IsVisible = showDetails;
+        PART_DetailsBackIcon.IsVisible = showDetails;
+        PART_DetailsChevron.IsVisible = !showDetails;
+        PART_DetailsToggleText.Text = showDetails ? "返回概览" : "技术详情";
     }
 
     private async void OnExportClick(object? sender, RoutedEventArgs e)
@@ -178,7 +179,7 @@ public sealed partial class CrashReportWindow : MolaContentWindow
         {
             await _context.ExportAsync(path, token);
             _exportedPath = Path.GetFullPath(path);
-            ShowStatus($"已导出到 {_exportedPath}", isError: false, canReveal: OperatingSystem.IsWindows());
+            ShowStatus($"已导出 {Path.GetFileName(_exportedPath)}", isError: false, canReveal: OperatingSystem.IsWindows());
         }, "导出失败");
     }
 
@@ -190,7 +191,7 @@ public sealed partial class CrashReportWindow : MolaContentWindow
         if (!PART_Delete.Classes.Contains("armed"))
         {
             PART_Delete.Classes.Add("armed");
-            PART_Delete.Content = "再次点击以确认删除";
+            PART_Delete.Content = "确认删除";
             _deleteDisarm.Start();
             return;
         }
@@ -200,11 +201,8 @@ public sealed partial class CrashReportWindow : MolaContentWindow
         {
             await _context.DeleteAsync(token);
             _deleted = true;
-            PART_Export.IsEnabled = false;
-            PART_Delete.IsEnabled = false;
-            ShowStatus(_exportedPath is null
-                ? "本地崩溃报告已删除。"
-                : "本地崩溃报告已删除。已导出的副本仍保留在你选择的位置。", isError: false);
+            ShowStatus(_exportedPath is null ? "本地报告已删除。" : "本地报告已删除，导出的副本仍保留。",
+                isError: false, canReveal: _exportedPath is not null && OperatingSystem.IsWindows());
         }, "删除失败");
     }
 
@@ -212,7 +210,7 @@ public sealed partial class CrashReportWindow : MolaContentWindow
     {
         _deleteDisarm.Stop();
         PART_Delete.Classes.Remove("armed");
-        PART_Delete.Content = "删除报告";
+        PART_Delete.Content = "删除";
     }
 
     private async void OnCopyClick(object? sender, RoutedEventArgs e)
@@ -223,12 +221,12 @@ public sealed partial class CrashReportWindow : MolaContentWindow
             {
                 await clipboard.SetTextAsync(PART_Details.Text ?? string.Empty);
                 PART_Copy.Content = "已复制";
-                DispatcherTimer.RunOnce(() => PART_Copy.Content = "复制技术详情", TimeSpan.FromSeconds(2));
+                DispatcherTimer.RunOnce(() => PART_Copy.Content = "复制", TimeSpan.FromSeconds(2));
             }
         }
         catch
         {
-            // Clipboard contention with another app; the text box remains selectable.
+            // Clipboard contention with another app; the details stay selectable.
         }
     }
 
@@ -280,11 +278,12 @@ public sealed partial class CrashReportWindow : MolaContentWindow
 
     private void ShowStatus(string message, bool isError, bool canReveal = false)
     {
-        PART_StatusPanel.IsVisible = true;
-        PART_Status.Text = message;
-        PART_Status.Foreground = (isError
+        PART_Hint.Text = message;
+        PART_Hint.Foreground = (isError
             ? this.FindResource(ActualThemeVariant, "Brush.Error")
             : this.FindResource(ActualThemeVariant, "Brush.Success.Foreground")) as Avalonia.Media.IBrush;
+        PART_HintIcon.Text = isError ? "\uE783" : "\uE73E";
+        PART_HintIcon.Foreground = PART_Hint.Foreground;
         PART_Reveal.IsVisible = canReveal && !isError;
     }
 }

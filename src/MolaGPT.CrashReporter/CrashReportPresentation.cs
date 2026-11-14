@@ -40,6 +40,10 @@ public sealed class CrashReportContext
     {
         if (action != CrashReportAction.Restart) return;
         if (!CanRestart) throw new InvalidOperationException("No restart executable is available.");
-        Process.Start(new ProcessStartInfo(RestartExecutable!) { UseShellExecute = false })?.Dispose();
+        Process.Start(new ProcessStartInfo(RestartExecutable!)
+        {
+            UseShellExecute = false,
+            WorkingDirectory = Path.GetDirectoryName(RestartExecutable) ?? string.Empty
+        })?.Dispose();
     }
 }
