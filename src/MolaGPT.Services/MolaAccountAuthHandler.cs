@@ -24,7 +24,10 @@ public sealed class MolaAccountAuthHandler(MolaGptAuthService auth) : Delegating
         }
         var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
-            auth.LogoutIfCurrent(request.Headers.Authorization?.Parameter);
+        {
+            var cleared = auth.LogoutIfCurrent(request.Headers.Authorization?.Parameter);
+            DiagnosticLog.Write("account", $"request unauthorized session_cleared={cleared}");
+        }
         return response;
     }
 }

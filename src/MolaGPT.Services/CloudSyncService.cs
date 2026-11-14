@@ -207,12 +207,14 @@ public sealed class CloudSyncService
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
+            DiagnosticLog.Write("sync", "sync timed out");
             if (publishStatus)
                 PublishStatus(CloudSyncState.Error, "云同步超时");
             throw new TimeoutException("云同步超时，请稍后重试。");
         }
         catch (Exception ex)
         {
+            DiagnosticLog.Write("sync", $"sync failed type={ex.GetType().Name}");
             if (publishStatus)
                 PublishStatus(CloudSyncState.Error, $"同步失败：{ex.Message}");
             throw;
@@ -430,11 +432,13 @@ public sealed class CloudSyncService
             // Our own DetailFetchTimeout fired — the network is unreachable or
             // too slow. Surface a recoverable error instead of hanging on the
             // "正在修复对话显示..." spinner forever.
+            DiagnosticLog.Write("sync", "conversation detail fetch timed out");
             PublishStatus(CloudSyncState.Error, "网络不稳定，对话加载超时，请稍后重试。");
             return false;
         }
         catch (Exception ex)
         {
+            DiagnosticLog.Write("sync", $"conversation detail fetch failed type={ex.GetType().Name}");
             PublishStatus(CloudSyncState.Error, $"拉取对话失败：{ex.Message}");
             return false;
         }
@@ -554,6 +558,7 @@ public sealed class CloudSyncService
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            DiagnosticLog.Write("sync", $"conversation sync failed type={ex.GetType().Name}");
             PublishStatus(CloudSyncState.Error, $"当前对话同步失败：{ex.Message}");
             throw;
         }
@@ -608,6 +613,7 @@ public sealed class CloudSyncService
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            DiagnosticLog.Write("sync", $"delete sync failed type={ex.GetType().Name}");
             PublishStatus(CloudSyncState.Error, $"删除同步失败：{ex.Message}");
             throw;
         }

@@ -35,6 +35,7 @@ public sealed class MolaGptAuthService
 
     private readonly HttpClient _http;
     private readonly CredentialStore _store;
+    private readonly Action<string>? _log;
     private readonly string _loginUrl;
     private readonly string _oauthExchangeUrl;
     private readonly string _warmupUrl;
@@ -54,10 +55,12 @@ public sealed class MolaGptAuthService
         CredentialStore store,
         string? loginUrl = null,
         string? warmupUrl = null,
-        string? oauthExchangeUrl = null)
+        string? oauthExchangeUrl = null,
+        Action<string>? log = null)
     {
         _http = http ?? throw new ArgumentNullException(nameof(http));
         _store = store ?? throw new ArgumentNullException(nameof(store));
+        _log = log;
         _loginUrl = NetworkSecurity.RequireMolaGptAccountOrigin(new Uri(loginUrl ?? DefaultLoginUrl), "MolaGPT 登录").ToString();
         _oauthExchangeUrl = NetworkSecurity.RequireMolaGptAccountOrigin(
             new Uri(oauthExchangeUrl ?? DefaultOAuthExchangeUrl), "MolaGPT OAuth 兑换").ToString();
@@ -356,6 +359,8 @@ public sealed class MolaGptAuthService
                     return currentToken;
             }
 
+            _log?.Invoke("refresh started");
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
             using var request = new HttpRequestMessage(HttpMethod.Post, DefaultRefreshUrl)
             {
                 Content = JsonContent.Create(new { refresh_token = refreshToken })
@@ -365,6 +370,7 @@ public sealed class MolaGptAuthService
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(15));
             using var response = await _http.SendAsync(request, timeout.Token).ConfigureAwait(false);
+            _log?.Invoke($"refresh HTTP={(int)response.StatusCode} elapsed_ms={System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}");
             var content = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             lock (_sessionGate)
             {
@@ -373,7 +379,8 @@ public sealed class MolaGptAuthService
             }
             if (response.StatusCode == HttpStatusCode.Unauthorized)
             {
-                LogoutIfCurrent(currentToken);
+                var cleared = LogoutIfCurrent(currentToken);
+                _log?.Invoke($"refresh unauthorized session_cleared={cleared}");
                 throw new MolaGptAuthExpiredException();
             }
             if (!response.IsSuccessStatusCode)
@@ -389,6 +396,11 @@ public sealed class MolaGptAuthService
                     throw new InvalidOperationException("服务器返回的刷新会话无效，请重新登录。");
                 return payload.Token!;
             }
+        }
+        catch (Exception ex)
+        {
+            _log?.Invoke($"refresh failed type={ex.GetType().Name}");
+            throw;
         }
         finally
         {

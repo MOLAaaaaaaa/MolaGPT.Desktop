@@ -105,9 +105,9 @@ public static class DiagnosticLog
 
     private static string Category(string tag) => tag.ToLowerInvariant() switch
     {
-        "chatgpt" or "proxy" or "updatecheck" or "provider" => "network",
+        "chatgpt" or "account" or "proxy" or "updatecheck" or "provider" => "network",
         "pi-work" or "pi-runtime" or "pi-byok" or "pi-sidecar" or "mcp" or "agentrelay" or "remotework" => "agent",
-        "attachments" or "memory" => "storage",
+        "attachments" or "memory" or "sync" => "storage",
         "avalonia" or "rendering" or "canvas" or "images" or "selection" => "ui",
         "performance" => "performance",
         _ => "app"

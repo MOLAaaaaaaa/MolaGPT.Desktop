@@ -10,7 +10,7 @@ namespace MolaGPT.App.Rendering;
 /// </summary>
 internal static class AnimationPerformanceTrace
 {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
     private const double SlowLayoutMilliseconds = 8;
 
     private static readonly Dictionary<RevealPresenter, Session> Reveals =
@@ -26,7 +26,7 @@ internal static class AnimationPerformanceTrace
 
     public static long Timestamp()
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         return Stopwatch.GetTimestamp();
 #else
         return 0;
@@ -35,7 +35,7 @@ internal static class AnimationPerformanceTrace
 
     public static void BeginWheel(string? conversationId, double start, double target, int rows)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (_wheel is not null) WriteSummary(_wheel, "restarted", start);
         _wheel = new Session(++_nextSession, "wheel", conversationId ?? "none", start, target, rows);
 #endif
@@ -43,28 +43,28 @@ internal static class AnimationPerformanceTrace
 
     public static void UpdateWheelTarget(double target)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (_wheel is not null) _wheel.Target = target;
 #endif
     }
 
     public static void WheelFrame(double rawIntervalMilliseconds)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         _wheel?.FrameIntervals.Add(rawIntervalMilliseconds);
 #endif
     }
 
     public static void WheelOffsetWritten()
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (_wheel is not null) _wheel.OffsetWrites++;
 #endif
     }
 
     public static void EndWheel(double end, string reason)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (_wheel is null) return;
         WriteSummary(_wheel, reason, end);
         _wheel = null;
@@ -78,7 +78,7 @@ internal static class AnimationPerformanceTrace
         double start,
         TimeSpan duration)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (Reveals.Remove(owner, out var previous))
             WriteSummary(previous, "interrupted", start);
 
@@ -97,7 +97,7 @@ internal static class AnimationPerformanceTrace
 
     public static void RevealFrame(RevealPresenter owner)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (!Reveals.TryGetValue(owner, out var session)) return;
         var now = Stopwatch.GetTimestamp();
         if (session.LastFrameTimestamp != 0)
@@ -108,7 +108,7 @@ internal static class AnimationPerformanceTrace
 
     public static void SetRevealMode(RevealPresenter owner, bool fadeOnly, double naturalHeight)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (!Reveals.TryGetValue(owner, out var session)) return;
         session.FadeOnly = fadeOnly;
         session.NaturalHeight = naturalHeight;
@@ -117,7 +117,7 @@ internal static class AnimationPerformanceTrace
 
     public static void EndReveal(RevealPresenter owner, double end, string reason)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (!Reveals.Remove(owner, out var session)) return;
         WriteSummary(session, reason, end);
 #endif
@@ -130,7 +130,7 @@ internal static class AnimationPerformanceTrace
         int first,
         int last)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         AddMeasure(_wheel, elapsed);
         foreach (var session in Reveals.Values) AddMeasure(session, elapsed);
@@ -146,7 +146,7 @@ internal static class AnimationPerformanceTrace
 
     public static void PanelArrangeFinished(long started, int itemCount, int realizedCount)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         AddArrange(_wheel, elapsed);
         foreach (var session in Reveals.Values) AddArrange(session, elapsed);
@@ -162,7 +162,7 @@ internal static class AnimationPerformanceTrace
 
     public static void RevealMeasureFinished(RevealPresenter owner, long started)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         if (!Reveals.TryGetValue(owner, out var session)) return;
         var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         session.RevealMeasureCount++;
@@ -173,14 +173,14 @@ internal static class AnimationPerformanceTrace
 
     public static void ThinkingBodyBuilt(long started, int sourceCharacters, int blockCount)
     {
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
         var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         if (elapsed < 4) return;
         Write($"thinking-body-build elapsed_ms={elapsed:0.###} chars={sourceCharacters} blocks={blockCount}");
 #endif
     }
 
-#if DEBUG
+#if MOLAGPT_ANIMATION_TRACE
     private static void AddMeasure(Session? session, double elapsed)
     {
         if (session is null) return;
