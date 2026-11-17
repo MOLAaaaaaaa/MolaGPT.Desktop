@@ -80,6 +80,51 @@ public sealed class ConversationRepository
             .ToList();
     }
 
+    /// <summary>Every row, soft-deleted ones included.</summary>
+    public IReadOnlyList<ConversationRow> ListAll()
+    {
+        using var conn = _db.Open();
+        return conn.Query<ConversationRow>($"SELECT {SelectColumns} FROM conversations").ToList();
+    }
+
+    /// <summary>
+    /// Remove soft-deleted conversations for good: the row, its messages and
+    /// timelines (by cascade), and what the cascade cannot reach — their entries
+    /// in the search index and the memory candidates extracted from them.
+    ///
+    /// Only rows still soft-deleted and deleted before <paramref name="deletedBeforeMs"/>
+    /// go, re-checked inside the transaction, so an undo that lands between the
+    /// caller's listing and this call wins. Returns the ids actually removed.
+    /// </summary>
+    public IReadOnlyList<string> PurgeDeleted(IReadOnlyList<string> ids, long deletedBeforeMs)
+    {
+        var removed = new List<string>();
+        if (ids.Count == 0) return removed;
+
+        using var conn = _db.Open();
+        foreach (var chunk in ids.Distinct(StringComparer.Ordinal).Chunk(400))
+        {
+            using var tx = conn.BeginTransaction();
+            var eligible = conn.Query<string>(
+                "SELECT id FROM conversations WHERE id IN @chunk AND deleted_at IS NOT NULL AND deleted_at < @t",
+                new { chunk, t = deletedBeforeMs }, tx).ToArray();
+            if (eligible.Length > 0)
+            {
+                conn.Execute(
+                    @"DELETE FROM message_fts WHERE message_id IN
+                        (SELECT id FROM messages WHERE conversation_id IN @eligible)",
+                    new { eligible }, tx);
+                conn.Execute("DELETE FROM memory_candidates WHERE conversation_id IN @eligible", new { eligible }, tx);
+                conn.Execute("DELETE FROM conversations WHERE id IN @eligible", new { eligible }, tx);
+            }
+            tx.Commit();
+            removed.AddRange(eligible);
+        }
+
+        foreach (var id in removed) ConversationChanged?.Invoke(id);
+        return removed;
+    }
+
     public ConversationRow? Get(string id)
     {
         using var conn = _db.Open();

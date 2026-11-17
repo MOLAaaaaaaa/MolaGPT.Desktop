@@ -586,6 +586,8 @@ public partial class SettingsWindow : MolaContentWindow
         if (page != PAGE_Providers) CloseProviderEditor();
         if (page == PAGE_Providers) RefreshProviders();
         if (page == PAGE_Account) _ = RefreshUsageAsync(force: false);
+        if (page == PAGE_Storage) _ = RefreshStorageAsync();
+        if (page == PAGE_Sandbox) _ = RefreshRuntimeStatusAsync();
         if (page == PAGE_Agent && _agentStatus is not null) _ = _agentStatus.LoadAsync();
         if (page == PAGE_Memory)
         {

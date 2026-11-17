@@ -1261,11 +1261,7 @@ public sealed class PythonExecutionTool
 
     private static string ResolveSessionDirectory(string? conversationId)
     {
-        var root = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "MolaGPT",
-            "python-tool",
-            "sessions");
+        var root = PythonWorkspaceStore.SessionsRoot;
 
         var slug = SanitizeConversationId(conversationId);
         var leaf = slug is null
@@ -1339,7 +1335,7 @@ public sealed class PythonExecutionTool
     /// filtering, or exceed a length bound fall back to a SHA-256 prefix (or
     /// null for empty, which triggers the timestamped path).
     /// </summary>
-    private static string? SanitizeConversationId(string? conversationId)
+    internal static string? SanitizeConversationId(string? conversationId)
     {
         if (string.IsNullOrWhiteSpace(conversationId))
             return null;

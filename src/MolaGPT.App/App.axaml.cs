@@ -40,6 +40,7 @@ public partial class App : Application
     private ServiceProvider? _services;
     private TrayIconHost? _tray;
     private CancellationTokenSource? _agentRelayCts;
+    private CancellationTokenSource? _storageMaintenanceCts;
     private Task? _agentRelayTask;
     private const string UpdateNotificationKey = "app-update";
     private const string CloudSyncNotificationKey = "cloud-sync";
@@ -86,6 +87,7 @@ public partial class App : Application
             var piSidecar = _services.GetRequiredService<PiSidecarRuntimeManager>();
             var autoUpdate = _services.GetRequiredService<AppAutoUpdateService>();
             var notifications = _services.GetRequiredService<NotificationCenter>();
+            var storage = _services.GetRequiredService<StorageService>();
             _notifications = notifications;
 
             if (!string.IsNullOrEmpty(auth.CurrentJwt)
@@ -187,6 +189,7 @@ public partial class App : Application
                  _services.GetRequiredService<SponsorsService>(),
                  _services.GetRequiredService<MembershipService>());
             window.RemoteWork = _services.GetRequiredService<RemoteWorkSettingsViewModel>();
+            window.Storage = storage;
             desktop.MainWindow = window;
             _selectionAssistant = new Selection.SelectionAssistantService(settings, providers,
                 _services.GetRequiredService<IHttpClientFactory>(), window);
@@ -259,6 +262,22 @@ public partial class App : Application
             // Remote clients control MolaGPT conversations while switched on: over the account
             // relay while signed in, and over the account-less link always.
             var remoteWork = _services.GetRequiredService<RemoteControlHost>();
+            remoteWork.ConfirmAccountPairingAsync = async device =>
+            {
+                if (!window.IsVisible) window.Show();
+                if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
+                window.Activate();
+                return await Confirm.AskAsync(window, "允许新设备配对？",
+                    $"设备「{device}」正在申请查看并控制本机的 MolaGPT 对话。请确认这是你自己的设备。",
+                    "允许配对");
+            };
+            remoteWork.ConfirmRemoteFullAccessAsync = async () =>
+            {
+                if (!window.IsVisible) window.Show();
+                if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
+                window.Activate();
+                return await FullAccessConfirmWindow.AskAsync(window);
+            };
             var remoteWorkSettings = _services.GetRequiredService<RemoteWorkSettingsViewModel>();
             var remoteSync = new SemaphoreSlim(1, 1);
             remoteWorkSettings.EnabledChanged += SyncRemoteWork;
@@ -270,7 +289,7 @@ public partial class App : Application
                 OfferRemoteWork();
             };
             // A code is typed at this desk, so its result shows on the settings page.
-            // Same-account clients pair automatically; announce the new device here.
+            // Same-account clients are approved locally; announce the new device here.
             remoteWork.Paired += (device, viaAccount) =>
             {
                 if (!viaAccount) return;
@@ -345,6 +364,13 @@ public partial class App : Application
 
             cloudSync.StartPeriodicSync();
             _ = RunStartupCloudSyncAsync(cloudSync, main.ConversationList);
+            _storageMaintenanceCts = new CancellationTokenSource();
+            var startupStorage = Task.Run(() =>
+            {
+                try { storage.StartupMaintenance(); }
+                catch (Exception ex) { DiagnosticLog.Write("storage", "启动清理失败：" + ex.Message); }
+            });
+            _ = RunStorageMaintenanceAsync(storage, startupStorage, _storageMaintenanceCts.Token);
             _ = Task.Run(SweepOrphanedPiSessions);
             _ = Task.Run(SweepOrphanedAttachments);
             _ = Task.Run(CatchUpMemoryIndex);
@@ -359,7 +385,7 @@ public partial class App : Application
                     auth, providers, proxy, localTools, accountSession, window),
                 DispatcherPriority.Background);
             _ = RunUpdateCheckAsync(main, updateCheck, notifications);
-            _ = RunAgentRuntimeUpdateCheckAsync(window, piSidecar);
+            _ = RunAgentRuntimeUpdateAfterStorageAsync(window, piSidecar, startupStorage);
 
             desktop.ShutdownRequested += (_, _) =>
             {
@@ -367,6 +393,7 @@ public partial class App : Application
                 _selectionAssistant?.Dispose();
                 main.Composer.SaveInProgressMessages();
                 _backgroundCheck?.Dispose();
+                _storageMaintenanceCts?.Cancel();
                 cloudSync.StopPeriodicSync();
                 _notificationRouter?.Dispose();
                 StopAgentRelayAsync().GetAwaiter().GetResult();
@@ -383,6 +410,34 @@ public partial class App : Application
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    private static async Task RunAgentRuntimeUpdateAfterStorageAsync(
+        MainWindow window, PiSidecarRuntimeManager piSidecar, Task startupStorage)
+    {
+        await startupStorage;
+        await RunAgentRuntimeUpdateCheckAsync(window, piSidecar);
+    }
+
+    private static async Task RunStorageMaintenanceAsync(StorageService storage, Task startup, CancellationToken ct)
+    {
+        try
+        {
+            await startup.ConfigureAwait(false);
+            await Task.Delay(TimeSpan.FromMinutes(2), ct).ConfigureAwait(false);
+            using var timer = new PeriodicTimer(TimeSpan.FromDays(1));
+            do
+            {
+                try
+                {
+                    var result = await Task.Run(() => storage.PurgeDeletedAsync(TimeSpan.FromDays(7), compact: true, ct), ct).ConfigureAwait(false);
+                    if (result.CompactError is not null) DiagnosticLog.Write("storage", "数据库整理未完成：" + result.CompactError);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                { DiagnosticLog.Write("storage", "自动清理已删除对话失败：" + ex.Message); }
+            } while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
     }
 
     private static async Task RunStartupAccountRefreshAsync(
@@ -645,7 +700,7 @@ public partial class App : Application
         try
         {
             var live = _services.GetRequiredService<ConversationRepository>()
-                .ListActive()
+                .ListAll()
                 .Select(conversation => conversation.Id)
                 .ToArray();
             var children = _services.GetRequiredService<MessageRepository>().ListSubagentSessionKeys();

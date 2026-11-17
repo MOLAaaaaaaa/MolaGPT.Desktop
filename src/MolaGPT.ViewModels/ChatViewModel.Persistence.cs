@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Encodings.Web;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Models;
 
@@ -7,6 +8,7 @@ namespace MolaGPT.ViewModels;
 
 public sealed partial class ChatViewModel
 {
+    private static readonly JsonSerializerOptions MessageMetaJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private readonly Lock _messageWriteGate = new();
     private Task _messageWriteTask = Task.CompletedTask;
 
@@ -181,7 +183,7 @@ public sealed partial class ChatViewModel
                 .ToArray());
         }
 
-        return meta.ToJsonString();
+        return meta.ToJsonString(MessageMetaJson);
     }
 
     private static MessageAttempt CloneAttempt(MessageAttempt attempt) => attempt with

@@ -54,6 +54,7 @@ internal static class Confirm
 
         confirm.Click += (_, _) => { confirmed = true; dialog.Close(); };
         cancel.Click += (_, _) => dialog.Close();
+        dialog.Opened += (_, _) => cancel.Focus();
 
         await dialog.ShowDialog(owner);
         return confirmed;

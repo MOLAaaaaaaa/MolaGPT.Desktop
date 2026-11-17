@@ -52,6 +52,15 @@ internal static class CdnProxy
 
     public static string CacheDirectory { get; } = Path.Combine(CanvasEnvironment.Root, "cdn-cache");
 
+    public static IReadOnlyList<string> ListCachePaths()
+    {
+        if (!Directory.Exists(CacheDirectory)) return [];
+        return Directory.EnumerateFiles(CacheDirectory)
+            .Where(path => System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(path),
+                @"^[0-9a-f]{32}\.(bin|type)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            .ToArray();
+    }
+
     public static void ConfigureProxy(IWebProxy proxy) => Handler.Proxy = proxy;
 
     public static bool IsAllowed(string host) =>

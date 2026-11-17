@@ -81,6 +81,47 @@ public sealed class CloudSyncService
     public event EventHandler? LocalConversationsChanged;
     public bool IsSyncing => Volatile.Read(ref _isSyncing) == 1;
 
+    public bool RequiresCloudDeletion(ConversationRow row) => IsCloudSyncable(row);
+
+    // A global sync timestamp can advance while a new deletion is being made.
+    // Confirm each tombstone with the server before dropping the local row.
+    public async Task<IReadOnlySet<string>> ConfirmDeletionsForPurgeAsync(
+        IReadOnlyList<ConversationRow> rows, CancellationToken ct = default)
+    {
+        var confirmed = new HashSet<string>(StringComparer.Ordinal);
+        var jwt = _auth.CurrentJwt;
+        var account = _auth.CurrentUsername;
+        if (rows.Count == 0 || string.IsNullOrWhiteSpace(jwt) || string.IsNullOrWhiteSpace(account)
+            || !string.Equals(_settings.Get(BoundAccountKey), account, StringComparison.Ordinal)
+            || (bool.TryParse(_settings.Get(SyncEnabledKey), out var enabled) && !enabled)
+            || Interlocked.CompareExchange(ref _isSyncing, 1, 0) != 0)
+            return confirmed;
+        try
+        {
+            var candidates = rows.Where(row => IsCloudSyncable(row) && row.DeletedAt is not null
+                && _conversations.Get(row.Id)?.DeletedAt == row.DeletedAt).Select(row => row.Id).Distinct().ToArray();
+            if (candidates.Length == 0) return confirmed;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(PushTimeout);
+            await DeleteCloudConversationsAsync(jwt, candidates, timeout.Token).ConfigureAwait(false);
+            if (string.Equals(jwt, _auth.CurrentJwt, StringComparison.Ordinal)
+                && string.Equals(account, _auth.CurrentUsername, StringComparison.Ordinal)
+                && string.Equals(account, _settings.Get(BoundAccountKey), StringComparison.Ordinal))
+                confirmed.UnionWith(candidates);
+            return confirmed;
+        }
+        finally { Interlocked.Exchange(ref _isSyncing, 0); }
+    }
+
+    public void ForgetPurgedConversation(string id)
+    {
+        _settings.Remove(ConversationSyncKey(id));
+        _settings.Remove(CloudMetadataKey(id));
+        _settings.Remove(DetailRefreshKey(id));
+        _settings.Remove(DetailParserVersionKey(id));
+        _settings.Remove(TitleGeneratedKey(id));
+    }
+
     public CloudSyncService(
         HttpClient http,
         MolaGptAuthService auth,
@@ -933,11 +974,13 @@ public sealed class CloudSyncService
         var array = new JsonArray();
         foreach (var id in ids) array.Add(id);
 
-        await PostSyncAsync(jwt, new JsonObject
+        var result = await PostSyncAsync(jwt, new JsonObject
         {
             ["action"] = "delete",
             ["conversation_ids"] = array
         }, ct).ConfigureAwait(false);
+        if (result["success"]?.GetValue<bool>() != true)
+            throw new InvalidOperationException("云端没有确认对话删除。");
     }
 
     private async Task<JsonObject> PostSyncAsync(

@@ -266,7 +266,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
                         (int)(ParseDouble(ws["calls"]) ?? 0),
                         ParseDouble(ws["uses"]) is { } wsUses ? (int)wsUses : null)
                     : null,
-                NextRefreshAt: cr["next_refresh_at"]?.GetValue<long>());
+                NextRefreshAt: cr["next_refresh_at"]?.GetValue<long>(),
+                ResetMode: cr["quota_reset_mode"]?.GetValue<string>());
         }
 
         // Per-model limits live under user.limits OR config.registered_user_limits
@@ -1536,7 +1537,8 @@ public sealed record MolaGptCredits(
     string? RecoversAt = null,
     IReadOnlyDictionary<string, int>? ByModelTokens = null,
     MolaGptWebSearchUsage? WebSearch = null,
-    long? NextRefreshAt = null)
+    long? NextRefreshAt = null,
+    string? ResetMode = null)
 {
     public bool Exhausted => Remaining <= 0;
 
@@ -1549,14 +1551,16 @@ public sealed record MolaGptCredits(
         var days = minutes / 1440;
         var hours = minutes % 1440 / 60;
         var rest = minutes % 60;
-        if (days > 0) return $"{days} 天{(hours > 0 ? $" {hours} 小时" : "")}后刷新";
-        if (hours > 0) return $"{hours} 小时{(rest > 0 ? $" {rest} 分钟" : "")}后刷新";
-        return $"{rest} 分钟后刷新";
+        var action = IsFixed ? "后重置" : "后刷新";
+        if (days > 0) return $"{days} 天{(hours > 0 ? $" {hours} 小时" : "")}{action}";
+        if (hours > 0) return $"{hours} 小时{(rest > 0 ? $" {rest} 分钟" : "")}{action}";
+        return $"{rest} 分钟{action}";
     }
 
     /// <summary>True once the pool settles over more than a single day, which
     /// rules out every "明日 0 点重置" phrasing.</summary>
-    public bool IsRolling => WindowDays > 1;
+    public bool IsFixed => ResetMode == "fixed";
+    public bool IsRolling => !IsFixed && WindowDays > 1;
 
     /// <summary>Share of the window's allowance already spent, 0..1.</summary>
     public double UsedFraction => Allowance > 0 ? Math.Clamp(Used / Allowance, 0, 1) : 0;
@@ -1589,7 +1593,7 @@ public sealed record MolaGptCredits(
     };
 
     /// <summary>How the balance settles, for the line next to the tier label.</summary>
-    public string WindowLabel => IsRolling ? $"近 {WindowDays} 天累计" : "明日 0 点重置";
+    public string WindowLabel => IsFixed ? $"{WindowDays} 天固定周期" : IsRolling ? $"近 {WindowDays} 天累计" : "明日 0 点重置";
 
     /// <summary>When an exhausted pool frees up again. A rolling window thaws one
     /// day at a time, so it never promises a full balance at a given moment.
@@ -1598,6 +1602,8 @@ public sealed record MolaGptCredits(
     {
         get
         {
+            if (IsFixed) return DateTime.TryParseExact(RecoversAt, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                DateTimeStyles.None, out var reset) ? $"{reset.Month} 月 {reset.Day} 日全部重置" : "周期结束时全部重置";
             if (!IsRolling) return "明日 0 点恢复";
             return DateTime.TryParseExact(RecoversAt, "yyyy-MM-dd", CultureInfo.InvariantCulture,
                        DateTimeStyles.None, out var d)
@@ -1607,7 +1613,7 @@ public sealed record MolaGptCredits(
     }
 
     /// <summary>Prefix for a per-model token figure, matching <see cref="WindowLabel"/>'s scope.</summary>
-    public string SpentLabel => IsRolling ? $"近 {WindowDays} 天已用" : "今日已用";
+    public string SpentLabel => IsFixed ? "本周期已用" : IsRolling ? $"近 {WindowDays} 天已用" : "今日已用";
 
     /// <summary>Tokens spent on one model over the window. Falls back to the
     /// caller's same-day figure only when the server did not send the window

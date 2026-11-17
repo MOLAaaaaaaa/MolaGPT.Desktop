@@ -462,7 +462,9 @@ public sealed partial class ChatViewModel : ObservableObject
     {
         var key = ModeLastModelKeyPrefix + provider.Id;
         var recalled = _settingsRepo?.Get(key);
-        return string.IsNullOrWhiteSpace(recalled) ? null : recalled;
+        return !string.IsNullOrWhiteSpace(recalled) && provider.Models.Any(m => m.Id == recalled)
+            ? recalled
+            : null;
     }
 
     private void RememberModeSelection(AppMode mode, string providerId, string modelId)

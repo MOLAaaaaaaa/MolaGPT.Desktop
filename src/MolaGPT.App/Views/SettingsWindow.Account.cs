@@ -174,7 +174,8 @@ public partial class SettingsWindow
         PART_TotalRequests.Text = $"{credits.RemainingPercent}%";
         PART_TotalRequestsLabel.Text = "额度剩余";
         PART_TotalTokens.Text = FormatTokens(credits.TotalTokens(status.TokensUsage));
-        PART_TotalTokensLabel.Text = credits.IsRolling ? $"近 {credits.WindowDays} 天 Tokens" : "今日 Tokens 用量";
+        PART_TotalTokensLabel.Text = credits.IsFixed && credits.ByModelTokens is not null ? "本周期 Tokens 用量"
+            : credits.IsRolling ? $"近 {credits.WindowDays} 天 Tokens" : "今日 Tokens 用量";
 
         PART_CreditsTier.Text = credits.TierLabel;
         PART_CreditsWindow.Text = credits.WindowLabel;

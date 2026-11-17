@@ -187,6 +187,7 @@
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="隐私和安全" />
                 <ListBoxItem Name="PART_ApprovalNav" Content="权限与审批" Tag="PAGE_Approval" />
                 <ListBoxItem Content="个人数据管理" Tag="PAGE_PersonalData" />
+                <ListBoxItem Content="存储空间管理" Tag="PAGE_Storage" />
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="个性化" />
                 <ListBoxItem Name="PART_PersonasNav" Content="角色" Tag="PAGE_Personas" />
                 <ListBoxItem Name="PART_MemoryNav" Tag="PAGE_Memory" AutomationProperties.Name="记忆">
@@ -951,6 +952,64 @@
                     <TextBlock Grid.Column="1" Classes="hint" Text="已加密" VerticalAlignment="Center" Margin="0" />
                   </Grid>
                 </Border>
+              </StackPanel>
+
+              <StackPanel Name="PAGE_Storage" IsVisible="False">
+                <Grid ColumnDefinitions="*,Auto">
+                  <TextBlock Classes="pagetitle" Text="存储空间管理" />
+                  <Button Name="PART_RefreshStorage" Grid.Column="1" Classes="outline" Content="刷新" Click="OnRefreshStorage" />
+                </Grid>
+                <TextBlock Classes="pagesubtitle" Text="管理 MolaGPT 在此设备上使用的存储空间。" />
+                <Border Name="PART_StorageLoading" Classes="settingscard" Padding="20">
+                  <StackPanel Spacing="12">
+                    <TextBlock Name="PART_StorageStatus" Text="正在计算…" FontSize="14" FontWeight="Medium"
+                               Foreground="{DynamicResource Brush.Text.Secondary}" />
+                    <ProgressBar Name="PART_StorageProgress" IsIndeterminate="True" Height="4"
+                                 Foreground="{DynamicResource Brush.Text.Secondary}" />
+                  </StackPanel>
+                </Border>
+                <StackPanel Name="PART_StorageContent" IsVisible="False">
+                <Border Classes="settingscard" Padding="16">
+                  <StackPanel Spacing="10">
+                    <TextBlock Name="PART_StorageTotal" FontSize="24" FontWeight="SemiBold" />
+                    <Grid Name="PART_StorageBar" ColumnDefinitions="*,*,*,*" Height="8" ClipToBounds="True">
+                      <Border Background="{DynamicResource Brush.Primary}" />
+                      <Border Grid.Column="1" Background="{DynamicResource Brush.Success}" />
+                      <Border Grid.Column="2" Background="{DynamicResource Brush.Warning}" />
+                      <Border Grid.Column="3" Background="{DynamicResource Brush.Border.Strong}" />
+                    </Grid>
+                    <TextBlock Name="PART_StorageLegend" Classes="hint" TextWrapping="Wrap" />
+                  </StackPanel>
+                </Border>
+
+                <Grid ColumnDefinitions="*,Auto" Margin="2,18,2,8">
+                  <TextBlock Classes="section" Margin="0" Text="可安全清理" VerticalAlignment="Center" />
+                  <Button Name="PART_CleanAllStorage" Grid.Column="1" Classes="outline" Content="全部清理" Click="OnCleanAllStorage" />
+                </Grid>
+                <Border Classes="settingscard"><StackPanel Name="PART_StorageSafeRows" /></Border>
+
+                <TextBlock Classes="section" Text="对话文件" />
+                <Border Classes="settingscard"><StackPanel Name="PART_StorageWorkspaceRows" /></Border>
+                <Button Name="PART_ShowAllWorkspaces" Classes="textlink" Content="显示全部" IsVisible="False"
+                        HorizontalAlignment="Left" Click="OnShowAllWorkspaces" />
+
+                <TextBlock Classes="section" Text="已删除的对话" />
+                <Border Classes="settingscard">
+                  <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                    <StackPanel>
+                      <TextBlock Name="PART_StorageDeletedTitle" Classes="rowtitle" />
+                      <TextBlock Classes="hint" Text="删除对话 7 天后自动清除，等待同步的对话将在同步后清除。" TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Button Name="PART_PurgeDeleted" Grid.Column="1" Classes="outline" Content="彻底清除"
+                            VerticalAlignment="Center" Click="OnPurgeDeleted" />
+                  </Grid>
+                </Border>
+
+                <TextBlock Classes="section" Text="其他占用" />
+                <Border Classes="settingscard"><StackPanel Name="PART_StorageOtherRows" /></Border>
+                <Button Classes="textlink" Content="打开数据文件夹" HorizontalAlignment="Left"
+                        Click="OnOpenStorageFolder" Margin="0,8,0,0" />
+                </StackPanel>
               </StackPanel>
 
               <StackPanel Name="PAGE_Providers" IsVisible="False">
@@ -3500,6 +3559,23 @@
          here. Values are unchanged. -->
     <Style Selector="Grid.settingrow">
       <Setter Property="Margin" Value="16,13" />
+    </Style>
+    <Style Selector="Button.storageconversation">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Body}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="MinHeight" Value="28" />
+    </Style>
+    <Style Selector="Button.storageconversation:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Button.storageaction">
+      <Setter Property="FontSize" Value="{DynamicResource Font.Size.Small}" />
+      <Setter Property="Padding" Value="10,4" />
+      <Setter Property="MinHeight" Value="28" />
     </Style>
     <Style Selector="StackPanel.fieldrow">
       <Setter Property="Margin" Value="16,13" />

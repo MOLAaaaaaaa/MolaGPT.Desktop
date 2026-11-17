@@ -338,9 +338,17 @@ public sealed class MolaGptAuthService
     }
 
     /// <summary>Refreshes before dispatch; callers must not replay an already sent operation.</summary>
-    public async Task<string> GetAccessTokenAsync(string expectedToken, CancellationToken ct = default)
+    public Task<string> GetAccessTokenAsync(string expectedToken, CancellationToken ct = default)
     {
-        await _refreshGate.WaitAsync(ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        // Cancelling a business request stops its wait, not a refresh that may
+        // already have rotated the server credential. Always save that result.
+        return RefreshAccessTokenAsync(expectedToken).WaitAsync(ct);
+    }
+
+    private async Task<string> RefreshAccessTokenAsync(string expectedToken)
+    {
+        await _refreshGate.WaitAsync().ConfigureAwait(false);
         try
         {
             string currentToken;
@@ -361,17 +369,9 @@ public sealed class MolaGptAuthService
 
             _log?.Invoke("refresh started");
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
-            using var request = new HttpRequestMessage(HttpMethod.Post, DefaultRefreshUrl)
-            {
-                Content = JsonContent.Create(new { refresh_token = refreshToken })
-            };
-            request.Headers.TryAddWithoutValidation("Origin", "https://chatgpt.wljay.cn");
-            request.Headers.TryAddWithoutValidation("X-MolaGPT-Client", UserAgentProvider.ClientMarker);
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(15));
-            using var response = await _http.SendAsync(request, timeout.Token).ConfigureAwait(false);
+            using var response = await SendRefreshRequestAsync(refreshToken, generation).ConfigureAwait(false);
             _log?.Invoke($"refresh HTTP={(int)response.StatusCode} elapsed_ms={System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}");
-            var content = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             lock (_sessionGate)
             {
                 if (generation != _sessionGeneration)
@@ -405,6 +405,36 @@ public sealed class MolaGptAuthService
         finally
         {
             _refreshGate.Release();
+        }
+    }
+
+    private async Task<HttpResponseMessage> SendRefreshRequestAsync(string refreshToken, long generation)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            lock (_sessionGate)
+            {
+                if (generation != _sessionGeneration)
+                    throw new OperationCanceledException("账户已切换，原请求已取消。");
+            }
+            using var request = new HttpRequestMessage(HttpMethod.Post, DefaultRefreshUrl)
+            {
+                Content = JsonContent.Create(new { refresh_token = refreshToken })
+            };
+            request.Headers.TryAddWithoutValidation("Origin", "https://chatgpt.wljay.cn");
+            request.Headers.TryAddWithoutValidation("X-MolaGPT-Client", UserAgentProvider.ClientMarker);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            try
+            {
+                return await _http.SendAsync(request, timeout.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (attempt == 0
+                && (ex is OperationCanceledException || ex is HttpRequestException { StatusCode: null }))
+            {
+                // Only session_refresh is replayed: the server returns the same
+                // rotation for a lost response. Business POSTs are never replayed.
+                _log?.Invoke($"refresh retry type={ex.GetType().Name}");
+            }
         }
     }
 

@@ -2,6 +2,7 @@ using System.IO;
 using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using MolaGPT.Core.Disk;
 
 namespace MolaGPT.Desktop.Services;
 
@@ -33,6 +34,11 @@ public sealed class PiSidecarRuntimeManager
     private readonly HttpClient _http;
     private readonly string _manifestUrl;
     private readonly string _baseDirectory;
+    private int _installing;
+    private readonly SemaphoreSlim _storageOperation = new(1, 1);
+
+    public bool TryBeginStorageCleanup() => _storageOperation.Wait(0);
+    public void EndStorageCleanup() => _storageOperation.Release();
 
     public PiSidecarRuntimeManager(
         HttpClient http,
@@ -84,9 +90,14 @@ public sealed class PiSidecarRuntimeManager
 
             var candidate = new InstalledPiSidecar(
                 stamp.Version, dir, node, cli, extension, installedContract);
+            var comparison = newest is null ? 1
+                : Version.TryParse(candidate.Version, out var candidateVersion)
+                  && Version.TryParse(newest.Version, out var newestVersion)
+                    ? candidateVersion.CompareTo(newestVersion)
+                    : string.CompareOrdinal(candidate.Version, newest.Version);
             if (newest is null
-                || string.CompareOrdinal(candidate.Version, newest.Version) > 0
-                || (string.Equals(candidate.Version, newest.Version, StringComparison.Ordinal)
+                || comparison > 0
+                || (comparison == 0
                     && candidate.ContractVersion > newest.ContractVersion))
                 newest = candidate;
         }
@@ -133,6 +144,16 @@ public sealed class PiSidecarRuntimeManager
     }
 
     public async Task<InstalledPiSidecar> DownloadAndInstallAsync(
+        IProgress<SandboxProgress>? progress = null,
+        CancellationToken ct = default)
+    {
+        await _storageOperation.WaitAsync(ct).ConfigureAwait(false);
+        Volatile.Write(ref _installing, 1);
+        try { return await DownloadAndInstallCoreAsync(progress, ct).ConfigureAwait(false); }
+        finally { Volatile.Write(ref _installing, 0); _storageOperation.Release(); }
+    }
+
+    private async Task<InstalledPiSidecar> DownloadAndInstallCoreAsync(
         IProgress<SandboxProgress>? progress = null,
         CancellationToken ct = default)
     {
@@ -227,27 +248,105 @@ public sealed class PiSidecarRuntimeManager
     /// sidecar simply survives to the next install.</summary>
     private void Reclaim(string keepRuntimeDirectory, string keepArchive)
     {
-        if (Directory.Exists(RuntimeRootDirectory))
+        foreach (var path in ListSupersededPathsCore(keepRuntimeDirectory, keepArchive))
         {
-            // Materialised before deleting: the lazy enumerator walks the same
-            // directory this loop is removing entries from.
-            foreach (var dir in Directory.GetDirectories(RuntimeRootDirectory))
+            if (Directory.Exists(path)) TryDelete(Path.Combine(path, StampFileName));
+            DiskFootprint.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// Runtime directories and archives that do not belong to the installed
+    /// version. The install path already reclaims these, but only when it runs and
+    /// only what is not held open at that moment — a sidecar still on the old
+    /// runtime keeps its directory until something asks again. This is that ask,
+    /// for callers without a manifest: the keeper is whatever is installed, and an
+    /// archive belongs to it when its name carries the same version and contract.
+    /// Empty when nothing is installed.
+    /// </summary>
+    public IReadOnlyList<string> ListSupersededPaths() => ListSupersededPathsCore(null, null);
+
+    private IReadOnlyList<string> ListSupersededPathsCore(string? keepDirectory, string? keepArchive)
+    {
+        if (keepDirectory is null && Volatile.Read(ref _installing) != 0) return [];
+        if (IsReparsePoint(BaseDirectory) || IsReparsePoint(Path.GetDirectoryName(BaseDirectory))
+            || IsReparsePoint(RuntimeRootDirectory)) return [];
+        var keep = keepDirectory ?? (GetCompatibleInstalled() ?? GetInstalled())?.Directory;
+        if (keep is null) return [];
+        var keepName = Path.GetFileName(Path.TrimEndingDirectorySeparator(keep));
+
+        var paths = new List<string>();
+        try
+        {
+            foreach (var directory in new DirectoryInfo(RuntimeRootDirectory).EnumerateDirectories())
             {
-                if (PathEquals(dir, keepRuntimeDirectory)) continue;
-                // Drop the stamp first so a directory we cannot remove — a sidecar
-                // may still hold node.exe open — stops advertising itself as an
-                // installed runtime instead of competing with the new one.
-                TryDelete(Path.Combine(dir, StampFileName));
-                try { Directory.Delete(dir, recursive: true); } catch { /* in use — next time */ }
+                if (PathEquals(directory.FullName, keep)) continue;
+                if (directory.Attributes.HasFlag(FileAttributes.ReparsePoint)
+                    || !System.Text.RegularExpressions.Regex.IsMatch(directory.Name,
+                        @"^\d+(?:\.\d+){1,3}-contract-\d+(?:\.staging)?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                    continue;
+                // An install in flight extracts into a staging directory.
+                if (directory.Name.EndsWith(".staging", StringComparison.OrdinalIgnoreCase)
+                    && directory.CreationTimeUtc > DateTime.UtcNow.AddHours(-1))
+                    continue;
+                if (!directory.Name.EndsWith(".staging", StringComparison.OrdinalIgnoreCase)
+                    && !File.Exists(Path.Combine(directory.FullName, StampFileName)))
+                {
+                    var entries = directory.GetFileSystemInfos();
+                    if (entries.Length != 1 || entries[0] is not FileInfo
+                        || !entries[0].Name.Equals("node.exe", StringComparison.OrdinalIgnoreCase)) continue;
+                }
+                var options = new EnumerationOptions { RecurseSubdirectories = true,
+                    AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = true };
+                var running = false;
+                foreach (var node in Directory.EnumerateFiles(directory.FullName, "node.exe", options))
+                {
+                    try { using var probe = new FileStream(node, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+                    catch (IOException) { running = true; break; }
+                    catch (UnauthorizedAccessException) { running = true; break; }
+                }
+                if (running) continue;
+                paths.Add(directory.FullName);
+            }
+
+            foreach (var file in IsReparsePoint(Path.Combine(BaseDirectory, "archives")) ? [] : EnumerateArchives())
+            {
+                if ((keepArchive is null || !PathEquals(file, keepArchive))
+                    && !Path.GetFileName(file).Contains(keepName, StringComparison.OrdinalIgnoreCase))
+                    paths.Add(file);
             }
         }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return paths;
+    }
 
+    /// <summary>The installed version's downloaded archive. Only a cache.</summary>
+    public IReadOnlyList<string> ListArchiveCachePaths()
+    {
+        if (Volatile.Read(ref _installing) != 0 || IsReparsePoint(BaseDirectory)
+            || IsReparsePoint(Path.GetDirectoryName(BaseDirectory))
+            || IsReparsePoint(Path.Combine(BaseDirectory, "archives"))) return [];
+        var superseded = ListSupersededPaths().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        try { return EnumerateArchives().Where(file => !superseded.Contains(file)).ToArray(); }
+        catch (IOException) { return []; }
+        catch (UnauthorizedAccessException) { return []; }
+    }
+
+    private static bool IsReparsePoint(string? path) => path is not null && Directory.Exists(path)
+        && File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint);
+
+    private IEnumerable<string> EnumerateArchives()
+    {
         var archives = Path.Combine(BaseDirectory, "archives");
-        if (!Directory.Exists(archives)) return;
-        foreach (var file in Directory.GetFiles(archives))
-        {
-            if (!PathEquals(file, keepArchive)) TryDelete(file);
-        }
+        if (!Directory.Exists(archives)) return [];
+        return Directory.EnumerateFiles(archives)
+            .Where(file => Path.GetFileName(file).StartsWith("MolaGPT.PiSidecar-", StringComparison.OrdinalIgnoreCase)
+                           && (file.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+                               || file.EndsWith(".zip.part", StringComparison.OrdinalIgnoreCase)))
+            // A download in progress writes a .part; an abandoned one stops being touched.
+            .Where(file => !file.EndsWith(".part", StringComparison.OrdinalIgnoreCase)
+                           || File.GetLastWriteTimeUtc(file) < DateTime.UtcNow.AddHours(-1));
     }
 
     private static bool PathEquals(string left, string right) =>
@@ -259,17 +358,22 @@ public sealed class PiSidecarRuntimeManager
     /// <summary>Remove every installed version and the download cache.</summary>
     public void Delete()
     {
-        if (Directory.Exists(RuntimeRootDirectory))
+        _storageOperation.Wait();
+        try
         {
-            foreach (var dir in Directory.EnumerateDirectories(RuntimeRootDirectory))
-                TryDelete(Path.Combine(dir, StampFileName));
-        }
+            if (Directory.Exists(RuntimeRootDirectory))
+            {
+                foreach (var dir in Directory.EnumerateDirectories(RuntimeRootDirectory))
+                    TryDelete(Path.Combine(dir, StampFileName));
+            }
 
-        foreach (var dir in new[] { RuntimeRootDirectory, Path.Combine(BaseDirectory, "archives") })
-        {
-            if (!Directory.Exists(dir)) continue;
-            try { Directory.Delete(dir, recursive: true); } catch { /* in use — next time */ }
+            foreach (var dir in new[] { RuntimeRootDirectory, Path.Combine(BaseDirectory, "archives") })
+            {
+                if (!Directory.Exists(dir)) continue;
+                try { Directory.Delete(dir, recursive: true); } catch { /* in use — next time */ }
+            }
         }
+        finally { _storageOperation.Release(); }
     }
 
     private async Task DownloadAsync(

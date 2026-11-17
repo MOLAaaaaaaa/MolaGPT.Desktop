@@ -18,9 +18,12 @@ public sealed class MolaGptDatabase
 
     public string ConnectionString { get; }
 
+    public string FilePath { get; }
+
     public MolaGptDatabase(string filePath)
     {
         if (string.IsNullOrEmpty(filePath)) throw new ArgumentException("filePath required", nameof(filePath));
+        FilePath = filePath;
         var dir = Path.GetDirectoryName(filePath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
         ConnectionString = new SqliteConnectionStringBuilder
@@ -88,6 +91,32 @@ public sealed class MolaGptDatabase
             var remainingSql = AddColumnMigration.Replace(sql, string.Empty);
             Execute(conn, remainingSql);
         }
+    }
+
+    /// <summary>Bytes on disk, including WAL and shared-memory files.</summary>
+    public long GetBytesOnDisk()
+    {
+        long onDisk = 0;
+        foreach (var path in new[] { FilePath, FilePath + "-wal", FilePath + "-shm" })
+        {
+            try { if (File.Exists(path)) onDisk += new FileInfo(path).Length; }
+            catch (IOException) { }
+        }
+
+        return onDisk;
+    }
+
+    /// <summary>
+    /// Rewrite the file without its free pages. Takes an exclusive lock for the
+    /// duration, so callers pick a moment when nothing is streaming into the
+    /// database; a writer that does collide waits on the busy timeout.
+    /// </summary>
+    public void Compact()
+    {
+        using var conn = Open();
+        Execute(conn, "PRAGMA wal_checkpoint(TRUNCATE);");
+        Execute(conn, "VACUUM;");
+        Execute(conn, "PRAGMA wal_checkpoint(TRUNCATE);");
     }
 
     private static bool ColumnExists(SqliteConnection conn, string table, string column)

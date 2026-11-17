@@ -16,19 +16,21 @@ public static class DiagnosticLog
         FullMode = BoundedChannelFullMode.Wait
     });
     private static long _dropped;
-    private static readonly Task Worker = Task.Run(ConsumeAsync);
+    private static readonly Lazy<Task> Worker = new(() => Task.Run(ConsumeAsync));
     public static string SessionDirectory { get; } = System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MolaGPT", "Logs",
         DateTime.Now.ToString("yyyy-MM-dd"), $"{DateTime.Now:HHmmss}-{Environment.ProcessId}-{Guid.NewGuid():N}");
 
     public static void Write(string tag, string message)
     {
+        _ = Worker.Value;
         if (!Queue.Writer.TryWrite(new Entry(DateTime.Now, tag, message, null)))
             Interlocked.Increment(ref _dropped);
     }
 
     public static void Flush()
     {
+        _ = Worker.Value;
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         try
@@ -38,6 +40,56 @@ public static class DiagnosticLog
         }
         catch (OperationCanceledException) { }
     }
+
+    public static string LogsRoot { get; } = Directory.GetParent(SessionDirectory)!.Parent!.FullName;
+
+    /// <summary>Logs of earlier runs. The running session's directory is left out:
+    /// it is being written, and a crash report would need it.</summary>
+    public static IReadOnlyList<string> ListPastSessionPaths()
+    {
+        var paths = new List<string>();
+        try
+        {
+            foreach (var day in new DirectoryInfo(LogsRoot).EnumerateDirectories())
+            {
+                if (day.Attributes.HasFlag(FileAttributes.ReparsePoint)
+                    || !DateTime.TryParseExact(day.Name, "yyyy-MM-dd", null,
+                        System.Globalization.DateTimeStyles.None, out _)) continue;
+                paths.AddRange(day.EnumerateDirectories()
+                    .Where(session => !session.Attributes.HasFlag(FileAttributes.ReparsePoint)
+                                      && Regex.IsMatch(session.Name, @"^\d{6}-\d+-[0-9a-f]{32}$")
+                                      && !string.Equals(session.FullName, SessionDirectory, StringComparison.OrdinalIgnoreCase))
+                    .Select(session => session.FullName));
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return paths;
+    }
+
+    /// <summary>
+    /// Log files earlier builds wrote straight into the data directory and never
+    /// rotated away: one <c>animation-performance-&lt;pid&gt;.log</c> per launch, the
+    /// single-file <c>app.log</c>, and the WPF-era <c>perf.log</c> with its
+    /// <c>perf.on</c> switch. Nothing writes or reads any of them now. Matched by
+    /// exact name so nothing else in that directory can be caught.
+    /// </summary>
+    public static IReadOnlyList<string> ListLegacyLogPaths()
+    {
+        try
+        {
+            var dataRoot = Directory.GetParent(LogsRoot)!.FullName;
+            return Directory.EnumerateFiles(dataRoot)
+                .Where(path => LegacyLogName.IsMatch(System.IO.Path.GetFileName(path)))
+                .ToArray();
+        }
+        catch (IOException) { return []; }
+        catch (UnauthorizedAccessException) { return []; }
+    }
+
+    private static readonly Regex LegacyLogName = new(
+        @"^(?:animation-performance-\d+\.log|app\.log|perf\.log|perf\.on)$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private static async Task ConsumeAsync()
     {

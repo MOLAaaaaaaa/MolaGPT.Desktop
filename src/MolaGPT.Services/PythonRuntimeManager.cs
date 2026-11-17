@@ -4,6 +4,8 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using MolaGPT.Core.Chat.Tools.PythonExecution;
+using MolaGPT.Core.Disk;
 
 namespace MolaGPT.Desktop.Services;
 
@@ -17,19 +19,24 @@ public sealed class PythonRuntimeManager
     private const string ActiveRuntimeFileName = ".active-runtime.json";
     private readonly HttpClient _http;
     private readonly string _manifestUrl;
+    private readonly string _runtimeBaseDirectory;
+    private int _installing;
+    private readonly SemaphoreSlim _storageOperation = new(1, 1);
 
-    public PythonRuntimeManager(HttpClient http, string? manifestUrl = null)
+    public bool TryBeginStorageCleanup() => _storageOperation.Wait(0);
+    public void EndStorageCleanup() => _storageOperation.Release();
+
+    public PythonRuntimeManager(HttpClient http, string? manifestUrl = null, string? baseDirectory = null)
     {
         _http = http;
         _manifestUrl = string.IsNullOrWhiteSpace(manifestUrl)
             ? DefaultManifestUrl
             : manifestUrl!;
+        _runtimeBaseDirectory = baseDirectory ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MolaGPT Desktop", "PythonRuntime");
     }
 
-    public string RuntimeBaseDirectory => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "MolaGPT Desktop",
-        "PythonRuntime");
+    public string RuntimeBaseDirectory => _runtimeBaseDirectory;
 
     public string RuntimeRootDirectory => Path.Combine(RuntimeBaseDirectory, RuntimeDirectoryName);
 
@@ -49,18 +56,27 @@ public sealed class PythonRuntimeManager
         }
     }
 
+    private string ArchiveRootDirectory => Path.Combine(RuntimeBaseDirectory, "archives");
+
     public void DeleteRuntime()
     {
-        DeleteManagedDirectory(RuntimeRootDirectory);
-        DeleteManagedDirectory(Path.Combine(RuntimeBaseDirectory, "archives"));
+        _storageOperation.Wait();
+        try
+        {
+            DeleteManagedDirectory(RuntimeRootDirectory, RuntimeBaseDirectory);
+            DeleteManagedDirectory(ArchiveRootDirectory, RuntimeBaseDirectory);
+            foreach (var directory in ListLegacyDownloadDirectories())
+                DeleteManagedDirectory(directory, RuntimeBaseDirectory);
 
-        // Clean up the legacy app-local one-click runtime as part of migration.
-        // A manually selected interpreter is never inside this exact directory.
-        var legacy = GetLegacyRuntimeDirectory();
-        if (Directory.Exists(legacy))
-            DeleteManagedDirectory(legacy, GetAppDirectory());
+            // Clean up the legacy app-local one-click runtime as part of migration.
+            // A manually selected interpreter is never inside this exact directory.
+            var legacy = GetLegacyRuntimeDirectory();
+            if (Directory.Exists(legacy))
+                DeleteManagedDirectory(legacy, GetAppDirectory());
 
-        ResetSessionDependencyOverlays();
+            ResetSessionDependencyOverlays();
+        }
+        finally { _storageOperation.Release(); }
     }
 
     public InstalledPythonRuntime? GetInstalledRuntime()
@@ -101,9 +117,167 @@ public sealed class PythonRuntimeManager
 
     public PythonRuntimeStorageUsage GetStorageUsage()
     {
-        var runtimeBytes = GetDirectorySize(RuntimeBaseDirectory) + GetDirectorySize(GetLegacyRuntimeDirectory());
+        var runtimeParent = Directory.GetParent(RuntimeBaseDirectory);
+        var runtimeBytes = runtimeParent is not null && runtimeParent.Exists
+                           && runtimeParent.Attributes.HasFlag(FileAttributes.ReparsePoint)
+            ? 0 : GetDirectorySize(RuntimeBaseDirectory);
+        runtimeBytes += GetDirectorySize(GetLegacyRuntimeDirectory());
         var sessionBytes = GetSessionDependencyOverlaySize();
         return new PythonRuntimeStorageUsage(runtimeBytes, sessionBytes);
+    }
+
+    /// <summary>
+    /// What the installed runtime no longer needs: other versions' runtime
+    /// directories and archives, the staging and backup directories a failed
+    /// replace leaves behind, and the download location builds before the
+    /// <c>archives</c> layout used. Empty when no managed runtime is installed —
+    /// without one there is nothing to say which copy is the superseded one.
+    /// </summary>
+    public IReadOnlyList<string> ListSupersededPaths()
+    {
+        if (Volatile.Read(ref _installing) != 0 || IsReparsePoint(RuntimeBaseDirectory)
+            || IsReparsePoint(Path.GetDirectoryName(RuntimeBaseDirectory))
+            || IsReparsePoint(RuntimeRootDirectory)) return [];
+        var paths = new List<string>();
+        try
+        {
+            var installed = GetInstalledRuntime();
+            if (installed is null || !IsPathInside(installed.RuntimeDirectory, RuntimeRootDirectory))
+                return paths;
+            var keepName = Path.GetFileName(Path.TrimEndingDirectorySeparator(installed.RuntimeDirectory));
+            var activePath = Path.Combine(RuntimeRootDirectory, ActiveRuntimeFileName);
+            if (!File.Exists(activePath)) return paths;
+            var active = JsonSerializer.Deserialize<ActiveRuntimeStamp>(File.ReadAllText(activePath));
+            if (!string.Equals(active?.DirectoryName, keepName, StringComparison.OrdinalIgnoreCase)) return paths;
+
+            foreach (var directory in new DirectoryInfo(RuntimeRootDirectory).EnumerateDirectories())
+            {
+                if (string.Equals(directory.Name, keepName, StringComparison.OrdinalIgnoreCase)) continue;
+                if (directory.Attributes.HasFlag(FileAttributes.ReparsePoint)
+                    || (!Version.TryParse(directory.Name, out _) && !IsTransientDirectory(directory.Name))) continue;
+                if (!IsTransientDirectory(directory.Name) && !File.Exists(Path.Combine(directory.FullName, StampFileName)))
+                    continue;
+                // An install in flight owns a staging directory and, briefly, a backup.
+                if (IsTransientDirectory(directory.Name) && directory.CreationTimeUtc > DateTime.UtcNow.AddHours(-1))
+                    continue;
+                if (IsInterpreterRunning(directory.FullName)) continue;
+                paths.Add(directory.FullName);
+            }
+
+            if (Directory.Exists(ArchiveRootDirectory) && !IsReparsePoint(ArchiveRootDirectory))
+            {
+                foreach (var directory in Directory.EnumerateDirectories(ArchiveRootDirectory))
+                {
+                    if (Version.TryParse(Path.GetFileName(directory), out _)
+                        && !string.Equals(Path.GetFileName(directory), keepName, StringComparison.OrdinalIgnoreCase)
+                        && !File.GetAttributes(directory).HasFlag(FileAttributes.ReparsePoint))
+                        paths.AddRange(Directory.EnumerateFiles(directory, "MolaGPT.PythonRuntime-*.zip"));
+                }
+            }
+
+            paths.AddRange(ListLegacyDownloadDirectories());
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return paths;
+    }
+
+    /// <summary>Downloaded archives of the installed version. Only a cache: the
+    /// next install or repair downloads again when they are gone.</summary>
+    public IReadOnlyList<string> ListArchiveCachePaths()
+    {
+        if (Volatile.Read(ref _installing) != 0 || !Directory.Exists(ArchiveRootDirectory)
+            || IsReparsePoint(RuntimeBaseDirectory) || IsReparsePoint(Path.GetDirectoryName(RuntimeBaseDirectory))
+            || IsReparsePoint(ArchiveRootDirectory)) return [];
+        var superseded = ListSupersededPaths().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            return new DirectoryInfo(ArchiveRootDirectory).EnumerateDirectories()
+                .Where(directory => Version.TryParse(directory.Name, out _)
+                                    && !directory.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                .SelectMany(directory => directory.EnumerateFiles("MolaGPT.PythonRuntime-*.zip*"))
+                .Select(file => file.FullName)
+                .Where(file => !superseded.Contains(file))
+                .Where(file => file.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+                               || file.EndsWith(".zip.download", StringComparison.OrdinalIgnoreCase))
+                // A download in progress writes here; an abandoned one stops being touched.
+                .Where(file => !file.EndsWith(".download", StringComparison.OrdinalIgnoreCase)
+                               || File.GetLastWriteTimeUtc(file) < DateTime.UtcNow.AddHours(-1))
+                .ToArray();
+        }
+        catch (IOException) { return []; }
+        catch (UnauthorizedAccessException) { return []; }
+    }
+
+    /// <summary>Delete everything <see cref="ListSupersededPaths"/> names.</summary>
+    public DiskDeleteResult ReclaimSuperseded()
+    {
+        var result = default(DiskDeleteResult);
+        foreach (var path in ListSupersededPaths())
+        {
+            // Stamp first, so a directory that only half goes — a file in it is
+            // open — can never be picked up again as an installed runtime.
+            TryDeleteFile(Path.Combine(path, StampFileName));
+            result += DiskFootprint.Delete(path);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Builds before the <c>archives</c> layout downloaded to
+    /// <c>PythonRuntime\&lt;version&gt;\&lt;file&gt;.zip</c>. Only version directories
+    /// containing the managed archive names are eligible.
+    /// </summary>
+    private IReadOnlyList<string> ListLegacyDownloadDirectories()
+    {
+        if (!Directory.Exists(RuntimeBaseDirectory) || IsReparsePoint(RuntimeBaseDirectory)
+            || IsReparsePoint(Path.GetDirectoryName(RuntimeBaseDirectory))) return [];
+        var found = new List<string>();
+        foreach (var directory in new DirectoryInfo(RuntimeBaseDirectory).EnumerateDirectories())
+        {
+            if (directory.Name.Equals(RuntimeDirectoryName, StringComparison.OrdinalIgnoreCase)
+                || directory.Name.Equals("archives", StringComparison.OrdinalIgnoreCase)
+                || !Version.TryParse(directory.Name, out _)
+                || directory.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                continue;
+
+            var entries = directory.GetFileSystemInfos();
+            if (entries.Length > 0 && entries.All(entry => entry is FileInfo
+                    && !entry.Attributes.HasFlag(FileAttributes.ReparsePoint)
+                    && entry.Name.StartsWith("MolaGPT.PythonRuntime-", StringComparison.OrdinalIgnoreCase)
+                    && (entry.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+                        || entry.Name.EndsWith(".zip.download", StringComparison.OrdinalIgnoreCase))))
+                found.Add(directory.FullName);
+        }
+        return found;
+    }
+
+    private static bool IsTransientDirectory(string name) =>
+        System.Text.RegularExpressions.Regex.IsMatch(name,
+            @"^(?:\.staging-[0-9a-f]{32}|\d+(?:\.\d+){1,3}\.old-[0-9a-f]{32})$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private static bool IsReparsePoint(string? path) => path is not null && Directory.Exists(path)
+        && File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint);
+
+    private static bool IsInterpreterRunning(string runtimeDirectory)
+    {
+        var options = new EnumerationOptions { RecurseSubdirectories = true,
+            AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = true };
+        foreach (var python in Directory.EnumerateFiles(runtimeDirectory, "python*.exe", options))
+        {
+            try { using var probe = new FileStream(python, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException) { return true; }
+            catch (UnauthorizedAccessException) { return true; }
+        }
+        return false;
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     public async Task<PythonRuntimeManifest> FetchManifestAsync(CancellationToken ct = default)
@@ -127,6 +301,27 @@ public sealed class PythonRuntimeManager
         IProgress<PythonRuntimeProgress>? progress = null,
         CancellationToken ct = default)
     {
+        await _storageOperation.WaitAsync(ct).ConfigureAwait(false);
+        Volatile.Write(ref _installing, 1);
+        var installed = false;
+        try
+        {
+            var result = await DownloadAndInstallCoreAsync(progress, ct).ConfigureAwait(false);
+            installed = true;
+            return result;
+        }
+        finally
+        {
+            Volatile.Write(ref _installing, 0);
+            try { if (installed) ReclaimSuperseded(); }
+            finally { _storageOperation.Release(); }
+        }
+    }
+
+    private async Task<InstalledPythonRuntime> DownloadAndInstallCoreAsync(
+        IProgress<PythonRuntimeProgress>? progress = null,
+        CancellationToken ct = default)
+    {
         progress?.Report(new PythonRuntimeProgress("manifest", 0, "正在获取 Python 运行时清单..."));
         var manifest = await FetchManifestAsync(ct).ConfigureAwait(false);
         var version = manifest.Version!;
@@ -143,12 +338,7 @@ public sealed class PythonRuntimeManager
 
         EnsureWritableRuntimeRoot();
 
-        var downloadDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "MolaGPT Desktop",
-            "PythonRuntime",
-            "archives",
-            version);
+        var downloadDir = Path.Combine(ArchiveRootDirectory, version);
         Directory.CreateDirectory(downloadDir);
         var archivePath = Path.Combine(downloadDir, SafeFileName(manifest.FileName ?? $"python-runtime-{version}.zip"));
         var tempArchivePath = archivePath + ".download";
@@ -414,14 +604,13 @@ public sealed class PythonRuntimeManager
             "PythonRuntime");
         if (!IsPathInside(path, root))
             throw new InvalidOperationException($"拒绝删除托管目录之外的 Python 环境：{path}");
-        Directory.Delete(path, recursive: true);
+        if (IsReparsePoint(root) || IsReparsePoint(Path.GetDirectoryName(root)))
+            throw new InvalidOperationException("拒绝清理目录联接中的 Python 环境。");
+        if (DiskFootprint.Delete(path).FilesSkipped > 0)
+            throw new IOException("部分 Python 环境文件正在使用或无法删除。");
     }
 
-    private static string GetSessionRootDirectory() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "MolaGPT",
-        "python-tool",
-        "sessions");
+    private static string GetSessionRootDirectory() => PythonWorkspaceStore.SessionsRoot;
 
     private static readonly string[] SessionEnvironmentDirectories =
     [
@@ -432,10 +621,17 @@ public sealed class PythonRuntimeManager
     {
         var root = GetSessionRootDirectory();
         if (!Directory.Exists(root)) return;
-        foreach (var session in Directory.EnumerateDirectories(root))
+        DirectoryInfo? parent = new(root);
+        for (var i = 0; i < 3 && parent is not null; i++, parent = parent.Parent)
+            if (parent.Exists && parent.Attributes.HasFlag(FileAttributes.ReparsePoint)) return;
+        foreach (var session in new DirectoryInfo(root).EnumerateDirectories())
         {
+            if (session.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
             foreach (var name in SessionEnvironmentDirectories)
-                TryDeleteDirectory(Path.Combine(session, name));
+            {
+                var path = Path.Combine(session.FullName, name);
+                if (!IsReparsePoint(path)) DiskFootprint.Delete(path);
+            }
         }
     }
 
@@ -443,40 +639,20 @@ public sealed class PythonRuntimeManager
     {
         var root = GetSessionRootDirectory();
         if (!Directory.Exists(root)) return 0;
+        DirectoryInfo? directory = new(root);
+        for (var i = 0; i < 3 && directory is not null; i++, directory = directory.Parent)
+            if (directory.Exists && directory.Attributes.HasFlag(FileAttributes.ReparsePoint)) return 0;
         long total = 0;
-        foreach (var session in Directory.EnumerateDirectories(root))
+        foreach (var session in new DirectoryInfo(root).EnumerateDirectories())
         {
+            if (session.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
             foreach (var name in SessionEnvironmentDirectories)
-                total += GetDirectorySize(Path.Combine(session, name));
+                total += GetDirectorySize(Path.Combine(session.FullName, name));
         }
         return total;
     }
 
-    /// <summary>
-    /// Enumerating <see cref="FileInfo"/> rather than paths matters here: the
-    /// runtime plus the session overlays are ~15k files, and a FileInfo built
-    /// from the directory walk already carries its length, while
-    /// <c>new FileInfo(path).Length</c> pays for a second stat per file.
-    /// Measured on a 578 MB runtime: 1.7 s → 0.8 s, identical byte total.
-    /// </summary>
-    private static long GetDirectorySize(string path)
-    {
-        if (!Directory.Exists(path)) return 0;
-        try
-        {
-            return new DirectoryInfo(path)
-                .EnumerateFiles("*", SearchOption.AllDirectories)
-                .Sum(file =>
-                {
-                    try { return file.Length; }
-                    catch { return 0L; }
-                });
-        }
-        catch
-        {
-            return 0;
-        }
-    }
+    private static long GetDirectorySize(string path) => DiskFootprint.Measure(path);
 
     private static string GetAppDirectory()
     {

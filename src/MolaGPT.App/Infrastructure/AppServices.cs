@@ -486,6 +486,7 @@ internal static class AppServices
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
             Environment.GetEnvironmentVariable("MOLAGPT_PYTHON_RUNTIME_MANIFEST_URL")));
         services.AddSingleton<NotificationCenter>();
+        services.AddSingleton<StorageService>();
         services.AddSingleton(sp => new SponsorsService(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt)));
         services.AddSingleton(sp => new MembershipService(

@@ -1,13 +1,17 @@
 using Dapper;
+using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Tasks;
+using MolaGPT.Core.Chat.Tools.PythonExecution;
 
 namespace MolaGPT.Storage.Repositories;
 
 public sealed class MessageRepository
 {
+    private static readonly JsonSerializerOptions CompactJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private readonly MolaGptDatabase _db;
     public MessageRepository(MolaGptDatabase db) => _db = db;
 
@@ -65,14 +69,14 @@ public sealed class MessageRepository
             new { conversationId }).ToList();
     }
 
-    public IReadOnlyList<string> ListSubagentSessionKeys()
+    public IReadOnlyList<string> ListSubagentSessionKeys(string? conversationId = null)
     {
         using var conn = _db.Open();
         var metas = conn.Query<string>(
             @"SELECT m.meta FROM messages AS m
               JOIN conversations AS c ON c.id = m.conversation_id
-              WHERE c.deleted_at IS NULL AND m.role = 'assistant'
-                AND (m.meta LIKE '%spawn_agent%' OR m.meta LIKE '%followup_agent%')");
+              WHERE (@conversationId IS NULL OR c.id = @conversationId) AND m.role = 'assistant'
+                AND (m.meta LIKE '%spawn_agent%' OR m.meta LIKE '%followup_agent%')", new { conversationId });
         var keys = new HashSet<string>(StringComparer.Ordinal);
         void Collect(JsonElement tools)
         {
@@ -147,6 +151,76 @@ public sealed class MessageRepository
         using var conn = _db.Open();
         return conn.Query<string>(
             "SELECT meta FROM messages WHERE meta LIKE '%localName%'").ToList();
+    }
+
+    /// <summary>
+    /// Names of the Python workspaces any stored message points into, across all
+    /// conversations including soft-deleted ones. Runs without a conversation id
+    /// land in a timestamped directory nothing else records, so the message that
+    /// links their output is the only evidence one is still in use.
+    /// </summary>
+    public IReadOnlySet<string> ListReferencedWorkspaceNames(string? conversationId = null)
+    {
+        return ListWorkspaceReferences(conversationId).Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    public IReadOnlyDictionary<string, HashSet<string>> ListWorkspaceReferences(string? conversationId = null)
+    {
+        var references = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        using var conn = _db.Open();
+        // Unbuffered: the matching rows are tens of megabytes and only the names survive.
+        foreach (var (id, content, meta) in conn.Query<(string Id, string? Content, string? Meta)>(
+                     @"SELECT conversation_id, content, meta FROM messages
+                       WHERE (@conversationId IS NULL OR conversation_id = @conversationId)
+                         AND (meta LIKE '%python-tool%' OR content LIKE '%python-tool%')",
+                     new { conversationId },
+                     buffered: false))
+        {
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            PythonWorkspaceStore.CollectReferencedNames(content, names);
+            PythonWorkspaceStore.CollectReferencedNames(meta, names);
+            foreach (var name in names)
+            {
+                if (!references.TryGetValue(name, out var owners))
+                    references[name] = owners = new HashSet<string>(StringComparer.Ordinal);
+                owners.Add(id);
+            }
+        }
+        return references;
+    }
+
+    /// <summary>Rewrite tool metadata as equivalent compact JSON. The original
+    /// text must still match so a concurrent message update cannot be lost.</summary>
+    public long CompactToolMetadata()
+    {
+        using var conn = _db.Open();
+        long lastRowId = 0, saved = 0;
+        while (true)
+        {
+            var rows = conn.Query<(long RowId, string Id, string Meta)>(
+                @"SELECT rowid, id, meta FROM messages WHERE rowid > @lastRowId
+                  AND (meta LIKE '%result_preview_json%' OR meta LIKE '%resultPreviewJson%')
+                  ORDER BY rowid LIMIT 32", new { lastRowId }).ToArray();
+            if (rows.Length == 0) break;
+            using var tx = conn.BeginTransaction();
+            foreach (var row in rows)
+            {
+                lastRowId = row.RowId;
+                try
+                {
+                    using var document = JsonDocument.Parse(row.Meta);
+                    var compact = JsonSerializer.Serialize(document.RootElement, CompactJson);
+                    var difference = Encoding.UTF8.GetByteCount(row.Meta) - Encoding.UTF8.GetByteCount(compact);
+                    if (difference > 0 && conn.Execute(
+                            "UPDATE messages SET meta = @compact WHERE id = @id AND meta = @original",
+                            new { compact, id = row.Id, original = row.Meta }, tx) == 1)
+                        saved += difference;
+                }
+                catch (JsonException) { /* Preserve malformed historical metadata unchanged. */ }
+            }
+            tx.Commit();
+        }
+        return saved;
     }
 
     public string? Insert(MessageRow row)

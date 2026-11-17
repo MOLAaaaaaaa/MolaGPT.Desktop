@@ -8,6 +8,30 @@ internal sealed class AppAutoUpdateService(HttpClient http)
 {
     public sealed record UpdatePackage(string Version, string DownloadUrl, string Sha256, string FileName);
 
+    public static IReadOnlyList<string> ListObsoletePackages()
+    {
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "MolaGPT Desktop", "Updates");
+        if (!Directory.Exists(root)) return [];
+        var current = typeof(AppAutoUpdateService).Assembly.GetName().Version!;
+        var paths = new List<string>();
+        foreach (var directory in new DirectoryInfo(root).EnumerateDirectories())
+        {
+            if (directory.Attributes.HasFlag(FileAttributes.ReparsePoint)
+                || !Version.TryParse(directory.Name, out var version)) continue;
+            foreach (var file in directory.EnumerateFiles("MolaGPT.Desktop-*-win-x64-setup.exe*"))
+            {
+                if (file.Name.EndsWith(".download", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (file.LastWriteTimeUtc < DateTime.UtcNow.AddHours(-24)) paths.Add(file.FullName);
+                }
+                else if (file.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && version <= current)
+                    paths.Add(file.FullName);
+            }
+        }
+        return paths;
+    }
+
     public async Task<string> DownloadAndVerifyAsync(
         UpdatePackage package,
         IProgress<double>? progress = null,

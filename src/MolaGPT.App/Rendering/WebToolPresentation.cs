@@ -40,7 +40,8 @@ internal static class WebToolPresentation
         if (markup.Unit.Kind is not (MarkupUnitKind.ImageErrorCard or MarkupUnitKind.ImagePendingSkeleton)
             || pending.LastOrDefault() is not { Count: > 0 } tools
             || !markups.TryGetValue(tools[0].Id, out var image)
-            || image.Unit.Tag?.Contains("tool-image-blockquote", StringComparison.OrdinalIgnoreCase) != true)
+            || (image.Unit.ToolName != "image_generation_and_editing"
+                && image.Unit.Tag?.Contains("tool-image-blockquote", StringComparison.OrdinalIgnoreCase) != true))
             return false;
         if (markup.Unit.Kind == MarkupUnitKind.ImageErrorCard)
         {

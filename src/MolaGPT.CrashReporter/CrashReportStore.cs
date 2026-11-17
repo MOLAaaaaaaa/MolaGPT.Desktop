@@ -8,6 +8,8 @@ internal sealed class CrashReportStore(string rootDirectory)
 {
     private const int MaxLogBytes = 256 * 1024;
     private const int MaxRetainedReports = 10;
+    private const string MinidumpFileName = "crash.dmp";
+    private const string CompressedMinidumpFileName = MinidumpFileName + ".gz";
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -74,7 +76,7 @@ internal sealed class CrashReportStore(string rootDirectory)
         report = report with
         {
             CaptureMinidump = minidumpPath is not null && File.Exists(minidumpPath),
-            MinidumpFileName = minidumpPath is not null && File.Exists(minidumpPath) ? "crash.dmp" : null
+            MinidumpFileName = minidumpPath is not null && File.Exists(minidumpPath) ? CompressedMinidumpFileName : null
         };
         Directory.CreateDirectory(rootDirectory);
         var reportJson = JsonSerializer.SerializeToUtf8Bytes(report, JsonOptions);
@@ -98,8 +100,27 @@ internal sealed class CrashReportStore(string rootDirectory)
                 }
             }
             if (report.MinidumpFileName is not null && minidumpPath is not null)
-                File.Copy(minidumpPath, Path.Combine(temporaryDirectory, report.MinidumpFileName), true);
-            if (!Directory.Exists(reportDirectory)) Directory.Move(temporaryDirectory, reportDirectory);
+            {
+                // A dump is mostly zero pages: ~28 MB raw, ~5 MB gzipped. Stored
+                // compressed because ten of them are kept; Export hands back the
+                // plain .dmp a debugger opens.
+                using var source = File.OpenRead(minidumpPath);
+                using var target = File.Create(Path.Combine(temporaryDirectory, report.MinidumpFileName));
+                using var gzip = new GZipStream(target, CompressionLevel.Fastest);
+                source.CopyTo(gzip);
+            }
+            if (!Directory.Exists(reportDirectory))
+            {
+                // Windows can briefly deny the rename immediately after the dump is written.
+                for (var attempt = 0; ; attempt++)
+                {
+                    try { Directory.Move(temporaryDirectory, reportDirectory); break; }
+                    catch (IOException ex) when ((uint)ex.HResult == 0x80070005 && attempt < 3)
+                    {
+                        Thread.Sleep(100);
+                    }
+                }
+            }
             saved = true;
             return report;
         }
@@ -164,7 +185,27 @@ internal sealed class CrashReportStore(string rootDirectory)
             using var file = new FileStream(destination, FileMode.Create, FileAccess.ReadWrite, FileShare.None);
             using var archive = new ZipArchive(file, ZipArchiveMode.Create);
             foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
-                archive.CreateEntryFromFile(path, Path.GetRelativePath(directory, path).Replace('\\', '/'), CompressionLevel.Fastest);
+            {
+                var name = Path.GetRelativePath(directory, path).Replace('\\', '/');
+                if (name.Equals("report.json", StringComparison.OrdinalIgnoreCase)
+                    && File.Exists(Path.Combine(directory, CompressedMinidumpFileName)))
+                {
+                    var report = JsonSerializer.Deserialize<CrashReportRecord>(File.ReadAllBytes(path), JsonOptions)
+                        ?? throw new InvalidDataException("Invalid crash report metadata.");
+                    using var metadata = archive.CreateEntry(name, CompressionLevel.Fastest).Open();
+                    JsonSerializer.Serialize(metadata, report with { MinidumpFileName = MinidumpFileName }, JsonOptions);
+                    continue;
+                }
+                if (!name.Equals(CompressedMinidumpFileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    archive.CreateEntryFromFile(path, name, CompressionLevel.Fastest);
+                    continue;
+                }
+
+                using var entry = archive.CreateEntry(MinidumpFileName, CompressionLevel.Fastest).Open();
+                using var gzip = new GZipStream(File.OpenRead(path), CompressionMode.Decompress);
+                gzip.CopyTo(entry);
+            }
         }
         else File.Copy(source, destination, overwrite: true);
         return true;

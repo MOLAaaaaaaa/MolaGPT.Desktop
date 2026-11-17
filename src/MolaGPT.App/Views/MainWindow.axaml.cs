@@ -87,6 +87,7 @@ public partial class MainWindow : MolaWindow
 
     private bool _sidebarCollapsed;
     private SettingsWindow? _settingsWindow;
+    internal StorageService? Storage { get; set; }
     private AboutWindow? _aboutWindow;
     private SupportWindow? _supportWindow;
     private ImageGenerationWorkbenchView? _imageWorkbench;
@@ -1198,7 +1199,8 @@ public partial class MainWindow : MolaWindow
             () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory,
             ActivateAgentRuntimeAsync, DeactivateAgentRuntime, _personalization, _memoryPage, _proxy,
             _pythonSetup, _personalData,
-            new MolaAccountSearchClient(_httpClientFactory.CreateClient(HttpClientNames.MolaGpt), _auth));
+            new MolaAccountSearchClient(_httpClientFactory.CreateClient(HttpClientNames.MolaGpt), _auth))
+        { Storage = Storage };
         if (RemoteWork is { } remoteWork) window.AttachRemoteWork(remoteWork);
         window.AccountRequested += async (_, _) =>
         {

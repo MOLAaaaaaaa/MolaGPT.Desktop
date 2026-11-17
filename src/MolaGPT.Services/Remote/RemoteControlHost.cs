@@ -218,6 +218,10 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
     /// </summary>
     public event Action<string, bool>? Paired;
 
+    // Only the local desktop owner may approve new pairing and full access.
+    public Func<string, Task<bool>>? ConfirmAccountPairingAsync { get; set; }
+    public Func<Task<bool>>? ConfirmRemoteFullAccessAsync { get; set; }
+
     public PairedPhoneStore Phones => _phones;
 
     /// <summary>Whether a phone has talked to this desktop over the current connection.</summary>
@@ -351,7 +355,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
 
     /// <summary>One-tap pairing from a phone signed in to the same account. Codes
     /// typed at this desk go through the anonymous link instead.</summary>
-    private JsonObject HandleAccountPair(JsonObject args)
+    private async Task<JsonObject> HandleAccountPairAsync(JsonObject args)
     {
         var phoneKey = Text(args, "pub") ?? throw new RemoteError("bad_request", "缺少配对数据");
         var device = Text(args, "device") is { Length: > 0 } name ? name[..Math.Min(name.Length, 60)] : "远程设备";
@@ -361,6 +365,14 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
         byte[] secret;
         try { (desktopKey, secret) = RemotePairing.Agree(RemotePairing.AccountPairingContext, phoneKey); }
         catch (Exception) { throw new RemoteError("bad_request", "配对数据无效，请重试"); }
+        var approved = false;
+        await _onUi(async () =>
+        {
+            if (ConfirmAccountPairingAsync is { } confirm)
+                approved = await confirm(device);
+        }).ConfigureAwait(false);
+        if (!approved) throw new RemoteError("pair_rejected", "电脑端未批准新设备配对");
+
         var pairId = RemotePairing.NewPairId();
         _phones.Add(pairId, device, deviceId, secret);
         Log($"paired {device}");
@@ -638,7 +650,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             if (sessionPairId is null && op == "pair_account")
             {
                 // The relay only forwards terminal requests from this desktop's account.
-                data = HandleAccountPair(args);
+                data = await HandleAccountPairAsync(args).ConfigureAwait(false);
             }
             else if (sessionPairId is null && op == "pair")
             {
@@ -1548,7 +1560,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
 
     /// <summary>
     /// Sets the app-wide approval mode, as the composer's mode menu does. Full access is
-    /// confirmed on the phone before it is sent; automatic review needs a review model.
+    /// confirmed on the computer before it is applied; automatic review needs a review model.
     /// </summary>
     private async Task<JsonObject> ApprovalModeAsync(JsonObject args)
     {
@@ -1560,13 +1572,17 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             _ => throw new RemoteError("bad_request", "未知的审批模式")
         };
         JsonObject? approval = null;
-        await _onUi(() =>
+        await _onUi(async () =>
         {
+            if (mode == ToolPermissionMode.FullAccess)
+            {
+                if (ConfirmRemoteFullAccessAsync is not { } confirm || !await confirm())
+                    throw new RemoteError("permission_denied", "电脑端未批准完全访问模式");
+            }
             if (mode == ToolPermissionMode.AutoReview && !_composer.IsAutoReviewSelectable)
                 throw new RemoteError("no_reviewer", _composer.ReviewModelMissingText);
             _composer.SetApprovalMode(mode);
             approval = ApprovalJson(visible: true);
-            return Task.CompletedTask;
         }).ConfigureAwait(false);
         Log($"approval mode {mode} by remote");
         return new JsonObject { ["approval"] = approval };

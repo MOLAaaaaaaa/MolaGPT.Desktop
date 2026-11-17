@@ -33,6 +33,7 @@ public partial class SettingsWindow
         ["PAGE_Selection"] = "划词 选词 翻译 解释 提问 快捷键 游戏 全屏 黑名单 剪贴板 位置 选区 右下角 左下角 右上角 左上角",
         ["PAGE_Network"] = "代理 proxy 网络 梯子 VPN Clash v2ray SOCKS5 HTTP 端口 7890 连接 超时 直连 绕过 出口",
         ["PAGE_PersonalData"] = "隐私和安全 个人数据 数据管理 导出 导入 备份 迁移 聊天记录 对话 模型配置 API Key 密钥 加密 密码 JSON",
+        ["PAGE_Storage"] = "隐私和安全 存储 空间 磁盘 占用 清理 缓存 日志 崩溃报告 对话 文件 运行环境",
         ["PAGE_Personas"] = "角色 人设 系统提示词 提示词 prompt 角色卡 世界书 SillyTavern RisuAI 提示词编排 预设 preset 氛围 默认模型 温度 temperature",
         ["PAGE_Memory"] = "记忆 本地记忆 个人资料 称呼 职业 所在地 语言 历史对话 整理",
         ["PAGE_PostProcessing"] = "文本替换 替换 正则 regex 后处理",
