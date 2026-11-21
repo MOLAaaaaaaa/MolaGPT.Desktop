@@ -36,6 +36,8 @@ public sealed partial class ComposerViewModel
             if (!string.IsNullOrEmpty(effort) && AvailableEffortLevels.Contains(effort)) ReasoningEffort = effort;
             OnPropertyChanged(nameof(IsPythonToolVisible));
             OnPropertyChanged(nameof(CanProcessOpaqueFiles));
+            // 会话的搜索服务商是这套「按会话记的偏好」的一部分，换对话就得重算。
+            RaiseSearchProviderChanged();
         }
         finally { _applyingRoleOptions = false; }
     }

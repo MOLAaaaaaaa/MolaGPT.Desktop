@@ -46,6 +46,10 @@ public sealed class PiWorkLlmShim : IDisposable
     /// asked for. See <see cref="TargetPathMode"/>.</param>
     /// <param name="ResponseReceived">Sees each upstream response before its body
     /// is relayed, for figures an endpoint reports in headers.</param>
+    /// <param name="RelayTap">Sees the response body as it is relayed, chunk by
+    /// chunk. Used for figures that only exist inside the stream — DeepSeek's
+    /// server-side search reports its sources that way, and there is no second
+    /// channel to wait for.</param>
     public sealed record ForwardTarget(
         HttpClient Http,
         string Endpoint,
@@ -60,7 +64,8 @@ public sealed class PiWorkLlmShim : IDisposable
         Action<string>? PromptPrepared = null,
         Action<System.Text.Json.Nodes.JsonObject>? AdaptBody = null,
         Action<HttpResponseMessage>? ResponseReceived = null,
-        string? ModelId = null);
+        string? ModelId = null,
+        Action<ReadOnlyMemory<byte>>? RelayTap = null);
 
     public sealed record GenerationOptions(
         string Api, double? Temperature, double? TopP, int? MaxTokens,
@@ -273,6 +278,13 @@ public sealed class PiWorkLlmShim : IDisposable
                 {
                     if (!chunk.IsEmpty)
                     {
+                        if (target.RelayTap is { } tap)
+                        {
+                            // Watchers must never break the relay: a parse error in
+                            // a source collector is not the client's problem.
+                            try { tap(chunk); }
+                            catch (Exception ex) { _log?.Invoke("[llm-shim] relay tap: " + ex.Message); }
+                        }
                         try
                         {
                             await ctx.Response.OutputStream.WriteAsync(chunk, _cts.Token).ConfigureAwait(false);

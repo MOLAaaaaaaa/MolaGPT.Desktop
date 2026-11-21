@@ -1105,7 +1105,7 @@
                         <StackPanel>
                           <TextBlock Classes="label" Text="协议" />
                           <ComboBox Name="PART_ProviderType" Classes="settingsinput">
-                            <ComboBoxItem Content="OpenAI 兼容" />
+                            <ComboBoxItem Content="OpenAI Chat Completions" />
                             <ComboBoxItem Content="Anthropic" />
                             <ComboBoxItem Content="Gemini 原生" />
                             <ComboBoxItem Content="OpenAI Responses" />
@@ -1930,8 +1930,20 @@
                           <TextBlock Text="MolaGPT Web Search" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                         </ComboBoxItem>
                         <ComboBoxItem Tag="duckduckgo" Content="DuckDuckGo" />
+                        <ComboBoxItem Tag="deepseek" Content="DeepSeek Search" />
                         <ComboBoxItem Tag="tavily" Content="Tavily" />
                         <ComboBoxItem Tag="exa" Content="Exa" />
+                        <!-- 会话内专用的服务端搜索：它不是一套可以全局共用的接口，
+                             而是「让当前模型自己在端点那边搜」。摆在这里是因为用户
+                             会先来这里找，但这里只能看到说明，不能选中。 -->
+                        <ComboBoxItem Tag="deepseek-server" IsEnabled="False" Opacity="0.55">
+                          <StackPanel>
+                            <TextBlock Text="DeepSeek服务端搜索" TextWrapping="NoWrap"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock Classes="hint" TextWrapping="Wrap" MaxWidth="400" Margin="0,2,0,0"
+                                       Text="DeepSeek官方提供的服务端搜索工具，搜索不按次收费，每次搜索都会额外消耗模型Token。" />
+                          </StackPanel>
+                        </ComboBoxItem>
                       </ComboBox>
                     </Grid>
                     <StackPanel Name="PART_SearchKeyRows">
@@ -1959,6 +1971,19 @@
                           </Grid>
                         </Border>
                         <TextBlock Classes="hint" Text="API Key 将被加密保存。" />
+                      </StackPanel>
+                      <StackPanel Name="PART_DeepSeekFetchRow" IsVisible="False">
+                        <Border Classes="divider" />
+                        <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                          <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                            <TextBlock Classes="rowtitle" Text="网页抓取走 DeepSeek" />
+                            <TextBlock Classes="hint" TextWrapping="Wrap"
+                                       Text="用 DeepSeek 的 /tools/fetch 读取网页正文，替代本地抓取。与搜索共用上面的 API Key，按次计费。" />
+                          </StackPanel>
+                          <ToggleButton Grid.Column="1" Classes="settingtoggle"
+                                        IsChecked="{Binding DeepSeekFetchEnabled, Mode=TwoWay}"
+                                        VerticalAlignment="Center" />
+                        </Grid>
                       </StackPanel>
                     </StackPanel>
                   </StackPanel>

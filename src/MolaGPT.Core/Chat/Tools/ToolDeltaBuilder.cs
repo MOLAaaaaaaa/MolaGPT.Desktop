@@ -312,6 +312,8 @@ public static class ToolDeltaBuilder
                 "molagpt" => "MolaGPT Web Search",
                 "tavily" => "Tavily",
                 "exa" => "Exa",
+                "deepseek" => "DeepSeek Search",
+                "deepseek-server" => "DeepSeek服务端搜索",
                 _ => "DuckDuckGo"
             };
 

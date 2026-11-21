@@ -186,6 +186,11 @@ public sealed class ConversationRoleContext
     public bool? EnableWebFetch { get; set; }
     public bool? EnableThinking { get; set; }
     public string? ReasoningEffort { get; set; }
+
+    /// <summary>本会话的联网搜索服务商。null / 空 = 跟随设置里的全局选择。
+    /// 取值与全局一致（molagpt、deepseek、tavily、exa、duckduckgo），另加一个
+    /// 只能在会话里用的 "deepseek-server"（DeepSeek 服务端搜索）。</summary>
+    public string? SearchProvider { get; set; }
 }
 
 public sealed record LoreActivationState(int ActivatedAt, string SourceMessageId);

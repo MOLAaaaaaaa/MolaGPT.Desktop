@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -98,6 +98,35 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         var options = LocalToolOptions.FromExtraBody(request.ExtraBody);
         var modelSupportsVision = Models.FirstOrDefault(m => m.Id == request.ModelId)?.SupportsVision ?? false;
 
+        // DeepSeek 的服务端搜索由模型端执行，本地这边唯一要做的事是把工具声明
+        // 放进请求体。所以先确认端点协议放得下它 —— 协议由凭据决定，拿不到
+        // （Gemini 模板、ChatGPT 套餐、或者干脆是别的模型）就退回本地搜索，
+        // 而不是把请求发上去等一个 400。
+        var creds = _config.ResolveCreds(request);
+        // 网络访问关掉的时候不能只关本地工具：服务端搜索也是联网，只是换了个
+        // 执行的地方。所以这里跟 options.Network 一起判断，退回到「没有搜索」，
+        // 而不是给模型一个还能查网的工具。
+        var serverSearchProtocol = options.Network
+            && string.Equals(options.SearchProvider, DeepSeekServerSearch.ProviderId, StringComparison.OrdinalIgnoreCase)
+            ? DeepSeekServerSearch.ResolveProtocol(creds.Api)
+            : null;
+        if (serverSearchProtocol is null
+            && string.Equals(options.SearchProvider, DeepSeekServerSearch.ProviderId, StringComparison.OrdinalIgnoreCase))
+        {
+            // 协议不支持（或是被 UI 闸门漏过来的请求）：退回本地搜索，别让整轮失败。
+            options = options with { SearchProvider = "duckduckgo" };
+        }
+        else if (serverSearchProtocol is not null)
+        {
+            // DeepSeek 官方的 /v1/responses 会悄悄丢掉服务端工具，换根路径才认。
+            var adjusted = DeepSeekServerSearch.AdjustEndpoint(creds.Endpoint, serverSearchProtocol);
+            if (!string.Equals(adjusted, creds.Endpoint, StringComparison.Ordinal))
+            {
+                _log?.Invoke($"[server-search] 端点改用 {adjusted}（/v1/responses 会丢掉服务端工具）");
+                creds = creds with { Endpoint = adjusted };
+            }
+        }
+
         // Pi launches with --no-builtin-tools, so its only file access is the
         // bridged MolaGPT tool set. read_file / execute_python_code both resolve
         // relative paths against this conversation's workspace — the same folder
@@ -130,7 +159,20 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         var hints = await _toolHost.DescribeAgentToolsAsync(options, ct).ConfigureAwait(false);
         var toolCatalogJson = BuildToolCatalog(localDefs.Concat(hostDefs), hints);
 
-        var creds = _config.ResolveCreds(request);
+        // 服务端搜索只在思考模式下被允许：不带思考时，连客户端工具都会被端点
+        // 拒掉（tools: client tools can only be used together with
+        // 'deepseek_web_search' in thinking mode）。这里替用户打开它 —— 会话里
+        // 选了「服务端搜索」就是这个意思，并且在界面上说明过。
+        if (serverSearchProtocol is not null && request.UseThinking != true)
+        {
+            request = request with
+            {
+                UseThinking = true,
+                ReasoningEffort = string.IsNullOrWhiteSpace(request.ReasoningEffort)
+                    ? "high"
+                    : request.ReasoningEffort
+            };
+        }
 
         // Reasoning is asked for twice, on purpose, because neither half covers the
         // other:
@@ -146,6 +188,12 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         var thinkingLevel = ResolveThinkingLevel(request, creds.Api);
         if (ThinkingParams.Owns(creds.Api))
             creds = creds with { ExtraBody = MergeThinking(creds.ExtraBody, request, creds) };
+
+        // 服务端工具的声明必须最后落笔：thinking 的字段、以及 ChatCompletions
+        // 上那几个和它互斥的开关，都要在这一层收口。内部先跑一遍凭据自己的
+        // AdaptBody，套餐降级之类丢掉的东西不会把工具也一起丢掉。
+        if (serverSearchProtocol is not null)
+            creds = creds with { AdaptBody = DeepSeekServerSearch.Wrap(serverSearchProtocol, creds.AdaptBody) };
 
         if (request.HistorySeed is { } history)
             await WriteHistoryAsync(request.ConversationId, history, creds, ct).ConfigureAwait(false);
@@ -167,6 +215,11 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // one call. The model gets the numbers and the rule; the transcript gets
         // the same list as a ChatChunk below.
         var citations = new SearchCitations();
+
+        // 服务端搜索的来源只存在于响应流里（Models/Responses/ChatCompletions 三种
+        // 协议的写法各不相同），所以顺手把转发的字节喂给一个收集器，再和本地
+        // 搜索一样按轮询把结果推给消息。
+        var serverSources = serverSearchProtocol is null ? null : new ServerSearchSources();
         async Task<string> ExecuteToolAsync(string name, string argsJson, CancellationToken toolCt, Action<string>? report = null)
         {
             using var call = CancellationTokenSource.CreateLinkedTokenSource(toolCt, ct);
@@ -186,6 +239,23 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             message => Volatile.Write(ref promptError, message),
             (name, argsJson, report, toolCt) => ExecuteToolAsync(name, argsJson, toolCt, report));
 
+        // 服务端搜索只在响应里留痕：请求这边要是没把工具带上（协议判断错了、
+        // 被别的 AdaptBody 覆盖了），表现和「模型自己不爱搜」一模一样，光看
+        // 回复分不出来。落一行日志，省得下次还得改代码才能查。
+        Action<string>? preparedHook = request.RolePrompt is null
+            ? null
+            : body => Interlocked.Exchange(ref promptTrace, RolePromptTrace.Read(creds.Api, body));
+        if (serverSources is not null)
+        {
+            var roleHook = preparedHook;
+            preparedHook = body =>
+            {
+                roleHook?.Invoke(body);
+                _log?.Invoke(
+                    $"[server-search] protocol={serverSearchProtocol} tools={DescribeWireTools(body)}");
+            };
+        }
+
         var target = new PiWorkLlmShim.ForwardTarget(
             _http,
             creds.Endpoint,
@@ -198,10 +268,11 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             creds.PathMode,
             new PiWorkLlmShim.GenerationOptions(
                 creds.Api, request.Temperature, request.TopP, request.MaxTokens, request.ReasoningEffort, request.UseThinking),
-            request.RolePrompt is null ? null : body => Interlocked.Exchange(ref promptTrace, RolePromptTrace.Read(creds.Api, body)),
+            preparedHook,
             creds.AdaptBody,
             creds.ResponseReceived,
-            ModelId: creds.Model);
+            ModelId: creds.Model,
+            RelayTap: serverSources is null ? null : serverSources.Feed);
 
         // Waits when every slot is busy, which is the point: three turns really are
         // in flight and a fourth process costs more than the wait.
@@ -267,6 +338,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                 // between lines rather than on one; polling here is what puts them on
                 // the message while the answer is still being written.
                 if (citations.TryTakeUpdate(out var found)) yield return new ChatChunk(Sources: found);
+                if (serverSources is not null && serverSources.TryTake(out var serverFound))
+                    yield return new ChatChunk(Sources: serverFound);
             }
         }
         finally
@@ -277,6 +350,11 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
 
         // A search that finished after the last line would otherwise be dropped.
         if (citations.TryTakeUpdate(out var trailing)) yield return new ChatChunk(Sources: trailing);
+        if (serverSources is not null)
+        {
+            serverSources.Complete();
+            if (serverSources.TryTake(out var serverTrailing)) yield return new ChatChunk(Sources: serverTrailing);
+        }
 
         if (errorMessage is not null)
             throw new InvalidOperationException(HumanizeAgentError(errorMessage));
@@ -395,6 +473,54 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     /// explicitly — 429 is what a long research turn actually dies of, and the bare
     /// status code reads like a crash instead of "you went too fast".
     /// </summary>
+    /// <summary>
+    /// 把发出去的 <c>tools</c> 归纳成一串短名字，服务端搜索排查用：要看清
+    /// <c>deepseek_web_search</c> 到底在不在，以及它排在哪个位置。
+    /// </summary>
+    private static string DescribeWireTools(string body)
+    {
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(body) is not System.Text.Json.Nodes.JsonObject root)
+                return "请求体无法解析";
+            if (root["tools"] is not System.Text.Json.Nodes.JsonArray tools) return "<无 tools>";
+
+            var names = new List<string>(tools.Count);
+            foreach (var tool in tools)
+            {
+                if (tool is not System.Text.Json.Nodes.JsonObject entry)
+                {
+                    names.Add("?");
+                    continue;
+                }
+
+                var type = entry["type"] is System.Text.Json.Nodes.JsonValue typeValue
+                    && typeValue.TryGetValue<string>(out var text) ? text : null;
+                if (!string.IsNullOrEmpty(type) && !string.Equals(type, "function", StringComparison.Ordinal))
+                {
+                    names.Add("type:" + type);
+                    continue;
+                }
+
+                names.Add(entry["name"] is System.Text.Json.Nodes.JsonValue nameValue
+                    && nameValue.TryGetValue<string>(out var name)
+                        ? name
+                        // ChatCompletions 把名字藏在 function.name 里
+                        : entry["function"] is System.Text.Json.Nodes.JsonObject function
+                          && function["name"] is System.Text.Json.Nodes.JsonValue inner
+                          && inner.TryGetValue<string>(out var innerName)
+                            ? innerName
+                            : "?");
+            }
+
+            return $"[{tools.Count}] {string.Join(", ", names)}";
+        }
+        catch (Exception ex)
+        {
+            return "请求体无法解析：" + ex.Message;
+        }
+    }
+
     internal static string HumanizeAgentError(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return "Agent 运行失败。";

@@ -32,7 +32,14 @@ public static partial class LocalToolRegistry
     public static IReadOnlyList<object> BuildOpenAiToolDefinitions(LocalToolOptions options)
     {
         var tools = new List<object>();
-        if (options.Network && NormalizeSearchProvider(options.SearchProvider) == "molagpt")
+        var searchProvider = NormalizeSearchProvider(options.SearchProvider);
+        if (options.Network && searchProvider == "deepseek-server")
+        {
+            // 服务端搜索：搜索由 DeepSeek 在模型那一侧执行，本地不能再挂 search_web。
+            // 两者同时出现在 tools 里时，DeepSeek 只允许「客户端工具 + 服务端搜索 +
+            // 思考模式」这一种组合；本客户端要的是纯服务端搜索，所以这里故意留空。
+        }
+        else if (options.Network && searchProvider == "molagpt")
         {
             tools.Add(BuildMolaSearchDefinition());
         }
@@ -490,6 +497,14 @@ public static partial class LocalToolRegistry
         if (NormalizeSearchProvider(options.SearchProvider) == "molagpt")
             return await SearchMolaAccountAsync(argumentsJson, options, accountSearch, ct).ConfigureAwait(false);
 
+        if (NormalizeSearchProvider(options.SearchProvider) == "deepseek-server")
+            return SerializeToolResult(new
+            {
+                success = false,
+                source = "local_search_web",
+                error = "本会话使用 DeepSeek 服务端搜索，搜索由模型端执行，本地 search_web 已停用。"
+            });
+
         var queries = ParseSearchQueries(argumentsJson);
         var provider = NormalizeSearchProvider(options.SearchProvider);
 
@@ -499,7 +514,7 @@ public static partial class LocalToolRegistry
         //   IP throttling kicks in, so we serialize and stagger.
         var maxConcurrency = provider switch
         {
-            "tavily" or "exa" => Math.Min(5, queries.Count),
+            "tavily" or "exa" or "deepseek" => Math.Min(5, queries.Count),
             _ => 1
         };
         var interQueryDelay = provider == "duckduckgo" && queries.Count > 1
@@ -618,6 +633,11 @@ public static partial class LocalToolRegistry
             maxChars = Math.Clamp(parsed, 1000, 30000);
         }
 
+        // 设置里打开「DeepSeek 网页抓取」后，读页改走 /v1/tools/fetch：服务端渲染
+        // 并把正文转成 Markdown，比本机正则去标签稳，代价是按次计费。
+        if (string.Equals(localOptions.FetchProvider?.Trim(), "deepseek", StringComparison.OrdinalIgnoreCase))
+            return await FetchDeepSeekAsync(url, maxChars, localOptions, http, ct).ConfigureAwait(false);
+
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.TryAddWithoutValidation("User-Agent", UserAgentProvider.FixedUa);
         req.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8");
@@ -657,6 +677,7 @@ public static partial class LocalToolRegistry
         {
             "tavily" => await SearchTavilyAsync(query, options, http, ct).ConfigureAwait(false),
             "exa" => await SearchExaAsync(query, options, http, ct).ConfigureAwait(false),
+            "deepseek" => await SearchDeepSeekAsync(query, options, http, ct).ConfigureAwait(false),
             _ => await SearchDuckDuckGoAsync(query, options, http, ct).ConfigureAwait(false)
         };
     }
@@ -755,6 +776,158 @@ public static partial class LocalToolRegistry
     }
 
     /// <summary>
+    /// DeepSeek 的 <c>POST /v1/tools/search</c>：一条查询一次请求，服务端已把结果
+    /// rerank 好并写好 <c>summary</c>。按成功请求计费（5 元 / 1000 次），
+    /// <c>count</c> 只影响一次请求带回几条，不额外加价。
+    /// </summary>
+    private static async Task<IReadOnlyList<object>> SearchDeepSeekAsync(
+        string query,
+        LocalToolOptions options,
+        HttpClient http,
+        CancellationToken ct)
+    {
+        var apiKey = RequireApiKey(options, "DeepSeek");
+        using var req = new HttpRequestMessage(HttpMethod.Post, DeepSeekToolEndpoint(options.SearchBaseUrl, "search"));
+        req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + apiKey);
+        req.Content = JsonContent.Create(new
+        {
+            query,
+            count = options.SearchMaxResults,
+            // 正文留给 web_fetch：这里带回全文会把一轮上下文塞满。
+            need_content = false
+        });
+
+        using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        await EnsureDeepSeekSuccessAsync(resp, ct).ConfigureAwait(false);
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+        if (!doc.RootElement.TryGetProperty("results", out var results) || results.ValueKind != JsonValueKind.Array)
+            return Array.Empty<object>();
+
+        return results.EnumerateArray()
+            .Take(options.SearchMaxResults)
+            .Select(result => new
+            {
+                title = ReadString(result, "title") ?? ReadString(result, "url") ?? "Untitled",
+                url = ReadString(result, "url") ?? string.Empty,
+                // summary 是服务端写好的摘要，比截断的 snippet 更适合直接读。
+                snippet = TrimSnippet(ReadString(result, "summary") ?? ReadString(result, "snippet"), options),
+                published_date = ReadString(result, "date"),
+                site_name = ReadString(result, "site_name")
+            })
+            .Where(item => !string.IsNullOrWhiteSpace(item.url))
+            .Cast<object>()
+            .ToArray();
+    }
+
+    /// <summary>
+    /// DeepSeek 的 <c>POST /v1/tools/fetch</c>：服务端取页并转成 Markdown。
+    /// 返回结构和本机抓取保持一致，调用方（工具桥、转录里的工具卡片）不用改。
+    /// </summary>
+    private static async Task<string> FetchDeepSeekAsync(
+        Uri url,
+        int maxChars,
+        LocalToolOptions options,
+        HttpClient http,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(options.FetchApiKey))
+            throw new InvalidOperationException("DeepSeek 网页抓取已开启，但设置里没有填写 API Key。");
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, DeepSeekToolEndpoint(options.FetchBaseUrl, "fetch"));
+        req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + options.FetchApiKey);
+        req.Content = JsonContent.Create(new { url = url.ToString() });
+
+        using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        await EnsureDeepSeekSuccessAsync(resp, ct).ConfigureAwait(false);
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+
+        var title = ReadString(doc.RootElement, "title") ?? url.ToString();
+        var content = ReadString(doc.RootElement, "content") ?? string.Empty;
+        if (content.Length > maxChars)
+            content = content[..maxChars] + "\n[content truncated]";
+
+        return SerializeToolResult(new
+        {
+            success = true,
+            source = "local_web_fetch",
+            action = "scrape",
+            url = url.ToString(),
+            title,
+            content,
+            // 服务端只回正文，不回链接清单；空数组比缺字段更容易让模型理解。
+            links = Array.Empty<string>()
+        });
+    }
+
+    /// <summary>
+    /// DeepSeek 的工具接口在 <c>/v1/tools/</c> 下。用户把 Base URL 填成
+    /// <c>https://api.deepseek.com</c> 或带上 <c>/v1</c> 都该能用，所以这里不让
+    /// <c>v1</c> 出现两次。
+    /// </summary>
+    private static Uri DeepSeekToolEndpoint(string? baseUrl, string tool)
+    {
+        var root = (string.IsNullOrWhiteSpace(baseUrl) ? "https://api.deepseek.com" : baseUrl.Trim()).TrimEnd('/');
+        return new Uri(root.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
+            ? $"{root}/tools/{tool}"
+            : $"{root}/v1/tools/{tool}");
+    }
+
+    /// <summary>
+    /// 把 DeepSeek 的 OpenAI 风格错误摊平成一句中文：抓取失败大多是「站点不允许」
+    /// 或「页面打不开」，带着状态码的一整段 JSON 对模型没有帮助。
+    /// </summary>
+    private static async Task EnsureDeepSeekSuccessAsync(HttpResponseMessage resp, CancellationToken ct)
+    {
+        if (resp.IsSuccessStatusCode) return;
+
+        string? message = null;
+        string? code = null;
+        try
+        {
+            var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(body))
+            {
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+                {
+                    message = ReadString(error, "message");
+                    code = ReadString(error, "code");
+                }
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or NotSupportedException)
+        {
+            // 非 JSON 的错误页：状态码本身已经足够说明问题。
+        }
+
+        var status = (int)resp.StatusCode;
+        var hint = code?.Trim().ToLowerInvariant() switch
+        {
+            "url_not_allowed" => "该站点不允许 DeepSeek 抓取。",
+            "url_not_accessible" => "页面无法访问（可能已删除或需要登录）。",
+            "unavailable" => "DeepSeek 暂时不可用，请稍后重试。",
+            _ => status switch
+            {
+                401 => "DeepSeek API Key 无效。",
+                402 => "DeepSeek 账户余额不足。",
+                403 => "该站点不允许 DeepSeek 抓取。",
+                404 => "页面无法访问（可能已删除或需要登录）。",
+                408 => "DeepSeek 抓取超时，请稍后重试。",
+                413 => "页面内容过大，DeepSeek 拒绝抓取。",
+                429 => "DeepSeek 接口限流，请稍后重试。",
+                >= 500 => "DeepSeek 服务端错误，请稍后重试。",
+                _ => "DeepSeek 接口返回错误。"
+            }
+        };
+
+        throw new InvalidOperationException(string.IsNullOrWhiteSpace(message)
+            ? $"{hint}（HTTP {status}）"
+            : $"{hint}（HTTP {status}）{message}");
+    }
+
+    /// <summary>
     /// Cuts a search hit's text down to <see cref="MaxSearchSnippetCharacters"/>
     /// (or whatever the turn configured). The marker is left in on purpose: the
     /// model needs to see that there is more behind the URL, or it will treat a
@@ -795,6 +968,10 @@ public static partial class LocalToolRegistry
                 "molagpt" => "molagpt",
                 "tavily" => "tavily",
                 "exa" => "exa",
+                "deepseek" => "deepseek",
+                // 服务端搜索由模型供应商自己执行，本地没有对应的 HTTP 接口。保留这个
+                // 名字是为了让下面各层能认出它并明确拒绝，而不是悄悄退回 DuckDuckGo。
+                "deepseek-server" => "deepseek-server",
                 _ => "duckduckgo"
             };
 

@@ -55,6 +55,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string WebSearchBaseUrlKey = "web_search_base_url";
     private const string WebSearchMaxResultsKey = "web_search_max_results";
     private const string WebPageMaxCharactersKey = "web_page_max_characters";
+    private const string DeepSeekFetchEnabledKey = "deepseek_fetch_enabled";
     private const string WebSearchSecretPrefix = "web_search_api_key:";
     private const string ByokMcpServersKey = "byok_mcp_servers";
     private const string McpServerSecretPrefix = "mcp_server_token:";
@@ -219,6 +220,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string? _webSearchApiKey;
     [ObservableProperty] private int _webSearchMaxResults = 6;
     [ObservableProperty] private int _webPageMaxCharacters = 12000;
+
+    /// <summary>网页读取改走 DeepSeek 的 /v1/tools/fetch。默认关闭：抓取按次计费，
+    /// 而本机抓取对大多数页面已经够用。</summary>
+    [ObservableProperty] private bool _deepSeekFetchEnabled;
     [ObservableProperty] private bool _autoTitleEnabled = true;
     [ObservableProperty] private TitleProviderModelOption? _selectedTitleProviderModel;
     [ObservableProperty] private bool _visionProxyEnabled;
@@ -452,6 +457,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 WebSearchMaxResults = Math.Clamp(maxResults, 1, WebSearchProvider == "molagpt" ? 6 : 10);
             if (int.TryParse(_settingsRepo.Get(WebPageMaxCharactersKey), out var maxChars))
                 WebPageMaxCharacters = Math.Clamp(maxChars, 1000, 30000);
+            DeepSeekFetchEnabled = bool.TryParse(_settingsRepo.Get(DeepSeekFetchEnabledKey), out var dsFetch) && dsFetch;
             AutoTitleEnabled = !bool.TryParse(
                 _settingsRepo.Get(ConversationTitleService.AutoTitleEnabledKey),
                 out var autoTitleEnabled) || autoTitleEnabled;
@@ -743,6 +749,13 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         var provider = NormalizeWebSearchProvider(value);
+        if (provider == "deepseek-server")
+        {
+            // 服务端搜索只能按会话使用，全局设置里不该落这个值。放回上一次的选择，
+            // 第二次赋值会走正常路径，因为存着的一定不是 deepseek-server。
+            WebSearchProvider = NormalizeWebSearchProvider(_settingsRepo.Get(WebSearchProviderKey));
+            return;
+        }
         WebSearchMaxResults = Math.Clamp(WebSearchMaxResults, 1, provider == "molagpt" ? 6 : 10);
         _settingsRepo.Set(WebSearchProviderKey, provider);
         WebSearchBaseUrl = DefaultWebSearchBaseUrl(provider);
@@ -781,6 +794,56 @@ public sealed partial class SettingsViewModel : ObservableObject
         WebPageMaxCharacters = Math.Clamp(value, 1000, 30000);
         _settingsRepo.Set(WebPageMaxCharactersKey, WebPageMaxCharacters.ToString());
     }
+
+    partial void OnDeepSeekFetchEnabledChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(DeepSeekFetchEnabledKey, value.ToString());
+    }
+
+    /// <summary>
+    /// 会话级切换要用到的「某个服务商的 Key / Base URL」，而不是当前选中的那个。
+    /// 密钥本来就按服务商分开存，取哪个都拿得到；Base URL 只有一行全局记录，
+    /// 所以非当前服务商回落到它自己的默认地址。
+    /// </summary>
+    public string? WebSearchApiKeyFor(string provider)
+    {
+        var normalized = NormalizeWebSearchProvider(provider);
+        var stored = _credentialStore?.LoadSecret(WebSearchSecretPrefix + normalized);
+        if (!string.IsNullOrWhiteSpace(stored)) return stored;
+
+        // DeepSeek 的搜索和对话是同一个账户，同一个 Key。已经在「模型服务」里配好
+        // DeepSeek 的人不该为了搜索再抄一遍——那一份 Key 只存在服务商行里（不在这
+        // 个凭据库里），所以这里回读一次。留空才算没配。
+        return normalized == "deepseek" ? DeepSeekProviderApiKey() : null;
+    }
+
+    /// <summary>DeepSeek 服务商行里那个 Key，给搜索做兜底。按地址认，地址看不出来
+    /// 时按名字认；两者都看不出来就不猜。</summary>
+    private string? DeepSeekProviderApiKey() =>
+        Providers.FirstOrDefault(entry =>
+            entry.Purpose == "chat"
+            && entry.ApiKey is { Length: > 0 }
+            && (entry.BaseUrl?.Contains("deepseek.com", StringComparison.OrdinalIgnoreCase) == true
+                || entry.Name.Contains("deepseek", StringComparison.OrdinalIgnoreCase)))?.ApiKey;
+
+    public string WebSearchBaseUrlFor(string provider)
+    {
+        var normalized = NormalizeWebSearchProvider(provider);
+        if (string.Equals(normalized, WebSearchProvider, StringComparison.Ordinal)
+            && !string.IsNullOrWhiteSpace(WebSearchBaseUrl))
+        {
+            return WebSearchBaseUrl!.Trim();
+        }
+
+        return DefaultWebSearchBaseUrl(normalized);
+    }
+
+    /// <summary>DeepSeek 网页抓取沿用 DeepSeek 搜索的 Key 与地址：同一个服务商、同一个
+    /// 账户，没有理由让用户填两遍。</summary>
+    public string? DeepSeekFetchApiKey => WebSearchApiKeyFor("deepseek");
+
+    public string DeepSeekFetchBaseUrl => WebSearchBaseUrlFor("deepseek");
 
     partial void OnAutoTitleEnabledChanged(bool value)
     {
@@ -1052,6 +1115,10 @@ public sealed partial class SettingsViewModel : ObservableObject
                 "molagpt" => "molagpt",
                 "tavily" => "tavily",
                 "exa" => "exa",
+                "deepseek" => "deepseek",
+                // 服务端搜索不是全局可用的服务商：它绑在具体会话和具体模型上。
+                // 认得出这个名字，是为了让读设置的地方能拒绝它而不是当成 DuckDuckGo。
+                "deepseek-server" => "deepseek-server",
                 _ => "duckduckgo"
             };
 
@@ -1060,6 +1127,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         {
             "tavily" => "https://api.tavily.com",
             "exa" => "https://api.exa.ai",
+            "deepseek" => "https://api.deepseek.com",
             _ => string.Empty
         };
 

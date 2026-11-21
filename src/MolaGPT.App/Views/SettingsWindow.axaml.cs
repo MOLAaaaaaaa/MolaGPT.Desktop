@@ -105,8 +105,10 @@ public partial class SettingsWindow : MolaContentWindow
     [
         new("openrouter", "OpenRouter", "openai-compat", "https://openrouter.ai/api/", "v1/models",
             ThinkingParamKind.OpenAiReasoningEffort),
-        new("deepseek", "DeepSeek", "openai-compat", "https://api.deepseek.com/", "v1/models",
-            ThinkingParamKind.DeepSeekV4),
+        // DeepSeek 的对话走 Responses 协议：服务端搜索 (deepseek_web_search) 只在
+        // 根路径 /responses 上生效，/v1/responses 这个别名会把工具悄悄丢掉。
+        new("deepseek", "DeepSeek", "openai-response", "https://api.deepseek.com/", "v1/models",
+            ThinkingParamKind.DeepSeekV4, ApiPath: "responses"),
         new("moonshot", "Moonshot (Kimi)", "openai-compat", "https://api.moonshot.cn/", "v1/models",
             ThinkingParamKind.None),
         new("openai", "OpenAI", "openai-compat", OpenAiBaseUrl, "v1/models",
@@ -802,14 +804,19 @@ public partial class SettingsWindow : MolaContentWindow
     {
         var provider = SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider);
         PART_SearchProvider.SelectedItem = PART_SearchProvider.Items.OfType<ComboBoxItem>()
-            .First(item => Equals(item.Tag, provider));
+            .FirstOrDefault(item => Equals(item.Tag, provider));
         var maxResults = provider == "molagpt" ? 6 : 10;
         PART_SearchMaxResults.Maximum = maxResults;
         PART_SearchKeyRows.IsVisible = provider != "molagpt";
+        // DeepSeek 的网页抓取复用搜索的 API Key，所以它只在那个服务商下露面。
+        PART_DeepSeekFetchRow.IsVisible = provider == "deepseek";
         PART_SearchProviderHint.Text = provider switch
         {
             "molagpt" => "MolaGPT 提供的开箱即用的搜索服务，登录后可用。无需 API Key，将使用少量账户额度。",
             "duckduckgo" => "免费使用，无需 API Key。",
+            "deepseek" => "DeepSeek 官方搜索 API（/v1/tools/search）。留空则沿用「模型服务」里 DeepSeek 的 API Key，按次计费。",
+            // 这一项在会话里选，不在这里。看得到说明，选不中。
+            "deepseek-server" => "DeepSeek官方提供的服务端搜索工具，搜索不按次收费，每次搜索都会额外消耗模型Token。可在对话顶部的搜索菜单里为单个会话启用。",
             _ => "使用自备 API Key。"
         };
         PART_SearchStatus.Text = provider switch

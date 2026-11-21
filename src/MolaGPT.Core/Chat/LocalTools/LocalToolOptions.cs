@@ -47,7 +47,12 @@ public sealed record LocalToolOptions(
     // The conversation whose working directory tools use. A sub-agent has its own
     // transcript but works in its parent's folder, so the two ids differ.
     string? WorkspaceConversationId = null,
-    string? AgentId = null)
+    string? AgentId = null,
+    // 网页读取改走供应商的抓取接口时填这里（目前只有 DeepSeek 的
+    // /v1/tools/fetch）。留空就是本机抓取：没有设置开关、没有多一次计费。
+    string? FetchProvider = null,
+    string? FetchApiKey = null,
+    string? FetchBaseUrl = null)
 {
     public bool HasAny =>
         Network
@@ -123,7 +128,10 @@ public sealed record LocalToolOptions(
             Subagents: ReadBool(raw, "subagents"),
             IsSubagent: ReadBool(raw, "subagent"),
             WorkspaceConversationId: ReadString(raw, "workspaceConversation"),
-            AgentId: ReadString(raw, "agentId"));
+            AgentId: ReadString(raw, "agentId"),
+            FetchProvider: ReadString(raw, "fetchProvider"),
+            FetchApiKey: ReadString(raw, "fetchApiKey"),
+            FetchBaseUrl: ReadString(raw, "fetchBaseUrl"));
     }
 
     private static BrowserControlOptions? ReadBrowser(object raw)
