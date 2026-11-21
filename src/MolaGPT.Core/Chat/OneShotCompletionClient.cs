@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Models;
 
@@ -183,16 +184,26 @@ public sealed class OneShotCompletionClient
         ThinkingConfig? thinkingConfig,
         CancellationToken ct)
     {
+        var directOpenAiResponses = target.Api == OneShotWireApi.OpenAiResponses
+            && Uri.TryCreate(target.Endpoint, UriKind.Absolute, out var uri)
+            && uri.Scheme == Uri.UriSchemeHttps && uri.Host == "api.openai.com"
+            && uri.AbsolutePath == "/v1/responses";
         var body = target.Api switch
         {
             OneShotWireApi.AnthropicMessages => BuildAnthropicBody(modelId, messages, temperature, maxTokens),
-            OneShotWireApi.OpenAiResponses => BuildResponsesBody(modelId, messages, temperature, maxTokens),
+            OneShotWireApi.OpenAiResponses => BuildResponsesBody(modelId, messages, temperature, maxTokens, directOpenAiResponses),
             OneShotWireApi.GoogleGenerativeAi => BuildGoogleBody(messages, temperature, maxTokens),
             _ => BuildCompletionsBody(modelId, messages, temperature, maxTokens),
         };
         ApplyThinking(body, target.Api, modelId, useThinking, thinkingKind, reasoningEffort, thinkingConfig, target.Endpoint);
         CustomRequestParams.ApplyBody(body, target.ExtraBody);
         foreach (var key in target.DropBodyKeys ?? []) body.Remove(key);
+        if (directOpenAiResponses && ChatGptAccount.IsGpt62Model(modelId))
+        {
+            body.Remove("temperature");
+            body.Remove("top_p");
+            body.Remove("top_logprobs");
+        }
         if (stream || target.StreamOnly)
         {
             // Google's dialect lives in the URL, not the body.
@@ -418,15 +429,20 @@ public sealed class OneShotCompletionClient
     }
 
     private static Dictionary<string, object?> BuildResponsesBody(
-        string modelId, IReadOnlyList<ChatMessage> messages, double? temperature, int? maxTokens)
+        string modelId, IReadOnlyList<ChatMessage> messages, double? temperature, int? maxTokens,
+        bool useDeveloperMessages)
     {
         string? instructions = null;
         var input = new List<object>();
+        var leadingInstructions = 0;
         foreach (var m in messages)
         {
             if (m.Role == ChatMessage.RoleSystem)
             {
-                instructions = instructions is null ? m.AsText() : instructions + "\n\n" + m.AsText();
+                if (useDeveloperMessages)
+                    input.Insert(leadingInstructions++, new { role = "developer", content = m.AsText() });
+                else
+                    instructions = instructions is null ? m.AsText() : instructions + "\n\n" + m.AsText();
                 continue;
             }
 

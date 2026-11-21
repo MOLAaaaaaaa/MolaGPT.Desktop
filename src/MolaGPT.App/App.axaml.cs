@@ -271,13 +271,6 @@ public partial class App : Application
                     $"设备「{device}」正在申请查看并控制本机的 MolaGPT 对话。请确认这是你自己的设备。",
                     "允许配对");
             };
-            remoteWork.ConfirmRemoteFullAccessAsync = async () =>
-            {
-                if (!window.IsVisible) window.Show();
-                if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
-                window.Activate();
-                return await FullAccessConfirmWindow.AskAsync(window);
-            };
             var remoteWorkSettings = _services.GetRequiredService<RemoteWorkSettingsViewModel>();
             var remoteSync = new SemaphoreSlim(1, 1);
             remoteWorkSettings.EnabledChanged += SyncRemoteWork;

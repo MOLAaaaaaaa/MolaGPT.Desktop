@@ -218,9 +218,8 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
     /// </summary>
     public event Action<string, bool>? Paired;
 
-    // Only the local desktop owner may approve new pairing and full access.
+    // Only the local desktop owner may approve new pairing.
     public Func<string, Task<bool>>? ConfirmAccountPairingAsync { get; set; }
-    public Func<Task<bool>>? ConfirmRemoteFullAccessAsync { get; set; }
 
     public PairedPhoneStore Phones => _phones;
 
@@ -1560,7 +1559,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
 
     /// <summary>
     /// Sets the app-wide approval mode, as the composer's mode menu does. Full access is
-    /// confirmed on the computer before it is applied; automatic review needs a review model.
+    /// confirmed on the remote client before it is sent; automatic review needs a review model.
     /// </summary>
     private async Task<JsonObject> ApprovalModeAsync(JsonObject args)
     {
@@ -1572,17 +1571,13 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             _ => throw new RemoteError("bad_request", "未知的审批模式")
         };
         JsonObject? approval = null;
-        await _onUi(async () =>
+        await _onUi(() =>
         {
-            if (mode == ToolPermissionMode.FullAccess)
-            {
-                if (ConfirmRemoteFullAccessAsync is not { } confirm || !await confirm())
-                    throw new RemoteError("permission_denied", "电脑端未批准完全访问模式");
-            }
             if (mode == ToolPermissionMode.AutoReview && !_composer.IsAutoReviewSelectable)
                 throw new RemoteError("no_reviewer", _composer.ReviewModelMissingText);
             _composer.SetApprovalMode(mode);
             approval = ApprovalJson(visible: true);
+            return Task.CompletedTask;
         }).ConfigureAwait(false);
         Log($"approval mode {mode} by remote");
         return new JsonObject { ["approval"] = approval };
