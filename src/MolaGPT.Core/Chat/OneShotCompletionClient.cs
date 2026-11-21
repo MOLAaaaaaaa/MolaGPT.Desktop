@@ -1,6 +1,5 @@
 using System.Net.Http.Json;
 using System.Text.Json;
-using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Models;
 
@@ -184,10 +183,8 @@ public sealed class OneShotCompletionClient
         ThinkingConfig? thinkingConfig,
         CancellationToken ct)
     {
-        var directOpenAiResponses = target.Api == OneShotWireApi.OpenAiResponses
-            && Uri.TryCreate(target.Endpoint, UriKind.Absolute, out var uri)
-            && uri.Scheme == Uri.UriSchemeHttps && uri.Host == "api.openai.com"
-            && uri.AbsolutePath == "/v1/responses";
+        var officialPath = OpenAiRequestParams.OfficialPath(target.Endpoint);
+        var directOpenAiResponses = officialPath == "/v1/responses";
         var body = target.Api switch
         {
             OneShotWireApi.AnthropicMessages => BuildAnthropicBody(modelId, messages, temperature, maxTokens),
@@ -198,12 +195,7 @@ public sealed class OneShotCompletionClient
         ApplyThinking(body, target.Api, modelId, useThinking, thinkingKind, reasoningEffort, thinkingConfig, target.Endpoint);
         CustomRequestParams.ApplyBody(body, target.ExtraBody);
         foreach (var key in target.DropBodyKeys ?? []) body.Remove(key);
-        if (directOpenAiResponses && ChatGptAccount.IsGpt62Model(modelId))
-        {
-            body.Remove("temperature");
-            body.Remove("top_p");
-            body.Remove("top_logprobs");
-        }
+        OpenAiRequestParams.Apply(body, officialPath);
         if (stream || target.StreamOnly)
         {
             // Google's dialect lives in the URL, not the body.
@@ -434,17 +426,19 @@ public sealed class OneShotCompletionClient
     {
         string? instructions = null;
         var input = new List<object>();
-        var leadingInstructions = 0;
+        var leading = true;
         foreach (var m in messages)
         {
-            if (m.Role == ChatMessage.RoleSystem)
+            if (m.Role == ChatMessage.RoleSystem && (!useDeveloperMessages || leading))
             {
                 if (useDeveloperMessages)
-                    input.Insert(leadingInstructions++, new { role = "developer", content = m.AsText() });
+                    input.Add(new { role = "developer", content = m.AsText() });
                 else
                     instructions = instructions is null ? m.AsText() : instructions + "\n\n" + m.AsText();
                 continue;
             }
+
+            leading = false;
 
             var parts = new List<object>();
             var text = m.AsText();

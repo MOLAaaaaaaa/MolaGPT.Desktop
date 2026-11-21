@@ -228,7 +228,6 @@ public sealed class ConversationTitleService
             target,
             model.Id,
             [new ChatMessage(ChatMessage.RoleUser, prompt)],
-            temperature: 0.2,
             // Deliberately uncapped rather than "a title is short, so cap it low":
             // on a model whose reasoning cannot be switched off, thinking tokens
             // count against the same budget and a tight cap truncates the answer
@@ -237,7 +236,7 @@ public sealed class ConversationTitleService
             useThinking: false,
             thinkingKind: model.ThinkingConfig?.Kind
                           ?? ThinkingParamKindInference.InferFromModelId(model.Id),
-            ct).ConfigureAwait(false);
+            ct: ct).ConfigureAwait(false);
 
         return text.Length > TitleMaxChars ? text[..TitleMaxChars] : text;
     }

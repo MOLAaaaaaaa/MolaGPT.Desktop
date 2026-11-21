@@ -760,7 +760,6 @@ public sealed class CloudSyncService
                         content = $"用户问题：{userText}\n\nAI回答：{assistantPreview}\n\n请为这段对话生成一个简洁的标题（不超过14个字）："
                     }
                 },
-                temperature = 0.2,
                 max_tokens = 30
             }, options: JsonOptions)
         };
