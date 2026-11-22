@@ -130,7 +130,7 @@ public sealed partial class ComposerViewModel
                 {
                     "molagpt" => configured ? "使用账户额度" : "登录后可用",
                     "duckduckgo" => "免费",
-                    "deepseek" => configured ? "按次计费" : "未配置 API Key",
+                    "deepseek" => configured ? "按成功请求计费" : "未配置 API Key",
                     _ => configured ? null : "未配置 API Key"
                 };
                 choices.Add(new SearchProviderChoice(id, name, detail, selectable, !dimmed && selected == id));

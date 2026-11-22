@@ -851,11 +851,12 @@ public partial class SettingsWindow : MolaContentWindow
             PART_SearchMaxResults.Maximum = maxResults;
             PART_SearchProviderHint.Text = provider switch
             {
-                "molagpt" => "登录后可用，使用少量账户额度。",
+                "molagpt" => "登录后可用，使用账户额度。",
                 "duckduckgo" => "免费使用，无需 API Key。",
-                "deepseek" => "按次计费。",
-                _ => "使用自备 API Key。"
+                "deepseek" => "按成功请求计费。",
+                _ => "需要 API Key。"
             };
+            PART_SearchApiKey.PlaceholderText = provider == "duckduckgo" ? "无需 API Key" : "请输入 API Key";
 
             if (provider == "deepseek")
             {
@@ -870,6 +871,7 @@ public partial class SettingsWindow : MolaContentWindow
                     var multiple = official.Count > 1;
                     PART_DeepSeekLinkedName.IsVisible = !multiple;
                     PART_DeepSeekLinkedName.Text = linked.Name;
+                    ToolTip.SetTip(PART_DeepSeekLinkedName, linked.Name);
                     PART_DeepSeekLinkedCombo.IsVisible = multiple;
                     PART_DeepSeekLinkedCombo.ItemsSource = official;
                     PART_DeepSeekLinkedCombo.SelectedItem = linked;
@@ -904,27 +906,20 @@ public partial class SettingsWindow : MolaContentWindow
             var chatProviders = _settings.Providers
                 .Where(entry => !SettingsViewModel.IsImagePurpose(entry.Purpose))
                 .ToArray();
-            var vendors = chatProviders
-                .Select(entry => BuiltinWebSearch.DetectVendor(entry.BaseUrl))
-                .OfType<BuiltinSearchVendor>()
-                .Distinct()
-                .ToArray();
-            var activeVendors = chatProviders
-                .Where(entry => BuiltinWebSearch.IsEnabledOnProvider(entry.Type, entry.BaseUrl, entry.BuiltinSearch))
-                .Select(entry => BuiltinWebSearch.DetectVendor(entry.BaseUrl))
-                .OfType<BuiltinSearchVendor>()
-                .Distinct()
-                .ToArray();
-            PART_BuiltinSearchTipRow.IsVisible = vendors.Length > 0;
-            if (activeVendors.Length > 0)
+            var hasBuiltinSearchVendor = chatProviders.Any(entry =>
+                BuiltinWebSearch.DetectVendor(entry.BaseUrl) is not null);
+            var hasActiveBuiltinSearch = chatProviders.Any(entry =>
+                entry.Enabled && BuiltinWebSearch.IsEnabledOnProvider(entry.Type, entry.BaseUrl, entry.BuiltinSearch));
+            PART_BuiltinSearchTipRow.IsVisible = hasBuiltinSearchVendor;
+            if (hasActiveBuiltinSearch)
             {
-                PART_BuiltinSearchTipText.Text = $"已开启内置搜索：{string.Join("、", activeVendors.Select(BuiltinWebSearch.FullName))}。";
+                PART_BuiltinSearchTipText.Text = "已在模型服务中开启内置搜索。";
                 PART_OpenBuiltinSearchProviders.Content = "管理";
             }
-            else if (vendors.Length > 0)
+            else if (hasBuiltinSearchVendor)
             {
-                PART_BuiltinSearchTipText.Text = $"{string.Join("、", vendors.Select(BuiltinWebSearch.FullName))}的模型可使用内置搜索。";
-                PART_OpenBuiltinSearchProviders.Content = "在模型服务中开启";
+                PART_BuiltinSearchTipText.Text = "部分模型支持内置搜索。";
+                PART_OpenBuiltinSearchProviders.Content = "前往模型服务";
             }
 
             var deepSeekConfigured = _settings.IsWebSearchProviderConfigured("deepseek");
@@ -932,10 +927,10 @@ public partial class SettingsWindow : MolaContentWindow
             var deepSeekFetch = _settings.EffectiveDeepSeekFetchEnabled;
             PART_WebFetchMode.SelectedIndex = deepSeekFetch ? 1 : 0;
             PART_WebFetchHint.Text = deepSeekFetch
-                ? "按次计费，使用 DeepSeek Search 的配置。"
+                ? "使用 DeepSeek Search 读取网页，按成功请求计费。"
                 : deepSeekConfigured
-                    ? "由本机直接读取网页，免费。"
-                    : "由本机直接读取网页，免费。DeepSeek 读取需先配置 DeepSeek Search。";
+                    ? "本机读取不产生额外费用。"
+                    : "使用 DeepSeek 读取需先配置 DeepSeek Search。";
 
             PART_SearchStatus.Text = provider switch
             {

@@ -514,7 +514,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     }
 
     public string ThinkingToolTip => IsThinkingForcedByBuiltinSearch
-        ? "使用 DeepSeek 内置搜索时保持开启"
+        ? "DeepSeek 内置搜索需要开启推理"
         : "开启推理：复杂问题先推理后回答";
 
     /// <summary>Effort-only models expose controls without a thinking toggle.</summary>

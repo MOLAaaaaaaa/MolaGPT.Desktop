@@ -126,11 +126,11 @@ public static class BuiltinWebSearch
 
     public static string DescribeToolHint(BuiltinSearchVendor vendor) => vendor switch
     {
-        BuiltinSearchVendor.DeepSeek => "由 DeepSeek 直接搜索网页，不单独计费。仅部分模型支持，使用时会开启深度思考。",
-        BuiltinSearchVendor.OpenAi => "由 OpenAI 直接搜索网页，按次计费，搜索内容计入输入 Token。仅部分模型支持。",
-        BuiltinSearchVendor.Bailian => "由百炼直接搜索网页，按次计费，搜索内容计入输入 Token。仅部分模型支持。",
-        BuiltinSearchVendor.Anthropic => "由 Anthropic 直接搜索网页，按次计费，搜索内容计入输入 Token。仅部分模型支持。",
-        BuiltinSearchVendor.Gemini => "由 Google 搜索提供结果，按次计费。仅部分模型支持。",
+        BuiltinSearchVendor.DeepSeek => "仅部分模型支持。使用时开启深度思考，搜索不单独计费。",
+        BuiltinSearchVendor.OpenAi => "仅部分模型支持。搜索按次计费，模型用量另计。",
+        BuiltinSearchVendor.Bailian => "仅部分模型支持。搜索可能产生额外费用，模型用量另计。",
+        BuiltinSearchVendor.Anthropic => "仅部分模型支持。搜索按次计费，模型用量另计。",
+        BuiltinSearchVendor.Gemini => "仅部分模型支持，使用时可能产生额外费用。",
         _ => string.Empty
     };
 

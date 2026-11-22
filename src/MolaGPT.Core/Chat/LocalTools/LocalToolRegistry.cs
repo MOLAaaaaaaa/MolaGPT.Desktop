@@ -497,12 +497,12 @@ public static partial class LocalToolRegistry
         if (NormalizeSearchProvider(options.SearchProvider) == "molagpt")
             return await SearchMolaAccountAsync(argumentsJson, options, accountSearch, ct).ConfigureAwait(false);
 
-        if (BuiltinWebSearch.TryParseProviderId(options.SearchProvider, out var builtinVendor))
+        if (BuiltinWebSearch.TryParseProviderId(options.SearchProvider, out _))
             return SerializeToolResult(new
             {
                 success = false,
                 source = "local_search_web",
-                error = $"当前使用 {BuiltinWebSearch.Label(builtinVendor)}，search_web 不可用。"
+                error = "已启用模型内置搜索，无法使用其他搜索服务。"
             });
 
         var queries = ParseSearchQueries(argumentsJson);

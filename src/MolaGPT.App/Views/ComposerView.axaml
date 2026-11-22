@@ -397,7 +397,7 @@
                                      VerticalAlignment="Center" />
                           <TextBlock Grid.Column="1" Text="{Binding ActiveBuiltinSearchNote}"
                                      FontSize="12" Foreground="{DynamicResource Brush.Text.Secondary}"
-                                     TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                     TextWrapping="Wrap" VerticalAlignment="Center" />
                           <Button Grid.Column="2" Classes="textlink" Content="更改"
                                   Click="OnOpenBuiltinSearchSettings" VerticalAlignment="Center" />
                         </Grid>
@@ -831,8 +831,8 @@
     <Style Selector="Button.searchoption:pointerover /template/ Border#PART_Root">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
     </Style>
-    <Style Selector="Button.searchoption:disabled">
-      <Setter Property="Opacity" Value="0.6" />
+    <Style Selector="Button.searchoption:disabled /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Opacity" Value="0.65" />
     </Style>
     <Style Selector="Border.searchnote">
       <Setter Property="Margin" Value="4,0,4,6" />

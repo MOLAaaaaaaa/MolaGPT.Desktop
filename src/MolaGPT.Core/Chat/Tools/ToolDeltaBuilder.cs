@@ -321,7 +321,7 @@ public static class ToolDeltaBuilder
     private static string LocalToolPendingLabel(string toolName) => toolName switch
     {
         "search_web" => "联网搜索",
-        "web_fetch" => "网页阅读",
+        "web_fetch" => "网页读取",
         "read_file" => "读取文件",
         "glob_files" => "查找文件",
         "grep_files" => "搜索内容",
