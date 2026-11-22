@@ -1432,11 +1432,10 @@ public sealed partial class ComposerViewModel : ObservableObject
             enabledTools["webPageMaxCharacters"] = _settings?.WebPageMaxCharacters ?? 12000;
             // DeepSeek 的网页抓取是可选的替换实现：同一个 Key、同一个账户，开着就
             // 走服务端的 /tools/fetch，关着仍然是本地抓取。
-            if (_settings?.DeepSeekFetchEnabled == true
-                && !string.IsNullOrWhiteSpace(_settings.DeepSeekFetchApiKey))
+            if (_settings?.DeepSeekFetchEnabled == true)
             {
                 enabledTools["fetchProvider"] = "deepseek";
-                enabledTools["fetchApiKey"] = _settings.DeepSeekFetchApiKey;
+                enabledTools["fetchApiKey"] = _settings.DeepSeekFetchApiKey ?? string.Empty;
                 enabledTools["fetchBaseUrl"] = _settings.DeepSeekFetchBaseUrl;
             }
             enabledTools["mcpServers"] = SubjectPersona?.Profile.EnableMcp == false

@@ -25,16 +25,24 @@ public static class DeepSeekServerSearch
     public const string ToolName = "deepseek_web_search";
 
     /// <summary>
-    /// 只有 DeepSeek 的模型能用：id 里带 deepseek，但 <c>deepseek-v4-pro</c> 除外。
-    /// 后者是给内部压测留的口子，不对普通会话开放服务端搜索。
+    /// DeepSeek Web Tools 当前支持 deepseek-flash。
     /// </summary>
     public static bool IsSupportedModel(string? modelId)
     {
-        if (string.IsNullOrWhiteSpace(modelId)) return false;
-        var id = modelId.Trim();
-        if (id.Contains("deepseek-v4-pro", StringComparison.OrdinalIgnoreCase)) return false;
-        return id.Contains("deepseek", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(modelId?.Trim(), "deepseek-flash", StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>仅对 DeepSeek 官方端点启用其专有工具；接受 Base URL 或完整端点。</summary>
+    public static bool IsSupportedTarget(string? modelId, string? endpoint) =>
+        IsSupportedModel(modelId) && IsOfficialEndpoint(endpoint);
+
+    /// <summary>判断 Base URL 或完整请求地址是否为 DeepSeek 官方 HTTPS 端点。</summary>
+    public static bool IsOfficialEndpoint(string? endpoint) =>
+        Uri.TryCreate(endpoint, UriKind.Absolute, out var uri)
+        && uri.Scheme == Uri.UriSchemeHttps
+        && uri.IsDefaultPort
+        && string.IsNullOrEmpty(uri.UserInfo)
+        && string.Equals(uri.Host, "api.deepseek.com", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// 端点类型（设置里那一列的 openai-compat / anthropic / openai-response）能不能
@@ -67,7 +75,7 @@ public static class DeepSeekServerSearch
     {
         if (!string.Equals(protocol, "responses", StringComparison.Ordinal)) return endpoint;
         if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri)) return endpoint;
-        if (!uri.Host.EndsWith("deepseek.com", StringComparison.OrdinalIgnoreCase)) return endpoint;
+        if (!IsOfficialEndpoint(endpoint)) return endpoint;
 
         const string versioned = "/v1/responses";
         var path = uri.AbsolutePath;
@@ -105,13 +113,22 @@ public static class DeepSeekServerSearch
                 body.Remove("logprobs");
                 body.Remove("top_logprobs");
                 NormalizeResponseFormat(body);
-                FixToolChoice(body);
+                FixToolChoice(body, protocol);
                 break;
 
             case "responses":
                 AppendTool(body, new JsonObject { ["type"] = ToolName });
                 EnableThinking(body, thinkingDialect: false);
-                FixToolChoice(body);
+                body.Remove("top_logprobs");
+                if (body["text"] is JsonObject text && text["format"] is JsonObject format
+                    && !string.Equals((string?)format["type"], "text", StringComparison.OrdinalIgnoreCase))
+                    text.Remove("format");
+                if (body["tools"] is JsonArray responseTools)
+                    for (var i = responseTools.Count - 1; i >= 0; i--)
+                        if (responseTools[i] is JsonObject entry
+                            && (string?)entry["type"] is "web_search" or "custom" or "namespace" or "tool_search")
+                            responseTools.RemoveAt(i);
+                FixToolChoice(body, protocol);
                 break;
 
             case "messages":
@@ -122,7 +139,7 @@ public static class DeepSeekServerSearch
                     ["name"] = ToolName
                 });
                 EnableThinking(body, thinkingDialect: true);
-                FixToolChoice(body);
+                FixToolChoice(body, protocol);
                 break;
 
             default:
@@ -150,21 +167,23 @@ public static class DeepSeekServerSearch
     }
 
     /// <summary>
-    /// 服务端搜索只在思考模式下允许：不带思考时 DeepSeek 连客户端工具都一起拒掉
-    /// (400)。请求侧已经强制开思考了，这里只是把字段补到位——没开的话 Pi 发出去的
-    /// 请求体里根本没有这个键。
+    /// 本客户端的服务端搜索采用深度思考模式，并覆盖请求中的关闭值。
     /// </summary>
     private static void EnableThinking(JsonObject body, bool thinkingDialect)
     {
         if (thinkingDialect)
         {
             if (body["thinking"] is not JsonObject)
-                body["thinking"] = new JsonObject { ["type"] = "enabled" };
+                body["thinking"] = new JsonObject();
+            ((JsonObject)body["thinking"]!)["type"] = "enabled";
             return;
         }
 
         if (body["reasoning"] is not JsonObject)
-            body["reasoning"] = new JsonObject { ["effort"] = "high" };
+            body["reasoning"] = new JsonObject();
+        var reasoning = (JsonObject)body["reasoning"]!;
+        if (reasoning["effort"] is null || string.Equals((string?)reasoning["effort"], "none", StringComparison.OrdinalIgnoreCase))
+            reasoning["effort"] = "high";
     }
 
     private static void NormalizeResponseFormat(JsonObject body)
@@ -178,21 +197,32 @@ public static class DeepSeekServerSearch
     }
 
     /// <summary>
-    /// <c>tool_choice</c> 不能点名服务端工具（400），<c>"required"</c> 也不行——
-    /// 必选一个不存在的函数同样无解。两种都退回 <c>auto</c>；<c>"none"</c> 保持，
-    /// 那是用户明确要求这一轮不调工具。
+    /// 保留明确关闭工具的意图，并将不兼容的指定工具选择转为自动。
     /// </summary>
-    private static void FixToolChoice(JsonObject body)
+    private static void FixToolChoice(JsonObject body, string protocol)
     {
         switch (body["tool_choice"])
         {
+            case JsonValue value when protocol == "messages":
+                var type = value.ToString();
+                body["tool_choice"] = new JsonObject
+                {
+                    ["type"] = string.Equals(type, "required", StringComparison.OrdinalIgnoreCase) ? "auto" : type
+                };
+                break;
+
             case JsonValue value when string.Equals(value.ToString(), "required", StringComparison.OrdinalIgnoreCase):
                 body["tool_choice"] = "auto";
                 break;
 
-            case JsonObject choice:
-                // Anthropic 的 {"type":"tool","name":...} 和 OpenAI 的
-                // {"type":"function","function":{"name":...}} 都是在点名。
+            case JsonObject choice when protocol == "messages"
+                && string.Equals((string?)choice["type"], "tool", StringComparison.OrdinalIgnoreCase):
+                body["tool_choice"] = new JsonObject { ["type"] = "auto" };
+                break;
+
+            case JsonObject choice when protocol != "messages"
+                && !string.Equals((string?)choice["type"], "none", StringComparison.OrdinalIgnoreCase)
+                && (protocol == "chat" || string.Equals((string?)choice["type"], ToolName, StringComparison.OrdinalIgnoreCase)):
                 body["tool_choice"] = "auto";
                 break;
         }
@@ -202,11 +232,8 @@ public static class DeepSeekServerSearch
 /// <summary>
 /// 从响应流里收集服务端搜索命中的来源。
 ///
-/// 三种协议把结果放在完全不同的位置（Chat Completions 的 <c>annotations</c>、
-/// Messages 的 <c>web_search_tool_result</c> 块、Responses 的 <c>output_item</c>），
-/// 但落到最后都是一个带 url 与 title 的小对象。所以这里不按协议各写一套解析，
-/// 而是深度遍历每个 SSE <c>data</c> 负载，认这种对象即可——协议再多一种也照样
-/// 认得出来。
+/// 只收集结果、页面和引用中的网址，不把工具调用的 action 当作成功结果。
+/// 原始引用位置不会随 Pi 的文本事件转发，因此这里仅提供来源列表。
 ///
 /// 只在转发线程上被写入、在流的循环里被读取，一把锁足够。
 /// </summary>
@@ -226,12 +253,11 @@ public sealed class ServerSearchSources
     {
         if (chunk.IsEmpty) return;
 
-        // UTF-8 的一个字符可能跨 chunk，必须用增量解码器，不能逐段 GetString。
-        var chars = new char[_decoder.GetCharCount(chunk.Span, flush: false)];
-        _decoder.GetChars(chunk.Span, chars, flush: false);
-
         lock (_gate)
         {
+            // UTF-8 的一个字符可能跨 chunk，必须用增量解码器。
+            var chars = new char[_decoder.GetCharCount(chunk.Span, flush: false)];
+            _decoder.GetChars(chunk.Span, chars, flush: false);
             foreach (var c in chars)
             {
                 if (c == '\n')
@@ -282,24 +308,40 @@ public sealed class ServerSearchSources
         try { doc = JsonDocument.Parse(payload); }
         catch (JsonException) { return; }
 
-        using (doc) Walk(doc.RootElement);
+        using (doc) Walk(doc.RootElement, false);
     }
 
-    private void Walk(JsonElement element)
+    private void Walk(JsonElement element, bool source)
     {
         switch (element.ValueKind)
         {
             case JsonValueKind.Array:
-                foreach (var item in element.EnumerateArray()) Walk(item);
+                foreach (var item in element.EnumerateArray()) Walk(item, source);
                 break;
 
             case JsonValueKind.Object:
-                if (TryReadSource(element, out var title, out var url, out var date))
+                var type = FirstString(element, "type");
+                var isSource = source || type is "web_search_result" or "web_fetch_result"
+                    or "web_search_result_location" or "url_citation";
+                if (isSource && TryReadSource(element, out var title, out var url, out var date))
                 {
                     Add(title, url, date);
-                    return;
                 }
-                foreach (var property in element.EnumerateObject()) Walk(property.Value);
+                foreach (var property in element.EnumerateObject())
+                {
+                    // Responses 的搜索结果在 action.sources；action.url 则只是请求。
+                    if (property.NameEquals("action"))
+                    {
+                        if (property.Value.ValueKind == JsonValueKind.Object
+                            && property.Value.TryGetProperty("sources", out var results))
+                            Walk(results, true);
+                        continue;
+                    }
+                    if (property.NameEquals("input")) continue;
+                    var childIsSource = property.Name is "sources" or "page" or "annotations"
+                        or "annotation" or "citations" or "citation" or "url_citation";
+                    Walk(property.Value, childIsSource);
+                }
                 break;
         }
     }
@@ -320,8 +362,11 @@ public sealed class ServerSearchSources
             return false;
 
         // title 是引用条目和结果条目都有的；没有就退到站点名，再没有就用地址。
-        title = FirstString(obj, "title", "site_name") ?? href;
-        date = FirstString(obj, "published_date", "date", "page_age");
+        title = FirstString(obj, "title", "site_name")
+            ?? (obj.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Object
+                ? FirstString(content, "title") : null)
+            ?? href;
+        date = FirstString(obj, "published_at", "published_date", "date", "page_age");
         url = href;
         return true;
     }
@@ -344,7 +389,7 @@ public sealed class ServerSearchSources
         {
             // 同一地址可能先以站点名出现、后补上标题；标题更具体，值得替换。
             var at = _sources.FindIndex(s => s.Id == existing);
-            if (at >= 0 && _sources[at].Title != title)
+            if (at >= 0 && _sources[at].Title != title && title != url)
             {
                 _sources[at] = _sources[at] with { Title = title };
                 _dirty = true;

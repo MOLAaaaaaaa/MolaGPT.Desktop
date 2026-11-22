@@ -26,6 +26,8 @@ public partial class ComposerView : UserControl
         // This is the phase WPF's PreviewKeyDown gave for free.
         PART_Input.AddHandler(KeyDownEvent, OnInputKeyDown, RoutingStrategies.Tunnel);
         PART_Attach.Click += OnAttachClick;
+        PART_SearchProviderList.AddHandler(Button.ClickEvent, OnSearchProviderRowClicked,
+            RoutingStrategies.Bubble);
         PART_ClearPersona.Click += (_, _) => ClearPersona();
         PART_NewPersona.Click += (_, _) => OpenPersonaSettings(true);
         PART_ManagePersonas.Click += (_, _) => OpenPersonaSettings(false);
@@ -80,6 +82,14 @@ public partial class ComposerView : UserControl
     }
 
     public event EventHandler? ApprovalSettingsRequested;
+
+    private void OnSearchProviderRowClicked(object? sender, RoutedEventArgs e)
+    {
+        if (e.Source is not Button { DataContext: SearchProviderChoice choice, IsEnabled: true }
+            || DataContext is not ComposerViewModel vm) return;
+        vm.SelectSearchProviderCommand.Execute(choice);
+        PART_SearchProvider.Flyout?.Hide();
+    }
 
     private void OnOpenApprovalSettings(object? sender, RoutedEventArgs e)
     {

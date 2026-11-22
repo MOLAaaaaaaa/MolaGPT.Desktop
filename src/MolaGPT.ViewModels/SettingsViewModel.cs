@@ -53,6 +53,8 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string TrayCloseBehaviorKey = "tray_close_behavior";
     private const string WebSearchProviderKey = "web_search_provider";
     private const string WebSearchBaseUrlKey = "web_search_base_url";
+    private const string WebSearchBaseUrlPrefix = "web_search_base_url:";
+    private const string WebSearchKeyOriginPrefix = "web_search_key_origin:";
     private const string WebSearchMaxResultsKey = "web_search_max_results";
     private const string WebPageMaxCharactersKey = "web_page_max_characters";
     private const string DeepSeekFetchEnabledKey = "deepseek_fetch_enabled";
@@ -218,6 +220,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string _webSearchProvider = "molagpt";
     [ObservableProperty] private string? _webSearchBaseUrl;
     [ObservableProperty] private string? _webSearchApiKey;
+    private bool _loadingSearchSettings;
     [ObservableProperty] private int _webSearchMaxResults = 6;
     [ObservableProperty] private int _webPageMaxCharacters = 12000;
 
@@ -452,7 +455,18 @@ public sealed partial class SettingsViewModel : ObservableObject
                 CornerStyle = cornerStyle;
             }
             WebSearchProvider = NormalizeWebSearchProvider(_settingsRepo.Get(WebSearchProviderKey));
-            WebSearchBaseUrl = _settingsRepo.Get(WebSearchBaseUrlKey) ?? DefaultWebSearchBaseUrl(WebSearchProvider);
+            var searchUrlKey = WebSearchBaseUrlPrefix + WebSearchProvider;
+            var searchUrl = _settingsRepo.Get(searchUrlKey);
+            if (searchUrl is null)
+            {
+                // Only the active legacy provider has a known address. Other legacy
+                // keys remain stored until their owner supplies an address and key.
+                searchUrl = _settingsRepo.Get(WebSearchBaseUrlKey) ?? DefaultWebSearchBaseUrl(WebSearchProvider);
+                _settingsRepo.Set(searchUrlKey, searchUrl);
+                if (SearchOrigin(searchUrl, WebSearchProvider) is { } legacyOrigin)
+                    _settingsRepo.Set(WebSearchKeyOriginPrefix + WebSearchProvider, legacyOrigin);
+            }
+            WebSearchBaseUrl = searchUrl;
             if (int.TryParse(_settingsRepo.Get(WebSearchMaxResultsKey), out var maxResults))
                 WebSearchMaxResults = Math.Clamp(maxResults, 1, WebSearchProvider == "molagpt" ? 6 : 10);
             if (int.TryParse(_settingsRepo.Get(WebPageMaxCharactersKey), out var maxChars))
@@ -463,7 +477,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 out var autoTitleEnabled) || autoTitleEnabled;
             _titleProviderId = _settingsRepo.Get(ConversationTitleService.TitleProviderIdKey);
             _titleModelId = _settingsRepo.Get(ConversationTitleService.TitleModelIdKey);
-            WebSearchApiKey = _credentialStore?.LoadSecret(WebSearchSecretPrefix + WebSearchProvider);
+            WebSearchApiKey = StoredWebSearchApiKey(WebSearchProvider, WebSearchBaseUrl);
             LoadMcpServers();
             VisionProxyEnabled = bool.TryParse(_settingsRepo.Get(VisionProxyEnabledKey), out var visionEnabled) && visionEnabled;
             VisionProxyProviderId = _settingsRepo.Get(VisionProxyProviderIdKey);
@@ -758,27 +772,47 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
         WebSearchMaxResults = Math.Clamp(WebSearchMaxResults, 1, provider == "molagpt" ? 6 : 10);
         _settingsRepo.Set(WebSearchProviderKey, provider);
-        WebSearchBaseUrl = DefaultWebSearchBaseUrl(provider);
-        WebSearchApiKey = _credentialStore?.LoadSecret(WebSearchSecretPrefix + provider);
+        _loadingSearchSettings = true;
+        try
+        {
+            WebSearchBaseUrl = _settingsRepo.Get(WebSearchBaseUrlPrefix + provider) ?? DefaultWebSearchBaseUrl(provider);
+            WebSearchApiKey = StoredWebSearchApiKey(provider, WebSearchBaseUrl);
+        }
+        finally { _loadingSearchSettings = false; }
+        _settingsRepo.Set(WebSearchBaseUrlPrefix + provider, WebSearchBaseUrl ?? string.Empty);
+        // Keep the old single setting in sync for compatibility with older versions.
+        _settingsRepo.Set(WebSearchBaseUrlKey, WebSearchBaseUrl ?? string.Empty);
     }
 
     partial void OnWebSearchBaseUrlChanged(string? value)
     {
-        if (_loadingSettings || _settingsRepo is null) return;
-        if (string.IsNullOrWhiteSpace(value))
-            _settingsRepo.Remove(WebSearchBaseUrlKey);
-        else
-            _settingsRepo.Set(WebSearchBaseUrlKey, value.Trim());
+        if (_loadingSettings || _loadingSearchSettings || _settingsRepo is null) return;
+        var provider = NormalizeWebSearchProvider(WebSearchProvider);
+        var address = value?.Trim() ?? string.Empty;
+        _settingsRepo.Set(WebSearchBaseUrlPrefix + provider, address);
+        _settingsRepo.Set(WebSearchBaseUrlKey, address);
+        _loadingSearchSettings = true;
+        try { WebSearchApiKey = StoredWebSearchApiKey(provider, address); }
+        finally { _loadingSearchSettings = false; }
     }
 
     partial void OnWebSearchApiKeyChanged(string? value)
     {
-        if (_loadingSettings || _credentialStore is null) return;
-        var key = WebSearchSecretPrefix + NormalizeWebSearchProvider(WebSearchProvider);
+        if (_loadingSettings || _loadingSearchSettings || _credentialStore is null || _settingsRepo is null) return;
+        var provider = NormalizeWebSearchProvider(WebSearchProvider);
+        var key = WebSearchSecretPrefix + provider;
+        // A failed write must never leave a newly saved key bound to an old host.
+        _settingsRepo.Remove(WebSearchKeyOriginPrefix + provider);
         if (string.IsNullOrWhiteSpace(value))
+        {
             _credentialStore.RemoveSecret(key);
+        }
         else
+        {
             _credentialStore.SaveSecret(key, value.Trim());
+            if (SearchOrigin(WebSearchBaseUrl, provider) is { } origin)
+                _settingsRepo.Set(WebSearchKeyOriginPrefix + provider, origin);
+        }
     }
 
     partial void OnWebSearchMaxResultsChanged(int value)
@@ -801,31 +835,40 @@ public sealed partial class SettingsViewModel : ObservableObject
         _settingsRepo.Set(DeepSeekFetchEnabledKey, value.ToString());
     }
 
-    /// <summary>
-    /// 会话级切换要用到的「某个服务商的 Key / Base URL」，而不是当前选中的那个。
-    /// 密钥本来就按服务商分开存，取哪个都拿得到；Base URL 只有一行全局记录，
-    /// 所以非当前服务商回落到它自己的默认地址。
-    /// </summary>
+    /// <summary>取得服务商和地址对应的搜索密钥。</summary>
     public string? WebSearchApiKeyFor(string provider)
     {
         var normalized = NormalizeWebSearchProvider(provider);
-        var stored = _credentialStore?.LoadSecret(WebSearchSecretPrefix + normalized);
+        var address = WebSearchBaseUrlFor(normalized);
+        var stored = StoredWebSearchApiKey(normalized, address);
         if (!string.IsNullOrWhiteSpace(stored)) return stored;
-
-        // DeepSeek 的搜索和对话是同一个账户，同一个 Key。已经在「模型服务」里配好
-        // DeepSeek 的人不该为了搜索再抄一遍——那一份 Key 只存在服务商行里（不在这
-        // 个凭据库里），所以这里回读一次。留空才算没配。
-        return normalized == "deepseek" ? DeepSeekProviderApiKey() : null;
+        return normalized == "deepseek" && DeepSeekServerSearch.IsOfficialEndpoint(address) ? DeepSeekProviderApiKey() : null;
     }
 
-    /// <summary>DeepSeek 服务商行里那个 Key，给搜索做兜底。按地址认，地址看不出来
-    /// 时按名字认；两者都看不出来就不猜。</summary>
     private string? DeepSeekProviderApiKey() =>
         Providers.FirstOrDefault(entry =>
-            entry.Purpose == "chat"
-            && entry.ApiKey is { Length: > 0 }
-            && (entry.BaseUrl?.Contains("deepseek.com", StringComparison.OrdinalIgnoreCase) == true
-                || entry.Name.Contains("deepseek", StringComparison.OrdinalIgnoreCase)))?.ApiKey;
+            entry.Enabled && entry.Purpose == "chat"
+            && !string.IsNullOrWhiteSpace(entry.ApiKey)
+            && DeepSeekServerSearch.IsOfficialEndpoint(entry.BaseUrl))?.ApiKey;
+
+    private string? StoredWebSearchApiKey(string provider, string? address)
+    {
+        var origin = SearchOrigin(address, provider);
+        return origin is not null
+            && string.Equals(origin, _settingsRepo?.Get(WebSearchKeyOriginPrefix + provider), StringComparison.OrdinalIgnoreCase)
+                ? _credentialStore?.LoadSecret(WebSearchSecretPrefix + provider)
+                : null;
+    }
+
+    private static string? SearchOrigin(string? address, string provider)
+    {
+        var url = string.IsNullOrWhiteSpace(address) ? DefaultWebSearchBaseUrl(provider) : address.Trim();
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            && uri.Scheme is "http" or "https"
+            && string.IsNullOrEmpty(uri.UserInfo)
+                ? uri.GetComponents(UriComponents.SchemeAndServer, UriFormat.UriEscaped)
+                : null;
+    }
 
     public string WebSearchBaseUrlFor(string provider)
     {
@@ -836,7 +879,8 @@ public sealed partial class SettingsViewModel : ObservableObject
             return WebSearchBaseUrl!.Trim();
         }
 
-        return DefaultWebSearchBaseUrl(normalized);
+        var stored = _settingsRepo?.Get(WebSearchBaseUrlPrefix + normalized);
+        return string.IsNullOrWhiteSpace(stored) ? DefaultWebSearchBaseUrl(normalized) : stored.Trim();
     }
 
     /// <summary>DeepSeek 网页抓取沿用 DeepSeek 搜索的 Key 与地址：同一个服务商、同一个

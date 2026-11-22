@@ -108,6 +108,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // 而不是给模型一个还能查网的工具。
         var serverSearchProtocol = options.Network
             && string.Equals(options.SearchProvider, DeepSeekServerSearch.ProviderId, StringComparison.OrdinalIgnoreCase)
+            && DeepSeekServerSearch.IsSupportedTarget(creds.Model, creds.Endpoint)
             ? DeepSeekServerSearch.ResolveProtocol(creds.Api)
             : null;
         if (serverSearchProtocol is null
@@ -159,10 +160,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         var hints = await _toolHost.DescribeAgentToolsAsync(options, ct).ConfigureAwait(false);
         var toolCatalogJson = BuildToolCatalog(localDefs.Concat(hostDefs), hints);
 
-        // 服务端搜索只在思考模式下被允许：不带思考时，连客户端工具都会被端点
-        // 拒掉（tools: client tools can only be used together with
-        // 'deepseek_web_search' in thinking mode）。这里替用户打开它 —— 会话里
-        // 选了「服务端搜索」就是这个意思，并且在界面上说明过。
+        // 客户端同时提供本地工具，服务端搜索使用界面说明的深度思考模式。
         if (serverSearchProtocol is not null && request.UseThinking != true)
         {
             request = request with

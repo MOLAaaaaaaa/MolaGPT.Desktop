@@ -808,15 +808,11 @@ public partial class SettingsWindow : MolaContentWindow
         var maxResults = provider == "molagpt" ? 6 : 10;
         PART_SearchMaxResults.Maximum = maxResults;
         PART_SearchKeyRows.IsVisible = provider != "molagpt";
-        // DeepSeek 的网页抓取复用搜索的 API Key，所以它只在那个服务商下露面。
-        PART_DeepSeekFetchRow.IsVisible = provider == "deepseek";
         PART_SearchProviderHint.Text = provider switch
         {
             "molagpt" => "MolaGPT 提供的开箱即用的搜索服务，登录后可用。无需 API Key，将使用少量账户额度。",
             "duckduckgo" => "免费使用，无需 API Key。",
-            "deepseek" => "DeepSeek 官方搜索 API（/v1/tools/search）。留空则沿用「模型服务」里 DeepSeek 的 API Key，按次计费。",
-            // 这一项在会话里选，不在这里。看得到说明，选不中。
-            "deepseek-server" => "DeepSeek官方提供的服务端搜索工具，搜索不按次收费，每次搜索都会额外消耗模型Token。可在对话顶部的搜索菜单里为单个会话启用。",
+            "deepseek" => "使用官方地址时，可沿用模型服务中 DeepSeek 的 API Key。按成功请求计费。",
             _ => "使用自备 API Key。"
         };
         PART_SearchStatus.Text = provider switch
@@ -850,7 +846,8 @@ public partial class SettingsWindow : MolaContentWindow
 
     private async void OnTestSearch(object? sender, RoutedEventArgs e)
     {
-        var molaSearch = SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider) == "molagpt";
+        var provider = SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider);
+        var molaSearch = provider == "molagpt";
         if (!molaSearch && _byokHttpFactory is null) return;
 
         PART_TestSearch.IsEnabled = false;
@@ -867,9 +864,9 @@ public partial class SettingsWindow : MolaContentWindow
             var options = new LocalToolOptions(
                 Network: true,
                 WebPage: false,
-                SearchProvider: _settings.WebSearchProvider,
-                SearchApiKey: _settings.WebSearchApiKey,
-                SearchBaseUrl: _settings.WebSearchBaseUrl,
+                SearchProvider: provider,
+                SearchApiKey: _settings.WebSearchApiKeyFor(provider),
+                SearchBaseUrl: _settings.WebSearchBaseUrlFor(provider),
                 SearchMaxResults: Math.Clamp(_settings.WebSearchMaxResults, 1, 10),
                 WebPageMaxCharacters: Math.Clamp(_settings.WebPageMaxCharacters, 1000, 30000));
             using var http = _byokHttpFactory!();
@@ -878,9 +875,17 @@ public partial class SettingsWindow : MolaContentWindow
             using var document = JsonDocument.Parse(result);
             var ok = document.RootElement.TryGetProperty("success", out var success)
                      && success.ValueKind == JsonValueKind.True;
-            PART_SearchStatus.Text = ok
-                ? "搜索可用。"
-                : "搜索不可用，请检查 API Key 或接口地址。";
+            if (ok && document.RootElement.TryGetProperty("queries", out var queries)
+                && queries.ValueKind == JsonValueKind.Array && queries.GetArrayLength() > 0)
+            {
+                var query = queries[0];
+                PART_SearchStatus.Text = query.TryGetProperty("error", out var error)
+                    && error.ValueKind == JsonValueKind.String
+                    ? "搜索失败：" + error.GetString()
+                    : "搜索可用。";
+            }
+            else
+                PART_SearchStatus.Text = "搜索不可用，请检查 API Key 或接口地址。";
         }
         catch (Exception ex)
         {

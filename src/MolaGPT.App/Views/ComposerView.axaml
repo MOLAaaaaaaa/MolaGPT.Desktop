@@ -366,6 +366,45 @@
             <TextBlock Text="网络访问" VerticalAlignment="Center" />
           </StackPanel>
         </ToggleButton>
+        <Button Name="PART_SearchProvider" Classes="toolchip"
+                IsVisible="{Binding IsSearchProviderSwitchVisible}"
+                IsEnabled="{Binding AreNetworkToolsEnabled}"
+                ToolTip.Tip="选择本会话的搜索服务">
+          <StackPanel Classes="inlinerow" Orientation="Horizontal">
+            <TextBlock Text="{Binding ActiveSearchProviderLabel}" IsVisible="{Binding EnableNetwork}"
+                       MaxWidth="160" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+            <TextBlock Text="网络访问已关闭" IsVisible="{Binding !EnableNetwork}" VerticalAlignment="Center" />
+            <TextBlock Classes="icon" Text="&#xE70D;" FontSize="9" Margin="6,0,0,0" VerticalAlignment="Center" />
+          </StackPanel>
+          <Button.Flyout>
+            <Flyout Placement="TopEdgeAlignedLeft" FlyoutPresenterClasses="molaflyout">
+              <Border Classes="flyoutsurface personapanel" Width="360">
+                <StackPanel>
+                  <TextBlock Text="本会话的搜索服务" Classes="muted" FontSize="12"
+                             FontWeight="SemiBold" Margin="10,2,10,6" />
+                  <ItemsControl Name="PART_SearchProviderList" ItemsSource="{Binding SearchProviderChoices}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="vm:SearchProviderChoice">
+                        <Button Classes="searchoption" IsEnabled="{Binding IsSelectable}">
+                          <Grid ColumnDefinitions="*,Auto">
+                            <StackPanel Spacing="1">
+                              <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                              <TextBlock Text="{Binding Detail}" IsVisible="{Binding HasDetail}"
+                                         Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <TextBlock Grid.Column="1" Classes="icon" Text="&#xE73E;" FontSize="12"
+                                       Margin="8,0,0,0" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Brush.Primary}" IsVisible="{Binding IsSelected}" />
+                          </Grid>
+                        </Button>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+              </Border>
+            </Flyout>
+          </Button.Flyout>
+        </Button>
       </WrapPanel>
 
       <Border Grid.Row="2" Classes="imageoptions" IsVisible="{Binding IsImageOptionsVisible}">
@@ -752,6 +791,17 @@
   </Border>
 
   <UserControl.Styles>
+    <Style Selector="Button.searchoption">
+      <Setter Property="Padding" Value="10,7" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    </Style>
+    <Style Selector="Button.searchoption:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
     <Style Selector="Button.modechip">
       <Setter Property="Height" Value="28" />
       <Setter Property="MinHeight" Value="28" />

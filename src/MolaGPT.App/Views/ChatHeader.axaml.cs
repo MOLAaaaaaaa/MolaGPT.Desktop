@@ -1,6 +1,5 @@
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
-using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Threading;
 using MolaGPT.Core.Chat;
@@ -30,13 +29,6 @@ public partial class ChatHeader : UserControl
         PART_OtherModes.Click += (_, _) => SwapModelSide();
         PART_WorkbenchSearch.TextChanged += (_, _) => RebuildWorkbenchModels();
         PART_WorkbenchModels.SelectionChanged += OnWorkbenchModelPicked;
-
-        // The rows run their own command (the binding is in the template); this
-        // handler only closes the flyout. A plain Button inside a Flyout does not
-        // dismiss it the way a menu item would, and leaving it open hides the pill
-        // label the click just changed.
-        PART_SearchProviderList.AddHandler(Button.ClickEvent, OnSearchProviderRowClicked,
-            RoutingStrategies.Bubble);
 
         // The list is rebuilt each time the flyout opens rather than kept live:
         // providers change when a key is added or a sidecar starts, and a stale
@@ -198,19 +190,6 @@ public partial class ChatHeader : UserControl
         _main.Settings.WorkbenchImageGenerationModelId = option.ModelId;
         SyncSecondaryUi();
         PART_WorkbenchSelector.Flyout?.Hide();
-    }
-
-    /// <summary>
-    /// 搜索服务商的一行被点了：交给 ViewModel 记住本会话的选择，然后收起下拉。
-    /// 行是 DataTemplate 里的按钮，命令不走绑定而在这里执行——模板里的按钮要拿
-    /// 到外层的命令得穿两层 DataContext，出错时是静默的（点了没反应），不如直接调。
-    /// </summary>
-    private void OnSearchProviderRowClicked(object? sender, RoutedEventArgs e)
-    {
-        if (e.Source is not Button { DataContext: SearchProviderChoice choice } button) return;
-        if (!button.IsEnabled) return;
-        _main?.Composer.SelectSearchProviderCommand.Execute(choice);
-        PART_SearchProvider.Flyout?.Hide();
     }
 
     private void OnMainPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)

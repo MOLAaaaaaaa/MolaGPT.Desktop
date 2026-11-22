@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -51,7 +52,9 @@ public static partial class LocalToolRegistry
                 function = new
                 {
                     name = "search_web",
-                    description = "在网络上搜索最新信息。适合查新闻、实时资料、产品/库/文档状态、事实核验。一次可提交 1 到 5 个查询。",
+                    description = searchProvider == "deepseek"
+                        ? "在网络上搜索最新信息。一次可提交 1 到 5 个查询，每个查询最多 128 个 Unicode 字符。"
+                        : "在网络上搜索最新信息。适合查新闻、实时资料、产品/库/文档状态、事实核验。一次可提交 1 到 5 个查询。",
                     parameters = new
                     {
                         type = "object",
@@ -786,6 +789,10 @@ public static partial class LocalToolRegistry
         HttpClient http,
         CancellationToken ct)
     {
+        var queryLength = 0;
+        foreach (var _ in query.EnumerateRunes())
+            if (++queryLength > 128)
+                throw new InvalidOperationException("DeepSeek 搜索词最多 128 个字符，请缩短后重试。");
         var apiKey = RequireApiKey(options, "DeepSeek");
         using var req = new HttpRequestMessage(HttpMethod.Post, DeepSeekToolEndpoint(options.SearchBaseUrl, "search"));
         req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + apiKey);

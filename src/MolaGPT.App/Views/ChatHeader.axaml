@@ -48,35 +48,33 @@
              the bottom of the window, so it had to flip to fit. -->
       </StackPanel>
 
-      <!-- Centre: model selector pill, with the conversation's search provider
-           beside it. The two belong on one row: the search provider only means
-           anything next to the model it will run on. -->
-      <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
-                  HorizontalAlignment="Left" Margin="16,0,0,0">
-
-      <Button
+      <!-- Centre: model selector pill -->
+      <Button Grid.Column="1"
               Name="PART_ModelSelector"
               Classes="outline"
               RenderTransform="{x:Null}"
+              HorizontalAlignment="Left"
               VerticalAlignment="Center"
               Padding="14,6"
+              Margin="16,0,0,0"
               IsVisible="{Binding !IsImageWorkbenchVisible}"
               ToolTip.Tip="选择模型">
-        <StackPanel Classes="inlinerow" Orientation="Horizontal" VerticalAlignment="Center">
+        <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
           <TextBlock Classes="icon" Text="&#xE99A;" FontSize="14" Margin="0,0,8,0"
                      VerticalAlignment="Center" />
           <!-- One TextBlock, two Runs: separate blocks get separate line boxes
                and their baselines drift a pixel or two (14px name vs 12px
                label). Runs share a baseline, so the junction stays flush. -->
-          <TextBlock TextWrapping="NoWrap" VerticalAlignment="Center">
+          <TextBlock Grid.Column="1" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                     MaxWidth="260" VerticalAlignment="Center">
             <Run Text="{Binding Chat.ActiveModelLabel}" FontWeight="SemiBold" />
             <Run Name="PART_ModeLabel"
                  FontSize="{DynamicResource Font.Size.XSmall}"
                  Foreground="{DynamicResource Brush.Text.Muted}" />
           </TextBlock>
-          <TextBlock Classes="icon" Text="&#xE70D;" FontSize="10" Margin="8,0,0,0"
+          <TextBlock Grid.Column="2" Classes="icon" Text="&#xE70D;" FontSize="10" Margin="8,0,0,0"
                      Opacity="0.6" VerticalAlignment="Center" />
-        </StackPanel>
+        </Grid>
 
         <Button.Flyout>
           <Flyout Placement="BottomEdgeAlignedLeft" ShowMode="Standard"
@@ -195,76 +193,13 @@
         </Button.Flyout>
       </Button>
 
-      <!-- 本会话的联网搜索服务商。只在本地 Agent 的会话里出现：Chat 模式的
-           搜索在服务端完成，这里换谁都不生效。外面那层 Panel 负责图像工作台那
-           一半条件——工作台下选的是画图的模型，没有搜索这回事。 -->
-      <Panel IsVisible="{Binding !IsImageWorkbenchVisible}">
-      <Button Name="PART_SearchProvider"
-              Classes="outline"
-              VerticalAlignment="Center"
-              Padding="12,6"
-              Margin="8,0,0,0"
-              IsVisible="{Binding Composer.IsSearchProviderSwitchVisible}"
-              ToolTip.Tip="本会话的联网搜索服务商">
-        <StackPanel Classes="inlinerow" Orientation="Horizontal" VerticalAlignment="Center">
-          <TextBlock Classes="icon" Text="&#xE721;" FontSize="12" Margin="0,0,7,0"
-                     VerticalAlignment="Center" Opacity="0.75" />
-          <TextBlock Text="联网搜索" FontSize="12" VerticalAlignment="Center"
-                     Foreground="{DynamicResource Brush.Text.Muted}" />
-          <TextBlock Text="·" FontSize="12" Margin="5,0" VerticalAlignment="Center"
-                     Foreground="{DynamicResource Brush.Text.Muted}" Opacity="0.7" />
-          <TextBlock Text="{Binding Composer.ActiveSearchProviderLabel}" FontSize="12"
-                     FontWeight="SemiBold" VerticalAlignment="Center"
-                     MaxWidth="190" TextTrimming="CharacterEllipsis" />
-          <TextBlock Classes="icon" Text="&#xE70D;" FontSize="9" Margin="7,0,0,0"
-                     Opacity="0.6" VerticalAlignment="Center" />
-        </StackPanel>
-        <Button.Flyout>
-          <Flyout Placement="BottomEdgeAlignedLeft" FlyoutPresenterClasses="molaflyout">
-            <Border Classes="flyoutsurface modelpanel" Width="360">
-              <StackPanel>
-                <TextBlock Text="本会话的联网搜索" Classes="muted" FontSize="12" FontWeight="SemiBold"
-                           Margin="10,2,10,6" />
-                <ItemsControl Name="PART_SearchProviderList"
-                              ItemsSource="{Binding Composer.SearchProviderChoices}">
-                  <ItemsControl.ItemTemplate>
-                    <DataTemplate x:DataType="vm:SearchProviderChoice">
-                      <Button Classes="searchoption"
-                              IsEnabled="{Binding IsSelectable}">
-                        <Grid ColumnDefinitions="*,Auto">
-                          <StackPanel Grid.Column="0" Spacing="1">
-                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="NoWrap"
-                                       TextTrimming="CharacterEllipsis" />
-                            <TextBlock Text="{Binding Detail}" IsVisible="{Binding HasDetail}"
-                                       Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}"
-                                       TextWrapping="Wrap" />
-                          </StackPanel>
-                          <TextBlock Grid.Column="1" Classes="icon" Text="&#xE73E;" FontSize="12"
-                                     Margin="8,0,0,0" VerticalAlignment="Center"
-                                     Foreground="{DynamicResource Brush.Primary}"
-                                     IsVisible="{Binding IsSelected}" />
-                        </Grid>
-                      </Button>
-                    </DataTemplate>
-                  </ItemsControl.ItemTemplate>
-                </ItemsControl>
-                <!-- 代价说在选项旁边：服务端搜索是按模型 Token 计费的，不是按次。 -->
-                <TextBlock Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}" TextWrapping="Wrap"
-                           Margin="10,8,10,2"
-                           IsVisible="{Binding Composer.CanUseDeepSeekServerSearch}"
-                           Text="「DeepSeek服务端搜索」由模型端执行搜索，将强制开启深度思考，并额外消耗模型 Token。" />
-              </StackPanel>
-            </Border>
-          </Flyout>
-        </Button.Flyout>
-      </Button>
-      </Panel>
-
-      <Button
+      <Button Grid.Column="1"
               Name="PART_WorkbenchSelector"
               Classes="outline"
+              HorizontalAlignment="Left"
               VerticalAlignment="Center"
               Padding="14,6"
+              Margin="16,0,0,0"
               IsVisible="{Binding IsImageWorkbenchVisible}"
               ToolTip.Tip="选择图像模型">
         <StackPanel Classes="inlinerow" Orientation="Horizontal" VerticalAlignment="Center">
@@ -305,7 +240,6 @@
           </Flyout>
         </Button.Flyout>
       </Button>
-      </StackPanel>
 
       <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
         <!-- State, not an event: what this conversation has cost so far. Derived
@@ -400,19 +334,6 @@
       <Setter Property="HorizontalAlignment" Value="Stretch" />
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
       <Setter Property="VerticalContentAlignment" Value="Center" />
-    </Style>
-    <!-- 搜索服务商的一行。整行可点，两行字（名称 + 说明），右边对勾。 -->
-    <Style Selector="Button.searchoption">
-      <Setter Property="Padding" Value="10,7" />
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderThickness" Value="0" />
-      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
-      <Setter Property="HorizontalAlignment" Value="Stretch" />
-      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-      <Setter Property="VerticalContentAlignment" Value="Center" />
-    </Style>
-    <Style Selector="Button.searchoption:pointerover /template/ Border#PART_Root">
-      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
     </Style>
     <Style Selector="Button.modeswitch:pointerover /template/ Border#PART_Root">
       <Setter Property="Background" Value="{DynamicResource Brush.Primary.Border}" />
