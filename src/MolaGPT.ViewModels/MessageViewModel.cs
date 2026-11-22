@@ -355,13 +355,9 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             : null;
 
     /// <summary>
-    /// 优先使用 Provider 提供的生成速度；没有精确值时用本轮输出量和耗时估算。
+    /// 仅显示 Provider 按模型调用测得的速度。对话总耗时包含工具等待。
     /// </summary>
-    public double? OutputTokensPerSecond =>
-        Usage?.TokensPerSecond
-        ?? (Usage?.CompletionTokens is { } completion && GenerationSeconds is { } seconds && seconds > 0
-            ? completion / seconds
-            : null);
+    public double? OutputTokensPerSecond => Usage?.TokensPerSecond;
 
     /// <summary>TTFT 数值文本，如 <c>1234ms</c>。</summary>
     public string? FirstTokenText =>

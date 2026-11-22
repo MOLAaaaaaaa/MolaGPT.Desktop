@@ -457,7 +457,6 @@ public sealed class MolaGptProxyProvider : IChatProvider
         {
             ["session_id"] = request.SessionId ?? Guid.NewGuid().ToString("N"),
             ["messages"] = request.Messages.Select(m => new { role = m.Role, content = OpenAiMessageContentBuilder.Build(m) }).ToArray(),
-            ["temperature"] = request.Temperature ?? 0.7,
             ["model"] = request.ModelId,
             ["stream"] = true,
             ["conversation_id"] = request.ConversationId ?? Guid.NewGuid().ToString("N"),
@@ -467,6 +466,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
             ["client_features"] = new { subagents = 1 },
             ["privacy_mode"] = false
         };
+        if (request.Temperature is { } temperature) bodyDict["temperature"] = temperature;
+
         // Unlike the BYOK providers this path keeps privacy_mode: it is MolaGPT's
         // own protocol field, already written above, and the composer's value
         // (Tracks off -> true) is meant to override the default.

@@ -434,6 +434,11 @@ public sealed class ChatGptAccount
         ];
     }
 
+    internal static bool IsGpt62Model(string? modelId) =>
+        modelId is not null && System.Text.RegularExpressions.Regex.IsMatch(
+            modelId, @"^gpt-6\.2-(?:sol|astra)(?:-\d{4}-\d{2}-\d{2})?$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
     /// <summary>Apply the selected session's HTTP contract after Pi and custom parameters.</summary>
     public static void AdaptBody(JsonObject body, ChatGptLoginKind kind = ChatGptLoginKind.Official)
     {
@@ -445,6 +450,16 @@ public sealed class ChatGptAccount
         var input = body["input"] as JsonArray ?? throw new JsonException("ChatGPT 请求的 input 必须是数组。");
         if (kind == ChatGptLoginKind.Codex)
         {
+            if (IsGpt62Model(body["model"]?.GetValue<string>()))
+            {
+                foreach (var item in input.OfType<JsonObject>())
+                {
+                    if (item["role"]?.GetValue<string>() is not ("system" or "developer")) break;
+                    item["role"] = "developer";
+                }
+                return;
+            }
+
             var instructions = new List<string>();
             if (body["instructions"]?.GetValue<string>() is { Length: > 0 } existing) instructions.Add(existing);
             while (input.Count > 0 && input[0] is JsonObject first

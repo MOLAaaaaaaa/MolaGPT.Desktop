@@ -183,16 +183,19 @@ public sealed class OneShotCompletionClient
         ThinkingConfig? thinkingConfig,
         CancellationToken ct)
     {
+        var officialPath = OpenAiRequestParams.OfficialPath(target.Endpoint);
+        var directOpenAiResponses = officialPath == "/v1/responses";
         var body = target.Api switch
         {
             OneShotWireApi.AnthropicMessages => BuildAnthropicBody(modelId, messages, temperature, maxTokens),
-            OneShotWireApi.OpenAiResponses => BuildResponsesBody(modelId, messages, temperature, maxTokens),
+            OneShotWireApi.OpenAiResponses => BuildResponsesBody(modelId, messages, temperature, maxTokens, directOpenAiResponses),
             OneShotWireApi.GoogleGenerativeAi => BuildGoogleBody(messages, temperature, maxTokens),
             _ => BuildCompletionsBody(modelId, messages, temperature, maxTokens),
         };
         ApplyThinking(body, target.Api, modelId, useThinking, thinkingKind, reasoningEffort, thinkingConfig, target.Endpoint);
         CustomRequestParams.ApplyBody(body, target.ExtraBody);
         foreach (var key in target.DropBodyKeys ?? []) body.Remove(key);
+        OpenAiRequestParams.Apply(body, officialPath);
         if (stream || target.StreamOnly)
         {
             // Google's dialect lives in the URL, not the body.
@@ -418,17 +421,24 @@ public sealed class OneShotCompletionClient
     }
 
     private static Dictionary<string, object?> BuildResponsesBody(
-        string modelId, IReadOnlyList<ChatMessage> messages, double? temperature, int? maxTokens)
+        string modelId, IReadOnlyList<ChatMessage> messages, double? temperature, int? maxTokens,
+        bool useDeveloperMessages)
     {
         string? instructions = null;
         var input = new List<object>();
+        var leading = true;
         foreach (var m in messages)
         {
-            if (m.Role == ChatMessage.RoleSystem)
+            if (m.Role == ChatMessage.RoleSystem && (!useDeveloperMessages || leading))
             {
-                instructions = instructions is null ? m.AsText() : instructions + "\n\n" + m.AsText();
+                if (useDeveloperMessages)
+                    input.Add(new { role = "developer", content = m.AsText() });
+                else
+                    instructions = instructions is null ? m.AsText() : instructions + "\n\n" + m.AsText();
                 continue;
             }
+
+            leading = false;
 
             var parts = new List<object>();
             var text = m.AsText();

@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Net;
 using System.Net.Http;
 using System.Text;
+using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 
 namespace MolaGPT.Core.Chat.Agents.Pi;
@@ -241,6 +242,10 @@ public sealed class PiWorkLlmShim : IDisposable
                 upstream.Headers.TryAddWithoutValidation("Accept", "text/event-stream");
                 OpenRouterAttribution.Apply(upstream, target.Endpoint, target.Headers);
                 CustomRequestParams.ApplyHeaders(upstream, target.Headers);
+                if (string.Equals(url, ChatGptAccount.CodexEndpoint, StringComparison.OrdinalIgnoreCase)
+                    && !upstream.Headers.Contains("session-id")
+                    && ctx.Request.Headers["session_id"] is { Length: > 0 } sessionId)
+                    upstream.Headers.TryAddWithoutValidation("session-id", sessionId);
 
                 using var resp = await target.Http
                     .SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, _cts.Token)
@@ -467,12 +472,13 @@ public sealed class PiWorkLlmShim : IDisposable
         var generation = target.Generation;
         var nativeGoogle = target.PathMode == TargetPathMode.GeminiModelTemplate;
         var google = GeminiRequestParams.Applies(target.ModelId, nativeGoogle, target.Endpoint);
+        var officialPath = OpenAiRequestParams.OfficialPath(target.Endpoint);
         var hasExtra = extra is { Count: > 0 };
         var hasDrops = dropKeys is { Count: > 0 };
         var hasGeneration = generation is not null
             && (generation.Temperature is not null || generation.TopP is not null || generation.MaxTokens is not null);
         var uncap = generation is { MaxTokens: null } && generation.Api != "anthropic-messages";
-        if (!hasExtra && !hasDrops && !hasGeneration && !uncap && !google) return body;
+        if (!hasExtra && !hasDrops && !hasGeneration && !uncap && !google && officialPath is null) return body;
         var parsed = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body)
             ?? throw new JsonException("Pi 请求体为空。");
         var merged = parsed.ToDictionary(kv => kv.Key, kv => (object?)kv.Value, StringComparer.Ordinal);
@@ -486,6 +492,7 @@ public sealed class PiWorkLlmShim : IDisposable
         if (hasGeneration) ApplyGenerationOptions(merged, generation!);
         if (hasDrops)
             foreach (var key in dropKeys!) merged.Remove(key);
+        OpenAiRequestParams.Apply(merged, officialPath);
         if (google)
             GeminiRequestParams.Apply(merged, target.ModelId!, nativeGoogle, generation?.ReasoningEffort, generation?.UseThinking);
         return JsonSerializer.Serialize(merged, RelaxedJson);

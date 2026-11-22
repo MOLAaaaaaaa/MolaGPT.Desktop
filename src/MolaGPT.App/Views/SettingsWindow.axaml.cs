@@ -1204,8 +1204,38 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void OnAddProviderBody(object? sender, RoutedEventArgs e)
     {
-        if (sender is not Control { DataContext: ModelRow model }) return;
-        model.CustomBodyRows.Add(new BodyRow(model));
+        if (sender is not Button { DataContext: ModelRow model } button) return;
+        if (model.IsImageProvider || EditingProviderType is "gemini" or "chatgpt")
+        {
+            model.CustomBodyRows.Add(new BodyRow(model));
+            return;
+        }
+
+        (string Key, string Value)[] presets = EditingProviderType switch
+        {
+            "openai-compat" =>
+            [
+                ("temperature", "0.7"), ("top_p", "0.9"),
+                ("frequency_penalty", "0"), ("presence_penalty", "0"), ("seed", "42"),
+            ],
+            "anthropic" => [("temperature", "0.7"), ("top_p", "0.9"), ("top_k", "40")],
+            _ => [("max_output_tokens", "4096")],
+        };
+        var menu = new MenuFlyout();
+        var manual = new MenuItem { Header = "手动填写" };
+        manual.Click += (_, _) => model.CustomBodyRows.Add(new BodyRow(model));
+        menu.Items.Add(manual);
+        foreach (var (key, value) in presets)
+        {
+            var item = new MenuItem
+            {
+                Header = key,
+                IsEnabled = !model.CustomBodyRows.Any(row => string.Equals(row.Key.Trim(), key, StringComparison.Ordinal)),
+            };
+            item.Click += (_, _) => model.CustomBodyRows.Add(new BodyRow(model, key, "number", value));
+            menu.Items.Add(item);
+        }
+        menu.ShowAt(button);
     }
 
     private void OnRemoveProviderBody(object? sender, RoutedEventArgs e)
@@ -2911,12 +2941,8 @@ public partial class SettingsWindow : MolaContentWindow
         return null;
     }
 
-    /// <summary>Sampling support is only trustworthy when the endpoint actually
-    /// declares its parameters. Plenty of OpenAI-compatible endpoints omit
-    /// <c>supported_parameters</c> entirely, and treating that silence as "not
-    /// supported" would disable temperature for every model they serve.</summary>
     private static bool SupportsSampling(IReadOnlyList<string> parameters, params string[] names) =>
-        parameters.Count == 0 || parameters.Any(value => IsAny(value, names));
+        parameters.Any(value => IsAny(value, names));
 
     private void OnSettingsKeyDown(object? sender, KeyEventArgs e)
     {

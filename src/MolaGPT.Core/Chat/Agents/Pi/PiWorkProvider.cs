@@ -1033,12 +1033,13 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         private long? _startedAt;
         private long _elapsedTicks;
         private int _outputTokens;
+        private bool _missingMeasurement;
 
         public double? TokensPerSecond
         {
             get
             {
-                if (_outputTokens <= 0 || _elapsedTicks <= 0) return null;
+                if (_missingMeasurement || _outputTokens <= 0 || _elapsedTicks <= 0) return null;
                 var seconds = _elapsedTicks / (double)System.Diagnostics.Stopwatch.Frequency;
                 return seconds > 0 ? _outputTokens / seconds : null;
             }
@@ -1053,20 +1054,30 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
 
         public void CompleteMessage(JsonElement root)
         {
-            if (_startedAt is not { } startedAt) return;
-
-            var endedAt = System.Diagnostics.Stopwatch.GetTimestamp();
-            _startedAt = null;
-
-            if (!root.TryGetProperty("message", out var message)
-                || !message.TryGetProperty("usage", out var usage)
-                || usage.ValueKind != JsonValueKind.Object)
+            if (!root.TryGetProperty("message", out var message) || Str(message, "role") != "assistant")
                 return;
+            var startedAt = _startedAt;
+            _startedAt = null;
+            if (Str(message, "stopReason") is "error" or "aborted") return;
+            if (!message.TryGetProperty("usage", out var usage)
+                || usage.ValueKind != JsonValueKind.Object
+                || !usage.TryGetProperty("output", out var value)
+                || value.ValueKind != JsonValueKind.Number
+                || !value.TryGetInt32(out var output))
+            {
+                _missingMeasurement |= startedAt is not null;
+                return;
+            }
 
-            var output = Int(usage, "output");
             if (output <= 0) return;
 
-            _elapsedTicks += Math.Max(1, endedAt - startedAt);
+            if (startedAt is null)
+            {
+                _missingMeasurement = true;
+                return;
+            }
+
+            _elapsedTicks += System.Diagnostics.Stopwatch.GetTimestamp() - startedAt.Value;
             _outputTokens += output;
         }
     }
