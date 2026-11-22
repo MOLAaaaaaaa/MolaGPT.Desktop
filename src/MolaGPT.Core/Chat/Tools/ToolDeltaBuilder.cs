@@ -307,15 +307,16 @@ public static class ToolDeltaBuilder
     private static string SearchProviderLabel(string? provider) =>
         string.IsNullOrWhiteSpace(provider)
             ? "DuckDuckGo"
-            : provider.Trim().ToLowerInvariant() switch
-            {
-                "molagpt" => "MolaGPT Web Search",
-                "tavily" => "Tavily",
-                "exa" => "Exa",
-                "deepseek" => "DeepSeek Search",
-                "deepseek-server" => "DeepSeek服务端搜索",
-                _ => "DuckDuckGo"
-            };
+            : BuiltinWebSearch.TryParseProviderId(provider, out var builtin)
+                ? BuiltinWebSearch.Label(builtin)
+                : provider.Trim().ToLowerInvariant() switch
+                {
+                    "molagpt" => "MolaGPT Web Search",
+                    "tavily" => "Tavily",
+                    "exa" => "Exa",
+                    "deepseek" => "DeepSeek Search",
+                    _ => "DuckDuckGo"
+                };
 
     private static string LocalToolPendingLabel(string toolName) => toolName switch
     {

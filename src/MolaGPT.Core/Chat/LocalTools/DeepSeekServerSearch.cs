@@ -5,77 +5,171 @@ using MolaGPT.Core.Models;
 
 namespace MolaGPT.Core.Chat.LocalTools;
 
-/// <summary>
-/// DeepSeek 的「服务端搜索」(<c>deepseek_web_search</c>) 适配层。
-///
-/// 和别的服务商不一样，这里没有本地 HTTP 调用：搜索由模型端在做，客户端能做的
-/// 只有三件事——在请求里声明这个工具、确认它被允许使用（必须开思考），以及从
-/// 流里把命中的来源捡出来。三件事都按端点协议分叉，因为同一个工具在三种协议里
-/// 的形状并不一样（详见 https://api-docs.deepseek.com/zh-cn/guides/web_tools ）。
-///
-/// 它不按次计费，Token 才是成本，所以这里不加任何「用了几次」的账。
-/// </summary>
-public static class DeepSeekServerSearch
+public enum BuiltinSearchVendor
 {
-    /// <summary>会话级的服务商标识。只出现在 <c>ConversationRoleContext</c> 里，
-    /// 全局设置不接受这个值。</summary>
-    public const string ProviderId = "deepseek-server";
+    DeepSeek,
+    OpenAi,
+    Bailian,
+    Anthropic,
+    Gemini
+}
 
-    /// <summary>DeepSeek 在请求里认的服务端工具名。</summary>
-    public const string ToolName = "deepseek_web_search";
+public static class BuiltinWebSearch
+{
+    public const string ProviderPrefix = "builtin:";
+    public const string DeepSeekToolName = "deepseek_web_search";
+    public const string AnthropicToolType = "web_search_20250305";
 
-    /// <summary>
-    /// DeepSeek Web Tools 当前支持 deepseek-flash。
-    /// </summary>
-    public static bool IsSupportedModel(string? modelId)
+    public static string ProviderId(BuiltinSearchVendor vendor) =>
+        ProviderPrefix + vendor.ToString().ToLowerInvariant();
+
+    public static bool TryParseProviderId(string? provider, out BuiltinSearchVendor vendor)
     {
-        return string.Equals(modelId?.Trim(), "deepseek-flash", StringComparison.OrdinalIgnoreCase);
+        vendor = default;
+        if (string.IsNullOrWhiteSpace(provider)) return false;
+
+        var trimmed = provider.Trim();
+        if (string.Equals(trimmed, DeepSeekServerSearch.ProviderId, StringComparison.OrdinalIgnoreCase))
+        {
+            vendor = BuiltinSearchVendor.DeepSeek;
+            return true;
+        }
+
+        if (!trimmed.StartsWith(ProviderPrefix, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return Enum.TryParse(trimmed[ProviderPrefix.Length..], ignoreCase: true, out vendor)
+               && Enum.IsDefined(vendor);
     }
 
-    /// <summary>仅对 DeepSeek 官方端点启用其专有工具；接受 Base URL 或完整端点。</summary>
-    public static bool IsSupportedTarget(string? modelId, string? endpoint) =>
-        IsSupportedModel(modelId) && IsOfficialEndpoint(endpoint);
+    public static bool IsBuiltinProviderId(string? provider) => TryParseProviderId(provider, out _);
 
-    /// <summary>判断 Base URL 或完整请求地址是否为 DeepSeek 官方 HTTPS 端点。</summary>
-    public static bool IsOfficialEndpoint(string? endpoint) =>
-        Uri.TryCreate(endpoint, UriKind.Absolute, out var uri)
-        && uri.Scheme == Uri.UriSchemeHttps
-        && uri.IsDefaultPort
-        && string.IsNullOrEmpty(uri.UserInfo)
-        && string.Equals(uri.Host, "api.deepseek.com", StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>
-    /// 端点类型（设置里那一列的 openai-compat / anthropic / openai-response）能不能
-    /// 承载这个工具。Gemini 的原生协议没有对应的服务端工具字段，ChatGPT 套餐更不
-    /// 可能认 DeepSeek 的工具，两者都不在此列。
-    /// </summary>
-    public static bool IsSupportedEndpointType(string? providerType) =>
-        providerType?.Trim().ToLowerInvariant() is "openai-compat" or "openai-response" or "anthropic";
-
-    /// <summary>
-    /// 端点协议 → 注入形状。<c>chat</c> / <c>responses</c> / <c>messages</c>；null 表示
-    /// 这个协议没有可放服务端工具的位置。
-    /// </summary>
-    public static string? ResolveProtocol(string? api) => api?.Trim().ToLowerInvariant() switch
+    public static BuiltinSearchVendor? DetectVendor(string? endpointOrBaseUrl)
     {
-        "openai-completions" => "chat",
-        "openai-responses" => "responses",
-        "anthropic-messages" => "messages",
-        _ => null
+        if (!Uri.TryCreate(endpointOrBaseUrl?.Trim(), UriKind.Absolute, out var uri)
+            || uri.Scheme != Uri.UriSchemeHttps
+            || !uri.IsDefaultPort
+            || !string.IsNullOrEmpty(uri.UserInfo))
+        {
+            return null;
+        }
+
+        var host = uri.Host.ToLowerInvariant();
+        if (host == "api.deepseek.com") return BuiltinSearchVendor.DeepSeek;
+        if (host == "api.openai.com") return BuiltinSearchVendor.OpenAi;
+        if (host == "api.anthropic.com") return BuiltinSearchVendor.Anthropic;
+        if (host == "generativelanguage.googleapis.com") return BuiltinSearchVendor.Gemini;
+        if (host is "dashscope.aliyuncs.com" or "dashscope-intl.aliyuncs.com" or "dashscope-us.aliyuncs.com"
+            || host.EndsWith(".maas.aliyuncs.com", StringComparison.Ordinal))
+        {
+            return BuiltinSearchVendor.Bailian;
+        }
+
+        return null;
+    }
+
+    public static bool IsSupportedProviderType(BuiltinSearchVendor vendor, string? providerType)
+    {
+        var normalized = NormalizeProviderType(providerType);
+        return vendor switch
+        {
+            BuiltinSearchVendor.DeepSeek => normalized is "openai-compat" or "openai-response" or "anthropic",
+            BuiltinSearchVendor.OpenAi => normalized == "openai-response",
+            BuiltinSearchVendor.Bailian => normalized is "openai-compat" or "openai-response",
+            BuiltinSearchVendor.Anthropic => normalized == "anthropic",
+            BuiltinSearchVendor.Gemini => normalized == "gemini",
+            _ => false
+        };
+    }
+
+    public static bool CanUseWireApi(BuiltinSearchVendor vendor, string? api)
+    {
+        var normalized = api?.Trim().ToLowerInvariant();
+        return vendor switch
+        {
+            BuiltinSearchVendor.DeepSeek => normalized is "openai-completions" or "openai-responses" or "anthropic-messages",
+            BuiltinSearchVendor.OpenAi => normalized == "openai-responses",
+            BuiltinSearchVendor.Bailian => normalized is "openai-completions" or "openai-responses",
+            BuiltinSearchVendor.Anthropic => normalized == "anthropic-messages",
+            BuiltinSearchVendor.Gemini => normalized == "google-generative-ai",
+            _ => false
+        };
+    }
+
+    public static bool IsEnabledOnProvider(string? providerType, string? baseUrl, bool enabled) =>
+        enabled
+        && DetectVendor(baseUrl) is { } vendor
+        && IsSupportedProviderType(vendor, providerType);
+
+    public static bool ForcesThinking(BuiltinSearchVendor vendor) =>
+        vendor == BuiltinSearchVendor.DeepSeek;
+
+    public static string FullName(BuiltinSearchVendor vendor) => vendor switch
+    {
+        BuiltinSearchVendor.DeepSeek => "DeepSeek",
+        BuiltinSearchVendor.OpenAi => "OpenAI",
+        BuiltinSearchVendor.Bailian => "阿里云百炼",
+        BuiltinSearchVendor.Anthropic => "Anthropic",
+        BuiltinSearchVendor.Gemini => "Google Gemini",
+        _ => vendor.ToString()
     };
 
-    /// <summary>
-    /// 端点地址里那条只影响服务端搜索的规矩：DeepSeek 的 Responses 端点在根路径
-    /// （<c>/responses</c>）。<c>/v1/responses</c> 这个 OpenAI 兼容别名收得下请求、
-    /// 也照常回话，但会把 <c>deepseek_web_search</c> 当不认识的工具丢掉——同一个
-    /// 请求体换成 <c>/responses</c> 就真的去搜了，来源和引用都会回来。所以只有在
-    /// 要用这个工具、且地址确实是 DeepSeek 官方的时候才改，别的时候一个字节不动。
-    /// </summary>
-    public static string AdjustEndpoint(string endpoint, string protocol)
+    public static string Label(BuiltinSearchVendor vendor) => vendor switch
     {
-        if (!string.Equals(protocol, "responses", StringComparison.Ordinal)) return endpoint;
-        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri)) return endpoint;
-        if (!IsOfficialEndpoint(endpoint)) return endpoint;
+        BuiltinSearchVendor.DeepSeek => "DeepSeek 内置搜索",
+        BuiltinSearchVendor.OpenAi => "OpenAI 内置搜索",
+        BuiltinSearchVendor.Bailian => "百炼内置搜索",
+        BuiltinSearchVendor.Anthropic => "Anthropic 内置搜索",
+        BuiltinSearchVendor.Gemini => "Gemini 内置搜索",
+        _ => "内置搜索"
+    };
+
+    public static string DescribeToolHint(BuiltinSearchVendor vendor) => vendor switch
+    {
+        BuiltinSearchVendor.DeepSeek => "由 DeepSeek 直接搜索网页，不单独计费。仅部分模型支持，使用时会开启深度思考。",
+        BuiltinSearchVendor.OpenAi => "由 OpenAI 直接搜索网页，按次计费，搜索内容计入输入 Token。仅部分模型支持。",
+        BuiltinSearchVendor.Bailian => "由百炼直接搜索网页，按次计费，搜索内容计入输入 Token。仅部分模型支持。",
+        BuiltinSearchVendor.Anthropic => "由 Anthropic 直接搜索网页，按次计费，搜索内容计入输入 Token。仅部分模型支持。",
+        BuiltinSearchVendor.Gemini => "由 Google 搜索提供结果，按次计费。仅部分模型支持。",
+        _ => string.Empty
+    };
+
+    public static string DescribeProtocolRequirement(BuiltinSearchVendor vendor) => vendor switch
+    {
+        BuiltinSearchVendor.DeepSeek => "需使用 OpenAI Chat Completions、OpenAI Responses 或 Anthropic 协议。",
+        BuiltinSearchVendor.OpenAi => "需使用 OpenAI Responses 协议。",
+        BuiltinSearchVendor.Bailian => "需使用 OpenAI Chat Completions 或 OpenAI Responses 协议。",
+        BuiltinSearchVendor.Anthropic => "需使用 Anthropic 协议。",
+        BuiltinSearchVendor.Gemini => "需使用 Gemini 原生协议。",
+        _ => string.Empty
+    };
+
+    public static bool DefaultSupportsModel(BuiltinSearchVendor vendor, string? modelId, string? providerType = null)
+    {
+        var id = NormalizeModelId(modelId);
+        if (id.Length == 0 || IsNonChatModel(id)) return false;
+
+        return vendor switch
+        {
+            BuiltinSearchVendor.DeepSeek => id == "deepseek-flash",
+            BuiltinSearchVendor.OpenAi => DefaultSupportsOpenAiModel(id),
+            BuiltinSearchVendor.Bailian => DefaultSupportsBailianModel(id, providerType),
+            BuiltinSearchVendor.Anthropic => DefaultSupportsAnthropicModel(id),
+            BuiltinSearchVendor.Gemini => GeminiModelPolicy.UsesThinkingLevel(id)
+                                          && !id.Contains("-image", StringComparison.Ordinal),
+            _ => false
+        };
+    }
+
+    public static string AdjustEndpoint(BuiltinSearchVendor vendor, string endpoint, string api)
+    {
+        if (vendor != BuiltinSearchVendor.DeepSeek
+            || !string.Equals(api, "openai-responses", StringComparison.OrdinalIgnoreCase)
+            || DetectVendor(endpoint) != BuiltinSearchVendor.DeepSeek
+            || !Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
+        {
+            return endpoint;
+        }
 
         const string versioned = "/v1/responses";
         var path = uri.AbsolutePath;
@@ -84,92 +178,184 @@ public static class DeepSeekServerSearch
         return new UriBuilder(uri) { Path = path[..^versioned.Length] + "/responses" }.Uri.ToString();
     }
 
-    /// <summary>
-    /// 把注入包在别的 <c>AdaptBody</c> 外面。内层先改（它认识的那点特殊字段），
-    /// 我们再补服务端搜索要的——顺序反过来的话，内层可能把刚放进去的工具又冲掉。
-    /// </summary>
-    public static Action<JsonObject> Wrap(string protocol, Action<JsonObject>? inner)
+    public static Action<JsonObject> Wrap(
+        BuiltinSearchVendor vendor,
+        string api,
+        string? modelId,
+        Action<JsonObject>? inner) => body =>
     {
-        ArgumentException.ThrowIfNullOrEmpty(protocol);
-        return body =>
-        {
-            inner?.Invoke(body);
-            Apply(body, protocol);
-        };
-    }
+        inner?.Invoke(body);
+        Apply(body, vendor, api, modelId);
+    };
 
-    /// <summary>按协议把服务端工具与配套字段写进请求体。</summary>
-    public static void Apply(JsonObject body, string protocol)
+    public static void Apply(JsonObject body, BuiltinSearchVendor vendor, string api, string? modelId = null)
     {
         ArgumentNullException.ThrowIfNull(body);
-        switch (protocol)
+        var normalizedApi = api.Trim().ToLowerInvariant();
+
+        switch (vendor)
         {
-            case "chat":
-                AppendTool(body, new JsonObject { ["type"] = ToolName });
-                EnableThinking(body, thinkingDialect: true);
-                // 这几个和 deepseek_web_search 同时出现会被拒：网页搜索选项重复，
-                // logprobs 与结构化输出都跟服务端搜索结果对不上。
+            case BuiltinSearchVendor.DeepSeek:
+                ApplyDeepSeek(body, normalizedApi);
+                break;
+
+            case BuiltinSearchVendor.OpenAi when normalizedApi == "openai-responses":
+                AppendTypedTool(body, "web_search", "web_search", "web_search_preview");
+                if (string.Equals(NormalizeModelId(modelId), "gpt-5", StringComparison.Ordinal)
+                    && body["reasoning"] is JsonObject reasoning
+                    && (string?)reasoning["effort"] is "minimal" or "none")
+                {
+                    reasoning["effort"] = "low";
+                }
+                break;
+
+            case BuiltinSearchVendor.Bailian when normalizedApi == "openai-responses":
+                AppendTypedTool(body, "web_search", "web_search");
+                break;
+
+            case BuiltinSearchVendor.Bailian when normalizedApi == "openai-completions":
+                body["enable_search"] = true;
+                if (NormalizeModelId(modelId).Contains("omni", StringComparison.Ordinal))
+                {
+                    if (body["search_options"] is not JsonObject searchOptions)
+                    {
+                        searchOptions = new JsonObject();
+                        body["search_options"] = searchOptions;
+                    }
+                    searchOptions["search_strategy"] ??= "agent";
+                }
+                break;
+
+            case BuiltinSearchVendor.Anthropic when normalizedApi == "anthropic-messages":
+                AppendAnthropicWebSearch(body);
+                break;
+
+            case BuiltinSearchVendor.Gemini when normalizedApi == "google-generative-ai":
+                AppendGeminiGoogleSearch(body);
+                break;
+        }
+    }
+
+    private static void ApplyDeepSeek(JsonObject body, string api)
+    {
+        switch (api)
+        {
+            case "openai-completions" or "chat":
+                AppendTypedTool(body, DeepSeekToolName, DeepSeekToolName);
+                EnableDeepSeekThinking(body, thinkingDialect: true);
                 body.Remove("web_search_options");
                 body.Remove("logprobs");
                 body.Remove("top_logprobs");
                 NormalizeResponseFormat(body);
-                FixToolChoice(body, protocol);
+                FixDeepSeekToolChoice(body, "chat");
                 break;
 
-            case "responses":
-                AppendTool(body, new JsonObject { ["type"] = ToolName });
-                EnableThinking(body, thinkingDialect: false);
+            case "openai-responses" or "responses":
+                AppendTypedTool(body, DeepSeekToolName, DeepSeekToolName);
+                EnableDeepSeekThinking(body, thinkingDialect: false);
                 body.Remove("top_logprobs");
                 if (body["text"] is JsonObject text && text["format"] is JsonObject format
                     && !string.Equals((string?)format["type"], "text", StringComparison.OrdinalIgnoreCase))
+                {
                     text.Remove("format");
+                }
                 if (body["tools"] is JsonArray responseTools)
+                {
                     for (var i = responseTools.Count - 1; i >= 0; i--)
+                    {
                         if (responseTools[i] is JsonObject entry
                             && (string?)entry["type"] is "web_search" or "custom" or "namespace" or "tool_search")
+                        {
                             responseTools.RemoveAt(i);
-                FixToolChoice(body, protocol);
+                        }
+                    }
+                }
+                FixDeepSeekToolChoice(body, "responses");
                 break;
 
-            case "messages":
-                // Messages 协议的工具对象要 name，且不要外层的 function 包装。
-                AppendTool(body, new JsonObject
-                {
-                    ["type"] = ToolName,
-                    ["name"] = ToolName
-                });
-                EnableThinking(body, thinkingDialect: true);
-                FixToolChoice(body, protocol);
+            case "anthropic-messages" or "messages":
+                AppendNamedServerTool(body, DeepSeekToolName, DeepSeekToolName);
+                EnableDeepSeekThinking(body, thinkingDialect: true);
+                FixDeepSeekToolChoice(body, "messages");
                 break;
 
             default:
-                throw new ArgumentOutOfRangeException(nameof(protocol), protocol, "未知的端点协议。");
+                throw new ArgumentOutOfRangeException(nameof(api), api, "未知的端点协议。");
         }
     }
 
-    private static void AppendTool(JsonObject body, JsonObject tool)
+    private static void AppendTypedTool(JsonObject body, string type, params string[] matchTypes)
     {
-        if (body["tools"] is not JsonArray tools)
+        var tools = EnsureToolsArray(body);
+        foreach (var existing in tools)
         {
-            tools = [];
-            body["tools"] = tools;
+            if (existing is JsonObject obj && (string?)obj["type"] is { } existingType
+                && matchTypes.Any(candidate => string.Equals(existingType, candidate, StringComparison.Ordinal)))
+            {
+                return;
+            }
         }
 
-        // 多轮里同一份请求可能被重放（重试、续写），重复声明会被拒。
+        tools.Add(new JsonObject { ["type"] = type });
+    }
+
+    private static void AppendNamedServerTool(JsonObject body, string type, string name)
+    {
+        var tools = EnsureToolsArray(body);
         foreach (var existing in tools)
         {
             if (existing is JsonObject obj
-                && string.Equals((string?)obj["type"], ToolName, StringComparison.Ordinal))
+                && (string.Equals((string?)obj["type"], type, StringComparison.Ordinal)
+                    || string.Equals((string?)obj["name"], name, StringComparison.Ordinal)))
+            {
+                return;
+            }
+        }
+
+        tools.Add(new JsonObject { ["type"] = type, ["name"] = name });
+    }
+
+    private static void AppendAnthropicWebSearch(JsonObject body)
+    {
+        var tools = EnsureToolsArray(body);
+        foreach (var existing in tools)
+        {
+            if (existing is JsonObject obj
+                && (string.Equals((string?)obj["name"], "web_search", StringComparison.Ordinal)
+                    || ((string?)obj["type"])?.StartsWith("web_search", StringComparison.Ordinal) == true))
+            {
+                return;
+            }
+        }
+
+        tools.Add(new JsonObject
+        {
+            ["type"] = AnthropicToolType,
+            ["name"] = "web_search"
+        });
+    }
+
+    private static void AppendGeminiGoogleSearch(JsonObject body)
+    {
+        var tools = EnsureToolsArray(body);
+        foreach (var existing in tools)
+        {
+            if (existing is JsonObject obj && (obj.ContainsKey("googleSearch") || obj.ContainsKey("google_search")))
                 return;
         }
 
-        tools.Add(tool);
+        tools.Add(new JsonObject { ["googleSearch"] = new JsonObject() });
     }
 
-    /// <summary>
-    /// 本客户端的服务端搜索采用深度思考模式，并覆盖请求中的关闭值。
-    /// </summary>
-    private static void EnableThinking(JsonObject body, bool thinkingDialect)
+    private static JsonArray EnsureToolsArray(JsonObject body)
+    {
+        if (body["tools"] is JsonArray tools) return tools;
+        tools = [];
+        body["tools"] = tools;
+        return tools;
+    }
+
+    private static void EnableDeepSeekThinking(JsonObject body, bool thinkingDialect)
     {
         if (thinkingDialect)
         {
@@ -196,10 +382,7 @@ public static class DeepSeekServerSearch
         }
     }
 
-    /// <summary>
-    /// 保留明确关闭工具的意图，并将不兼容的指定工具选择转为自动。
-    /// </summary>
-    private static void FixToolChoice(JsonObject body, string protocol)
+    private static void FixDeepSeekToolChoice(JsonObject body, string protocol)
     {
         switch (body["tool_choice"])
         {
@@ -222,40 +405,160 @@ public static class DeepSeekServerSearch
 
             case JsonObject choice when protocol != "messages"
                 && !string.Equals((string?)choice["type"], "none", StringComparison.OrdinalIgnoreCase)
-                && (protocol == "chat" || string.Equals((string?)choice["type"], ToolName, StringComparison.OrdinalIgnoreCase)):
+                && (protocol == "chat" || string.Equals((string?)choice["type"], DeepSeekToolName, StringComparison.OrdinalIgnoreCase)):
                 body["tool_choice"] = "auto";
                 break;
         }
     }
+
+    private static bool DefaultSupportsOpenAiModel(string id) =>
+        (id.StartsWith("gpt-6", StringComparison.Ordinal)
+         || id.StartsWith("gpt-5", StringComparison.Ordinal)
+         || id.StartsWith("gpt-4.1", StringComparison.Ordinal)
+         || id.StartsWith("gpt-4o", StringComparison.Ordinal)
+         || id.StartsWith("chatgpt-4o", StringComparison.Ordinal)
+         || id.StartsWith("o3", StringComparison.Ordinal)
+         || id.StartsWith("o1", StringComparison.Ordinal))
+        && !id.StartsWith("gpt-4.1-nano", StringComparison.Ordinal)
+        && !id.Contains("-search-", StringComparison.Ordinal)
+        && !id.Contains("-audio", StringComparison.Ordinal)
+        && !id.Contains("-transcribe", StringComparison.Ordinal);
+
+    private static bool DefaultSupportsAnthropicModel(string id) =>
+        id.StartsWith("claude-", StringComparison.Ordinal)
+        && !id.StartsWith("claude-2", StringComparison.Ordinal)
+        && !id.StartsWith("claude-instant", StringComparison.Ordinal)
+        && !id.StartsWith("claude-3-opus", StringComparison.Ordinal)
+        && !id.StartsWith("claude-3-sonnet", StringComparison.Ordinal)
+        && !id.StartsWith("claude-3-haiku", StringComparison.Ordinal);
+
+    private static bool DefaultSupportsBailianModel(string id, string? providerType)
+    {
+        var isResponses = string.Equals(NormalizeProviderType(providerType), "openai-response", StringComparison.Ordinal);
+
+        if (MatchesPrefixOrExact(id, "qwen4-max")
+            || MatchesPrefixOrExact(id, "qwen3.8-max")
+            || MatchesPrefixOrExact(id, "qwen3.8-flash")
+            || id is "qwen3.8-2.4t-a95b" or "qwen3.8-27b" or "qwen3.8-omni-flash"
+            || MatchesPrefixOrExact(id, "qwen3.7-max")
+            || MatchesPrefixOrExact(id, "qwen3.7-plus")
+            || MatchesPrefixOrExact(id, "qwen3.7-flash")
+            || MatchesPrefixOrExact(id, "qwen3.6-plus")
+            || MatchesPrefixOrExact(id, "qwen3.6-flash")
+            || id == "qwen3.6-35b-a3b"
+            || MatchesPrefixOrExact(id, "qwen3.5-plus")
+            || MatchesPrefixOrExact(id, "qwen3.5-flash")
+            || id is "qwen3.5-397b-a17b" or "qwen3.5-122b-a10b" or "qwen3.5-35b-a3b" or "qwen3.5-27b"
+            || MatchesPrefixOrExact(id, "deepseek-v4.1-flash")
+            || MatchesPrefixOrExact(id, "deepseek-v4-pro")
+            || MatchesPrefixOrExact(id, "deepseek-v4-flash"))
+        {
+            return true;
+        }
+
+        if (isResponses)
+        {
+            return MatchesPrefixOrExact(id, "glm-5.3")
+                   || MatchesPrefixOrExact(id, "glm-5.2")
+                   || id == "kimi-k3"
+                   || MatchesPrefixOrExact(id, "kimi-k3.1-pro");
+        }
+
+        return id == "qwen3.6-27b"
+               || MatchesPrefixOrExact(id, "qwen3.5-omni-plus")
+               || MatchesPrefixOrExact(id, "qwen3.5-omni-flash")
+               || MatchesPrefixOrExact(id, "qwen-plus-character")
+               || MatchesPrefixOrExact(id, "qwen-flash-character")
+               || IsSupportedDatedQwenFlagship(id, "qwen-max", "2025-07-01")
+               || IsSupportedDatedQwenFlagship(id, "qwen-plus", "2025-07-14")
+               || IsSupportedDatedQwenFlagship(id, "qwen-flash", "2025-07-28");
+    }
+
+    private static bool MatchesPrefixOrExact(string id, string prefix) =>
+        string.Equals(id, prefix, StringComparison.Ordinal)
+        || id.StartsWith(prefix + "-", StringComparison.Ordinal);
+
+    private static bool IsSupportedDatedQwenFlagship(string id, string family, string minSnapshotDate)
+    {
+        if (id == family || id == family + "-latest") return true;
+        var prefix = family + "-";
+        if (!id.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        var suffix = id[prefix.Length..];
+        return suffix.Length == 10
+               && suffix[4] == '-' && suffix[7] == '-'
+               && string.CompareOrdinal(suffix, minSnapshotDate) >= 0;
+    }
+
+    private static bool IsNonChatModel(string id) =>
+        id.Contains("embedding", StringComparison.Ordinal)
+        || id.Contains("rerank", StringComparison.Ordinal)
+        || id.Contains("moderation", StringComparison.Ordinal)
+        || id.Contains("whisper", StringComparison.Ordinal)
+        || id.Contains("dall-e", StringComparison.Ordinal)
+        || id.Contains("gpt-image", StringComparison.Ordinal)
+        || id.Contains("imagen", StringComparison.Ordinal)
+        || id.Contains("veo", StringComparison.Ordinal)
+        || id.Contains("wanx", StringComparison.Ordinal)
+        || id.Contains("paraformer", StringComparison.Ordinal)
+        || id.Contains("cosyvoice", StringComparison.Ordinal)
+        || id.Contains("sambert", StringComparison.Ordinal)
+        || id.Contains("qwen-ocr", StringComparison.Ordinal)
+        || id.Contains("qwen-vl-ocr", StringComparison.Ordinal)
+        || id.StartsWith("qwen-mt", StringComparison.Ordinal)
+        || id.EndsWith("-realtime", StringComparison.Ordinal)
+        || id.Contains("-realtime-", StringComparison.Ordinal)
+        || id.EndsWith("-tts", StringComparison.Ordinal)
+        || id.Contains("-tts-", StringComparison.Ordinal)
+        || id.EndsWith("-asr", StringComparison.Ordinal)
+        || id.Contains("-asr-", StringComparison.Ordinal);
+
+    private static string NormalizeProviderType(string? providerType)
+    {
+        var normalized = providerType?.Trim().ToLowerInvariant() ?? string.Empty;
+        return normalized == "openai" ? "openai-compat" : normalized;
+    }
+
+    private static string NormalizeModelId(string? modelId)
+    {
+        var value = (modelId ?? string.Empty).Trim().ToLowerInvariant();
+        if (value.StartsWith("models/", StringComparison.Ordinal)) value = value[7..];
+        return value;
+    }
 }
 
-/// <summary>
-/// 从响应流里收集服务端搜索命中的来源。
-///
-/// 只收集结果、页面和引用中的网址，不把工具调用的 action 当作成功结果。
-/// 原始引用位置不会随 Pi 的文本事件转发，因此这里仅提供来源列表。
-///
-/// 只在转发线程上被写入、在流的循环里被读取，一把锁足够。
-/// </summary>
+public static class DeepSeekServerSearch
+{
+    public const string ProviderId = "deepseek-server";
+    public const string ToolName = BuiltinWebSearch.DeepSeekToolName;
+
+    public static bool IsSupportedModel(string? modelId) =>
+        BuiltinWebSearch.DefaultSupportsModel(BuiltinSearchVendor.DeepSeek, modelId);
+
+    public static bool IsSupportedTarget(string? modelId, string? endpoint) =>
+        IsSupportedModel(modelId) && IsOfficialEndpoint(endpoint);
+
+    public static bool IsOfficialEndpoint(string? endpoint) =>
+        BuiltinWebSearch.DetectVendor(endpoint) == BuiltinSearchVendor.DeepSeek;
+
+    public static bool IsSupportedEndpointType(string? providerType) =>
+        BuiltinWebSearch.IsSupportedProviderType(BuiltinSearchVendor.DeepSeek, providerType);
+}
+
 public sealed class ServerSearchSources
 {
     private readonly Lock _gate = new();
     private readonly List<SourceReference> _sources = [];
     private readonly Dictionary<string, int> _byUrl = new(StringComparer.OrdinalIgnoreCase);
     private readonly Decoder _decoder = Encoding.UTF8.GetDecoder();
-
-    // 一行可能被拆在两个 chunk 里，尤其是中文标题。
     private readonly StringBuilder _line = new();
     private bool _dirty;
 
-    /// <summary>喂一段原始响应字节（SSE 或一整个 JSON）。线程安全。</summary>
     public void Feed(ReadOnlyMemory<byte> chunk)
     {
         if (chunk.IsEmpty) return;
 
         lock (_gate)
         {
-            // UTF-8 的一个字符可能跨 chunk，必须用增量解码器。
             var chars = new char[_decoder.GetCharCount(chunk.Span, flush: false)];
             _decoder.GetChars(chunk.Span, chars, flush: false);
             foreach (var c in chars)
@@ -271,13 +574,11 @@ public sealed class ServerSearchSources
         }
     }
 
-    /// <summary>流结束时把最后一行（通常没有换行）也读掉。</summary>
     public void Complete()
     {
         lock (_gate) ConsumeLine();
     }
 
-    /// <summary>列表长了就交出去一次，和 <c>SearchCitations</c> 一个规矩：给的是全量。</summary>
     public bool TryTake(out IReadOnlyList<SourceReference> sources)
     {
         lock (_gate)
@@ -299,7 +600,6 @@ public sealed class ServerSearchSources
         var line = _line.ToString();
         _line.Clear();
 
-        // 注释行（": ping"）和 event: 行没有负载；只认 data:。
         if (!line.StartsWith("data:", StringComparison.Ordinal)) return;
         var payload = line[5..].Trim();
         if (payload.Length == 0 || payload == "[DONE]") return;
@@ -308,60 +608,66 @@ public sealed class ServerSearchSources
         try { doc = JsonDocument.Parse(payload); }
         catch (JsonException) { return; }
 
-        using (doc) Walk(doc.RootElement, false);
+        using (doc) Walk(doc.RootElement, source: false, groundingChunk: false);
     }
 
-    private void Walk(JsonElement element, bool source)
+    private void Walk(JsonElement element, bool source, bool groundingChunk)
     {
         switch (element.ValueKind)
         {
             case JsonValueKind.Array:
-                foreach (var item in element.EnumerateArray()) Walk(item, source);
+                foreach (var item in element.EnumerateArray()) Walk(item, source, groundingChunk);
                 break;
 
             case JsonValueKind.Object:
                 var type = FirstString(element, "type");
                 var isSource = source || type is "web_search_result" or "web_fetch_result"
                     or "web_search_result_location" or "url_citation";
-                if (isSource && TryReadSource(element, out var title, out var url, out var date))
+                if (isSource && TryReadSource(element, allowUri: groundingChunk, out var title, out var url, out var date))
                 {
                     Add(title, url, date);
                 }
                 foreach (var property in element.EnumerateObject())
                 {
-                    // Responses 的搜索结果在 action.sources；action.url 则只是请求。
                     if (property.NameEquals("action"))
                     {
                         if (property.Value.ValueKind == JsonValueKind.Object
                             && property.Value.TryGetProperty("sources", out var results))
-                            Walk(results, true);
+                        {
+                            Walk(results, source: true, groundingChunk: false);
+                        }
                         continue;
                     }
                     if (property.NameEquals("input")) continue;
-                    var childIsSource = property.Name is "sources" or "page" or "annotations"
-                        or "annotation" or "citations" or "citation" or "url_citation";
-                    Walk(property.Value, childIsSource);
+                    if (property.NameEquals("groundingChunks"))
+                    {
+                        Walk(property.Value, source: false, groundingChunk: true);
+                        continue;
+                    }
+                    if (groundingChunk && property.NameEquals("web"))
+                    {
+                        Walk(property.Value, source: true, groundingChunk: true);
+                        continue;
+                    }
+                    var childIsSource = property.Name is "sources" or "search_results" or "page"
+                        or "annotations" or "annotation" or "citations" or "citation" or "url_citation";
+                    Walk(property.Value, childIsSource, groundingChunk: false);
                 }
                 break;
         }
     }
 
-    private static bool TryReadSource(JsonElement obj, out string title, out string url, out string? date)
+    private static bool TryReadSource(JsonElement obj, bool allowUri, out string title, out string url, out string? date)
     {
         title = url = string.Empty;
         date = null;
 
-        if (!obj.TryGetProperty("url", out var urlElement)
-            || urlElement.ValueKind != JsonValueKind.String)
-            return false;
-
-        var href = urlElement.GetString();
+        var href = FirstString(obj, "url") ?? (allowUri ? FirstString(obj, "uri") : null);
         if (string.IsNullOrWhiteSpace(href)) return false;
         if (!href.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
             && !href.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             return false;
 
-        // title 是引用条目和结果条目都有的；没有就退到站点名，再没有就用地址。
         title = FirstString(obj, "title", "site_name")
             ?? (obj.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Object
                 ? FirstString(content, "title") : null)
@@ -387,7 +693,6 @@ public sealed class ServerSearchSources
     {
         if (_byUrl.TryGetValue(url, out var existing))
         {
-            // 同一地址可能先以站点名出现、后补上标题；标题更具体，值得替换。
             var at = _sources.FindIndex(s => s.Id == existing);
             if (at >= 0 && _sources[at].Title != title && title != url)
             {

@@ -82,7 +82,8 @@ public static class PiEndpointQuirks
         // role, and take max_tokens rather than max_completion_tokens.
         var host = endpoint!;
         var nonStandard =
-            Has(host, "deepseek.com") || Has(host, "api.moonshot.") || Has(host, "api.z.ai")
+            Has(host, "deepseek.com") || Has(host, "aliyuncs.com")
+            || Has(host, "api.moonshot.") || Has(host, "api.z.ai")
             || Has(host, "open.bigmodel.cn") || Has(host, "api.together.ai") || Has(host, "api.together.xyz")
             || Has(host, "chutes.ai") || Has(host, "cerebras.ai") || Has(host, "api.x.ai")
             || Has(host, "integrate.api.nvidia.com") || Has(host, "api.ant-ling.com")

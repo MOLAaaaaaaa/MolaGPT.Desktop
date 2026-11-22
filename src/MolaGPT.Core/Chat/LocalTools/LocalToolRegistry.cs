@@ -34,11 +34,8 @@ public static partial class LocalToolRegistry
     {
         var tools = new List<object>();
         var searchProvider = NormalizeSearchProvider(options.SearchProvider);
-        if (options.Network && searchProvider == "deepseek-server")
+        if (options.Network && BuiltinWebSearch.IsBuiltinProviderId(searchProvider))
         {
-            // 服务端搜索：搜索由 DeepSeek 在模型那一侧执行，本地不能再挂 search_web。
-            // 两者同时出现在 tools 里时，DeepSeek 只允许「客户端工具 + 服务端搜索 +
-            // 思考模式」这一种组合；本客户端要的是纯服务端搜索，所以这里故意留空。
         }
         else if (options.Network && searchProvider == "molagpt")
         {
@@ -500,12 +497,12 @@ public static partial class LocalToolRegistry
         if (NormalizeSearchProvider(options.SearchProvider) == "molagpt")
             return await SearchMolaAccountAsync(argumentsJson, options, accountSearch, ct).ConfigureAwait(false);
 
-        if (NormalizeSearchProvider(options.SearchProvider) == "deepseek-server")
+        if (BuiltinWebSearch.TryParseProviderId(options.SearchProvider, out var builtinVendor))
             return SerializeToolResult(new
             {
                 success = false,
                 source = "local_search_web",
-                error = "本会话使用 DeepSeek 服务端搜索，搜索由模型端执行，本地 search_web 已停用。"
+                error = $"当前使用 {BuiltinWebSearch.Label(builtinVendor)}，search_web 不可用。"
             });
 
         var queries = ParseSearchQueries(argumentsJson);
@@ -792,7 +789,7 @@ public static partial class LocalToolRegistry
         var queryLength = 0;
         foreach (var _ in query.EnumerateRunes())
             if (++queryLength > 128)
-                throw new InvalidOperationException("DeepSeek 搜索词最多 128 个字符，请缩短后重试。");
+                throw new InvalidOperationException("搜索词不能超过 128 个字符。");
         var apiKey = RequireApiKey(options, "DeepSeek");
         using var req = new HttpRequestMessage(HttpMethod.Post, DeepSeekToolEndpoint(options.SearchBaseUrl, "search"));
         req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + apiKey);
@@ -839,7 +836,7 @@ public static partial class LocalToolRegistry
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(options.FetchApiKey))
-            throw new InvalidOperationException("DeepSeek 网页抓取已开启，但设置里没有填写 API Key。");
+            throw new InvalidOperationException("未配置 DeepSeek API Key，无法读取网页。");
 
         using var req = new HttpRequestMessage(HttpMethod.Post, DeepSeekToolEndpoint(options.FetchBaseUrl, "fetch"));
         req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + options.FetchApiKey);
@@ -912,19 +909,19 @@ public static partial class LocalToolRegistry
         var status = (int)resp.StatusCode;
         var hint = code?.Trim().ToLowerInvariant() switch
         {
-            "url_not_allowed" => "该站点不允许 DeepSeek 抓取。",
+            "url_not_allowed" => "该网站不允许读取。",
             "url_not_accessible" => "页面无法访问（可能已删除或需要登录）。",
             "unavailable" => "DeepSeek 暂时不可用，请稍后重试。",
             _ => status switch
             {
                 401 => "DeepSeek API Key 无效。",
                 402 => "DeepSeek 账户余额不足。",
-                403 => "该站点不允许 DeepSeek 抓取。",
+                403 => "该网站不允许读取。",
                 404 => "页面无法访问（可能已删除或需要登录）。",
-                408 => "DeepSeek 抓取超时，请稍后重试。",
-                413 => "页面内容过大，DeepSeek 拒绝抓取。",
-                429 => "DeepSeek 接口限流，请稍后重试。",
-                >= 500 => "DeepSeek 服务端错误，请稍后重试。",
+                408 => "读取超时，请稍后重试。",
+                413 => "页面过大，无法读取。",
+                429 => "请求过于频繁，请稍后重试。",
+                >= 500 => "DeepSeek 服务异常，请稍后重试。",
                 _ => "DeepSeek 接口返回错误。"
             }
         };
@@ -970,17 +967,16 @@ public static partial class LocalToolRegistry
     private static string NormalizeSearchProvider(string? provider) =>
         string.IsNullOrWhiteSpace(provider)
             ? "duckduckgo"
-            : provider.Trim().ToLowerInvariant() switch
-            {
-                "molagpt" => "molagpt",
-                "tavily" => "tavily",
-                "exa" => "exa",
-                "deepseek" => "deepseek",
-                // 服务端搜索由模型供应商自己执行，本地没有对应的 HTTP 接口。保留这个
-                // 名字是为了让下面各层能认出它并明确拒绝，而不是悄悄退回 DuckDuckGo。
-                "deepseek-server" => "deepseek-server",
-                _ => "duckduckgo"
-            };
+            : BuiltinWebSearch.TryParseProviderId(provider, out var builtin)
+                ? BuiltinWebSearch.ProviderId(builtin)
+                : provider.Trim().ToLowerInvariant() switch
+                {
+                    "molagpt" => "molagpt",
+                    "tavily" => "tavily",
+                    "exa" => "exa",
+                    "deepseek" => "deepseek",
+                    _ => "duckduckgo"
+                };
 
     private static IReadOnlyList<string> ParseSearchQueries(string argumentsJson)
     {

@@ -96,36 +96,29 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         if (string.IsNullOrWhiteSpace(userText) && images.Count == 0 && files.Count == 0) yield break;
 
         var options = LocalToolOptions.FromExtraBody(request.ExtraBody);
-        var modelSupportsVision = Models.FirstOrDefault(m => m.Id == request.ModelId)?.SupportsVision ?? false;
+        var activeModel = Models.FirstOrDefault(m => m.Id.Equals(request.ModelId, StringComparison.OrdinalIgnoreCase));
+        var modelSupportsVision = activeModel?.SupportsVision ?? false;
 
-        // DeepSeek 的服务端搜索由模型端执行，本地这边唯一要做的事是把工具声明
-        // 放进请求体。所以先确认端点协议放得下它 —— 协议由凭据决定，拿不到
-        // （Gemini 模板、ChatGPT 套餐、或者干脆是别的模型）就退回本地搜索，
-        // 而不是把请求发上去等一个 400。
         var creds = _config.ResolveCreds(request);
-        // 网络访问关掉的时候不能只关本地工具：服务端搜索也是联网，只是换了个
-        // 执行的地方。所以这里跟 options.Network 一起判断，退回到「没有搜索」，
-        // 而不是给模型一个还能查网的工具。
-        var serverSearchProtocol = options.Network
-            && string.Equals(options.SearchProvider, DeepSeekServerSearch.ProviderId, StringComparison.OrdinalIgnoreCase)
-            && DeepSeekServerSearch.IsSupportedTarget(creds.Model, creds.Endpoint)
-            ? DeepSeekServerSearch.ResolveProtocol(creds.Api)
-            : null;
-        if (serverSearchProtocol is null
-            && string.Equals(options.SearchProvider, DeepSeekServerSearch.ProviderId, StringComparison.OrdinalIgnoreCase))
+        BuiltinSearchVendor? builtinVendor = null;
+        if (options.Network
+            && _config.BuiltinSearch
+            && activeModel?.SupportsBuiltinSearch == true
+            && BuiltinWebSearch.DetectVendor(creds.Endpoint) is { } detectedVendor
+            && BuiltinWebSearch.CanUseWireApi(detectedVendor, creds.Api))
         {
-            // 协议不支持（或是被 UI 闸门漏过来的请求）：退回本地搜索，别让整轮失败。
-            options = options with { SearchProvider = "duckduckgo" };
-        }
-        else if (serverSearchProtocol is not null)
-        {
-            // DeepSeek 官方的 /v1/responses 会悄悄丢掉服务端工具，换根路径才认。
-            var adjusted = DeepSeekServerSearch.AdjustEndpoint(creds.Endpoint, serverSearchProtocol);
+            builtinVendor = detectedVendor;
+            options = options with { SearchProvider = BuiltinWebSearch.ProviderId(detectedVendor) };
+            var adjusted = BuiltinWebSearch.AdjustEndpoint(detectedVendor, creds.Endpoint, creds.Api);
             if (!string.Equals(adjusted, creds.Endpoint, StringComparison.Ordinal))
             {
-                _log?.Invoke($"[server-search] 端点改用 {adjusted}（/v1/responses 会丢掉服务端工具）");
+                _log?.Invoke($"[builtin-search] 端点改用 {adjusted}");
                 creds = creds with { Endpoint = adjusted };
             }
+        }
+        else if (BuiltinWebSearch.IsBuiltinProviderId(options.SearchProvider))
+        {
+            options = options with { SearchProvider = "duckduckgo" };
         }
 
         // Pi launches with --no-builtin-tools, so its only file access is the
@@ -160,8 +153,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         var hints = await _toolHost.DescribeAgentToolsAsync(options, ct).ConfigureAwait(false);
         var toolCatalogJson = BuildToolCatalog(localDefs.Concat(hostDefs), hints);
 
-        // 客户端同时提供本地工具，服务端搜索使用界面说明的深度思考模式。
-        if (serverSearchProtocol is not null && request.UseThinking != true)
+        if (builtinVendor is { } thinkingVendor && BuiltinWebSearch.ForcesThinking(thinkingVendor) && request.UseThinking != true)
         {
             request = request with
             {
@@ -187,11 +179,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         if (ThinkingParams.Owns(creds.Api))
             creds = creds with { ExtraBody = MergeThinking(creds.ExtraBody, request, creds) };
 
-        // 服务端工具的声明必须最后落笔：thinking 的字段、以及 ChatCompletions
-        // 上那几个和它互斥的开关，都要在这一层收口。内部先跑一遍凭据自己的
-        // AdaptBody，套餐降级之类丢掉的东西不会把工具也一起丢掉。
-        if (serverSearchProtocol is not null)
-            creds = creds with { AdaptBody = DeepSeekServerSearch.Wrap(serverSearchProtocol, creds.AdaptBody) };
+        if (builtinVendor is { } activeBuiltin)
+            creds = creds with { AdaptBody = BuiltinWebSearch.Wrap(activeBuiltin, creds.Api, creds.Model, creds.AdaptBody) };
 
         if (request.HistorySeed is { } history)
             await WriteHistoryAsync(request.ConversationId, history, creds, ct).ConfigureAwait(false);
@@ -214,10 +203,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // the same list as a ChatChunk below.
         var citations = new SearchCitations();
 
-        // 服务端搜索的来源只存在于响应流里（Models/Responses/ChatCompletions 三种
-        // 协议的写法各不相同），所以顺手把转发的字节喂给一个收集器，再和本地
-        // 搜索一样按轮询把结果推给消息。
-        var serverSources = serverSearchProtocol is null ? null : new ServerSearchSources();
+        var serverSources = builtinVendor is null ? null : new ServerSearchSources();
         async Task<string> ExecuteToolAsync(string name, string argsJson, CancellationToken toolCt, Action<string>? report = null)
         {
             using var call = CancellationTokenSource.CreateLinkedTokenSource(toolCt, ct);
@@ -237,20 +223,17 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             message => Volatile.Write(ref promptError, message),
             (name, argsJson, report, toolCt) => ExecuteToolAsync(name, argsJson, toolCt, report));
 
-        // 服务端搜索只在响应里留痕：请求这边要是没把工具带上（协议判断错了、
-        // 被别的 AdaptBody 覆盖了），表现和「模型自己不爱搜」一模一样，光看
-        // 回复分不出来。落一行日志，省得下次还得改代码才能查。
         Action<string>? preparedHook = request.RolePrompt is null
             ? null
             : body => Interlocked.Exchange(ref promptTrace, RolePromptTrace.Read(creds.Api, body));
-        if (serverSources is not null)
+        if (serverSources is not null && builtinVendor is { } loggedVendor)
         {
             var roleHook = preparedHook;
             preparedHook = body =>
             {
                 roleHook?.Invoke(body);
                 _log?.Invoke(
-                    $"[server-search] protocol={serverSearchProtocol} tools={DescribeWireTools(body)}");
+                    $"[builtin-search] vendor={loggedVendor} api={creds.Api} tools={DescribeWireTools(body)}");
             };
         }
 
@@ -297,7 +280,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         var preview = new ToolPreviewTracker();
         var generationSpeed = new GenerationSpeedTracker();
 
-        var activeModel = Models.FirstOrDefault(m => m.Id.Equals(creds.Model, StringComparison.OrdinalIgnoreCase));
+        if (!string.Equals(creds.Model, request.ModelId, StringComparison.OrdinalIgnoreCase))
+            activeModel = Models.FirstOrDefault(m => m.Id.Equals(creds.Model, StringComparison.OrdinalIgnoreCase));
 
         // The same window Pi was catalogued with, so the gauge is measured against
         // the very number its auto-compaction is thresholded on.
@@ -481,14 +465,24 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         {
             if (System.Text.Json.Nodes.JsonNode.Parse(body) is not System.Text.Json.Nodes.JsonObject root)
                 return "请求体无法解析";
-            if (root["tools"] is not System.Text.Json.Nodes.JsonArray tools) return "<无 tools>";
+            var enableSearch = root["enable_search"] is System.Text.Json.Nodes.JsonValue flag
+                && flag.TryGetValue<bool>(out var searchOn) && searchOn;
+            if (root["tools"] is not System.Text.Json.Nodes.JsonArray tools)
+                return enableSearch ? "enable_search=true" : "<无 tools>";
 
-            var names = new List<string>(tools.Count);
+            var names = new List<string>(tools.Count + 1);
+            if (enableSearch) names.Add("enable_search");
             foreach (var tool in tools)
             {
                 if (tool is not System.Text.Json.Nodes.JsonObject entry)
                 {
                     names.Add("?");
+                    continue;
+                }
+
+                if (entry.ContainsKey("googleSearch") || entry.ContainsKey("google_search"))
+                {
+                    names.Add("googleSearch");
                     continue;
                 }
 
@@ -1484,7 +1478,8 @@ public sealed record PiWorkProviderConfig(
     string DisplayName,
     IReadOnlyList<ProviderModel> Models,
     PiSidecarSpec Spec,
-    Func<ChatRequest, PiProviderCreds> ResolveCreds);
+    Func<ChatRequest, PiProviderCreds> ResolveCreds,
+    bool BuiltinSearch = false);
 
 /// <summary>Per-request billing target. Account-quota → the MolaGPT relay URL +
 /// the live account JWT; BYOK → the user's own chat endpoint + key. Neither the

@@ -353,7 +353,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             var models = TryDeserializeModels(row.Models);
             var customHeaders = TryDeserializeHeaders(row.CustomHeaders is { } headers && _credentialStore is not null
                 ? _credentialStore.DecryptText(headers) : row.CustomHeaders);
-            var entry = new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat, customHeaders, row.ImageChatPath);
+            var entry = new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat, customHeaders, row.ImageChatPath, row.BuiltinSearch);
             if (IsImagePurpose(entry.Purpose) && entry.ImageChatPath is null)
             {
                 var legacyChat = ImageApiFormat.IsChatImage(entry.ImageFormat)
@@ -1199,7 +1199,8 @@ public sealed partial class SettingsViewModel : ObservableObject
                 ? (_credentialStore ?? throw new InvalidOperationException("凭据存储不可用。"))
                     .EncryptText(JsonSerializer.Serialize(entry.CustomHeaders))
                 : null,
-            ImageChatPath: entry.ImageChatPath));
+            ImageChatPath: entry.ImageChatPath,
+            BuiltinSearch: entry.BuiltinSearch));
         RefreshVisionProviderModels();
         RefreshTitleProviderModels();
         RefreshSubagentProviderModels();
@@ -1672,7 +1673,8 @@ public sealed record ProviderEntry(
     string? ImageEditPath = null,                          // image(openai-images): 编辑路径
     string? ImageFormat = null,                            // image: openai-images|openai-chat-image
     List<CustomHeaderEntry>? CustomHeaders = null,
-    string? ImageChatPath = null);
+    string? ImageChatPath = null,
+    bool BuiltinSearch = false);
 
 public sealed record ProviderModelEntry(
     string Id,
@@ -1696,7 +1698,8 @@ public sealed record ProviderModelEntry(
     bool SupportsTemperature = true,
     bool SupportsTopP = true,
     ModelPricing? Pricing = null,
-    string? ImageFormat = null);
+    string? ImageFormat = null,
+    bool? BuiltinSearch = null);
 
 /// <summary>A user-defined HTTP header appended to a BYOK provider's requests.</summary>
 public sealed record CustomHeaderEntry(string Name = "", string Value = "");

@@ -151,4 +151,5 @@ public sealed record ProviderModel(
     IReadOnlyDictionary<string, JsonElement>? CustomBody = null,
     bool SupportsTemperature = true,
     bool SupportsTopP = true,
-    ModelPricing? Pricing = null);
+    ModelPricing? Pricing = null,
+    bool SupportsBuiltinSearch = false);
