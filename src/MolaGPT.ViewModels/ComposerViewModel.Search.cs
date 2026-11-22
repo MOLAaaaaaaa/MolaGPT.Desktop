@@ -6,14 +6,13 @@ namespace MolaGPT.ViewModels;
 
 public sealed partial class ComposerViewModel
 {
-    private static readonly (string Id, string Name, string? Detail)[] SearchProviders =
+    private static readonly (string Id, string Name)[] SearchProviders =
     [
-        ("molagpt", "MolaGPT Web Search", null),
-        ("duckduckgo", "DuckDuckGo", "无需 API Key"),
-        ("deepseek", "DeepSeek 搜索 API", "成功请求按次计费"),
-        ("tavily", "Tavily", "需要 API Key"),
-        ("exa", "Exa", "需要 API Key"),
-        (DeepSeekServerSearch.ProviderId, "DeepSeek 服务端搜索", "开启深度思考，计入模型用量")
+        ("molagpt", "MolaGPT Web Search"),
+        ("duckduckgo", "DuckDuckGo"),
+        ("deepseek", "DeepSeek Search"),
+        ("tavily", "Tavily"),
+        ("exa", "Exa")
     ];
 
     public string? ConversationSearchProvider => NormalizeConversationSearchProvider(SubjectRoleContext.SearchProvider);
@@ -23,73 +22,128 @@ public sealed partial class ComposerViewModel
         get
         {
             var provider = SettingsViewModel.NormalizeWebSearchProvider(_settings?.WebSearchProvider);
-            return provider == DeepSeekServerSearch.ProviderId ? "duckduckgo" : provider;
+            return provider == "molagpt" && _settings?.IsLoggedIn != true ? "duckduckgo" : provider;
         }
     }
 
-    public bool CanUseDeepSeekServerSearch
+    private ProviderEntry? ActiveByokProviderEntry
     {
         get
         {
             var provider = SubjectProvider;
-            if (provider is null || provider.ToAppMode() != AppMode.Byok
-                || SubjectModel is not { SupportsToolCalling: true } model)
-                return false;
-
-            var entry = _settings?.Providers.FirstOrDefault(item =>
+            if (provider is null || provider.ToAppMode() != AppMode.Byok) return null;
+            return _settings?.Providers.FirstOrDefault(item =>
                 item.Enabled && string.Equals(item.Id, provider.Id, StringComparison.OrdinalIgnoreCase));
-            return entry is not null
-                && DeepSeekServerSearch.IsSupportedEndpointType(entry.Type)
-                && DeepSeekServerSearch.IsSupportedTarget(model.Id, entry.BaseUrl);
         }
     }
+
+    public BuiltinSearchVendor? ActiveBuiltinSearchVendor
+    {
+        get
+        {
+            if (SubjectModel is not { SupportsBuiltinSearch: true }
+                || ActiveByokProviderEntry is not { } entry
+                || !BuiltinWebSearch.IsEnabledOnProvider(entry.Type, entry.BaseUrl, entry.BuiltinSearch))
+            {
+                return null;
+            }
+
+            return BuiltinWebSearch.DetectVendor(entry.BaseUrl);
+        }
+    }
+
+    public bool IsBuiltinSearchActive => ActiveBuiltinSearchVendor is not null;
+
+    public string? ActiveBuiltinSearchProviderId =>
+        IsBuiltinSearchActive ? ActiveByokProviderEntry?.Id : null;
+
+    public string? ActiveBuiltinSearchNote =>
+        ActiveBuiltinSearchVendor is { } vendor
+            ? $"当前模型使用 {BuiltinWebSearch.Label(vendor)}"
+            : null;
+
+    public bool IsThinkingForcedByBuiltinSearch =>
+        EnableNetwork
+        && AreNetworkToolsEnabled
+        && ActiveBuiltinSearchVendor is { } vendor
+        && BuiltinWebSearch.ForcesThinking(vendor);
 
     private string? AvailableConversationSearchProvider
     {
         get
         {
             var selected = ConversationSearchProvider;
-            return selected == DeepSeekServerSearch.ProviderId && !CanUseDeepSeekServerSearch ? null : selected;
+            return selected is not null && IsSearchProviderConfigured(selected) ? selected : null;
         }
     }
 
-    public string ActiveSearchProvider => AvailableConversationSearchProvider ?? GlobalSearchProvider;
+    public string ActiveSearchProvider =>
+        ActiveBuiltinSearchVendor is { } vendor
+            ? BuiltinWebSearch.ProviderId(vendor)
+            : AvailableConversationSearchProvider ?? GlobalSearchProvider;
 
-    public string ActiveSearchProviderLabel => SearchProviderLabel(ActiveSearchProvider);
+    public string ActiveSearchProviderLabel =>
+        ActiveBuiltinSearchVendor is { } vendor
+            ? BuiltinWebSearch.Label(vendor)
+            : SearchProviderLabel(ActiveSearchProvider);
 
     public bool IsSearchProviderSwitchVisible =>
         SubjectProvider is { } provider && provider.ToAppMode().IsLocalAgent()
         && SubjectModel?.SupportsToolCalling == true;
 
+    public bool IsNetworkGroupActive => EnableNetwork && AreNetworkToolsEnabled;
+
+    public bool IsNetworkSplit => IsNetworkGroupActive && IsSearchProviderSwitchVisible;
+
+    public string NetworkSegmentLabel =>
+        IsBuiltinSearchActive
+            ? "内置搜索"
+            : AvailableConversationSearchProvider is { } selected
+                ? SearchProviderLabel(selected)
+                : string.Empty;
+
+    public bool HasNetworkSegmentLabel => !string.IsNullOrEmpty(NetworkSegmentLabel);
+
+    public string SearchProviderToolTip =>
+        ActiveBuiltinSearchVendor is { } vendor
+            ? $"搜索服务：{BuiltinWebSearch.Label(vendor)}"
+            : AvailableConversationSearchProvider is { } selected
+                ? $"搜索服务：{SearchProviderLabel(selected)}"
+                : $"搜索服务：{SearchProviderLabel(GlobalSearchProvider)} · 跟随设置";
+
     public IReadOnlyList<SearchProviderChoice> SearchProviderChoices
     {
         get
         {
+            var dimmed = IsBuiltinSearchActive;
             var selected = AvailableConversationSearchProvider;
-            bool canUseServerSearch = CanUseDeepSeekServerSearch;
-            bool signedIn = _settings?.IsLoggedIn == true;
             var choices = new List<SearchProviderChoice>
             {
-                new(null, $"跟随设置（{SearchProviderLabel(GlobalSearchProvider)}）", null, true, selected is null)
+                new(null, "跟随设置", SearchProviderLabel(GlobalSearchProvider), !dimmed, !dimmed && selected is null)
             };
 
-            foreach (var (id, name, detail) in SearchProviders)
+            foreach (var (id, name) in SearchProviders)
             {
-                bool selectable = id switch
+                var configured = IsSearchProviderConfigured(id);
+                var selectable = !dimmed && configured;
+                var detail = id switch
                 {
-                    DeepSeekServerSearch.ProviderId => canUseServerSearch,
-                    "molagpt" => signedIn,
-                    _ => true
+                    "molagpt" => configured ? "使用账户额度" : "登录后可用",
+                    "duckduckgo" => "免费",
+                    "deepseek" => configured ? "按次计费" : "未配置 API Key",
+                    _ => configured ? null : "未配置 API Key"
                 };
-                var description = selectable ? detail : id == "molagpt"
-                    ? "请先登录 MolaGPT"
-                    : "需要 DeepSeek 官方 deepseek-flash 模型";
-                choices.Add(new SearchProviderChoice(id, name, description, selectable, selected == id));
+                choices.Add(new SearchProviderChoice(id, name, detail, selectable, !dimmed && selected == id));
             }
 
             return choices;
         }
     }
+
+    private bool IsSearchProviderConfigured(string id) =>
+        _settings is null
+            ? id == "duckduckgo"
+            : _settings.IsWebSearchProviderConfigured(id);
 
     [RelayCommand]
     private void SelectSearchProvider(SearchProviderChoice? choice)
@@ -101,7 +155,7 @@ public sealed partial class ComposerViewModel
     public void SetConversationSearchProvider(string? provider)
     {
         var normalized = NormalizeConversationSearchProvider(provider);
-        if (normalized == DeepSeekServerSearch.ProviderId && !CanUseDeepSeekServerSearch) return;
+        if (normalized is not null && !IsSearchProviderConfigured(normalized)) return;
 
         var context = _chat.RoleContext;
         if (string.Equals(context.SearchProvider, normalized, StringComparison.Ordinal)) return;
@@ -110,13 +164,29 @@ public sealed partial class ComposerViewModel
         RaiseSearchProviderChanged();
     }
 
+    public void RefreshSearchProviderUi() => RaiseSearchProviderChanged();
+
     private void RaiseSearchProviderChanged()
     {
         OnPropertyChanged(nameof(ConversationSearchProvider));
+        OnPropertyChanged(nameof(GlobalSearchProvider));
+        OnPropertyChanged(nameof(ActiveBuiltinSearchVendor));
+        OnPropertyChanged(nameof(IsBuiltinSearchActive));
+        OnPropertyChanged(nameof(ActiveBuiltinSearchProviderId));
+        OnPropertyChanged(nameof(ActiveBuiltinSearchNote));
+        OnPropertyChanged(nameof(IsThinkingForcedByBuiltinSearch));
+        OnPropertyChanged(nameof(IsThinkingToggleChecked));
+        OnPropertyChanged(nameof(ThinkingToolTip));
+        OnPropertyChanged(nameof(IsReasoningEffortVisible));
+        RaiseReasoningGroupChanged();
         OnPropertyChanged(nameof(ActiveSearchProvider));
         OnPropertyChanged(nameof(ActiveSearchProviderLabel));
+        OnPropertyChanged(nameof(IsNetworkGroupActive));
+        OnPropertyChanged(nameof(IsNetworkSplit));
+        OnPropertyChanged(nameof(NetworkSegmentLabel));
+        OnPropertyChanged(nameof(HasNetworkSegmentLabel));
+        OnPropertyChanged(nameof(SearchProviderToolTip));
         OnPropertyChanged(nameof(SearchProviderChoices));
-        OnPropertyChanged(nameof(CanUseDeepSeekServerSearch));
     }
 
     internal static string SearchProviderLabel(string? provider) =>

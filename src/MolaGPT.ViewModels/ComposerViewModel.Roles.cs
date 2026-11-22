@@ -61,7 +61,11 @@ public sealed partial class ComposerViewModel
         _chat.SaveRoleContext(context);
     }
 
-    partial void OnEnableNetworkChanged(bool value) => PersistRoleOptions();
+    partial void OnEnableNetworkChanged(bool value)
+    {
+        RaiseSearchProviderChanged();
+        PersistRoleOptions();
+    }
 
     private RolePromptBuildResult? PrepareRolePrompt(MessageViewModel assistant, string generationId, bool continuation, int? maxTokens)
     {

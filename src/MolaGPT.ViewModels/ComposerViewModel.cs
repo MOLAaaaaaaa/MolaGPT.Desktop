@@ -344,12 +344,10 @@ public sealed partial class ComposerViewModel : ObservableObject
                     or nameof(SettingsViewModel.IsLoggedIn)
                     or nameof(SettingsViewModel.DeepSeekFetchEnabled))
                 {
-                    OnPropertyChanged(nameof(GlobalSearchProvider));
-                    OnPropertyChanged(nameof(ActiveSearchProvider));
-                    OnPropertyChanged(nameof(ActiveSearchProviderLabel));
-                    OnPropertyChanged(nameof(SearchProviderChoices));
+                    RaiseSearchProviderChanged();
                 }
             };
+            _settings.SearchConfigurationChanged += (_, _) => RaiseSearchProviderChanged();
         }
         Attachments.CollectionChanged += (_, _) =>
         {
@@ -498,7 +496,26 @@ public sealed partial class ComposerViewModel : ObservableObject
     private bool? _pendingMemoryOverride;
 
     private bool IsThinkingEnabled => IsThinkingMandatory
+        || IsThinkingForcedByBuiltinSearch
         || (IsThinkingVisible ? EnableThinking : _chat.ActiveModel?.SupportsReasoningEffort == true);
+
+    public bool IsThinkingToggleChecked
+    {
+        get => EnableThinking || IsThinkingForcedByBuiltinSearch;
+        set
+        {
+            if (IsThinkingForcedByBuiltinSearch)
+            {
+                OnPropertyChanged(nameof(IsThinkingToggleChecked));
+                return;
+            }
+            EnableThinking = value;
+        }
+    }
+
+    public string ThinkingToolTip => IsThinkingForcedByBuiltinSearch
+        ? "使用 DeepSeek 内置搜索时保持开启"
+        : "开启推理：复杂问题先推理后回答";
 
     /// <summary>Effort-only models expose controls without a thinking toggle.</summary>
     public bool IsReasoningEffortVisible => IsThinkingEnabled
@@ -1432,7 +1449,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             enabledTools["webPageMaxCharacters"] = _settings?.WebPageMaxCharacters ?? 12000;
             // DeepSeek 的网页抓取是可选的替换实现：同一个 Key、同一个账户，开着就
             // 走服务端的 /tools/fetch，关着仍然是本地抓取。
-            if (_settings?.DeepSeekFetchEnabled == true)
+            if (_settings?.EffectiveDeepSeekFetchEnabled == true)
             {
                 enabledTools["fetchProvider"] = "deepseek";
                 enabledTools["fetchApiKey"] = _settings.DeepSeekFetchApiKey ?? string.Empty;
@@ -2821,6 +2838,7 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     partial void OnEnableThinkingChanged(bool value)
     {
+        OnPropertyChanged(nameof(IsThinkingToggleChecked));
         OnPropertyChanged(nameof(IsReasoningEffortVisible));
         RaiseReasoningGroupChanged();
         PersistRoleOptions();
