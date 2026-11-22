@@ -4,6 +4,7 @@ using System.Linq;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using CommunityToolkit.Mvvm.ComponentModel;
+using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Models;
 using MolaGPT.ViewModels;
 
@@ -197,6 +198,54 @@ public sealed partial class ModelRow : ObservableObject
     [ObservableProperty] private bool _canChooseImageFormat = true;
     [ObservableProperty] private bool _isExpanded;
 
+    private bool? _builtinSearchOverride;
+    private BuiltinSearchVendor? _builtinSearchVendor;
+    private string? _providerType;
+    private bool _providerBuiltinSearchActive;
+
+    public bool? BuiltinSearchOverride => _builtinSearchOverride;
+
+    public bool IsBuiltinSearchVendor => !IsImageProvider && _builtinSearchVendor is not null;
+
+    public bool BuiltinSearch
+    {
+        get => _builtinSearchOverride
+               ?? (_builtinSearchVendor is { } vendor
+                   && BuiltinWebSearch.DefaultSupportsModel(vendor, Id, _providerType));
+        set
+        {
+            var previous = BuiltinSearch;
+            _builtinSearchOverride = value;
+            if (previous == value) return;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(ShowBuiltinSearchBadge));
+        }
+    }
+
+    public bool ShowBuiltinSearchBadge => IsBuiltinSearchVendor && _providerBuiltinSearchActive && BuiltinSearch;
+
+    public void SetBuiltinSearchContext(
+        BuiltinSearchVendor? vendor,
+        string? providerType,
+        bool providerActive,
+        bool? initialOverride = null,
+        bool applyInitialOverride = false)
+    {
+        _builtinSearchVendor = vendor;
+        _providerType = providerType;
+        _providerBuiltinSearchActive = providerActive;
+        if (applyInitialOverride) _builtinSearchOverride = initialOverride;
+        OnPropertyChanged(nameof(IsBuiltinSearchVendor));
+        OnPropertyChanged(nameof(BuiltinSearch));
+        OnPropertyChanged(nameof(ShowBuiltinSearchBadge));
+    }
+
+    partial void OnIsImageProviderChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsBuiltinSearchVendor));
+        OnPropertyChanged(nameof(ShowBuiltinSearchBadge));
+    }
+
     public string ImageFormatHint => ImageFormatIndex switch
     {
         1 => "适用于 gpt-image、Seedream、Qwen-Image 等图像模型",
@@ -298,6 +347,11 @@ public sealed partial class ModelRow : ObservableObject
 
     partial void OnIdChanged(string value)
     {
+        if (_builtinSearchOverride is null && _builtinSearchVendor is not null)
+        {
+            OnPropertyChanged(nameof(BuiltinSearch));
+            OnPropertyChanged(nameof(ShowBuiltinSearchBadge));
+        }
         if (PricingCandidates.Count == 0) return;
         SelectedPricingCandidate = null;
         PricingCandidates.Clear();

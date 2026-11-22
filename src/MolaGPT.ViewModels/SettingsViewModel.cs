@@ -58,6 +58,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string WebSearchMaxResultsKey = "web_search_max_results";
     private const string WebPageMaxCharactersKey = "web_page_max_characters";
     private const string DeepSeekFetchEnabledKey = "deepseek_fetch_enabled";
+    private const string DeepSeekSearchLinkedProviderKey = "web_search_linked_provider:deepseek";
     private const string WebSearchSecretPrefix = "web_search_api_key:";
     private const string ByokMcpServersKey = "byok_mcp_servers";
     private const string McpServerSecretPrefix = "mcp_server_token:";
@@ -227,6 +228,9 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// <summary>网页读取改走 DeepSeek 的 /v1/tools/fetch。默认关闭：抓取按次计费，
     /// 而本机抓取对大多数页面已经够用。</summary>
     [ObservableProperty] private bool _deepSeekFetchEnabled;
+    [ObservableProperty] private string? _deepSeekSearchLinkedProviderId;
+
+    public event EventHandler? SearchConfigurationChanged;
     [ObservableProperty] private bool _autoTitleEnabled = true;
     [ObservableProperty] private TitleProviderModelOption? _selectedTitleProviderModel;
     [ObservableProperty] private bool _visionProxyEnabled;
@@ -374,6 +378,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         RefreshMemoryProviderModels();
         RefreshVisionProviderModels();
         RefreshImageGenerationProviderModels();
+        RaiseSearchConfigurationChanged();
     }
 
     private void LoadSettings()
@@ -472,6 +477,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             if (int.TryParse(_settingsRepo.Get(WebPageMaxCharactersKey), out var maxChars))
                 WebPageMaxCharacters = Math.Clamp(maxChars, 1000, 30000);
             DeepSeekFetchEnabled = bool.TryParse(_settingsRepo.Get(DeepSeekFetchEnabledKey), out var dsFetch) && dsFetch;
+            DeepSeekSearchLinkedProviderId = _settingsRepo.Get(DeepSeekSearchLinkedProviderKey);
             AutoTitleEnabled = !bool.TryParse(
                 _settingsRepo.Get(ConversationTitleService.AutoTitleEnabledKey),
                 out var autoTitleEnabled) || autoTitleEnabled;
@@ -763,11 +769,9 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         var provider = NormalizeWebSearchProvider(value);
-        if (provider == "deepseek-server")
+        if (!string.Equals(provider, value, StringComparison.Ordinal))
         {
-            // 服务端搜索只能按会话使用，全局设置里不该落这个值。放回上一次的选择，
-            // 第二次赋值会走正常路径，因为存着的一定不是 deepseek-server。
-            WebSearchProvider = NormalizeWebSearchProvider(_settingsRepo.Get(WebSearchProviderKey));
+            WebSearchProvider = provider;
             return;
         }
         WebSearchMaxResults = Math.Clamp(WebSearchMaxResults, 1, provider == "molagpt" ? 6 : 10);
@@ -782,6 +786,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _settingsRepo.Set(WebSearchBaseUrlPrefix + provider, WebSearchBaseUrl ?? string.Empty);
         // Keep the old single setting in sync for compatibility with older versions.
         _settingsRepo.Set(WebSearchBaseUrlKey, WebSearchBaseUrl ?? string.Empty);
+        RaiseSearchConfigurationChanged();
     }
 
     partial void OnWebSearchBaseUrlChanged(string? value)
@@ -794,6 +799,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _loadingSearchSettings = true;
         try { WebSearchApiKey = StoredWebSearchApiKey(provider, address); }
         finally { _loadingSearchSettings = false; }
+        RaiseSearchConfigurationChanged();
     }
 
     partial void OnWebSearchApiKeyChanged(string? value)
@@ -813,6 +819,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             if (SearchOrigin(WebSearchBaseUrl, provider) is { } origin)
                 _settingsRepo.Set(WebSearchKeyOriginPrefix + provider, origin);
         }
+        RaiseSearchConfigurationChanged();
     }
 
     partial void OnWebSearchMaxResultsChanged(int value)
@@ -833,23 +840,55 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(DeepSeekFetchEnabledKey, value.ToString());
+        RaiseSearchConfigurationChanged();
     }
 
-    /// <summary>取得服务商和地址对应的搜索密钥。</summary>
+    partial void OnDeepSeekSearchLinkedProviderIdChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(DeepSeekSearchLinkedProviderKey, value);
+        RaiseSearchConfigurationChanged();
+    }
+
+    private void RaiseSearchConfigurationChanged()
+    {
+        OnPropertyChanged(nameof(EffectiveDeepSeekFetchEnabled));
+        SearchConfigurationChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public IReadOnlyList<ProviderEntry> GetOfficialDeepSeekProviders() =>
+        Providers
+            .Where(entry => !IsImagePurpose(entry.Purpose)
+                            && !string.IsNullOrWhiteSpace(entry.ApiKey)
+                            && BuiltinWebSearch.DetectVendor(entry.BaseUrl) == BuiltinSearchVendor.DeepSeek)
+            .ToArray();
+
+    public ProviderEntry? GetLinkedDeepSeekSearchProvider() =>
+        string.IsNullOrWhiteSpace(DeepSeekSearchLinkedProviderId)
+            ? null
+            : GetOfficialDeepSeekProviders().FirstOrDefault(entry =>
+                string.Equals(entry.Id, DeepSeekSearchLinkedProviderId, StringComparison.Ordinal));
+
+    public bool IsWebSearchProviderConfigured(string? provider) =>
+        NormalizeWebSearchProvider(provider) switch
+        {
+            "duckduckgo" => true,
+            "molagpt" => IsLoggedIn,
+            var other => !string.IsNullOrWhiteSpace(WebSearchApiKeyFor(other))
+        };
+
+    public bool EffectiveDeepSeekFetchEnabled =>
+        DeepSeekFetchEnabled && IsWebSearchProviderConfigured("deepseek");
+
     public string? WebSearchApiKeyFor(string provider)
     {
         var normalized = NormalizeWebSearchProvider(provider);
-        var address = WebSearchBaseUrlFor(normalized);
-        var stored = StoredWebSearchApiKey(normalized, address);
-        if (!string.IsNullOrWhiteSpace(stored)) return stored;
-        return normalized == "deepseek" && DeepSeekServerSearch.IsOfficialEndpoint(address) ? DeepSeekProviderApiKey() : null;
-    }
+        if (normalized == "deepseek" && GetLinkedDeepSeekSearchProvider() is { } linked)
+            return linked.ApiKey;
 
-    private string? DeepSeekProviderApiKey() =>
-        Providers.FirstOrDefault(entry =>
-            entry.Enabled && entry.Purpose == "chat"
-            && !string.IsNullOrWhiteSpace(entry.ApiKey)
-            && DeepSeekServerSearch.IsOfficialEndpoint(entry.BaseUrl))?.ApiKey;
+        var address = WebSearchBaseUrlFor(normalized);
+        return StoredWebSearchApiKey(normalized, address);
+    }
 
     private string? StoredWebSearchApiKey(string provider, string? address)
     {
@@ -873,6 +912,11 @@ public sealed partial class SettingsViewModel : ObservableObject
     public string WebSearchBaseUrlFor(string provider)
     {
         var normalized = NormalizeWebSearchProvider(provider);
+        if (normalized == "deepseek" && GetLinkedDeepSeekSearchProvider() is { } linked
+            && !string.IsNullOrWhiteSpace(linked.BaseUrl))
+        {
+            return linked.BaseUrl.Trim();
+        }
         if (string.Equals(normalized, WebSearchProvider, StringComparison.Ordinal)
             && !string.IsNullOrWhiteSpace(WebSearchBaseUrl))
         {
@@ -883,8 +927,6 @@ public sealed partial class SettingsViewModel : ObservableObject
         return string.IsNullOrWhiteSpace(stored) ? DefaultWebSearchBaseUrl(normalized) : stored.Trim();
     }
 
-    /// <summary>DeepSeek 网页抓取沿用 DeepSeek 搜索的 Key 与地址：同一个服务商、同一个
-    /// 账户，没有理由让用户填两遍。</summary>
     public string? DeepSeekFetchApiKey => WebSearchApiKeyFor("deepseek");
 
     public string DeepSeekFetchBaseUrl => WebSearchBaseUrlFor("deepseek");
@@ -1160,9 +1202,6 @@ public sealed partial class SettingsViewModel : ObservableObject
                 "tavily" => "tavily",
                 "exa" => "exa",
                 "deepseek" => "deepseek",
-                // 服务端搜索不是全局可用的服务商：它绑在具体会话和具体模型上。
-                // 认得出这个名字，是为了让读设置的地方能拒绝它而不是当成 DuckDuckGo。
-                "deepseek-server" => "deepseek-server",
                 _ => "duckduckgo"
             };
 
@@ -1208,6 +1247,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         RefreshSelectionModels();
         RefreshMemoryProviderModels();
         RefreshImageGenerationProviderModels();
+        RaiseSearchConfigurationChanged();
 
         if (string.Equals(entry.Purpose, "image", StringComparison.OrdinalIgnoreCase))
         {
@@ -1592,6 +1632,10 @@ public sealed partial class SettingsViewModel : ObservableObject
             WorkbenchImageGenerationProviderId = null;
             WorkbenchImageGenerationModelId = null;
         }
+        if (string.Equals(DeepSeekSearchLinkedProviderId, id, StringComparison.Ordinal))
+            DeepSeekSearchLinkedProviderId = null;
+        else
+            RaiseSearchConfigurationChanged();
     }
 
     private static List<ProviderModelEntry> TryDeserializeModels(string json)
