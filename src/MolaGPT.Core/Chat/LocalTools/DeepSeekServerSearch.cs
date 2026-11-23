@@ -230,9 +230,10 @@ public static class BuiltinWebSearch
 
             case BuiltinSearchVendor.OpenAi when normalizedApi == "openai-responses":
                 AppendTypedTool(body, "web_search", "web_search", "web_search_preview");
-                if (string.Equals(NormalizeModelId(modelId), "gpt-5", StringComparison.Ordinal)
-                    && body["reasoning"] is JsonObject reasoning
-                    && (string?)reasoning["effort"] is "minimal" or "none")
+                if (body["reasoning"] is JsonObject reasoning
+                    && reasoning["effort"] is JsonValue value
+                    && value.TryGetValue<string>(out var effort)
+                    && (effort == "minimal" || (effort == "none" && NormalizeModelId(modelId) == "gpt-5")))
                 {
                     reasoning["effort"] = "low";
                 }
