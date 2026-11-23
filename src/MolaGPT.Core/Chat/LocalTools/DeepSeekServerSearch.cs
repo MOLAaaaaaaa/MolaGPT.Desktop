@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
 
 namespace MolaGPT.Core.Chat.LocalTools;
@@ -75,7 +76,9 @@ public static class BuiltinWebSearch
         var normalized = NormalizeProviderType(providerType);
         return vendor switch
         {
-            BuiltinSearchVendor.DeepSeek => normalized is "openai-compat" or "openai-response" or "anthropic",
+            // DeepSeek 的 Chat Completions 与 Anthropic 兼容端点在携带本地 function 工具时会静默忽略服务端搜索工具；
+            // 仅 Responses 端点（/responses）支持本地工具与内置搜索共存。
+            BuiltinSearchVendor.DeepSeek => normalized == "openai-response",
             BuiltinSearchVendor.OpenAi => normalized == "openai-response",
             BuiltinSearchVendor.Bailian => normalized is "openai-compat" or "openai-response",
             BuiltinSearchVendor.Anthropic => normalized == "anthropic",
@@ -89,7 +92,7 @@ public static class BuiltinWebSearch
         var normalized = api?.Trim().ToLowerInvariant();
         return vendor switch
         {
-            BuiltinSearchVendor.DeepSeek => normalized is "openai-completions" or "openai-responses" or "anthropic-messages",
+            BuiltinSearchVendor.DeepSeek => normalized == "openai-responses",
             BuiltinSearchVendor.OpenAi => normalized == "openai-responses",
             BuiltinSearchVendor.Bailian => normalized is "openai-completions" or "openai-responses",
             BuiltinSearchVendor.Anthropic => normalized == "anthropic-messages",
@@ -128,17 +131,17 @@ public static class BuiltinWebSearch
 
     public static string DescribeToolHint(BuiltinSearchVendor vendor) => vendor switch
     {
-        BuiltinSearchVendor.DeepSeek => "支持搜索与网页读取，仅部分模型可用。开启后启用深度思考，搜索不单独计费。",
-        BuiltinSearchVendor.OpenAi => "支持搜索与网页浏览，仅部分模型可用。搜索按次计费，模型用量另计。",
+        BuiltinSearchVendor.DeepSeek => "支持搜索与网页读取，仅部分模型可用，开启后默认启用深度思考。可能产生额外费用。",
+        BuiltinSearchVendor.OpenAi => "支持搜索与网页浏览，仅部分模型可用。可能产生额外费用。",
         BuiltinSearchVendor.Bailian => "支持搜索，开启思考时含网页读取。仅部分模型可用，可能产生额外费用。",
-        BuiltinSearchVendor.Anthropic => "支持搜索与网页读取，仅部分模型可用。搜索按次计费，读取仅计模型用量。",
-        BuiltinSearchVendor.Gemini => "支持搜索与网页读取，仅部分模型可用，可能产生额外费用。",
+        BuiltinSearchVendor.Anthropic => "支持搜索与网页读取，仅部分模型可用。可能产生额外费用。",
+        BuiltinSearchVendor.Gemini => "支持搜索与网页读取，仅部分模型可用。可能产生额外费用。",
         _ => string.Empty
     };
 
     public static string DescribeProtocolRequirement(BuiltinSearchVendor vendor) => vendor switch
     {
-        BuiltinSearchVendor.DeepSeek => "需使用 OpenAI Chat Completions、OpenAI Responses 或 Anthropic 协议。",
+        BuiltinSearchVendor.DeepSeek => "需使用 OpenAI Responses 协议。",
         BuiltinSearchVendor.OpenAi => "需使用 OpenAI Responses 协议。",
         BuiltinSearchVendor.Bailian => "需使用 OpenAI Chat Completions 或 OpenAI Responses 协议。",
         BuiltinSearchVendor.Anthropic => "需使用 Anthropic 协议。",
@@ -265,6 +268,7 @@ public static class BuiltinWebSearch
             case BuiltinSearchVendor.Gemini when normalizedApi == "google-generative-ai":
                 AppendGeminiGoogleSearch(body);
                 if (enableWebFetch) AppendGeminiUrlContext(body);
+                EnsureGeminiServerToolInvocations(body);
                 break;
         }
     }
@@ -412,6 +416,17 @@ public static class BuiltinWebSearch
         }
 
         tools.Add(new JsonObject { ["urlContext"] = new JsonObject() });
+    }
+
+    private static void EnsureGeminiServerToolInvocations(JsonObject body)
+    {
+        if (body["toolConfig"] is not JsonObject toolConfig)
+        {
+            toolConfig = new JsonObject();
+            body["toolConfig"] = toolConfig;
+        }
+
+        toolConfig["includeServerSideToolInvocations"] = true;
     }
 
     private static JsonObject EnsureSearchOptions(JsonObject body)
@@ -624,14 +639,36 @@ public static class DeepSeekServerSearch
         BuiltinWebSearch.IsSupportedProviderType(BuiltinSearchVendor.DeepSeek, providerType);
 }
 
-public sealed class ServerSearchSources
+public sealed class ServerSearchSources(LocalToolOptions? options = null)
 {
+    private static readonly JsonSerializerOptions CompactJsonOptions = new()
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    private sealed class OpenCall(string id, string name, string args)
+    {
+        public string Id { get; } = id;
+        public string Name { get; set; } = name;
+        public string Args { get; set; } = args;
+        public bool Done { get; set; }
+        public bool HasResult { get; set; }
+    }
+
+    private sealed record AnthropicBlock(string Id, string Name, StringBuilder Json);
+
+    private readonly LocalToolOptions? _options = options;
     private readonly Lock _gate = new();
     private readonly List<SourceReference> _sources = [];
     private readonly Dictionary<string, int> _byUrl = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, OpenCall> _calls = new(StringComparer.Ordinal);
+    private readonly Dictionary<int, AnthropicBlock> _anthropicBlocks = [];
+    private readonly List<ToolCallDelta> _pendingTools = [];
     private readonly Decoder _decoder = Encoding.UTF8.GetDecoder();
     private readonly StringBuilder _line = new();
     private bool _dirty;
+    private bool _sawExplicitSearchCall;
+    private int _seq;
 
     public void Feed(ReadOnlyMemory<byte> chunk)
     {
@@ -656,7 +693,47 @@ public sealed class ServerSearchSources
 
     public void Complete()
     {
-        lock (_gate) ConsumeLine();
+        lock (_gate)
+        {
+            ConsumeLine();
+            var fallbackSourcesJson = _sources.Count > 0
+                ? JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    results = _sources.Select(s => new { title = s.Title, url = s.Url })
+                }, CompactJsonOptions)
+                : null;
+            foreach (var call in _calls.Values)
+            {
+                if (!call.Done)
+                {
+                    call.Done = true;
+                    var result = call.Name == "search_web" ? fallbackSourcesJson : null;
+                    call.HasResult = result is not null;
+                    EnqueueTool(call.Id, call.Name, call.Args, failed: false, running: false, result);
+                }
+                else if (!call.HasResult && call.Name == "search_web" && fallbackSourcesJson is not null)
+                {
+                    call.HasResult = true;
+                    EnqueueTool(call.Id, call.Name, call.Args, failed: false, running: false, fallbackSourcesJson);
+                }
+            }
+        }
+    }
+
+    public bool TryTakeTools(out IReadOnlyList<ToolCallDelta> tools)
+    {
+        lock (_gate)
+        {
+            if (_pendingTools.Count == 0)
+            {
+                tools = [];
+                return false;
+            }
+            tools = _pendingTools.ToArray();
+            _pendingTools.Clear();
+            return true;
+        }
     }
 
     public bool TryTake(out IReadOnlyList<SourceReference> sources)
@@ -688,7 +765,462 @@ public sealed class ServerSearchSources
         try { doc = JsonDocument.Parse(payload); }
         catch (JsonException) { return; }
 
-        using (doc) Walk(doc.RootElement, source: false, groundingChunk: false);
+        using (doc)
+        {
+            Walk(doc.RootElement, source: false, groundingChunk: false);
+            InspectToolEvents(doc.RootElement);
+        }
+    }
+
+    private void InspectToolEvents(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return;
+        var eventType = FirstString(root, "type");
+
+        // 1. OpenAI / DeepSeek / Bailian Responses API
+        if (eventType is "response.output_item.added" or "response.output_item.done"
+            && root.TryGetProperty("item", out var item)
+            && item.ValueKind == JsonValueKind.Object)
+        {
+            var itemType = FirstString(item, "type");
+            if (itemType is "web_search_call" or "web_extractor" or "web_extractor_call")
+            {
+                var id = FirstString(item, "id") ?? $"srv_{++_seq}";
+                var (toolName, argsJson) = DescribeActionCall(item, itemType);
+                if (eventType == "response.output_item.added")
+                {
+                    EmitRunning(id, toolName, argsJson);
+                }
+                else
+                {
+                    var failed = string.Equals(FirstString(item, "status"), "failed", StringComparison.OrdinalIgnoreCase);
+                    EmitFinished(id, toolName, argsJson, failed, BuildItemResultJson(item, toolName, failed));
+                }
+                return;
+            }
+        }
+
+        // 2. Anthropic Messages API
+        if (eventType == "content_block_start"
+            && root.TryGetProperty("content_block", out var block)
+            && block.ValueKind == JsonValueKind.Object)
+        {
+            var blockType = FirstString(block, "type");
+            var index = root.TryGetProperty("index", out var idx) && idx.TryGetInt32(out var parsedIdx) ? parsedIdx : -1;
+            if (blockType == "server_tool_use")
+            {
+                var id = FirstString(block, "id") ?? $"srv_{++_seq}";
+                var rawName = FirstString(block, "name") ?? "web_search";
+                var toolName = rawName is "web_fetch" or "deepseek_read_url" ? "web_fetch" : "search_web";
+                var argsJson = NormalizeAnthropicInput(
+                    toolName,
+                    block.TryGetProperty("input", out var inp) && inp.ValueKind == JsonValueKind.Object ? inp : default);
+                if (index >= 0) _anthropicBlocks[index] = new AnthropicBlock(id, toolName, new StringBuilder());
+                EmitRunning(id, toolName, argsJson);
+                return;
+            }
+
+            if (blockType is "web_search_tool_result" or "web_fetch_tool_result")
+            {
+                var toolUseId = FirstString(block, "tool_use_id");
+                if (!string.IsNullOrWhiteSpace(toolUseId))
+                {
+                    var defaultName = blockType == "web_fetch_tool_result" ? "web_fetch" : "search_web";
+                    var (failed, resultJson) = BuildAnthropicResultJson(block);
+                    EmitFinished(toolUseId, defaultName, null, failed, resultJson);
+                }
+                return;
+            }
+        }
+        else if (eventType == "content_block_delta"
+                 && root.TryGetProperty("index", out var deltaIdxNode)
+                 && deltaIdxNode.TryGetInt32(out var deltaIdx)
+                 && _anthropicBlocks.TryGetValue(deltaIdx, out var openBlock)
+                 && root.TryGetProperty("delta", out var deltaObj)
+                 && deltaObj.ValueKind == JsonValueKind.Object
+                 && string.Equals(FirstString(deltaObj, "type"), "input_json_delta", StringComparison.Ordinal)
+                 && deltaObj.TryGetProperty("partial_json", out var partialNode)
+                 && partialNode.ValueKind == JsonValueKind.String)
+        {
+            openBlock.Json.Append(partialNode.GetString());
+            return;
+        }
+        else if (eventType == "content_block_stop"
+                 && root.TryGetProperty("index", out var stopIdxNode)
+                 && stopIdxNode.TryGetInt32(out var stopIdx)
+                 && _anthropicBlocks.Remove(stopIdx, out var finishedBlock)
+                 && finishedBlock.Json.Length > 0)
+        {
+            try
+            {
+                using var argDoc = JsonDocument.Parse(finishedBlock.Json.ToString());
+                var updatedArgs = NormalizeAnthropicInput(finishedBlock.Name, argDoc.RootElement);
+                EmitRunning(finishedBlock.Id, finishedBlock.Name, updatedArgs);
+            }
+            catch (JsonException)
+            {
+            }
+            return;
+        }
+
+        // 3. DeepSeek Chat Completions server_tool_event
+        if (root.TryGetProperty("choices", out var choices) && choices.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var choice in choices.EnumerateArray())
+            {
+                if (choice.ValueKind != JsonValueKind.Object
+                    || !choice.TryGetProperty("server_tool_event", out var serverEv)
+                    || serverEv.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                var evType = FirstString(serverEv, "type");
+                if (evType is "call_started" or "call_completed"
+                    && serverEv.TryGetProperty("call", out var call)
+                    && call.ValueKind == JsonValueKind.Object)
+                {
+                    var id = FirstString(call, "id") ?? $"srv_{++_seq}";
+                    var (toolName, argsJson) = DescribeActionCall(call, FirstString(call, "type"));
+                    if (evType == "call_started")
+                    {
+                        EmitRunning(id, toolName, argsJson);
+                    }
+                    else
+                    {
+                        var failed = string.Equals(FirstString(call, "status"), "failed", StringComparison.OrdinalIgnoreCase);
+                        EmitFinished(id, toolName, argsJson, failed, BuildItemResultJson(call, toolName, failed));
+                    }
+                }
+            }
+        }
+
+        // 4. Gemini Native parts (toolCall / toolResponse) + groundingMetadata fallback
+        if (root.TryGetProperty("candidates", out var candidates) && candidates.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var cand in candidates.EnumerateArray())
+            {
+                if (cand.ValueKind != JsonValueKind.Object) continue;
+                if (cand.TryGetProperty("content", out var content)
+                    && content.ValueKind == JsonValueKind.Object
+                    && content.TryGetProperty("parts", out var parts)
+                    && parts.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var part in parts.EnumerateArray())
+                    {
+                        if (part.ValueKind != JsonValueKind.Object) continue;
+                        if (part.TryGetProperty("toolCall", out var tc) && tc.ValueKind == JsonValueKind.Object)
+                        {
+                            var toolType = FirstString(tc, "toolType", "tool_type");
+                            var id = FirstString(tc, "id") ?? $"gem_{++_seq}";
+                            var tcArgs = tc.TryGetProperty("args", out var a) && a.ValueKind == JsonValueKind.Object ? a : default;
+                            if (string.Equals(toolType, "URL_CONTEXT", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var urls = ReadStringList(tcArgs, "urls", "url");
+                                EmitRunning(id, "web_fetch", BuildFetchArgs(urls.FirstOrDefault()));
+                            }
+                            else if (string.Equals(toolType, "GOOGLE_SEARCH_WEB", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var queries = ReadStringList(tcArgs, "queries", "query");
+                                EmitRunning(id, "search_web", BuildSearchArgs(queries));
+                            }
+                        }
+                        else if (part.TryGetProperty("toolResponse", out var tr) && tr.ValueKind == JsonValueKind.Object)
+                        {
+                            var id = FirstString(tr, "id");
+                            if (string.IsNullOrWhiteSpace(id)) continue;
+                            var toolType = FirstString(tr, "toolType", "tool_type");
+                            if (string.Equals(toolType, "URL_CONTEXT", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var (failed, resultJson) = BuildGeminiUrlContextResult(tr);
+                                EmitFinished(id, "web_fetch", null, failed, resultJson);
+                            }
+                            else if (string.Equals(toolType, "GOOGLE_SEARCH_WEB", StringComparison.OrdinalIgnoreCase))
+                            {
+                                EmitFinished(id, "search_web", null, failed: false, resultJson: null);
+                            }
+                        }
+                    }
+                }
+
+                if (!_sawExplicitSearchCall
+                    && cand.TryGetProperty("groundingMetadata", out var gm)
+                    && gm.ValueKind == JsonValueKind.Object)
+                {
+                    var queries = ReadStringList(gm, "webSearchQueries", "web_search_queries");
+                    if (queries.Count > 0)
+                    {
+                        var id = $"gem_grounding_{++_seq}";
+                        var argsJson = BuildSearchArgs(queries);
+                        var resultJson = _sources.Count > 0
+                            ? JsonSerializer.Serialize(new
+                            {
+                                success = true,
+                                results = _sources.Select(s => new { title = s.Title, url = s.Url })
+                            }, CompactJsonOptions)
+                            : null;
+                        EmitRunning(id, "search_web", argsJson);
+                        EmitFinished(id, "search_web", argsJson, failed: false, resultJson);
+                    }
+                }
+            }
+        }
+
+        // 5. Bailian Chat Completions search_info.search_results fallback
+        if (!_sawExplicitSearchCall
+            && root.TryGetProperty("search_info", out var searchInfo)
+            && searchInfo.ValueKind == JsonValueKind.Object
+            && searchInfo.TryGetProperty("search_results", out var searchResults)
+            && searchResults.ValueKind == JsonValueKind.Array
+            && searchResults.GetArrayLength() > 0)
+        {
+            var id = $"bailian_search_{++_seq}";
+            var argsJson = "{}";
+            var resultJson = JsonSerializer.Serialize(new
+            {
+                success = true,
+                results = _sources.Select(s => new { title = s.Title, url = s.Url })
+            }, CompactJsonOptions);
+            EmitRunning(id, "search_web", argsJson);
+            EmitFinished(id, "search_web", argsJson, failed: false, resultJson);
+        }
+    }
+
+    private void EmitRunning(string id, string toolName, string argsJson)
+    {
+        if (toolName == "search_web") _sawExplicitSearchCall = true;
+        if (_calls.TryGetValue(id, out var existing))
+        {
+            if (existing.Done) return;
+            if (!string.IsNullOrWhiteSpace(argsJson) && argsJson != "{}")
+                existing.Args = argsJson;
+            EnqueueTool(id, existing.Name, existing.Args, failed: false, running: true, resultJson: null);
+            return;
+        }
+
+        var call = new OpenCall(id, toolName, string.IsNullOrWhiteSpace(argsJson) ? "{}" : argsJson);
+        _calls[id] = call;
+        EnqueueTool(id, call.Name, call.Args, failed: false, running: true, resultJson: null);
+    }
+
+    private void EmitFinished(string id, string fallbackName, string? argsJson, bool failed, string? resultJson)
+    {
+        if (!_calls.TryGetValue(id, out var call))
+        {
+            if (fallbackName == "search_web") _sawExplicitSearchCall = true;
+            call = new OpenCall(id, fallbackName, string.IsNullOrWhiteSpace(argsJson) ? "{}" : argsJson!);
+            _calls[id] = call;
+        }
+        else if (!string.IsNullOrWhiteSpace(argsJson) && argsJson != "{}" && call.Args == "{}")
+        {
+            call.Args = argsJson!;
+        }
+
+        call.Done = true;
+        call.HasResult = !string.IsNullOrWhiteSpace(resultJson);
+        EnqueueTool(id, call.Name, call.Args, failed, running: false, resultJson);
+    }
+
+    private void EnqueueTool(string id, string name, string argsJson, bool failed, bool running, string? resultJson)
+    {
+        var builderStatus = running ? "running" : failed ? "error" : "completed";
+        var delta = ToolDeltaBuilder.BuildToolDelta(id, name, argsJson, _options, builderStatus, resultJson);
+        if (!running && failed)
+            delta = delta with { Status = "failed" };
+        _pendingTools.Add(delta);
+    }
+
+    private static (string ToolName, string ArgsJson) DescribeActionCall(JsonElement item, string? itemType)
+    {
+        if (string.Equals(itemType, "web_extractor", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(itemType, "web_extractor_call", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(itemType, BuiltinWebSearch.DeepSeekReadUrlToolName, StringComparison.OrdinalIgnoreCase))
+        {
+            var directUrl = FirstString(item, "url")
+                ?? (item.TryGetProperty("action", out var act) && act.ValueKind == JsonValueKind.Object
+                    ? FirstString(act, "url")
+                    : null);
+            return ("web_fetch", BuildFetchArgs(directUrl));
+        }
+
+        if (item.TryGetProperty("action", out var action) && action.ValueKind == JsonValueKind.Object)
+        {
+            var actionType = FirstString(action, "type") ?? "search";
+            if (actionType is "open_page" or "read_link" or "find_in_page")
+                return ("web_fetch", BuildFetchArgs(FirstString(action, "url"), FirstString(action, "pattern")));
+
+            var queries = ReadStringList(action, "queries", "query");
+            return ("search_web", BuildSearchArgs(queries));
+        }
+
+        return ("search_web", "{}");
+    }
+
+    private static string NormalizeAnthropicInput(string toolName, JsonElement input)
+    {
+        if (input.ValueKind != JsonValueKind.Object) return "{}";
+        if (toolName == "web_fetch")
+            return BuildFetchArgs(FirstString(input, "url"));
+
+        var queries = ReadStringList(input, "queries", "query");
+        return BuildSearchArgs(queries);
+    }
+
+    private static string BuildSearchArgs(IReadOnlyList<string> queries) =>
+        queries.Count == 0
+            ? "{}"
+            : JsonSerializer.Serialize(new { queries }, CompactJsonOptions);
+
+    private static string BuildFetchArgs(string? url, string? pattern = null)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return "{}";
+        return string.IsNullOrWhiteSpace(pattern)
+            ? JsonSerializer.Serialize(new { action = "scrape", url }, CompactJsonOptions)
+            : JsonSerializer.Serialize(new { action = "scrape", url, pattern }, CompactJsonOptions);
+    }
+
+    private static string? BuildItemResultJson(JsonElement item, string toolName, bool failed)
+    {
+        if (failed)
+        {
+            var code = item.TryGetProperty("error", out var err) && err.ValueKind == JsonValueKind.Object
+                ? FirstString(err, "message", "code")
+                : FirstString(item, "error");
+            return JsonSerializer.Serialize(new { success = false, error = code ?? "服务端工具执行失败。" }, CompactJsonOptions);
+        }
+
+        if (toolName == "web_fetch")
+        {
+            if (item.TryGetProperty("page", out var page) && page.ValueKind == JsonValueKind.Object)
+            {
+                var url = FirstString(page, "url");
+                var title = FirstString(page, "title");
+                if (!string.IsNullOrWhiteSpace(url))
+                    return JsonSerializer.Serialize(new { success = true, url, title }, CompactJsonOptions);
+            }
+            return null;
+        }
+
+        if (item.TryGetProperty("action", out var action)
+            && action.ValueKind == JsonValueKind.Object
+            && action.TryGetProperty("sources", out var sources)
+            && sources.ValueKind == JsonValueKind.Array)
+        {
+            var list = new List<object>();
+            foreach (var entry in sources.EnumerateArray())
+            {
+                if (entry.ValueKind == JsonValueKind.Object
+                    && TryReadSource(entry, allowUri: false, out var title, out var url, out _))
+                {
+                    list.Add(new { title, url });
+                }
+            }
+            if (list.Count > 0)
+                return JsonSerializer.Serialize(new { success = true, results = list }, CompactJsonOptions);
+        }
+
+        if (item.TryGetProperty("sources", out var directSources) && directSources.ValueKind == JsonValueKind.Array)
+        {
+            var list = new List<object>();
+            foreach (var entry in directSources.EnumerateArray())
+            {
+                if (entry.ValueKind == JsonValueKind.Object
+                    && TryReadSource(entry, allowUri: false, out var title, out var url, out _))
+                {
+                    list.Add(new { title, url });
+                }
+            }
+            if (list.Count > 0)
+                return JsonSerializer.Serialize(new { success = true, results = list }, CompactJsonOptions);
+        }
+
+        return null;
+    }
+
+    private static (bool Failed, string? ResultJson) BuildAnthropicResultJson(JsonElement block)
+    {
+        if (!block.TryGetProperty("content", out var content)) return (false, null);
+        if (content.ValueKind == JsonValueKind.Object)
+        {
+            var type = FirstString(content, "type");
+            if (type?.EndsWith("_error", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var errCode = FirstString(content, "error_code", "message") ?? "服务端工具执行失败。";
+                return (true, JsonSerializer.Serialize(new { success = false, error = errCode }, CompactJsonOptions));
+            }
+            if (TryReadSource(content, allowUri: false, out var singleTitle, out var singleUrl, out _))
+                return (false, JsonSerializer.Serialize(new { success = true, title = singleTitle, url = singleUrl }, CompactJsonOptions));
+        }
+        else if (content.ValueKind == JsonValueKind.Array)
+        {
+            var list = new List<object>();
+            foreach (var entry in content.EnumerateArray())
+            {
+                if (entry.ValueKind == JsonValueKind.Object
+                    && TryReadSource(entry, allowUri: false, out var title, out var url, out _))
+                {
+                    list.Add(new { title, url });
+                }
+            }
+            if (list.Count > 0)
+                return (false, JsonSerializer.Serialize(new { success = true, results = list }, CompactJsonOptions));
+        }
+
+        return (false, null);
+    }
+
+    private static (bool Failed, string? ResultJson) BuildGeminiUrlContextResult(JsonElement tr)
+    {
+        if (!tr.TryGetProperty("response", out var resp)
+            || resp.ValueKind != JsonValueKind.Object
+            || !resp.TryGetProperty("url_metadata", out var meta)
+            || meta.ValueKind != JsonValueKind.Array
+            || meta.GetArrayLength() == 0)
+        {
+            return (false, null);
+        }
+
+        var urls = new List<object>();
+        var anySuccess = false;
+        foreach (var entry in meta.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object) continue;
+            var url = FirstString(entry, "retrieved_url", "retrievedUrl");
+            var status = FirstString(entry, "url_retrieval_status", "urlRetrievalStatus");
+            var ok = string.Equals(status, "URL_RETRIEVAL_STATUS_SUCCESS", StringComparison.OrdinalIgnoreCase);
+            if (ok) anySuccess = true;
+            if (!string.IsNullOrWhiteSpace(url))
+                urls.Add(new { url, status });
+        }
+
+        if (!anySuccess)
+        {
+            return (true, JsonSerializer.Serialize(new
+            {
+                success = false,
+                error = "目标网页无法访问或受限。",
+                urls
+            }, CompactJsonOptions));
+        }
+
+        return (false, JsonSerializer.Serialize(new { success = true, urls }, CompactJsonOptions));
+    }
+
+    private static IReadOnlyList<string> ReadStringList(JsonElement obj, string arrayName, string singleName)
+    {
+        if (obj.ValueKind != JsonValueKind.Object) return [];
+        var list = new List<string>();
+        if (obj.TryGetProperty(arrayName, out var arr) && arr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in arr.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
+                    list.Add(item.GetString()!);
+            }
+        }
+        if (list.Count == 0 && FirstString(obj, singleName) is { } single)
+            list.Add(single);
+        return list;
     }
 
     private void Walk(JsonElement element, bool source, bool groundingChunk)

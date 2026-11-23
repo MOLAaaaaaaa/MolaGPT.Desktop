@@ -225,7 +225,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // the same list as a ChatChunk below.
         var citations = new SearchCitations();
 
-        var serverSources = builtinVendor is null ? null : new ServerSearchSources();
+        var serverSources = builtinVendor is null ? null : new ServerSearchSources(options);
         async Task<string> ExecuteToolAsync(string name, string argsJson, CancellationToken toolCt, Action<string>? report = null)
         {
             using var call = CancellationTokenSource.CreateLinkedTokenSource(toolCt, ct);
@@ -326,6 +326,11 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             {
                 if (Volatile.Read(ref promptError) is { } roleError) throw new InvalidOperationException(roleError);
                 if (Interlocked.Exchange(ref promptTrace, null) is { } trace) yield return new ChatChunk(PromptTrace: trace);
+                if (serverSources is not null && serverSources.TryTakeTools(out var serverTools))
+                {
+                    foreach (var tool in serverTools)
+                        yield return new ChatChunk(Tool: tool);
+                }
                 var chunk = MapLine(
                     line,
                     options,
@@ -338,6 +343,11 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                     ref errorMessage,
                     ref finalStopReason);
                 if (chunk is not null) yield return chunk;
+                if (serverSources is not null && serverSources.TryTakeTools(out var postTools))
+                {
+                    foreach (var tool in postTools)
+                        yield return new ChatChunk(Tool: tool);
+                }
                 // Tool results come back on the bridge thread, so the sources show up
                 // between lines rather than on one; polling here is what puts them on
                 // the message while the answer is still being written.
@@ -357,6 +367,11 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         if (serverSources is not null)
         {
             serverSources.Complete();
+            if (serverSources.TryTakeTools(out var trailingTools))
+            {
+                foreach (var tool in trailingTools)
+                    yield return new ChatChunk(Tool: tool);
+            }
             if (serverSources.TryTake(out var serverTrailing)) yield return new ChatChunk(Sources: serverTrailing);
         }
 

@@ -54,7 +54,9 @@ public static class ToolDeltaBuilder
             BuildToolDetail(name, args, options, status, resultJson),
             PrettyJson(args),
             resultJson is null ? null : PrettyJson(resultJson),
-            name == "search_web" ? SearchProviderLabel(options?.SearchProvider) : null);
+            name == "search_web" || (name == "web_fetch" && BuiltinWebSearch.IsBuiltinProviderId(options?.SearchProvider))
+                ? SearchProviderLabel(options?.SearchProvider)
+                : null);
     }
 
     public static bool IsToolError(string resultJson)
@@ -153,7 +155,17 @@ public static class ToolDeltaBuilder
             return count > 0 ? $"{count} 条查询 · 通过 {provider}" : $"通过 {provider}";
         }
         if (name == "web_fetch")
-            return "读取页面标题、正文和链接";
+        {
+            if (BuiltinWebSearch.TryParseProviderId(options?.SearchProvider, out var builtinFetch))
+                return $"通过 {BuiltinWebSearch.Label(builtinFetch)}";
+            return options?.FetchProvider?.Trim().ToLowerInvariant() switch
+            {
+                "deepseek" => "通过 DeepSeek Search 读取网页",
+                "tavily" => "通过 Tavily 提取网页正文",
+                "exa" => "通过 Exa 提取网页正文",
+                _ => "读取页面标题、正文和链接"
+            };
+        }
         if (name == BrowserControlTool.ToolName)
             return "在本机 Chrome/Edge 中操作网页";
         if (name == VisionProxyTool.ToolName)
