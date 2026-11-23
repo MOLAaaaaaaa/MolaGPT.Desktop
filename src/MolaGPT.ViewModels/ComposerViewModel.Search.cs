@@ -37,7 +37,7 @@ public sealed partial class ComposerViewModel
         }
     }
 
-    public BuiltinSearchVendor? ActiveBuiltinSearchVendor
+    public BuiltinSearchVendor? ModelBuiltinSearchVendor
     {
         get
         {
@@ -52,21 +52,7 @@ public sealed partial class ComposerViewModel
         }
     }
 
-    public bool IsBuiltinSearchActive => ActiveBuiltinSearchVendor is not null;
-
-    public string? ActiveBuiltinSearchProviderId =>
-        IsBuiltinSearchActive ? ActiveByokProviderEntry?.Id : null;
-
-    public string? ActiveBuiltinSearchNote =>
-        ActiveBuiltinSearchVendor is { } vendor
-            ? $"当前模型使用 {BuiltinWebSearch.Label(vendor)}"
-            : null;
-
-    public bool IsThinkingForcedByBuiltinSearch =>
-        EnableNetwork
-        && AreNetworkToolsEnabled
-        && ActiveBuiltinSearchVendor is { } vendor
-        && BuiltinWebSearch.ForcesThinking(vendor);
+    public bool HasModelBuiltinSearch => ModelBuiltinSearchVendor is not null;
 
     private string? AvailableConversationSearchProvider
     {
@@ -76,6 +62,20 @@ public sealed partial class ComposerViewModel
             return selected is not null && IsSearchProviderConfigured(selected) ? selected : null;
         }
     }
+
+    public BuiltinSearchVendor? ActiveBuiltinSearchVendor =>
+        AvailableConversationSearchProvider is null ? ModelBuiltinSearchVendor : null;
+
+    public bool IsBuiltinSearchActive => ActiveBuiltinSearchVendor is not null;
+
+    public string? ActiveBuiltinSearchProviderId =>
+        HasModelBuiltinSearch ? ActiveByokProviderEntry?.Id : null;
+
+    public bool IsThinkingForcedByBuiltinSearch =>
+        EnableNetwork
+        && AreNetworkToolsEnabled
+        && ActiveBuiltinSearchVendor is { } vendor
+        && BuiltinWebSearch.ForcesThinking(vendor);
 
     public string ActiveSearchProvider =>
         ActiveBuiltinSearchVendor is { } vendor
@@ -96,36 +96,32 @@ public sealed partial class ComposerViewModel
     public bool IsNetworkSplit => IsNetworkGroupActive && IsSearchProviderSwitchVisible;
 
     public string NetworkSegmentLabel =>
-        IsBuiltinSearchActive
-            ? "内置搜索"
-            : AvailableConversationSearchProvider is { } selected
-                ? SearchProviderLabel(selected)
-                : string.Empty;
+        AvailableConversationSearchProvider is { } selected
+            ? SearchProviderLabel(selected)
+            : string.Empty;
 
     public bool HasNetworkSegmentLabel => !string.IsNullOrEmpty(NetworkSegmentLabel);
 
     public string SearchProviderToolTip =>
-        ActiveBuiltinSearchVendor is { } vendor
-            ? $"搜索服务：{BuiltinWebSearch.Label(vendor)}"
-            : AvailableConversationSearchProvider is { } selected
-                ? $"搜索服务：{SearchProviderLabel(selected)}"
+        AvailableConversationSearchProvider is { } selected
+            ? $"搜索服务：{SearchProviderLabel(selected)}"
+            : ModelBuiltinSearchVendor is { } vendor
+                ? $"搜索服务：{BuiltinWebSearch.Label(vendor)} · 当前模型默认"
                 : $"搜索服务：{SearchProviderLabel(GlobalSearchProvider)} · 跟随设置";
 
     public IReadOnlyList<SearchProviderChoice> SearchProviderChoices
     {
         get
         {
-            var dimmed = IsBuiltinSearchActive;
             var selected = AvailableConversationSearchProvider;
-            var choices = new List<SearchProviderChoice>
-            {
-                new(null, "跟随设置", SearchProviderLabel(GlobalSearchProvider), !dimmed, !dimmed && selected is null)
-            };
+            var defaultChoice = ModelBuiltinSearchVendor is { } vendor
+                ? new SearchProviderChoice(null, BuiltinWebSearch.Label(vendor), "当前模型默认", true, selected is null)
+                : new SearchProviderChoice(null, "跟随设置", SearchProviderLabel(GlobalSearchProvider), true, selected is null);
+            var choices = new List<SearchProviderChoice> { defaultChoice };
 
             foreach (var (id, name) in SearchProviders)
             {
                 var configured = IsSearchProviderConfigured(id);
-                var selectable = !dimmed && configured;
                 var detail = id switch
                 {
                     "molagpt" => configured ? "使用账户额度" : "登录后可用",
@@ -133,7 +129,7 @@ public sealed partial class ComposerViewModel
                     "deepseek" => configured ? "按成功请求计费" : "未配置 API Key",
                     _ => configured ? null : "未配置 API Key"
                 };
-                choices.Add(new SearchProviderChoice(id, name, detail, selectable, !dimmed && selected == id));
+                choices.Add(new SearchProviderChoice(id, name, detail, configured, selected == id));
             }
 
             return choices;
@@ -170,10 +166,11 @@ public sealed partial class ComposerViewModel
     {
         OnPropertyChanged(nameof(ConversationSearchProvider));
         OnPropertyChanged(nameof(GlobalSearchProvider));
+        OnPropertyChanged(nameof(ModelBuiltinSearchVendor));
+        OnPropertyChanged(nameof(HasModelBuiltinSearch));
         OnPropertyChanged(nameof(ActiveBuiltinSearchVendor));
         OnPropertyChanged(nameof(IsBuiltinSearchActive));
         OnPropertyChanged(nameof(ActiveBuiltinSearchProviderId));
-        OnPropertyChanged(nameof(ActiveBuiltinSearchNote));
         OnPropertyChanged(nameof(IsThinkingForcedByBuiltinSearch));
         OnPropertyChanged(nameof(IsThinkingToggleChecked));
         OnPropertyChanged(nameof(ThinkingToolTip));

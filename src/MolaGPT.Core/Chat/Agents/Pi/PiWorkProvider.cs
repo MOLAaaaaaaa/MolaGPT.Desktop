@@ -104,6 +104,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         var builtinWebFetch = false;
         if (options.Network
             && _config.BuiltinSearch
+            && (string.IsNullOrWhiteSpace(options.SearchProvider)
+                || BuiltinWebSearch.IsBuiltinProviderId(options.SearchProvider))
             && activeModel?.SupportsBuiltinSearch == true
             && BuiltinWebSearch.DetectVendor(creds.Endpoint) is { } detectedVendor
             && BuiltinWebSearch.CanUseWireApi(detectedVendor, creds.Api))
