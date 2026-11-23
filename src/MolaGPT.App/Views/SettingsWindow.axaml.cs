@@ -84,6 +84,8 @@ public partial class SettingsWindow : MolaContentWindow
     private bool _loadingPersonaForm;
     private bool _loadingProviderForm;
     private bool _applyingProviderPreset;
+    private bool _editingProviderBuiltinSearch;
+    private bool _updatingSearchControls;
     private string _editingProviderPurpose = "chat";
 
     /// <summary>A completed scan doubles as the cache. Opening the window fires
@@ -105,8 +107,14 @@ public partial class SettingsWindow : MolaContentWindow
     [
         new("openrouter", "OpenRouter", "openai-compat", "https://openrouter.ai/api/", "v1/models",
             ThinkingParamKind.OpenAiReasoningEffort),
-        new("deepseek", "DeepSeek", "openai-compat", "https://api.deepseek.com/", "v1/models",
-            ThinkingParamKind.DeepSeekV4),
+        // DeepSeek 的对话走 Responses 协议：服务端搜索 (deepseek_web_search) 只在
+        // 根路径 /responses 上生效，/v1/responses 这个别名会把工具悄悄丢掉。
+        new("deepseek", "DeepSeek", "openai-response", "https://api.deepseek.com/", "v1/models",
+            ThinkingParamKind.DeepSeekV4, ApiPath: "responses"),
+        new("bailian", "阿里云百炼", "openai-compat", "https://dashscope.aliyuncs.com/compatible-mode/", "v1/models",
+            ThinkingParamKind.QwenThinkingBudget),
+        new("bailian-response", "阿里云百炼 (Responses API)", "openai-response", "https://dashscope.aliyuncs.com/compatible-mode/",
+            "v1/models", ThinkingParamKind.OpenAiReasoningEffort, ApiPath: "v1/responses"),
         new("moonshot", "Moonshot (Kimi)", "openai-compat", "https://api.moonshot.cn/", "v1/models",
             ThinkingParamKind.None),
         new("openai", "OpenAI", "openai-compat", OpenAiBaseUrl, "v1/models",
@@ -278,6 +286,12 @@ public partial class SettingsWindow : MolaContentWindow
         PART_RevealSearchKey.Click += (_, _) =>
             PART_SearchApiKey.PasswordChar = PART_SearchApiKey.PasswordChar == '\0' ? '•' : '\0';
         PART_TestSearch.Click += OnTestSearch;
+        PART_UseDetectedDeepSeek.Click += OnUseDetectedDeepSeek;
+        PART_UnlinkDeepSeekSearch.Click += OnUnlinkDeepSeekSearch;
+        PART_DeepSeekLinkedCombo.SelectionChanged += OnDeepSeekLinkedComboChanged;
+        PART_OpenBuiltinSearchProviders.Click += (_, _) => OpenProvidersPage();
+        PART_WebFetchMode.SelectionChanged += OnWebFetchModeChanged;
+        PART_ProviderBuiltinSearch.IsCheckedChanged += OnProviderBuiltinSearchChanged;
         PART_CancelProviderEdit.Click += (_, _) => CloseProviderEditor();
         PART_BackProvider.Click += (_, _) => CloseProviderEditor();
         PART_SaveProvider.Click += (_, _) => SaveProvider();
@@ -344,6 +358,7 @@ public partial class SettingsWindow : MolaContentWindow
             RefreshMcpServers();
             RefreshSpecializedModelChoices();
             RefreshSkills();
+            UpdateSearchStatusHint();
             _ = RefreshRuntimeStatusAsync();
         };
         Activated += (_, _) =>
@@ -380,11 +395,18 @@ public partial class SettingsWindow : MolaContentWindow
             }
             else if (args.PropertyName == nameof(SettingsViewModel.PythonToolExecutablePath))
                 RefreshPythonBrowseButton();
-            else if (args.PropertyName == nameof(SettingsViewModel.WebSearchProvider))
+            else if (args.PropertyName is nameof(SettingsViewModel.WebSearchProvider)
+                     or nameof(SettingsViewModel.IsLoggedIn))
                 UpdateSearchStatusHint();
         };
+        EventHandler searchChanged = (_, _) => UpdateSearchStatusHint();
         _settings.PropertyChanged += settingsChanged;
-        Closed += (_, _) => _settings.PropertyChanged -= settingsChanged;
+        _settings.SearchConfigurationChanged += searchChanged;
+        Closed += (_, _) =>
+        {
+            _settings.PropertyChanged -= settingsChanged;
+            _settings.SearchConfigurationChanged -= searchChanged;
+        };
         KeyDown += OnSettingsKeyDown;
         AddHandler(Button.ClickEvent, OnSectionHeaderClicked, RoutingStrategies.Bubble);
     }
@@ -495,6 +517,23 @@ public partial class SettingsWindow : MolaContentWindow
         ShowSelectedPage();
     }
 
+    internal void OpenSearchPage()
+    {
+        PART_Nav.SelectedItem = PART_SearchNav;
+        ShowSelectedPage();
+    }
+
+    internal void OpenProviderTools(string? providerId)
+    {
+        OpenProvidersPage();
+        if (string.IsNullOrWhiteSpace(providerId)) return;
+        if (_settings.Providers.FirstOrDefault(p => string.Equals(p.Id, providerId, StringComparison.Ordinal)) is not { } entry)
+            return;
+        EditProvider(entry, entry.Purpose);
+        if (PART_ProviderToolsSection.IsVisible)
+            _ = RevealSearchHitAsync(PART_ProviderToolsCard, PART_ProviderBuiltinSearchTitle, false);
+    }
+
     internal void OpenPersonaPage(bool startNew, string? personaId = null)
     {
         PART_Nav.SelectedItem = PART_PersonasNav;
@@ -585,6 +624,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_ContentScroll.Offset = default;
         if (page != PAGE_Providers) CloseProviderEditor();
         if (page == PAGE_Providers) RefreshProviders();
+        if (page == PAGE_Search) UpdateSearchStatusHint();
         if (page == PAGE_Account) _ = RefreshUsageAsync(force: false);
         if (page == PAGE_Storage) _ = RefreshStorageAsync();
         if (page == PAGE_Sandbox) _ = RefreshRuntimeStatusAsync();
@@ -655,6 +695,7 @@ public partial class SettingsWindow : MolaContentWindow
 
         PART_SearchProvider.SelectionChanged += (_, _) =>
         {
+            if (_updatingSearchControls) return;
             if (PART_SearchProvider.SelectedItem is ComboBoxItem { Tag: string provider })
             {
                 _settings.WebSearchProvider = provider;
@@ -800,25 +841,158 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void UpdateSearchStatusHint()
     {
-        var provider = SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider);
-        PART_SearchProvider.SelectedItem = PART_SearchProvider.Items.OfType<ComboBoxItem>()
-            .First(item => Equals(item.Tag, provider));
-        var maxResults = provider == "molagpt" ? 6 : 10;
-        PART_SearchMaxResults.Maximum = maxResults;
-        PART_SearchKeyRows.IsVisible = provider != "molagpt";
-        PART_SearchProviderHint.Text = provider switch
+        _updatingSearchControls = true;
+        try
         {
-            "molagpt" => "MolaGPT 提供的开箱即用的搜索服务，登录后可用。无需 API Key，将使用少量账户额度。",
-            "duckduckgo" => "免费使用，无需 API Key。",
-            _ => "使用自备 API Key。"
-        };
-        PART_SearchStatus.Text = provider switch
+            var provider = SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider);
+            PART_SearchProvider.SelectedItem = PART_SearchProvider.Items.OfType<ComboBoxItem>()
+                .FirstOrDefault(item => Equals(item.Tag, provider));
+            var maxResults = provider == "molagpt" ? 6 : 10;
+            PART_SearchMaxResults.Maximum = maxResults;
+            PART_SearchProviderHint.Text = provider switch
+            {
+                "molagpt" => "登录后可用，使用账户额度。",
+                "duckduckgo" => "免费使用，无需 API Key。",
+                "deepseek" => "按成功请求计费。",
+                _ => "需要 API Key。"
+            };
+            PART_SearchApiKey.PlaceholderText = provider == "duckduckgo" ? "无需 API Key" : "请输入 API Key";
+
+            if (provider == "deepseek")
+            {
+                var official = _settings.GetOfficialDeepSeekProviders();
+                var linked = _settings.GetLinkedDeepSeekSearchProvider();
+                if (linked is not null)
+                {
+                    PART_DeepSeekDetectBar.IsVisible = false;
+                    PART_DeepSeekLinkedRow.IsVisible = true;
+                    PART_SearchKeyRows.IsVisible = false;
+                    PART_DeepSeekLinkedMask.Text = MaskSecret(linked.ApiKey);
+                    var multiple = official.Count > 1;
+                    PART_DeepSeekLinkedName.IsVisible = !multiple;
+                    PART_DeepSeekLinkedName.Text = linked.Name;
+                    ToolTip.SetTip(PART_DeepSeekLinkedName, linked.Name);
+                    PART_DeepSeekLinkedCombo.IsVisible = multiple;
+                    PART_DeepSeekLinkedCombo.ItemsSource = official;
+                    PART_DeepSeekLinkedCombo.SelectedItem = linked;
+                }
+                else
+                {
+                    PART_DeepSeekLinkedRow.IsVisible = false;
+                    PART_SearchKeyRows.IsVisible = true;
+                    PART_DeepSeekDetectBar.IsVisible = official.Count > 0;
+                    if (official.Count > 0)
+                    {
+                        PART_DeepSeekDetectText.Text = official.Count > 1
+                            ? $"检测到 {official.Count} 个 DeepSeek 配置。"
+                            : "检测到模型服务中的 DeepSeek 配置。";
+                        PART_DeepSeekDetectCombo.IsVisible = official.Count > 1;
+                        PART_DeepSeekDetectCombo.ItemsSource = official;
+                        if (PART_DeepSeekDetectCombo.SelectedItem is not ProviderEntry current
+                            || !official.Any(item => string.Equals(item.Id, current.Id, StringComparison.Ordinal)))
+                        {
+                            PART_DeepSeekDetectCombo.SelectedItem = official[0];
+                        }
+                    }
+                }
+            }
+            else
+            {
+                PART_DeepSeekDetectBar.IsVisible = false;
+                PART_DeepSeekLinkedRow.IsVisible = false;
+                PART_SearchKeyRows.IsVisible = provider != "molagpt";
+            }
+
+            var chatProviders = _settings.Providers
+                .Where(entry => !SettingsViewModel.IsImagePurpose(entry.Purpose))
+                .ToArray();
+            var hasBuiltinSearchVendor = chatProviders.Any(entry =>
+                BuiltinWebSearch.DetectVendor(entry.BaseUrl) is not null);
+            var hasActiveBuiltinSearch = chatProviders.Any(entry =>
+                entry.Enabled && BuiltinWebSearch.IsEnabledOnProvider(entry.Type, entry.BaseUrl, entry.BuiltinSearch));
+            PART_BuiltinSearchTipRow.IsVisible = hasBuiltinSearchVendor;
+            if (hasActiveBuiltinSearch)
+            {
+                PART_BuiltinSearchTipText.Text = "已在模型服务中开启内置搜索。";
+                PART_OpenBuiltinSearchProviders.Content = "管理";
+            }
+            else if (hasBuiltinSearchVendor)
+            {
+                PART_BuiltinSearchTipText.Text = "部分模型支持内置搜索。";
+                PART_OpenBuiltinSearchProviders.Content = "前往模型服务";
+            }
+
+            var deepSeekConfigured = _settings.IsWebSearchProviderConfigured("deepseek");
+            var tavilyConfigured = _settings.IsWebSearchProviderConfigured("tavily");
+            var exaConfigured = _settings.IsWebSearchProviderConfigured("exa");
+            PART_WebFetchDeepSeekItem.IsEnabled = deepSeekConfigured;
+            PART_WebFetchTavilyItem.IsEnabled = tavilyConfigured;
+            PART_WebFetchExaItem.IsEnabled = exaConfigured;
+            var fetchMode = _settings.EffectiveWebFetchProvider;
+            PART_WebFetchMode.SelectedItem = PART_WebFetchMode.Items.OfType<ComboBoxItem>()
+                .FirstOrDefault(item => Equals(item.Tag, fetchMode));
+            var allFetchConfigured = deepSeekConfigured && tavilyConfigured && exaConfigured;
+            PART_WebFetchHint.Text = fetchMode switch
+            {
+                "deepseek" => "使用 DeepSeek Search 读取网页，按成功请求计费。",
+                "tavily" => "使用 Tavily 提取网页正文，按服务商额度计费。",
+                "exa" => "使用 Exa 提取网页正文，按服务商额度计费。",
+                _ => allFetchConfigured
+                    ? "本机读取不产生额外费用。"
+                    : "本机读取不产生额外费用。其他方式需先配置对应搜索服务的 API Key。"
+            };
+
+            PART_SearchStatus.Text = provider switch
+            {
+                "molagpt" => _accountSearch is { IsSignedIn: true } account
+                    ? $"当前登录账号：{account.Username}"
+                    : "请登录 MolaGPT 账号。",
+                _ => string.Empty
+            };
+        }
+        finally
         {
-            "molagpt" => _accountSearch is { IsSignedIn: true } account
-                ? $"当前登录账号：{account.Username}"
-                : "请登录 MolaGPT 账号。",
-            _ => string.Empty
-        };
+            _updatingSearchControls = false;
+        }
+    }
+
+    private static string MaskSecret(string? secret)
+    {
+        if (string.IsNullOrWhiteSpace(secret)) return string.Empty;
+        var trimmed = secret.Trim();
+        if (trimmed.Length <= 8) return "••••";
+        var dash = trimmed.IndexOf('-');
+        var prefixLength = dash is > 0 and <= 7 ? dash + 1 : 3;
+        return trimmed[..prefixLength] + "••••" + trimmed[^4..];
+    }
+
+    private void OnUseDetectedDeepSeek(object? sender, RoutedEventArgs e)
+    {
+        var official = _settings.GetOfficialDeepSeekProviders();
+        if (official.Count == 0) return;
+        var selected = PART_DeepSeekDetectCombo.SelectedItem as ProviderEntry ?? official[0];
+        _settings.DeepSeekSearchLinkedProviderId = selected.Id;
+    }
+
+    private void OnUnlinkDeepSeekSearch(object? sender, RoutedEventArgs e)
+    {
+        _settings.DeepSeekSearchLinkedProviderId = null;
+    }
+
+    private void OnDeepSeekLinkedComboChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (_updatingSearchControls || PART_DeepSeekLinkedCombo.SelectedItem is not ProviderEntry entry) return;
+        _settings.DeepSeekSearchLinkedProviderId = entry.Id;
+    }
+
+    private void OnWebFetchModeChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (_updatingSearchControls) return;
+        if (PART_WebFetchMode.SelectedItem is not ComboBoxItem { Tag: string mode }) return;
+        _settings.WebFetchProvider = mode == "local" || _settings.IsWebSearchProviderConfigured(mode)
+            ? mode
+            : "local";
+        UpdateSearchStatusHint();
     }
 
     private async Task TestMolaSearchAsync()
@@ -843,7 +1017,8 @@ public partial class SettingsWindow : MolaContentWindow
 
     private async void OnTestSearch(object? sender, RoutedEventArgs e)
     {
-        var molaSearch = SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider) == "molagpt";
+        var provider = SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider);
+        var molaSearch = provider == "molagpt";
         if (!molaSearch && _byokHttpFactory is null) return;
 
         PART_TestSearch.IsEnabled = false;
@@ -860,9 +1035,9 @@ public partial class SettingsWindow : MolaContentWindow
             var options = new LocalToolOptions(
                 Network: true,
                 WebPage: false,
-                SearchProvider: _settings.WebSearchProvider,
-                SearchApiKey: _settings.WebSearchApiKey,
-                SearchBaseUrl: _settings.WebSearchBaseUrl,
+                SearchProvider: provider,
+                SearchApiKey: _settings.WebSearchApiKeyFor(provider),
+                SearchBaseUrl: _settings.WebSearchBaseUrlFor(provider),
                 SearchMaxResults: Math.Clamp(_settings.WebSearchMaxResults, 1, 10),
                 WebPageMaxCharacters: Math.Clamp(_settings.WebPageMaxCharacters, 1000, 30000));
             using var http = _byokHttpFactory!();
@@ -871,9 +1046,17 @@ public partial class SettingsWindow : MolaContentWindow
             using var document = JsonDocument.Parse(result);
             var ok = document.RootElement.TryGetProperty("success", out var success)
                      && success.ValueKind == JsonValueKind.True;
-            PART_SearchStatus.Text = ok
-                ? "搜索可用。"
-                : "搜索不可用，请检查 API Key 或接口地址。";
+            if (ok && document.RootElement.TryGetProperty("queries", out var queries)
+                && queries.ValueKind == JsonValueKind.Array && queries.GetArrayLength() > 0)
+            {
+                var query = queries[0];
+                PART_SearchStatus.Text = query.TryGetProperty("error", out var error)
+                    && error.ValueKind == JsonValueKind.String
+                    ? "搜索失败：" + error.GetString()
+                    : "搜索可用。";
+            }
+            else
+                PART_SearchStatus.Text = "搜索不可用，请检查 API Key 或接口地址。";
         }
         catch (Exception ex)
         {
@@ -933,6 +1116,7 @@ public partial class SettingsWindow : MolaContentWindow
     {
         _editingProvider = existing;
         _editingProviderPurpose = SettingsViewModel.IsImagePurpose(existing?.Purpose ?? purpose) ? "image" : "chat";
+        _editingProviderBuiltinSearch = existing?.BuiltinSearch == true;
         _providerModels.Clear();
         _providerHeaders.Clear();
         CloseDetectedModels();
@@ -1233,7 +1417,8 @@ public partial class SettingsWindow : MolaContentWindow
             } : null,
             CustomBody = customBody.Count > 0 ? customBody : null,
             EffortLevels = resolvedGeminiLevels?.ToList() ?? (effortLevels.Count > 0 ? effortLevels : null),
-            Pricing = row.Pricing()
+            Pricing = row.Pricing(),
+            BuiltinSearch = row.IsBuiltinSearchVendor ? row.BuiltinSearchOverride : row.Source?.BuiltinSearch
         };
     }
 
@@ -1318,7 +1503,8 @@ public partial class SettingsWindow : MolaContentWindow
                     : null,
             ImageFormat: imageFormat,
             CustomHeaders: !chatGpt && headers.Count > 0 ? headers : null,
-            ImageChatPath: image ? PART_ProviderImageChatPath.Text?.Trim() : null);
+            ImageChatPath: image ? PART_ProviderImageChatPath.Text?.Trim() : null,
+            BuiltinSearch: !image && !chatGpt && _editingProviderBuiltinSearch);
         return true;
     }
 
@@ -1437,6 +1623,18 @@ public partial class SettingsWindow : MolaContentWindow
         row.LoadPricing(model.Pricing);
         foreach (var item in model.CustomBody ?? [])
             row.CustomBodyRows.Add(new BodyRow(row, item.Key, item.Type, item.Value));
+        var builtinVendor = _editingProviderPurpose != "image" && !EditingChatGpt
+            ? BuiltinWebSearch.DetectVendor(PART_ProviderBaseUrl.Text)
+            : null;
+        var providerBuiltinActive = builtinVendor is { } activeVendor
+            && BuiltinWebSearch.IsSupportedProviderType(activeVendor, EditingProviderType)
+            && _editingProviderBuiltinSearch;
+        row.SetBuiltinSearchContext(
+            builtinVendor,
+            EditingProviderType,
+            providerBuiltinActive,
+            model.BuiltinSearch,
+            applyInitialOverride: true);
         return row;
     }
 
@@ -1508,6 +1706,7 @@ public partial class SettingsWindow : MolaContentWindow
         _loadingProviderForm = true;
         try
         {
+            _editingProviderBuiltinSearch = false;
             ApplyProviderPreset(preset);
             _providerModels.Clear();
             _providerHeaders.Clear();
@@ -1559,6 +1758,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_ProviderError.IsVisible = false;
         PART_ProviderStatus.IsVisible = false;
         CloseDetectedModels();
+        _editingProviderBuiltinSearch = false;
         _providerModels.Clear();
 
         if (PART_ProviderPreset.SelectedItem is ProviderPresetRow preset)
@@ -1605,6 +1805,46 @@ public partial class SettingsWindow : MolaContentWindow
         }
         UpdateChatGptUi();
         if (geminiImage) PART_ProviderApiPathField.IsVisible = false;
+        UpdateProviderBuiltinSearchUi();
+    }
+
+    private void OnProviderBuiltinSearchChanged(object? sender, RoutedEventArgs e)
+    {
+        if (_loadingProviderForm || _updatingSearchControls) return;
+        _editingProviderBuiltinSearch = PART_ProviderBuiltinSearch.IsChecked == true;
+        UpdateProviderBuiltinSearchUi();
+    }
+
+    private void UpdateProviderBuiltinSearchUi()
+    {
+        var image = _editingProviderPurpose == "image";
+        var vendor = !image && !EditingChatGpt
+            ? BuiltinWebSearch.DetectVendor(PART_ProviderBaseUrl.Text)
+            : null;
+        PART_ProviderToolsSection.IsVisible = vendor is not null;
+        var protoSupported = vendor is { } v && BuiltinWebSearch.IsSupportedProviderType(v, EditingProviderType);
+        if (vendor is { } detected)
+        {
+            PART_ProviderBuiltinSearchHint.Text = BuiltinWebSearch.DescribeToolHint(detected);
+            PART_ProviderBuiltinSearchNeed.IsVisible = !protoSupported;
+            PART_ProviderBuiltinSearchNeedText.Text = protoSupported
+                ? string.Empty
+                : BuiltinWebSearch.DescribeProtocolRequirement(detected);
+            _updatingSearchControls = true;
+            try
+            {
+                PART_ProviderBuiltinSearch.IsEnabled = protoSupported;
+                PART_ProviderBuiltinSearch.IsChecked = protoSupported && _editingProviderBuiltinSearch;
+            }
+            finally
+            {
+                _updatingSearchControls = false;
+            }
+        }
+
+        var providerActive = protoSupported && _editingProviderBuiltinSearch;
+        foreach (var model in _providerModels)
+            model.SetBuiltinSearchContext(vendor, EditingProviderType, providerActive);
     }
 
     private static string DefaultProviderApiPath(string? purpose, string? imageFormat, string? type, string? baseUrl = null)
@@ -1656,6 +1896,7 @@ public partial class SettingsWindow : MolaContentWindow
             PART_ProviderHttps.IsChecked = false;
         else if (baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             PART_ProviderHttps.IsChecked = true;
+        UpdateProviderBuiltinSearchUi();
         UpdateProviderEndpointPreview();
     }
 
@@ -1667,6 +1908,7 @@ public partial class SettingsWindow : MolaContentWindow
             PART_ProviderBaseUrl.Text = (PART_ProviderHttps.IsChecked == true ? "https://" : "http://") + baseUrl[8..];
         else if (baseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
             PART_ProviderBaseUrl.Text = (PART_ProviderHttps.IsChecked == true ? "https://" : "http://") + baseUrl[7..];
+        UpdateProviderBuiltinSearchUi();
         UpdateProviderEndpointPreview();
     }
 
@@ -1713,6 +1955,9 @@ public partial class SettingsWindow : MolaContentWindow
             var models = await FetchProviderModelsAsync(entry);
             _detectedModels.Clear();
             var existing = _providerModels.Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var detectedVendor = !SettingsViewModel.IsImagePurpose(entry.Purpose) && entry.Type != ChatGptType
+                ? BuiltinWebSearch.DetectVendor(entry.BaseUrl)
+                : null;
             foreach (var model in models)
             {
                 if (entry.Type == ChatGptType && model.EffortLevels is { Count: > 0 }
@@ -1726,8 +1971,10 @@ public partial class SettingsWindow : MolaContentWindow
                     && imageRow.ImageFormatIndex == 0 && model.ImageFormat is not null)
                     imageRow.ImageFormatIndex = ImageApiFormat.IsChatImage(model.ImageFormat) ? 2 : 1;
                 var alreadyExists = existing.Contains(model.Id);
+                var defaultBuiltinSearch = detectedVendor is { } vendor
+                    && BuiltinWebSearch.DefaultSupportsModel(vendor, model.Id, entry.Type);
                 _detectedModels.Add(new DetectedModelRow(model, false, !alreadyExists,
-                    alreadyExists ? "已存在" : string.Empty));
+                    alreadyExists ? "已存在" : string.Empty, defaultBuiltinSearch));
             }
 
             PART_DetectedModelsTitle.Text = $"检测到 {models.Count} 个模型";
@@ -3685,6 +3932,9 @@ public sealed record ProviderCardRow(ProviderEntry Entry, string? InactiveReason
     public string? BaseUrl => Entry.Type == "chatgpt" ? "ChatGPT 套餐" : Entry.BaseUrl;
     public int ModelCount => Entry.Models.Count;
     public bool IsInactive => InactiveReason is not null;
+    public bool HasBuiltinSearch =>
+        !SettingsViewModel.IsImagePurpose(Entry.Purpose)
+        && BuiltinWebSearch.IsEnabledOnProvider(Entry.Type, Entry.BaseUrl, Entry.BuiltinSearch);
 }
 
 public sealed record ProviderPresetRow(
@@ -3702,18 +3952,25 @@ public sealed record ProviderPresetRow(
 
 public sealed partial class DetectedModelRow : CommunityToolkit.Mvvm.ComponentModel.ObservableObject
 {
-    public DetectedModelRow(ProviderModelEntry entry, bool isSelected, bool isEnabled, string statusText)
+    public DetectedModelRow(
+        ProviderModelEntry entry,
+        bool isSelected,
+        bool isEnabled,
+        string statusText,
+        bool supportsBuiltinSearch = false)
     {
         Entry = entry;
         _isSelected = isSelected;
         IsEnabled = isEnabled;
         StatusText = statusText;
+        SupportsBuiltinSearch = supportsBuiltinSearch;
     }
 
     public ProviderModelEntry Entry { get; }
     [CommunityToolkit.Mvvm.ComponentModel.ObservableProperty] private bool _isSelected;
     public bool IsEnabled { get; }
     public string StatusText { get; }
+    public bool SupportsBuiltinSearch { get; }
 
     public string CapabilitySummary
     {
@@ -3724,6 +3981,7 @@ public sealed partial class DetectedModelRow : CommunityToolkit.Mvvm.ComponentMo
             if (Entry.Tools) parts.Add("工具调用");
             if (Entry.Thinking) parts.Add("推理");
             if (Entry.ReasoningEffort) parts.Add("推理强度");
+            if (SupportsBuiltinSearch) parts.Add("内置搜索");
             if (Entry.ImageEdit) parts.Add("图像编辑");
             if (Entry.ContextWindow is { } context) parts.Add($"上下文 {context / 1000}K");
             return parts.Count == 0 ? "标准模型" : string.Join(" · ", parts);

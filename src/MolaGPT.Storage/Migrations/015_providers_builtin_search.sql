@@ -1,0 +1,1 @@
+ALTER TABLE providers ADD COLUMN builtin_search INTEGER NOT NULL DEFAULT 0;

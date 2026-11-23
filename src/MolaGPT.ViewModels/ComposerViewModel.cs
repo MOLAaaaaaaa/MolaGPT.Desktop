@@ -248,6 +248,9 @@ public sealed partial class ComposerViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsImageGenerationAvailable));
                 OnPropertyChanged(nameof(IsImageOptionsVisible));
                 OnPropertyChanged(nameof(IsMemoryChipVisible));
+                // 换模型会换掉服务端搜索的可用性，整组搜索相关的显示都要跟着重算。
+                RaiseSearchProviderChanged();
+                OnPropertyChanged(nameof(IsSearchProviderSwitchVisible));
 
                 if (!IsThinkingVisible && EnableThinking) EnableThinking = false;
                 // 网络访问不在这里清零：模型不支持工具调用时 chip 已经是灰的，
@@ -335,7 +338,17 @@ public sealed partial class ComposerViewModel : ObservableObject
                 }
                 if (e.PropertyName is nameof(SettingsViewModel.BrowserToolEnabled))
                     OnPropertyChanged(nameof(IsBrowserToolAvailable));
+                // 全局搜索服务商、登录状态（MolaGPT 搜索的可用性）、DeepSeek Key
+                // 都会改变下拉的内容与本次是否带上网抓取的配置。
+                if (e.PropertyName is nameof(SettingsViewModel.WebSearchProvider)
+                    or nameof(SettingsViewModel.IsLoggedIn)
+                    or nameof(SettingsViewModel.DeepSeekFetchEnabled)
+                    or nameof(SettingsViewModel.WebFetchProvider))
+                {
+                    RaiseSearchProviderChanged();
+                }
             };
+            _settings.SearchConfigurationChanged += (_, _) => RaiseSearchProviderChanged();
         }
         Attachments.CollectionChanged += (_, _) =>
         {
@@ -484,7 +497,26 @@ public sealed partial class ComposerViewModel : ObservableObject
     private bool? _pendingMemoryOverride;
 
     private bool IsThinkingEnabled => IsThinkingMandatory
+        || IsThinkingForcedByBuiltinSearch
         || (IsThinkingVisible ? EnableThinking : _chat.ActiveModel?.SupportsReasoningEffort == true);
+
+    public bool IsThinkingToggleChecked
+    {
+        get => EnableThinking || IsThinkingForcedByBuiltinSearch;
+        set
+        {
+            if (IsThinkingForcedByBuiltinSearch)
+            {
+                OnPropertyChanged(nameof(IsThinkingToggleChecked));
+                return;
+            }
+            EnableThinking = value;
+        }
+    }
+
+    public string ThinkingToolTip => IsThinkingForcedByBuiltinSearch
+        ? "DeepSeek 内置搜索需要开启推理"
+        : "开启推理：复杂问题先推理后回答";
 
     /// <summary>Effort-only models expose controls without a thinking toggle.</summary>
     public bool IsReasoningEffortVisible => IsThinkingEnabled
@@ -1406,11 +1438,24 @@ public sealed partial class ComposerViewModel : ObservableObject
 
         if (SubjectProvider?.Kind != ProviderKind.MolaGptProxy)
         {
-            enabledTools["searchProvider"] = _settings?.WebSearchProvider;
-            enabledTools["searchApiKey"] = _settings?.WebSearchApiKey;
-            enabledTools["searchBaseUrl"] = _settings?.WebSearchBaseUrl;
-            enabledTools["searchMaxResults"] = _settings?.WebSearchMaxResults ?? 6;
+            // 会话级的切换优先于设置页；服务端搜索只在具体模型下可用，所以这里
+            // 取的是「实际生效的那个」而不是设置里的那个。
+            var searchProvider = ActiveSearchProvider;
+            enabledTools["searchProvider"] = searchProvider;
+            enabledTools["searchApiKey"] = _settings?.WebSearchApiKeyFor(searchProvider);
+            enabledTools["searchBaseUrl"] = _settings?.WebSearchBaseUrlFor(searchProvider);
+            // MolaGPT 内置搜索一次最多回 6 条，其余服务商到 10 条。
+            var maxResults = _settings?.WebSearchMaxResults ?? 6;
+            enabledTools["searchMaxResults"] = searchProvider == "molagpt" ? Math.Min(maxResults, 6) : maxResults;
             enabledTools["webPageMaxCharacters"] = _settings?.WebPageMaxCharacters ?? 12000;
+            // DeepSeek 的网页抓取是可选的替换实现：同一个 Key、同一个账户，开着就
+            // 走服务端的 /tools/fetch，关着仍然是本地抓取。
+            if (_settings?.EffectiveWebFetchProvider is { } fetchProvider && fetchProvider != "local")
+            {
+                enabledTools["fetchProvider"] = fetchProvider;
+                enabledTools["fetchApiKey"] = _settings.ActiveWebFetchApiKey ?? string.Empty;
+                enabledTools["fetchBaseUrl"] = _settings.ActiveWebFetchBaseUrl;
+            }
             enabledTools["mcpServers"] = SubjectPersona?.Profile.EnableMcp == false
                 ? Array.Empty<MolaGPT.Core.Chat.LocalTools.McpServerOptions>()
                 : _settings?.BuildMcpServerOptions() ?? Array.Empty<MolaGPT.Core.Chat.LocalTools.McpServerOptions>();
@@ -1984,7 +2029,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
 
         if (!options.AllowNetwork)
-            lines.Add("网络默认关闭，不要依赖下载文件或抓取网页。");
+            lines.Add("Python 环境默认断网，不要在代码里下载文件或抓取网页。");
 
         return "<运行环境>\n" + string.Join("\n", lines) + "\n</运行环境>";
     }
@@ -2794,6 +2839,7 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     partial void OnEnableThinkingChanged(bool value)
     {
+        OnPropertyChanged(nameof(IsThinkingToggleChecked));
         OnPropertyChanged(nameof(IsReasoningEffortVisible));
         RaiseReasoningGroupChanged();
         PersistRoleOptions();

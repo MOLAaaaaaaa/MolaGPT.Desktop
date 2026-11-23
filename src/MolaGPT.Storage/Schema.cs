@@ -106,6 +106,7 @@ public sealed record ProviderRow
     public string? ImageFormat { get; set; }
     public string? CustomHeaders { get; set; }
     public string? ImageChatPath { get; set; }
+    public bool BuiltinSearch { get; set; }
 
     public ProviderRow() { }
 
@@ -123,7 +124,8 @@ public sealed record ProviderRow
         string? ImageEditPath = null,
         string? ImageFormat = null,
         string? CustomHeaders = null,
-        string? ImageChatPath = null)
+        string? ImageChatPath = null,
+        bool BuiltinSearch = false)
     {
         this.Id = Id;
         this.Type = Type;
@@ -139,5 +141,6 @@ public sealed record ProviderRow
         this.ImageFormat = ImageFormat;
         this.CustomHeaders = CustomHeaders;
         this.ImageChatPath = ImageChatPath;
+        this.BuiltinSearch = BuiltinSearch;
     }
 }

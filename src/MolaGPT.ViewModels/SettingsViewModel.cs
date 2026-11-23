@@ -53,8 +53,13 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string TrayCloseBehaviorKey = "tray_close_behavior";
     private const string WebSearchProviderKey = "web_search_provider";
     private const string WebSearchBaseUrlKey = "web_search_base_url";
+    private const string WebSearchBaseUrlPrefix = "web_search_base_url:";
+    private const string WebSearchKeyOriginPrefix = "web_search_key_origin:";
     private const string WebSearchMaxResultsKey = "web_search_max_results";
     private const string WebPageMaxCharactersKey = "web_page_max_characters";
+    private const string DeepSeekFetchEnabledKey = "deepseek_fetch_enabled";
+    private const string WebFetchProviderKey = "web_fetch_provider";
+    private const string DeepSeekSearchLinkedProviderKey = "web_search_linked_provider:deepseek";
     private const string WebSearchSecretPrefix = "web_search_api_key:";
     private const string ByokMcpServersKey = "byok_mcp_servers";
     private const string McpServerSecretPrefix = "mcp_server_token:";
@@ -217,8 +222,17 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string _webSearchProvider = "molagpt";
     [ObservableProperty] private string? _webSearchBaseUrl;
     [ObservableProperty] private string? _webSearchApiKey;
+    private bool _loadingSearchSettings;
     [ObservableProperty] private int _webSearchMaxResults = 6;
     [ObservableProperty] private int _webPageMaxCharacters = 12000;
+
+    /// <summary>网页读取改走 DeepSeek 的 /v1/tools/fetch。默认关闭：抓取按次计费，
+    /// 而本机抓取对大多数页面已经够用。</summary>
+    [ObservableProperty] private bool _deepSeekFetchEnabled;
+    [ObservableProperty] private string _webFetchProvider = "local";
+    [ObservableProperty] private string? _deepSeekSearchLinkedProviderId;
+
+    public event EventHandler? SearchConfigurationChanged;
     [ObservableProperty] private bool _autoTitleEnabled = true;
     [ObservableProperty] private TitleProviderModelOption? _selectedTitleProviderModel;
     [ObservableProperty] private bool _visionProxyEnabled;
@@ -345,7 +359,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             var models = TryDeserializeModels(row.Models);
             var customHeaders = TryDeserializeHeaders(row.CustomHeaders is { } headers && _credentialStore is not null
                 ? _credentialStore.DecryptText(headers) : row.CustomHeaders);
-            var entry = new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat, customHeaders, row.ImageChatPath);
+            var entry = new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat, customHeaders, row.ImageChatPath, row.BuiltinSearch);
             if (IsImagePurpose(entry.Purpose) && entry.ImageChatPath is null)
             {
                 var legacyChat = ImageApiFormat.IsChatImage(entry.ImageFormat)
@@ -366,6 +380,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         RefreshMemoryProviderModels();
         RefreshVisionProviderModels();
         RefreshImageGenerationProviderModels();
+        RaiseSearchConfigurationChanged();
     }
 
     private void LoadSettings()
@@ -447,17 +462,34 @@ public sealed partial class SettingsViewModel : ObservableObject
                 CornerStyle = cornerStyle;
             }
             WebSearchProvider = NormalizeWebSearchProvider(_settingsRepo.Get(WebSearchProviderKey));
-            WebSearchBaseUrl = _settingsRepo.Get(WebSearchBaseUrlKey) ?? DefaultWebSearchBaseUrl(WebSearchProvider);
+            var searchUrlKey = WebSearchBaseUrlPrefix + WebSearchProvider;
+            var searchUrl = _settingsRepo.Get(searchUrlKey);
+            if (searchUrl is null)
+            {
+                // Only the active legacy provider has a known address. Other legacy
+                // keys remain stored until their owner supplies an address and key.
+                searchUrl = _settingsRepo.Get(WebSearchBaseUrlKey) ?? DefaultWebSearchBaseUrl(WebSearchProvider);
+                _settingsRepo.Set(searchUrlKey, searchUrl);
+                if (SearchOrigin(searchUrl, WebSearchProvider) is { } legacyOrigin)
+                    _settingsRepo.Set(WebSearchKeyOriginPrefix + WebSearchProvider, legacyOrigin);
+            }
+            WebSearchBaseUrl = searchUrl;
             if (int.TryParse(_settingsRepo.Get(WebSearchMaxResultsKey), out var maxResults))
                 WebSearchMaxResults = Math.Clamp(maxResults, 1, WebSearchProvider == "molagpt" ? 6 : 10);
             if (int.TryParse(_settingsRepo.Get(WebPageMaxCharactersKey), out var maxChars))
                 WebPageMaxCharacters = Math.Clamp(maxChars, 1000, 30000);
+            DeepSeekFetchEnabled = bool.TryParse(_settingsRepo.Get(DeepSeekFetchEnabledKey), out var dsFetch) && dsFetch;
+            var storedFetchProvider = _settingsRepo.Get(WebFetchProviderKey);
+            WebFetchProvider = storedFetchProvider is null
+                ? (DeepSeekFetchEnabled ? "deepseek" : "local")
+                : NormalizeWebFetchProvider(storedFetchProvider);
+            DeepSeekSearchLinkedProviderId = _settingsRepo.Get(DeepSeekSearchLinkedProviderKey);
             AutoTitleEnabled = !bool.TryParse(
                 _settingsRepo.Get(ConversationTitleService.AutoTitleEnabledKey),
                 out var autoTitleEnabled) || autoTitleEnabled;
             _titleProviderId = _settingsRepo.Get(ConversationTitleService.TitleProviderIdKey);
             _titleModelId = _settingsRepo.Get(ConversationTitleService.TitleModelIdKey);
-            WebSearchApiKey = _credentialStore?.LoadSecret(WebSearchSecretPrefix + WebSearchProvider);
+            WebSearchApiKey = StoredWebSearchApiKey(WebSearchProvider, WebSearchBaseUrl);
             LoadMcpServers();
             VisionProxyEnabled = bool.TryParse(_settingsRepo.Get(VisionProxyEnabledKey), out var visionEnabled) && visionEnabled;
             VisionProxyProviderId = _settingsRepo.Get(VisionProxyProviderIdKey);
@@ -743,29 +775,57 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         var provider = NormalizeWebSearchProvider(value);
+        if (!string.Equals(provider, value, StringComparison.Ordinal))
+        {
+            WebSearchProvider = provider;
+            return;
+        }
         WebSearchMaxResults = Math.Clamp(WebSearchMaxResults, 1, provider == "molagpt" ? 6 : 10);
         _settingsRepo.Set(WebSearchProviderKey, provider);
-        WebSearchBaseUrl = DefaultWebSearchBaseUrl(provider);
-        WebSearchApiKey = _credentialStore?.LoadSecret(WebSearchSecretPrefix + provider);
+        _loadingSearchSettings = true;
+        try
+        {
+            WebSearchBaseUrl = _settingsRepo.Get(WebSearchBaseUrlPrefix + provider) ?? DefaultWebSearchBaseUrl(provider);
+            WebSearchApiKey = StoredWebSearchApiKey(provider, WebSearchBaseUrl);
+        }
+        finally { _loadingSearchSettings = false; }
+        _settingsRepo.Set(WebSearchBaseUrlPrefix + provider, WebSearchBaseUrl ?? string.Empty);
+        // Keep the old single setting in sync for compatibility with older versions.
+        _settingsRepo.Set(WebSearchBaseUrlKey, WebSearchBaseUrl ?? string.Empty);
+        RaiseSearchConfigurationChanged();
     }
 
     partial void OnWebSearchBaseUrlChanged(string? value)
     {
-        if (_loadingSettings || _settingsRepo is null) return;
-        if (string.IsNullOrWhiteSpace(value))
-            _settingsRepo.Remove(WebSearchBaseUrlKey);
-        else
-            _settingsRepo.Set(WebSearchBaseUrlKey, value.Trim());
+        if (_loadingSettings || _loadingSearchSettings || _settingsRepo is null) return;
+        var provider = NormalizeWebSearchProvider(WebSearchProvider);
+        var address = value?.Trim() ?? string.Empty;
+        _settingsRepo.Set(WebSearchBaseUrlPrefix + provider, address);
+        _settingsRepo.Set(WebSearchBaseUrlKey, address);
+        _loadingSearchSettings = true;
+        try { WebSearchApiKey = StoredWebSearchApiKey(provider, address); }
+        finally { _loadingSearchSettings = false; }
+        RaiseSearchConfigurationChanged();
     }
 
     partial void OnWebSearchApiKeyChanged(string? value)
     {
-        if (_loadingSettings || _credentialStore is null) return;
-        var key = WebSearchSecretPrefix + NormalizeWebSearchProvider(WebSearchProvider);
+        if (_loadingSettings || _loadingSearchSettings || _credentialStore is null || _settingsRepo is null) return;
+        var provider = NormalizeWebSearchProvider(WebSearchProvider);
+        var key = WebSearchSecretPrefix + provider;
+        // A failed write must never leave a newly saved key bound to an old host.
+        _settingsRepo.Remove(WebSearchKeyOriginPrefix + provider);
         if (string.IsNullOrWhiteSpace(value))
+        {
             _credentialStore.RemoveSecret(key);
+        }
         else
+        {
             _credentialStore.SaveSecret(key, value.Trim());
+            if (SearchOrigin(WebSearchBaseUrl, provider) is { } origin)
+                _settingsRepo.Set(WebSearchKeyOriginPrefix + provider, origin);
+        }
+        RaiseSearchConfigurationChanged();
     }
 
     partial void OnWebSearchMaxResultsChanged(int value)
@@ -781,6 +841,150 @@ public sealed partial class SettingsViewModel : ObservableObject
         WebPageMaxCharacters = Math.Clamp(value, 1000, 30000);
         _settingsRepo.Set(WebPageMaxCharactersKey, WebPageMaxCharacters.ToString());
     }
+
+    partial void OnDeepSeekFetchEnabledChanged(bool value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        _settingsRepo.Set(DeepSeekFetchEnabledKey, value.ToString());
+        if (value && WebFetchProvider == "local")
+            WebFetchProvider = "deepseek";
+        else if (!value && WebFetchProvider == "deepseek")
+            WebFetchProvider = "local";
+        RaiseSearchConfigurationChanged();
+    }
+
+    partial void OnWebFetchProviderChanged(string value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        var provider = NormalizeWebFetchProvider(value);
+        if (!string.Equals(provider, value, StringComparison.Ordinal))
+        {
+            WebFetchProvider = provider;
+            return;
+        }
+        _settingsRepo.Set(WebFetchProviderKey, provider);
+        var isDeepSeek = provider == "deepseek";
+        if (DeepSeekFetchEnabled != isDeepSeek)
+        {
+            _loadingSettings = true;
+            try { DeepSeekFetchEnabled = isDeepSeek; }
+            finally { _loadingSettings = false; }
+        }
+        _settingsRepo.Set(DeepSeekFetchEnabledKey, isDeepSeek.ToString());
+        RaiseSearchConfigurationChanged();
+    }
+
+    partial void OnDeepSeekSearchLinkedProviderIdChanged(string? value)
+    {
+        if (_loadingSettings) return;
+        SetOrRemove(DeepSeekSearchLinkedProviderKey, value);
+        RaiseSearchConfigurationChanged();
+    }
+
+    private void RaiseSearchConfigurationChanged()
+    {
+        OnPropertyChanged(nameof(EffectiveWebFetchProvider));
+        OnPropertyChanged(nameof(EffectiveDeepSeekFetchEnabled));
+        SearchConfigurationChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public IReadOnlyList<ProviderEntry> GetOfficialDeepSeekProviders() =>
+        Providers
+            .Where(entry => !IsImagePurpose(entry.Purpose)
+                            && !string.IsNullOrWhiteSpace(entry.ApiKey)
+                            && BuiltinWebSearch.DetectVendor(entry.BaseUrl) == BuiltinSearchVendor.DeepSeek)
+            .ToArray();
+
+    public ProviderEntry? GetLinkedDeepSeekSearchProvider() =>
+        string.IsNullOrWhiteSpace(DeepSeekSearchLinkedProviderId)
+            ? null
+            : GetOfficialDeepSeekProviders().FirstOrDefault(entry =>
+                string.Equals(entry.Id, DeepSeekSearchLinkedProviderId, StringComparison.Ordinal));
+
+    public bool IsWebSearchProviderConfigured(string? provider) =>
+        NormalizeWebSearchProvider(provider) switch
+        {
+            "duckduckgo" => true,
+            "molagpt" => IsLoggedIn,
+            var other => !string.IsNullOrWhiteSpace(WebSearchApiKeyFor(other))
+        };
+
+    public static string NormalizeWebFetchProvider(string? provider) =>
+        provider?.Trim().ToLowerInvariant() switch
+        {
+            "deepseek" => "deepseek",
+            "tavily" => "tavily",
+            "exa" => "exa",
+            _ => "local"
+        };
+
+    public string EffectiveWebFetchProvider
+    {
+        get
+        {
+            var provider = NormalizeWebFetchProvider(WebFetchProvider);
+            return provider != "local" && IsWebSearchProviderConfigured(provider) ? provider : "local";
+        }
+    }
+
+    public bool EffectiveDeepSeekFetchEnabled => EffectiveWebFetchProvider == "deepseek";
+
+    public string? ActiveWebFetchApiKey =>
+        EffectiveWebFetchProvider is not "local" and var provider ? WebSearchApiKeyFor(provider) : null;
+
+    public string? ActiveWebFetchBaseUrl =>
+        EffectiveWebFetchProvider is not "local" and var provider ? WebSearchBaseUrlFor(provider) : null;
+
+    public string? WebSearchApiKeyFor(string provider)
+    {
+        var normalized = NormalizeWebSearchProvider(provider);
+        if (normalized == "deepseek" && GetLinkedDeepSeekSearchProvider() is { } linked)
+            return linked.ApiKey;
+
+        var address = WebSearchBaseUrlFor(normalized);
+        return StoredWebSearchApiKey(normalized, address);
+    }
+
+    private string? StoredWebSearchApiKey(string provider, string? address)
+    {
+        var origin = SearchOrigin(address, provider);
+        return origin is not null
+            && string.Equals(origin, _settingsRepo?.Get(WebSearchKeyOriginPrefix + provider), StringComparison.OrdinalIgnoreCase)
+                ? _credentialStore?.LoadSecret(WebSearchSecretPrefix + provider)
+                : null;
+    }
+
+    private static string? SearchOrigin(string? address, string provider)
+    {
+        var url = string.IsNullOrWhiteSpace(address) ? DefaultWebSearchBaseUrl(provider) : address.Trim();
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            && uri.Scheme is "http" or "https"
+            && string.IsNullOrEmpty(uri.UserInfo)
+                ? uri.GetComponents(UriComponents.SchemeAndServer, UriFormat.UriEscaped)
+                : null;
+    }
+
+    public string WebSearchBaseUrlFor(string provider)
+    {
+        var normalized = NormalizeWebSearchProvider(provider);
+        if (normalized == "deepseek" && GetLinkedDeepSeekSearchProvider() is { } linked
+            && !string.IsNullOrWhiteSpace(linked.BaseUrl))
+        {
+            return linked.BaseUrl.Trim();
+        }
+        if (string.Equals(normalized, WebSearchProvider, StringComparison.Ordinal)
+            && !string.IsNullOrWhiteSpace(WebSearchBaseUrl))
+        {
+            return WebSearchBaseUrl!.Trim();
+        }
+
+        var stored = _settingsRepo?.Get(WebSearchBaseUrlPrefix + normalized);
+        return string.IsNullOrWhiteSpace(stored) ? DefaultWebSearchBaseUrl(normalized) : stored.Trim();
+    }
+
+    public string? DeepSeekFetchApiKey => WebSearchApiKeyFor("deepseek");
+
+    public string DeepSeekFetchBaseUrl => WebSearchBaseUrlFor("deepseek");
 
     partial void OnAutoTitleEnabledChanged(bool value)
     {
@@ -1052,6 +1256,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 "molagpt" => "molagpt",
                 "tavily" => "tavily",
                 "exa" => "exa",
+                "deepseek" => "deepseek",
                 _ => "duckduckgo"
             };
 
@@ -1060,6 +1265,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         {
             "tavily" => "https://api.tavily.com",
             "exa" => "https://api.exa.ai",
+            "deepseek" => "https://api.deepseek.com",
             _ => string.Empty
         };
 
@@ -1087,7 +1293,8 @@ public sealed partial class SettingsViewModel : ObservableObject
                 ? (_credentialStore ?? throw new InvalidOperationException("凭据存储不可用。"))
                     .EncryptText(JsonSerializer.Serialize(entry.CustomHeaders))
                 : null,
-            ImageChatPath: entry.ImageChatPath));
+            ImageChatPath: entry.ImageChatPath,
+            BuiltinSearch: entry.BuiltinSearch));
         RefreshVisionProviderModels();
         RefreshTitleProviderModels();
         RefreshSubagentProviderModels();
@@ -1095,6 +1302,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         RefreshSelectionModels();
         RefreshMemoryProviderModels();
         RefreshImageGenerationProviderModels();
+        RaiseSearchConfigurationChanged();
 
         if (string.Equals(entry.Purpose, "image", StringComparison.OrdinalIgnoreCase))
         {
@@ -1479,6 +1687,10 @@ public sealed partial class SettingsViewModel : ObservableObject
             WorkbenchImageGenerationProviderId = null;
             WorkbenchImageGenerationModelId = null;
         }
+        if (string.Equals(DeepSeekSearchLinkedProviderId, id, StringComparison.Ordinal))
+            DeepSeekSearchLinkedProviderId = null;
+        else
+            RaiseSearchConfigurationChanged();
     }
 
     private static List<ProviderModelEntry> TryDeserializeModels(string json)
@@ -1560,7 +1772,8 @@ public sealed record ProviderEntry(
     string? ImageEditPath = null,                          // image(openai-images): 编辑路径
     string? ImageFormat = null,                            // image: openai-images|openai-chat-image
     List<CustomHeaderEntry>? CustomHeaders = null,
-    string? ImageChatPath = null);
+    string? ImageChatPath = null,
+    bool BuiltinSearch = false);
 
 public sealed record ProviderModelEntry(
     string Id,
@@ -1584,7 +1797,8 @@ public sealed record ProviderModelEntry(
     bool SupportsTemperature = true,
     bool SupportsTopP = true,
     ModelPricing? Pricing = null,
-    string? ImageFormat = null);
+    string? ImageFormat = null,
+    bool? BuiltinSearch = null);
 
 /// <summary>A user-defined HTTP header appended to a BYOK provider's requests.</summary>
 public sealed record CustomHeaderEntry(string Name = "", string Value = "");

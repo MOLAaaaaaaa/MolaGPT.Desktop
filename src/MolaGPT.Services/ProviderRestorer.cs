@@ -2,6 +2,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
@@ -108,7 +109,7 @@ public static class ProviderRestorer
                     // an unusable model missing from the picker is a question the
                     // user can act on; one that answers without tools is not.
                     var provider = pi?.TryWrap(row.Type, row.Id, row.Name, row.BaseUrl, row.ApiPath,
-                        apiKey, models, headers);
+                        apiKey, models, headers, row.BuiltinSearch);
 
                     if (provider is not null)
                     {
@@ -158,7 +159,7 @@ public static class ProviderRestorer
         var headers = CustomParamConverter.ToHeaderList(entry.CustomHeaders);
         var provider = pi?.TryWrap(
             entry.Type, entry.Id, entry.Name, entry.BaseUrl, entry.ApiPath,
-            entry.ApiKey ?? string.Empty, models, headers);
+            entry.ApiKey ?? string.Empty, models, headers, entry.BuiltinSearch);
         if (provider is null) return Classify(pi);
 
         registry.Register(provider);
@@ -239,6 +240,9 @@ public static class ProviderRestorer
         }
 
         var levelModel = geminiPolicy is not null;
+        var supportsBuiltinSearch = entry.BuiltinSearch
+            ?? (BuiltinWebSearch.DetectVendor(baseUrl) is { } vendor
+                && BuiltinWebSearch.DefaultSupportsModel(vendor, entry.Id, providerType));
         return new ProviderModel(
             entry.Id,
             NormalizeAutoModelDisplayName(entry.Id, entry.DisplayName),
@@ -251,7 +255,8 @@ public static class ProviderRestorer
             CustomBody: CustomParamConverter.ToBodyDict(entry.CustomBody),
             SupportsTemperature: levelModel ? false : entry.SupportsTemperature,
             SupportsTopP: levelModel ? false : entry.SupportsTopP,
-            Pricing: entry.Pricing);
+            Pricing: entry.Pricing,
+            SupportsBuiltinSearch: supportsBuiltinSearch);
     }
 
     private static bool IsGoogleGeminiRoute(string? providerType, string? baseUrl)

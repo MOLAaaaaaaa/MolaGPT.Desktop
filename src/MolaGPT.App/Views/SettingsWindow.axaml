@@ -25,9 +25,10 @@
     <v:AgentSessionLabelConverter x:Key="AgentSessionLabel" />
     <DataTemplate x:Key="ProviderCardTemplate" x:DataType="v:ProviderCardRow">
       <Border Classes="providercard">
-        <Grid ColumnDefinitions="*,Auto,Auto,Auto">
+        <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto">
           <StackPanel Grid.Column="0" Spacing="3">
-            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+            <TextBlock Text="{Binding Name}" FontWeight="SemiBold"
+                       TextTrimming="CharacterEllipsis" />
             <TextBlock Text="{Binding BaseUrl}"
                        FontSize="{DynamicResource Font.Size.XSmall}"
                        Foreground="{DynamicResource Brush.Text.Muted}"
@@ -44,13 +45,17 @@
                        FontWeight="SemiBold"
                        Foreground="{DynamicResource Brush.Warning.Foreground}" />
           </Border>
-          <Border Grid.Column="2" Classes="countpill" VerticalAlignment="Center">
+          <Border Grid.Column="2" Classes="builtinbadge" VerticalAlignment="Center"
+                  Margin="10,0,0,0" IsVisible="{Binding HasBuiltinSearch}">
+            <TextBlock Text="内置搜索" />
+          </Border>
+          <Border Grid.Column="3" Classes="countpill" VerticalAlignment="Center">
             <TextBlock Text="{Binding ModelCount}"
                        FontSize="{DynamicResource Font.Size.XSmall}"
                        FontWeight="SemiBold"
                        Foreground="{DynamicResource Brush.Text.Muted}" />
           </Border>
-          <StackPanel Grid.Column="3" Orientation="Horizontal"
+          <StackPanel Grid.Column="4" Orientation="Horizontal"
                       VerticalAlignment="Center" Margin="10,0,0,0">
             <Button Classes="inlineaction" Click="OnEditProvider" Tag="{Binding Id}"
                     ToolTip.Tip="编辑">
@@ -202,7 +207,7 @@
                 <ListBoxItem Name="PART_PostProcessingNav" Content="文本替换" Tag="PAGE_PostProcessing" />
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="模型" />
                 <ListBoxItem Name="PART_ProvidersNav" Content="模型服务" Tag="PAGE_Providers" />
-                <ListBoxItem Content="联网搜索" Tag="PAGE_Search" />
+                <ListBoxItem Name="PART_SearchNav" Content="联网搜索" Tag="PAGE_Search" />
                 <ListBoxItem Content="图像生成" Tag="PAGE_ImageGeneration" />
                 <ListBoxItem Content="视觉理解" Tag="PAGE_Vision" />
                 <ListBoxItem Classes="navgroup" IsEnabled="False" Content="工具" />
@@ -1105,7 +1110,7 @@
                         <StackPanel>
                           <TextBlock Classes="label" Text="协议" />
                           <ComboBox Name="PART_ProviderType" Classes="settingsinput">
-                            <ComboBoxItem Content="OpenAI 兼容" />
+                            <ComboBoxItem Content="OpenAI Chat Completions" />
                             <ComboBoxItem Content="Anthropic" />
                             <ComboBoxItem Content="Gemini 原生" />
                             <ComboBoxItem Content="OpenAI Responses" />
@@ -1232,6 +1237,29 @@
                     </StackPanel>
                   </Border>
 
+                  <StackPanel Name="PART_ProviderToolsSection" IsVisible="False">
+                    <TextBlock Classes="section" Text="工具" />
+                    <Border Name="PART_ProviderToolsCard" Classes="settingscard">
+                      <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Margin="0,0,20,0">
+                          <TextBlock Name="PART_ProviderBuiltinSearchTitle" Classes="rowtitle" Text="内置搜索" />
+                          <TextBlock Name="PART_ProviderBuiltinSearchHint" Classes="hint" />
+                          <Grid Name="PART_ProviderBuiltinSearchNeed" ColumnDefinitions="Auto,*" ColumnSpacing="6"
+                                Margin="0,6,0,0" IsVisible="False">
+                            <TextBlock Classes="icon" Text="&#xE946;" FontSize="11"
+                                       Foreground="{DynamicResource Brush.Primary.Hover}" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1" Name="PART_ProviderBuiltinSearchNeedText"
+                                       FontSize="{DynamicResource Font.Size.Small}"
+                                       Foreground="{DynamicResource Brush.Text.Secondary}"
+                                       TextWrapping="Wrap" VerticalAlignment="Center" />
+                          </Grid>
+                        </StackPanel>
+                        <ToggleButton Grid.Column="1" Name="PART_ProviderBuiltinSearch" Classes="settingtoggle"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+                    </Border>
+                  </StackPanel>
+
                   <Grid Margin="2,20,2,8" ColumnDefinitions="*,Auto,Auto,Auto">
                     <TextBlock Grid.Column="0" Classes="section" Text="模型" Margin="0"
                                VerticalAlignment="Center" />
@@ -1302,14 +1330,18 @@
                         <Border Classes="providereditcard">
                           <Expander IsExpanded="{Binding IsExpanded, Mode=TwoWay}">
                             <Expander.Header>
-                              <Grid ColumnDefinitions="*,Auto" Margin="0,1">
+                              <Grid ColumnDefinitions="*,Auto,Auto" Margin="0,1">
                                 <StackPanel Grid.Column="0">
                                   <TextBlock Text="{Binding Id}" FontWeight="SemiBold"
                                              TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                                   <TextBlock Text="{Binding DisplayName}" Classes="hint" Margin="0,2,0,0"
                                              TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                                 </StackPanel>
-                                <Button Grid.Column="1" Classes="inlineaction" Width="28" Height="28"
+                                <Border Grid.Column="1" Classes="builtinbadge" VerticalAlignment="Center"
+                                        Margin="8,0,0,0" IsVisible="{Binding ShowBuiltinSearchBadge}">
+                                  <TextBlock Text="内置搜索" />
+                                </Border>
+                                <Button Grid.Column="2" Classes="inlineaction" Width="28" Height="28"
                                         Margin="8,0,0,0" Click="OnRemoveProviderModel" ToolTip.Tip="移除">
                                   <TextBlock Classes="icon" Text="&#xE711;" FontSize="11" />
                                 </Button>
@@ -1347,6 +1379,8 @@
                                           IsEnabled="{Binding CanEditGenerationParameters}" Margin="0,0,14,6" />
                                 <CheckBox Content="推理强度" IsChecked="{Binding ReasoningEffort, Mode=TwoWay}"
                                           IsEnabled="{Binding CanEditGenerationParameters}" Margin="0,0,14,6" />
+                                <CheckBox Content="内置搜索" IsChecked="{Binding BuiltinSearch, Mode=TwoWay}"
+                                          IsVisible="{Binding IsBuiltinSearchVendor}" Margin="0,0,14,6" />
                                 <CheckBox Content="图像编辑" IsChecked="{Binding ImageEdit, Mode=TwoWay}"
                                           IsVisible="{Binding IsImageProvider}" Margin="0,0,14,6" />
                               </WrapPanel>
@@ -1930,10 +1964,77 @@
                           <TextBlock Text="MolaGPT Web Search" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                         </ComboBoxItem>
                         <ComboBoxItem Tag="duckduckgo" Content="DuckDuckGo" />
+                        <ComboBoxItem Tag="deepseek" Content="DeepSeek Search" />
                         <ComboBoxItem Tag="tavily" Content="Tavily" />
                         <ComboBoxItem Tag="exa" Content="Exa" />
                       </ComboBox>
                     </Grid>
+                    <Border Name="PART_DeepSeekDetectBar" IsVisible="False"
+                            Margin="12,0,12,12" Padding="12,8,8,8"
+                            CornerRadius="{DynamicResource Radius.Sm}"
+                            Background="{DynamicResource Brush.Primary.Tint}"
+                            BorderBrush="{DynamicResource Brush.Primary.Border}"
+                            BorderThickness="1">
+                      <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
+                        <TextBlock Classes="icon" Text="&#xE946;" FontSize="12"
+                                   Foreground="{DynamicResource Brush.Primary.Hover}" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1" Name="PART_DeepSeekDetectText"
+                                   FontSize="{DynamicResource Font.Size.Small}"
+                                   VerticalAlignment="Center" TextWrapping="Wrap" />
+                        <ComboBox Grid.Column="2" Name="PART_DeepSeekDetectCombo" Classes="settingsinput"
+                                  Height="30" MinHeight="30" Width="170"
+                                  VerticalAlignment="Center" IsVisible="False">
+                          <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ProviderEntry">
+                              <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"
+                                         ToolTip.Tip="{Binding Name}" />
+                            </DataTemplate>
+                          </ComboBox.ItemTemplate>
+                        </ComboBox>
+                        <Button Grid.Column="3" Name="PART_UseDetectedDeepSeek" Classes="pillprimary"
+                                Content="使用" Padding="12,5"
+                                FontSize="{DynamicResource Font.Size.Small}" VerticalAlignment="Center" />
+                      </Grid>
+                    </Border>
+                    <StackPanel Name="PART_DeepSeekLinkedRow" IsVisible="False">
+                      <Border Classes="divider" />
+                      <StackPanel Classes="fieldrow">
+                        <TextBlock Name="PART_DeepSeekLinkedLabel" Classes="label" Text="API Key" />
+                        <Border Classes="input">
+                          <Grid ColumnDefinitions="Auto,Auto,*,Auto" ColumnSpacing="8">
+                            <TextBlock Classes="icon" Text="&#xE71B;" FontSize="12"
+                                       Foreground="{DynamicResource Brush.Primary.Hover}" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1" Name="PART_DeepSeekLinkedPrefix" Text="已关联模型服务"
+                                       FontSize="13" Foreground="{DynamicResource Brush.Text.Secondary}"
+                                       VerticalAlignment="Center" />
+                            <Panel Grid.Column="2" VerticalAlignment="Center">
+                              <TextBlock Name="PART_DeepSeekLinkedName" FontWeight="SemiBold"
+                                         TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                              <ComboBox Name="PART_DeepSeekLinkedCombo" Classes="settingsinput"
+                                        Height="28" MinHeight="28" HorizontalAlignment="Stretch"
+                                        VerticalAlignment="Center" IsVisible="False">
+                                <ComboBox.ItemTemplate>
+                                  <DataTemplate x:DataType="vm:ProviderEntry">
+                                    <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"
+                                               ToolTip.Tip="{Binding Name}" />
+                                  </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                              </ComboBox>
+                            </Panel>
+                            <TextBlock Grid.Column="3" Name="PART_DeepSeekLinkedMask"
+                                       FontFamily="{DynamicResource Font.Mono}"
+                                       FontSize="12" Foreground="{DynamicResource Brush.Text.Muted}"
+                                       VerticalAlignment="Center" />
+                          </Grid>
+                        </Border>
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8" Margin="0,4,0,0">
+                          <TextBlock Name="PART_DeepSeekLinkedHint" Classes="hint" Margin="0"
+                                     VerticalAlignment="Center" Text="API Key 和接口地址与模型服务保持一致。" />
+                          <Button Grid.Column="1" Name="PART_UnlinkDeepSeekSearch" Classes="textlink"
+                                  Content="单独填写" VerticalAlignment="Center" />
+                        </Grid>
+                      </StackPanel>
+                    </StackPanel>
                     <StackPanel Name="PART_SearchKeyRows">
                       <Border Classes="divider" />
                       <StackPanel Classes="fieldrow">
@@ -1963,6 +2064,41 @@
                     </StackPanel>
                   </StackPanel>
                 </Border>
+                <Grid Name="PART_BuiltinSearchTipRow" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6"
+                      Margin="2,-4,2,0" IsVisible="False">
+                  <TextBlock Classes="icon" Text="&#xE946;" FontSize="12"
+                             Foreground="{DynamicResource Brush.Text.Muted}" VerticalAlignment="Center" />
+                  <TextBlock Grid.Column="1" Name="PART_BuiltinSearchTipText" Classes="hint"
+                             Margin="0" VerticalAlignment="Center" />
+                  <Button Grid.Column="2" Name="PART_OpenBuiltinSearchProviders" Classes="textlink"
+                          VerticalAlignment="Center" />
+                </Grid>
+
+                <TextBlock Classes="section" Text="网页读取" />
+                <Border Classes="settingscard">
+                  <StackPanel>
+                    <Grid Classes="settingrow" ColumnDefinitions="*,160">
+                      <StackPanel Grid.Column="0" Margin="0,0,20,0" VerticalAlignment="Center">
+                        <TextBlock Classes="rowtitle" Text="读取方式" />
+                        <TextBlock Name="PART_WebFetchHint" Classes="hint" TextWrapping="Wrap" />
+                      </StackPanel>
+                      <ComboBox Grid.Column="1" Name="PART_WebFetchMode" Classes="settingsinput"
+                                HorizontalAlignment="Stretch" VerticalAlignment="Center">
+                        <ComboBoxItem Tag="local" Content="本机" />
+                        <ComboBoxItem Name="PART_WebFetchDeepSeekItem" Tag="deepseek" Content="DeepSeek" />
+                        <ComboBoxItem Name="PART_WebFetchTavilyItem" Tag="tavily" Content="Tavily" />
+                        <ComboBoxItem Name="PART_WebFetchExaItem" Tag="exa" Content="Exa" />
+                      </ComboBox>
+                    </Grid>
+                    <Border Classes="divider" />
+                    <Grid Classes="settingrow" ColumnDefinitions="*,160">
+                      <TextBlock Grid.Column="0" Classes="rowtitle" Text="网页正文字符上限" VerticalAlignment="Center" />
+                      <NumericUpDown Grid.Column="1" Name="PART_SearchMaxCharacters" Classes="settingsinput"
+                                      Value="{Binding WebPageMaxCharacters, Mode=TwoWay}"
+                                      Minimum="1000" Maximum="30000" Increment="1000" />
+                    </Grid>
+                  </StackPanel>
+                </Border>
 
                 <TextBlock Classes="section" Text="搜索结果" />
                 <Border Classes="settingscard">
@@ -1972,13 +2108,6 @@
                       <NumericUpDown Grid.Column="1" Name="PART_SearchMaxResults" Classes="settingsinput"
                                       Value="{Binding WebSearchMaxResults, Mode=TwoWay}"
                                       Minimum="1" Maximum="10" Increment="1" />
-                    </Grid>
-                    <Border Classes="divider" />
-                    <Grid Classes="settingrow" ColumnDefinitions="*,160">
-                      <TextBlock Grid.Column="0" Classes="rowtitle" Text="网页正文字符上限" VerticalAlignment="Center" />
-                      <NumericUpDown Grid.Column="1" Name="PART_SearchMaxCharacters" Classes="settingsinput"
-                                      Value="{Binding WebPageMaxCharacters, Mode=TwoWay}"
-                                      Minimum="1000" Maximum="200000" Increment="1000" />
                     </Grid>
                     <Border Classes="divider" />
                     <Grid Classes="settingrow" ColumnDefinitions="*,Auto">
@@ -3825,6 +3954,16 @@
       <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
       <Setter Property="Padding" Value="8,3" />
       <Setter Property="Margin" Value="10,0,0,0" />
+    </Style>
+    <Style Selector="Border.builtinbadge">
+      <Setter Property="Background" Value="{DynamicResource Brush.Primary.Soft}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Pill}" />
+      <Setter Property="Padding" Value="8,2" />
+    </Style>
+    <Style Selector="Border.builtinbadge TextBlock">
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Primary.Hover}" />
     </Style>
     <Style Selector="Border.emptystate">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.Tertiary}" />

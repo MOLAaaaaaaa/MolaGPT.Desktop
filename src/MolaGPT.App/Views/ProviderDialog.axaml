@@ -34,7 +34,7 @@
         <StackPanel Classes="field">
           <TextBlock Classes="label" Text="协议" />
           <ComboBox Name="PART_Type" HorizontalAlignment="Stretch">
-            <ComboBoxItem Content="OpenAI 兼容" />
+            <ComboBoxItem Content="OpenAI Chat Completions" />
             <ComboBoxItem Content="Anthropic" />
             <ComboBoxItem Content="Gemini" />
           </ComboBox>

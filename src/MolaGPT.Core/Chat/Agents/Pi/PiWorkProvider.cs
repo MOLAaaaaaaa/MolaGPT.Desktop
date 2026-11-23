@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -96,7 +96,52 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         if (string.IsNullOrWhiteSpace(userText) && images.Count == 0 && files.Count == 0) yield break;
 
         var options = LocalToolOptions.FromExtraBody(request.ExtraBody);
-        var modelSupportsVision = Models.FirstOrDefault(m => m.Id == request.ModelId)?.SupportsVision ?? false;
+        var activeModel = Models.FirstOrDefault(m => m.Id.Equals(request.ModelId, StringComparison.OrdinalIgnoreCase));
+        var modelSupportsVision = activeModel?.SupportsVision ?? false;
+
+        var creds = _config.ResolveCreds(request);
+        BuiltinSearchVendor? builtinVendor = null;
+        var builtinWebFetch = false;
+        if (options.Network
+            && _config.BuiltinSearch
+            && (string.IsNullOrWhiteSpace(options.SearchProvider)
+                || BuiltinWebSearch.IsBuiltinProviderId(options.SearchProvider))
+            && activeModel?.SupportsBuiltinSearch == true
+            && BuiltinWebSearch.DetectVendor(creds.Endpoint) is { } detectedVendor
+            && BuiltinWebSearch.CanUseWireApi(detectedVendor, creds.Api, creds.Model))
+        {
+            builtinVendor = detectedVendor;
+            if (BuiltinWebSearch.ForcesThinking(detectedVendor, creds.Model) && request.UseThinking != true)
+            {
+                request = request with
+                {
+                    UseThinking = true,
+                    ReasoningEffort = string.IsNullOrWhiteSpace(request.ReasoningEffort)
+                        ? "high"
+                        : request.ReasoningEffort
+                };
+            }
+
+            builtinWebFetch = options.WebPage;
+            var replacesLocalFetch = builtinWebFetch
+                && BuiltinWebSearch.ReplacesLocalWebFetch(detectedVendor, creds.Api, creds.Model, request.UseThinking == true);
+            options = options with
+            {
+                SearchProvider = BuiltinWebSearch.ProviderId(detectedVendor),
+                WebPage = replacesLocalFetch ? false : options.WebPage
+            };
+
+            var adjusted = BuiltinWebSearch.AdjustEndpoint(detectedVendor, creds.Endpoint, creds.Api);
+            if (!string.Equals(adjusted, creds.Endpoint, StringComparison.Ordinal))
+            {
+                _log?.Invoke($"[builtin-search] 端点改用 {adjusted}");
+                creds = creds with { Endpoint = adjusted };
+            }
+        }
+        else if (BuiltinWebSearch.IsBuiltinProviderId(options.SearchProvider))
+        {
+            options = options with { SearchProvider = "duckduckgo" };
+        }
 
         // Pi launches with --no-builtin-tools, so its only file access is the
         // bridged MolaGPT tool set. read_file / execute_python_code both resolve
@@ -130,8 +175,6 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         var hints = await _toolHost.DescribeAgentToolsAsync(options, ct).ConfigureAwait(false);
         var toolCatalogJson = BuildToolCatalog(localDefs.Concat(hostDefs), hints);
 
-        var creds = _config.ResolveCreds(request);
-
         // Reasoning is asked for twice, on purpose, because neither half covers the
         // other:
         //
@@ -147,6 +190,20 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         if (ThinkingParams.Owns(creds.Api))
             creds = creds with { ExtraBody = MergeThinking(creds.ExtraBody, request, creds) };
 
+        if (builtinVendor is { } activeBuiltin)
+        {
+            creds = creds with
+            {
+                AdaptBody = BuiltinWebSearch.Wrap(
+                    activeBuiltin,
+                    creds.Api,
+                    creds.Model,
+                    creds.AdaptBody,
+                    enableWebFetch: builtinWebFetch,
+                    useThinking: request.UseThinking == true)
+            };
+        }
+
         if (request.HistorySeed is { } history)
             await WriteHistoryAsync(request.ConversationId, history, creds, ct).ConfigureAwait(false);
 
@@ -154,6 +211,11 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // its own coding-assistant prompt when nobody says otherwise, so failing to
         // forward these would quietly discard whatever the user selected.
         var systemPrompt = ExtractSystemPrompt(request.Messages);
+        if (builtinVendor is { } hintVendor
+            && BuiltinWebSearch.BuildSystemHint(hintVendor, creds.Api, creds.Model, builtinWebFetch) is { Length: > 0 } builtinHint)
+        {
+            systemPrompt = systemPrompt + "\n\n" + builtinHint;
+        }
 
         // The tool set is deliberately NOT part of the sidecar's identity: the
         // extension re-reads this catalogue every turn (before_agent_start) and
@@ -167,6 +229,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // one call. The model gets the numbers and the rule; the transcript gets
         // the same list as a ChatChunk below.
         var citations = new SearchCitations();
+
+        var serverSources = builtinVendor is null ? null : new ServerSearchSources(options);
         async Task<string> ExecuteToolAsync(string name, string argsJson, CancellationToken toolCt, Action<string>? report = null)
         {
             using var call = CancellationTokenSource.CreateLinkedTokenSource(toolCt, ct);
@@ -186,6 +250,20 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             message => Volatile.Write(ref promptError, message),
             (name, argsJson, report, toolCt) => ExecuteToolAsync(name, argsJson, toolCt, report));
 
+        Action<string>? preparedHook = request.RolePrompt is null
+            ? null
+            : body => Interlocked.Exchange(ref promptTrace, RolePromptTrace.Read(creds.Api, body));
+        if (serverSources is not null && builtinVendor is { } loggedVendor)
+        {
+            var roleHook = preparedHook;
+            preparedHook = body =>
+            {
+                roleHook?.Invoke(body);
+                _log?.Invoke(
+                    $"[builtin-search] vendor={loggedVendor} api={creds.Api} tools={DescribeWireTools(body)}");
+            };
+        }
+
         var target = new PiWorkLlmShim.ForwardTarget(
             _http,
             creds.Endpoint,
@@ -198,10 +276,11 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             creds.PathMode,
             new PiWorkLlmShim.GenerationOptions(
                 creds.Api, request.Temperature, request.TopP, request.MaxTokens, request.ReasoningEffort, request.UseThinking),
-            request.RolePrompt is null ? null : body => Interlocked.Exchange(ref promptTrace, RolePromptTrace.Read(creds.Api, body)),
+            preparedHook,
             creds.AdaptBody,
             creds.ResponseReceived,
-            ModelId: creds.Model);
+            ModelId: creds.Model,
+            RelayTap: serverSources is null ? null : serverSources.Feed);
 
         // Waits when every slot is busy, which is the point: three turns really are
         // in flight and a fourth process costs more than the wait.
@@ -228,7 +307,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         var preview = new ToolPreviewTracker();
         var generationSpeed = new GenerationSpeedTracker();
 
-        var activeModel = Models.FirstOrDefault(m => m.Id.Equals(creds.Model, StringComparison.OrdinalIgnoreCase));
+        if (!string.Equals(creds.Model, request.ModelId, StringComparison.OrdinalIgnoreCase))
+            activeModel = Models.FirstOrDefault(m => m.Id.Equals(creds.Model, StringComparison.OrdinalIgnoreCase));
 
         // The same window Pi was catalogued with, so the gauge is measured against
         // the very number its auto-compaction is thresholded on.
@@ -251,6 +331,11 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             {
                 if (Volatile.Read(ref promptError) is { } roleError) throw new InvalidOperationException(roleError);
                 if (Interlocked.Exchange(ref promptTrace, null) is { } trace) yield return new ChatChunk(PromptTrace: trace);
+                if (serverSources is not null && serverSources.TryTakeTools(out var serverTools))
+                {
+                    foreach (var tool in serverTools)
+                        yield return new ChatChunk(Tool: tool);
+                }
                 var chunk = MapLine(
                     line,
                     options,
@@ -263,10 +348,17 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                     ref errorMessage,
                     ref finalStopReason);
                 if (chunk is not null) yield return chunk;
+                if (serverSources is not null && serverSources.TryTakeTools(out var postTools))
+                {
+                    foreach (var tool in postTools)
+                        yield return new ChatChunk(Tool: tool);
+                }
                 // Tool results come back on the bridge thread, so the sources show up
                 // between lines rather than on one; polling here is what puts them on
                 // the message while the answer is still being written.
                 if (citations.TryTakeUpdate(out var found)) yield return new ChatChunk(Sources: found);
+                if (serverSources is not null && serverSources.TryTake(out var serverFound))
+                    yield return new ChatChunk(Sources: serverFound);
             }
         }
         finally
@@ -277,6 +369,16 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
 
         // A search that finished after the last line would otherwise be dropped.
         if (citations.TryTakeUpdate(out var trailing)) yield return new ChatChunk(Sources: trailing);
+        if (serverSources is not null)
+        {
+            serverSources.Complete();
+            if (serverSources.TryTakeTools(out var trailingTools))
+            {
+                foreach (var tool in trailingTools)
+                    yield return new ChatChunk(Tool: tool);
+            }
+            if (serverSources.TryTake(out var serverTrailing)) yield return new ChatChunk(Sources: serverTrailing);
+        }
 
         if (errorMessage is not null)
             throw new InvalidOperationException(HumanizeAgentError(errorMessage));
@@ -395,6 +497,69 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     /// explicitly — 429 is what a long research turn actually dies of, and the bare
     /// status code reads like a crash instead of "you went too fast".
     /// </summary>
+    /// <summary>
+    /// 把发出去的 <c>tools</c> 归纳成一串短名字，服务端搜索排查用：要看清
+    /// <c>deepseek_web_search</c> 到底在不在，以及它排在哪个位置。
+    /// </summary>
+    private static string DescribeWireTools(string body)
+    {
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(body) is not System.Text.Json.Nodes.JsonObject root)
+                return "请求体无法解析";
+            var enableSearch = root["enable_search"] is System.Text.Json.Nodes.JsonValue flag
+                && flag.TryGetValue<bool>(out var searchOn) && searchOn;
+            if (root["tools"] is not System.Text.Json.Nodes.JsonArray tools)
+                return enableSearch ? "enable_search=true" : "<无 tools>";
+
+            var names = new List<string>(tools.Count + 1);
+            if (enableSearch) names.Add("enable_search");
+            foreach (var tool in tools)
+            {
+                if (tool is not System.Text.Json.Nodes.JsonObject entry)
+                {
+                    names.Add("?");
+                    continue;
+                }
+
+                if (entry.ContainsKey("googleSearch") || entry.ContainsKey("google_search"))
+                {
+                    names.Add("googleSearch");
+                    continue;
+                }
+                if (entry.ContainsKey("urlContext") || entry.ContainsKey("url_context"))
+                {
+                    names.Add("urlContext");
+                    continue;
+                }
+
+                var type = entry["type"] is System.Text.Json.Nodes.JsonValue typeValue
+                    && typeValue.TryGetValue<string>(out var text) ? text : null;
+                if (!string.IsNullOrEmpty(type) && !string.Equals(type, "function", StringComparison.Ordinal))
+                {
+                    names.Add("type:" + type);
+                    continue;
+                }
+
+                names.Add(entry["name"] is System.Text.Json.Nodes.JsonValue nameValue
+                    && nameValue.TryGetValue<string>(out var name)
+                        ? name
+                        // ChatCompletions 把名字藏在 function.name 里
+                        : entry["function"] is System.Text.Json.Nodes.JsonObject function
+                          && function["name"] is System.Text.Json.Nodes.JsonValue inner
+                          && inner.TryGetValue<string>(out var innerName)
+                            ? innerName
+                            : "?");
+            }
+
+            return $"[{tools.Count}] {string.Join(", ", names)}";
+        }
+        catch (Exception ex)
+        {
+            return "请求体无法解析：" + ex.Message;
+        }
+    }
+
     internal static string HumanizeAgentError(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return "Agent 运行失败。";
@@ -1371,7 +1536,8 @@ public sealed record PiWorkProviderConfig(
     string DisplayName,
     IReadOnlyList<ProviderModel> Models,
     PiSidecarSpec Spec,
-    Func<ChatRequest, PiProviderCreds> ResolveCreds);
+    Func<ChatRequest, PiProviderCreds> ResolveCreds,
+    bool BuiltinSearch = false);
 
 /// <summary>Per-request billing target. Account-quota → the MolaGPT relay URL +
 /// the live account JWT; BYOK → the user's own chat endpoint + key. Neither the

@@ -219,6 +219,8 @@ public partial class MainWindow : MolaWindow
         };
         PART_Composer.PersonaSettingsRequested += (_, startNew) => OpenPersonaSettings(startNew);
         PART_Composer.ApprovalSettingsRequested += (_, _) => OpenApprovalSettings();
+        PART_Composer.SearchSettingsRequested += (_, _) => OpenSearchSettings();
+        PART_Composer.ProviderToolsRequested += (_, providerId) => OpenProviderToolsSettings(providerId);
         PART_Composer.PersonaSelectionFailed += (_, error) => _notifications.Error("角色切换失败", error, "persona-selection");
         _chat.HistorySaveFailed += error => _notifications.Error("回复版本保存失败", error, "message-history");
         // An event, not a state: this turn ran without the server's tools.
@@ -1104,6 +1106,18 @@ public partial class MainWindow : MolaWindow
     {
         OpenSettings();
         _settingsWindow?.OpenProvidersPage();
+    }
+
+    private void OpenSearchSettings()
+    {
+        OpenSettings();
+        _settingsWindow?.OpenSearchPage();
+    }
+
+    private void OpenProviderToolsSettings(string? providerId)
+    {
+        OpenSettings();
+        _settingsWindow?.OpenProviderTools(providerId);
     }
 
     private async Task OpenSystemPromptAsync()

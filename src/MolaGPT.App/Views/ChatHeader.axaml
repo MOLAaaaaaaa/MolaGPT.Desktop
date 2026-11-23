@@ -59,21 +59,22 @@
               Margin="16,0,0,0"
               IsVisible="{Binding !IsImageWorkbenchVisible}"
               ToolTip.Tip="选择模型">
-        <StackPanel Classes="inlinerow" Orientation="Horizontal" VerticalAlignment="Center">
+        <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
           <TextBlock Classes="icon" Text="&#xE99A;" FontSize="14" Margin="0,0,8,0"
                      VerticalAlignment="Center" />
           <!-- One TextBlock, two Runs: separate blocks get separate line boxes
                and their baselines drift a pixel or two (14px name vs 12px
                label). Runs share a baseline, so the junction stays flush. -->
-          <TextBlock TextWrapping="NoWrap" VerticalAlignment="Center">
+          <TextBlock Grid.Column="1" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                     MaxWidth="260" VerticalAlignment="Center">
             <Run Text="{Binding Chat.ActiveModelLabel}" FontWeight="SemiBold" />
             <Run Name="PART_ModeLabel"
                  FontSize="{DynamicResource Font.Size.XSmall}"
                  Foreground="{DynamicResource Brush.Text.Muted}" />
           </TextBlock>
-          <TextBlock Classes="icon" Text="&#xE70D;" FontSize="10" Margin="8,0,0,0"
+          <TextBlock Grid.Column="2" Classes="icon" Text="&#xE70D;" FontSize="10" Margin="8,0,0,0"
                      Opacity="0.6" VerticalAlignment="Center" />
-        </StackPanel>
+        </Grid>
 
         <Button.Flyout>
           <Flyout Placement="BottomEdgeAlignedLeft" ShowMode="Standard"

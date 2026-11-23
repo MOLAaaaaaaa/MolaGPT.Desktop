@@ -131,7 +131,8 @@ public sealed class PiByokProviderFactory
         string? apiPath,
         string? apiKey,
         IReadOnlyList<ProviderModel> models,
-        IReadOnlyList<KeyValuePair<string, string>>? headers = null)
+        IReadOnlyList<KeyValuePair<string, string>>? headers = null,
+        bool builtinSearch = false)
     {
         if (!Eligible.TryGetValue(type, out var shape)) return null;
         var chatGpt = type.Equals("chatgpt", StringComparison.Ordinal);
@@ -234,7 +235,8 @@ public sealed class PiByokProviderFactory
                 PathMode: shape.PathMode,
                 StreamOnly: account is not null,
                 AdaptBody: account?.Kind is { } kind ? body => ChatGptAccount.AdaptBody(body, kind) : null,
-                ResponseReceived: account is null ? null : account.ObserveResponse));
+                ResponseReceived: account is null ? null : account.ObserveResponse),
+            BuiltinSearch: !chatGpt && builtinSearch);
 
         var http = _httpClientFactory.CreateClient(HttpClientNames.Byok);
         var provider = new PiWorkProvider(

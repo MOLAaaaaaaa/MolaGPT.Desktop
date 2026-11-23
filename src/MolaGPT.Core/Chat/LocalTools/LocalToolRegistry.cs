@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -32,7 +33,11 @@ public static partial class LocalToolRegistry
     public static IReadOnlyList<object> BuildOpenAiToolDefinitions(LocalToolOptions options)
     {
         var tools = new List<object>();
-        if (options.Network && NormalizeSearchProvider(options.SearchProvider) == "molagpt")
+        var searchProvider = NormalizeSearchProvider(options.SearchProvider);
+        if (options.Network && BuiltinWebSearch.IsBuiltinProviderId(searchProvider))
+        {
+        }
+        else if (options.Network && searchProvider == "molagpt")
         {
             tools.Add(BuildMolaSearchDefinition());
         }
@@ -44,7 +49,9 @@ public static partial class LocalToolRegistry
                 function = new
                 {
                     name = "search_web",
-                    description = "在网络上搜索最新信息。适合查新闻、实时资料、产品/库/文档状态、事实核验。一次可提交 1 到 5 个查询。",
+                    description = searchProvider == "deepseek"
+                        ? "在网络上搜索最新信息。一次可提交 1 到 5 个查询，每个查询最多 128 个 Unicode 字符。"
+                        : "在网络上搜索最新信息。适合查新闻、实时资料、产品/库/文档状态、事实核验。一次可提交 1 到 5 个查询。",
                     parameters = new
                     {
                         type = "object",
@@ -490,6 +497,14 @@ public static partial class LocalToolRegistry
         if (NormalizeSearchProvider(options.SearchProvider) == "molagpt")
             return await SearchMolaAccountAsync(argumentsJson, options, accountSearch, ct).ConfigureAwait(false);
 
+        if (BuiltinWebSearch.TryParseProviderId(options.SearchProvider, out _))
+            return SerializeToolResult(new
+            {
+                success = false,
+                source = "local_search_web",
+                error = "已启用模型内置搜索，无法使用其他搜索服务。"
+            });
+
         var queries = ParseSearchQueries(argumentsJson);
         var provider = NormalizeSearchProvider(options.SearchProvider);
 
@@ -499,7 +514,7 @@ public static partial class LocalToolRegistry
         //   IP throttling kicks in, so we serialize and stagger.
         var maxConcurrency = provider switch
         {
-            "tavily" or "exa" => Math.Min(5, queries.Count),
+            "tavily" or "exa" or "deepseek" => Math.Min(5, queries.Count),
             _ => 1
         };
         var interQueryDelay = provider == "duckduckgo" && queries.Count > 1
@@ -618,6 +633,14 @@ public static partial class LocalToolRegistry
             maxChars = Math.Clamp(parsed, 1000, 30000);
         }
 
+        var fetchProvider = localOptions.FetchProvider?.Trim().ToLowerInvariant();
+        if (fetchProvider == "deepseek")
+            return await FetchDeepSeekAsync(url, maxChars, localOptions, http, ct).ConfigureAwait(false);
+        if (fetchProvider == "tavily")
+            return await FetchTavilyAsync(url, maxChars, localOptions, http, ct).ConfigureAwait(false);
+        if (fetchProvider == "exa")
+            return await FetchExaAsync(url, maxChars, localOptions, http, ct).ConfigureAwait(false);
+
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.TryAddWithoutValidation("User-Agent", UserAgentProvider.FixedUa);
         req.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8");
@@ -657,6 +680,7 @@ public static partial class LocalToolRegistry
         {
             "tavily" => await SearchTavilyAsync(query, options, http, ct).ConfigureAwait(false),
             "exa" => await SearchExaAsync(query, options, http, ct).ConfigureAwait(false),
+            "deepseek" => await SearchDeepSeekAsync(query, options, http, ct).ConfigureAwait(false),
             _ => await SearchDuckDuckGoAsync(query, options, http, ct).ConfigureAwait(false)
         };
     }
@@ -755,6 +779,355 @@ public static partial class LocalToolRegistry
     }
 
     /// <summary>
+    /// DeepSeek 的 <c>POST /v1/tools/search</c>：一条查询一次请求，服务端已把结果
+    /// rerank 好并写好 <c>summary</c>。按成功请求计费（5 元 / 1000 次），
+    /// <c>count</c> 只影响一次请求带回几条，不额外加价。
+    /// </summary>
+    private static async Task<IReadOnlyList<object>> SearchDeepSeekAsync(
+        string query,
+        LocalToolOptions options,
+        HttpClient http,
+        CancellationToken ct)
+    {
+        var queryLength = 0;
+        foreach (var _ in query.EnumerateRunes())
+            if (++queryLength > 128)
+                throw new InvalidOperationException("搜索词不能超过 128 个字符。");
+        var apiKey = RequireApiKey(options, "DeepSeek");
+        using var req = new HttpRequestMessage(HttpMethod.Post, DeepSeekToolEndpoint(options.SearchBaseUrl, "search"));
+        req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + apiKey);
+        req.Content = JsonContent.Create(new
+        {
+            query,
+            count = options.SearchMaxResults,
+            // 正文留给 web_fetch：这里带回全文会把一轮上下文塞满。
+            need_content = false
+        });
+
+        using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        await EnsureDeepSeekSuccessAsync(resp, ct).ConfigureAwait(false);
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+        if (!doc.RootElement.TryGetProperty("results", out var results) || results.ValueKind != JsonValueKind.Array)
+            return Array.Empty<object>();
+
+        return results.EnumerateArray()
+            .Take(options.SearchMaxResults)
+            .Select(result => new
+            {
+                title = ReadString(result, "title") ?? ReadString(result, "url") ?? "Untitled",
+                url = ReadString(result, "url") ?? string.Empty,
+                // summary 是服务端写好的摘要，比截断的 snippet 更适合直接读。
+                snippet = TrimSnippet(ReadString(result, "summary") ?? ReadString(result, "snippet"), options),
+                published_date = ReadString(result, "date"),
+                site_name = ReadString(result, "site_name")
+            })
+            .Where(item => !string.IsNullOrWhiteSpace(item.url))
+            .Cast<object>()
+            .ToArray();
+    }
+
+    /// <summary>
+    /// DeepSeek 的 <c>POST /v1/tools/fetch</c>：服务端取页并转成 Markdown。
+    /// 返回结构和本机抓取保持一致，调用方（工具桥、转录里的工具卡片）不用改。
+    /// </summary>
+    private static async Task<string> FetchDeepSeekAsync(
+        Uri url,
+        int maxChars,
+        LocalToolOptions options,
+        HttpClient http,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(options.FetchApiKey))
+            throw new InvalidOperationException("未配置 DeepSeek API Key，无法读取网页。");
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, DeepSeekToolEndpoint(options.FetchBaseUrl, "fetch"));
+        req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + options.FetchApiKey);
+        req.Content = JsonContent.Create(new { url = url.ToString() });
+
+        using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        await EnsureDeepSeekSuccessAsync(resp, ct).ConfigureAwait(false);
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+
+        var title = ReadString(doc.RootElement, "title") ?? url.ToString();
+        var content = ReadString(doc.RootElement, "content") ?? string.Empty;
+        if (content.Length > maxChars)
+            content = content[..maxChars] + "\n[content truncated]";
+
+        return SerializeToolResult(new
+        {
+            success = true,
+            source = "local_web_fetch",
+            action = "scrape",
+            url = url.ToString(),
+            title,
+            content,
+            // 服务端只回正文，不回链接清单；空数组比缺字段更容易让模型理解。
+            links = Array.Empty<string>()
+        });
+    }
+
+    private static async Task<string> FetchTavilyAsync(
+        Uri url,
+        int maxChars,
+        LocalToolOptions options,
+        HttpClient http,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(options.FetchApiKey))
+            throw new InvalidOperationException("未配置 Tavily API Key，无法读取网页。");
+
+        var endpoint = CombineEndpoint(options.FetchBaseUrl, "https://api.tavily.com", "extract");
+        using var req = new HttpRequestMessage(HttpMethod.Post, endpoint);
+        req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + options.FetchApiKey);
+        req.Content = JsonContent.Create(new
+        {
+            urls = url.ToString(),
+            extract_depth = "basic",
+            format = "markdown"
+        });
+
+        using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        await EnsureExternalFetchSuccessAsync(resp, "Tavily", ct).ConfigureAwait(false);
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+
+        if (doc.RootElement.TryGetProperty("results", out var results)
+            && results.ValueKind == JsonValueKind.Array
+            && results.GetArrayLength() > 0)
+        {
+            var first = results[0];
+            var content = ReadString(first, "raw_content") ?? string.Empty;
+            var title = ReadString(first, "title") ?? ExtractMarkdownHeading(content) ?? url.ToString();
+            if (content.Length > maxChars)
+                content = content[..maxChars] + "\n[content truncated]";
+
+            return SerializeToolResult(new
+            {
+                success = true,
+                source = "local_web_fetch",
+                action = "scrape",
+                url = url.ToString(),
+                title,
+                content,
+                links = Array.Empty<string>()
+            });
+        }
+
+        string? failedReason = null;
+        if (doc.RootElement.TryGetProperty("failed_results", out var failed)
+            && failed.ValueKind == JsonValueKind.Array
+            && failed.GetArrayLength() > 0)
+        {
+            failedReason = ReadString(failed[0], "error");
+        }
+
+        throw new InvalidOperationException(string.IsNullOrWhiteSpace(failedReason)
+            ? "页面无法读取。"
+            : $"页面无法读取：{failedReason}");
+    }
+
+    private static async Task<string> FetchExaAsync(
+        Uri url,
+        int maxChars,
+        LocalToolOptions options,
+        HttpClient http,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(options.FetchApiKey))
+            throw new InvalidOperationException("未配置 Exa API Key，无法读取网页。");
+
+        var endpoint = CombineEndpoint(options.FetchBaseUrl, "https://api.exa.ai", "contents");
+        using var req = new HttpRequestMessage(HttpMethod.Post, endpoint);
+        req.Headers.TryAddWithoutValidation("x-api-key", options.FetchApiKey);
+        req.Content = JsonContent.Create(new
+        {
+            urls = new[] { url.ToString() },
+            text = new { maxCharacters = maxChars }
+        });
+
+        using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        await EnsureExternalFetchSuccessAsync(resp, "Exa", ct).ConfigureAwait(false);
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+
+        if (doc.RootElement.TryGetProperty("results", out var results)
+            && results.ValueKind == JsonValueKind.Array
+            && results.GetArrayLength() > 0)
+        {
+            var first = results[0];
+            var content = ReadString(first, "text") ?? string.Empty;
+            if (!string.IsNullOrEmpty(content))
+            {
+                var title = ReadString(first, "title") ?? url.ToString();
+                if (content.Length > maxChars)
+                    content = content[..maxChars] + "\n[content truncated]";
+
+                return SerializeToolResult(new
+                {
+                    success = true,
+                    source = "local_web_fetch",
+                    action = "scrape",
+                    url = url.ToString(),
+                    title,
+                    content,
+                    links = Array.Empty<string>()
+                });
+            }
+        }
+
+        string? errorTag = null;
+        if (doc.RootElement.TryGetProperty("statuses", out var statuses)
+            && statuses.ValueKind == JsonValueKind.Array
+            && statuses.GetArrayLength() > 0
+            && statuses[0].TryGetProperty("error", out var errorObj)
+            && errorObj.ValueKind == JsonValueKind.Object)
+        {
+            errorTag = ReadString(errorObj, "tag");
+        }
+
+        var message = errorTag?.Trim().ToUpperInvariant() switch
+        {
+            "CRAWL_NOT_FOUND" or "SOURCE_NOT_AVAILABLE" => "页面无法访问（可能已删除或需要登录）。",
+            "CRAWL_TIMEOUT" or "CRAWL_LIVECRAWL_TIMEOUT" => "读取超时，请稍后重试。",
+            "UNSUPPORTED_URL" => "不支持读取该链接。",
+            _ => "页面无法读取。"
+        };
+        throw new InvalidOperationException(message);
+    }
+
+    private static string? ExtractMarkdownHeading(string markdown)
+    {
+        if (string.IsNullOrWhiteSpace(markdown)) return null;
+        foreach (var rawLine in markdown.AsSpan().EnumerateLines())
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0) continue;
+            if (line.StartsWith("# ", StringComparison.Ordinal))
+            {
+                var heading = line[2..].Trim();
+                return heading.Length > 0 ? heading.ToString() : null;
+            }
+            break;
+        }
+        return null;
+    }
+
+    private static async Task EnsureExternalFetchSuccessAsync(
+        HttpResponseMessage resp,
+        string providerName,
+        CancellationToken ct)
+    {
+        if (resp.IsSuccessStatusCode) return;
+
+        string? detail = null;
+        try
+        {
+            var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(body))
+            {
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("error", out var err))
+                {
+                    detail = err.ValueKind == JsonValueKind.String
+                        ? err.GetString()
+                        : err.ValueKind == JsonValueKind.Object ? ReadString(err, "message") : null;
+                }
+                else if (doc.RootElement.TryGetProperty("detail", out var d))
+                {
+                    detail = d.ValueKind == JsonValueKind.String
+                        ? d.GetString()
+                        : d.ValueKind == JsonValueKind.Object ? ReadString(d, "error") : null;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or NotSupportedException)
+        {
+        }
+
+        var status = (int)resp.StatusCode;
+        var hint = status switch
+        {
+            401 => $"{providerName} API Key 无效。",
+            402 or 432 or 433 => $"{providerName} 账户额度不足。",
+            429 => "请求过于频繁，请稍后重试。",
+            >= 500 => $"{providerName} 服务异常，请稍后重试。",
+            _ => $"{providerName} 接口返回错误。"
+        };
+
+        throw new InvalidOperationException(string.IsNullOrWhiteSpace(detail)
+            ? $"{hint}（HTTP {status}）"
+            : $"{hint}（HTTP {status}）{detail}");
+    }
+
+    /// <summary>
+    /// DeepSeek 的工具接口在 <c>/v1/tools/</c> 下。用户把 Base URL 填成
+    /// <c>https://api.deepseek.com</c> 或带上 <c>/v1</c> 都该能用，所以这里不让
+    /// <c>v1</c> 出现两次。
+    /// </summary>
+    private static Uri DeepSeekToolEndpoint(string? baseUrl, string tool)
+    {
+        var root = (string.IsNullOrWhiteSpace(baseUrl) ? "https://api.deepseek.com" : baseUrl.Trim()).TrimEnd('/');
+        return new Uri(root.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
+            ? $"{root}/tools/{tool}"
+            : $"{root}/v1/tools/{tool}");
+    }
+
+    /// <summary>
+    /// 把 DeepSeek 的 OpenAI 风格错误摊平成一句中文：抓取失败大多是「站点不允许」
+    /// 或「页面打不开」，带着状态码的一整段 JSON 对模型没有帮助。
+    /// </summary>
+    private static async Task EnsureDeepSeekSuccessAsync(HttpResponseMessage resp, CancellationToken ct)
+    {
+        if (resp.IsSuccessStatusCode) return;
+
+        string? message = null;
+        string? code = null;
+        try
+        {
+            var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(body))
+            {
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+                {
+                    message = ReadString(error, "message");
+                    code = ReadString(error, "code");
+                }
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or NotSupportedException)
+        {
+            // 非 JSON 的错误页：状态码本身已经足够说明问题。
+        }
+
+        var status = (int)resp.StatusCode;
+        var hint = code?.Trim().ToLowerInvariant() switch
+        {
+            "url_not_allowed" => "该网站不允许读取。",
+            "url_not_accessible" => "页面无法访问（可能已删除或需要登录）。",
+            "unavailable" => "DeepSeek 暂时不可用，请稍后重试。",
+            _ => status switch
+            {
+                401 => "DeepSeek API Key 无效。",
+                402 => "DeepSeek 账户余额不足。",
+                403 => "该网站不允许读取。",
+                404 => "页面无法访问（可能已删除或需要登录）。",
+                408 => "读取超时，请稍后重试。",
+                413 => "页面过大，无法读取。",
+                429 => "请求过于频繁，请稍后重试。",
+                >= 500 => "DeepSeek 服务异常，请稍后重试。",
+                _ => "DeepSeek 接口返回错误。"
+            }
+        };
+
+        throw new InvalidOperationException(string.IsNullOrWhiteSpace(message)
+            ? $"{hint}（HTTP {status}）"
+            : $"{hint}（HTTP {status}）{message}");
+    }
+
+    /// <summary>
     /// Cuts a search hit's text down to <see cref="MaxSearchSnippetCharacters"/>
     /// (or whatever the turn configured). The marker is left in on purpose: the
     /// model needs to see that there is more behind the URL, or it will treat a
@@ -790,13 +1163,16 @@ public static partial class LocalToolRegistry
     private static string NormalizeSearchProvider(string? provider) =>
         string.IsNullOrWhiteSpace(provider)
             ? "duckduckgo"
-            : provider.Trim().ToLowerInvariant() switch
-            {
-                "molagpt" => "molagpt",
-                "tavily" => "tavily",
-                "exa" => "exa",
-                _ => "duckduckgo"
-            };
+            : BuiltinWebSearch.TryParseProviderId(provider, out var builtin)
+                ? BuiltinWebSearch.ProviderId(builtin)
+                : provider.Trim().ToLowerInvariant() switch
+                {
+                    "molagpt" => "molagpt",
+                    "tavily" => "tavily",
+                    "exa" => "exa",
+                    "deepseek" => "deepseek",
+                    _ => "duckduckgo"
+                };
 
     private static IReadOnlyList<string> ParseSearchQueries(string argumentsJson)
     {

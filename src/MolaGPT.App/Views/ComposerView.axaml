@@ -282,9 +282,9 @@
                 IsVisible="{Binding IsReasoningGroupVisible}">
           <StackPanel Orientation="Horizontal">
             <ToggleButton Name="PART_Thinking" Classes="toolchip"
-                          IsChecked="{Binding EnableThinking, Mode=TwoWay}"
+                          IsChecked="{Binding IsThinkingToggleChecked, Mode=TwoWay}"
                           IsVisible="{Binding IsThinkingVisible}"
-                          ToolTip.Tip="开启推理：复杂问题先推理后回答">
+                          ToolTip.Tip="{Binding ThinkingToolTip}">
               <StackPanel Classes="inlinerow" Orientation="Horizontal">
                 <TextBlock Classes="icon" Text="&#xE82F;" FontSize="12" Margin="0,0,6,0"
                            VerticalAlignment="Center" />
@@ -356,16 +356,78 @@
         <!-- One switch, not two. 搜索和读页是同一件事的两半——单开搜索，模型拿到
              的只有摘要片段；单开读页，它没有办法找到要读的地址。分开放只是把一个
              决定拆成两个都得答对的问题。 -->
-        <ToggleButton Name="PART_Network" Classes="toolchip"
-                      IsChecked="{Binding EnableNetwork, Mode=TwoWay}"
-                      IsEnabled="{Binding AreNetworkToolsEnabled}"
-                      ToolTip.Tip="搜索网页并读取页面内容">
-          <StackPanel Classes="inlinerow" Orientation="Horizontal">
-            <TextBlock Classes="icon" Text="&#xE721;" FontSize="12" Margin="0,0,6,0"
-                       VerticalAlignment="Center" />
-            <TextBlock Text="网络访问" VerticalAlignment="Center" />
+        <Border Name="PART_NetworkGroup" Classes="reasoningpill"
+                Classes.on="{Binding IsNetworkGroupActive}">
+          <StackPanel Orientation="Horizontal">
+            <ToggleButton Name="PART_Network" Classes="toolchip"
+                          IsChecked="{Binding EnableNetwork, Mode=TwoWay}"
+                          IsEnabled="{Binding AreNetworkToolsEnabled}"
+                          ToolTip.Tip="搜索网页并读取页面内容">
+              <StackPanel Classes="inlinerow" Orientation="Horizontal">
+                <TextBlock Classes="icon" Text="&#xE721;" FontSize="12" Margin="0,0,6,0"
+                           VerticalAlignment="Center" />
+                <TextBlock Text="网络访问" VerticalAlignment="Center" />
+              </StackPanel>
+            </ToggleButton>
+
+            <Border Classes="reasoningdivider" IsVisible="{Binding IsNetworkSplit}" />
+
+            <Button Name="PART_SearchProvider" Classes="toolchip effortsegment"
+                    Classes.iconly="{Binding !HasNetworkSegmentLabel}"
+                    IsVisible="{Binding IsNetworkSplit}"
+                    ToolTip.Tip="{Binding SearchProviderToolTip}">
+              <StackPanel Classes="inlinerow" Orientation="Horizontal">
+                <TextBlock Text="{Binding NetworkSegmentLabel}"
+                           IsVisible="{Binding HasNetworkSegmentLabel}"
+                           MaxWidth="140" TextTrimming="CharacterEllipsis"
+                           Margin="0,0,5,0" VerticalAlignment="Center" />
+                <TextBlock Classes="icon" Text="&#xE70D;" FontSize="8"
+                           Margin="0,1,0,0" VerticalAlignment="Center" />
+              </StackPanel>
+              <Button.Flyout>
+                <Flyout Placement="TopEdgeAlignedLeft" FlyoutPresenterClasses="molaflyout">
+                  <Border Classes="flyoutsurface approvalpanel" Width="300">
+                    <StackPanel>
+                      <TextBlock Text="搜索服务" Classes="muted" FontSize="12"
+                                 FontWeight="SemiBold" Margin="10,4,10,6" />
+                      <ItemsControl Name="PART_SearchProviderList" ItemsSource="{Binding SearchProviderChoices}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="vm:SearchProviderChoice">
+                            <Button Classes="searchoption" IsEnabled="{Binding IsSelectable}">
+                              <Grid ColumnDefinitions="*,Auto">
+                                <StackPanel Spacing="1">
+                                  <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                  <TextBlock Text="{Binding Detail}" IsVisible="{Binding HasDetail}"
+                                             Classes="muted" FontSize="{DynamicResource Font.Size.XSmall}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <TextBlock Grid.Column="1" Classes="icon" Text="&#xE73E;" FontSize="12"
+                                           Margin="8,0,0,0" VerticalAlignment="Center"
+                                           Foreground="{DynamicResource Brush.Primary.Hover}" IsVisible="{Binding IsSelected}" />
+                              </Grid>
+                            </Button>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                      <Border Classes="divider" Margin="4,6" />
+                      <Grid ColumnDefinitions="*,Auto">
+                        <Button Grid.Column="0" Classes="searchfooter" Click="OnOpenSearchSettings">
+                          <StackPanel Classes="inlinerow" Orientation="Horizontal" Spacing="8">
+                            <TextBlock Classes="icon" Text="&#xE713;" FontSize="12" VerticalAlignment="Center" />
+                            <TextBlock Text="搜索设置" FontSize="12" VerticalAlignment="Center" />
+                          </StackPanel>
+                        </Button>
+                        <Button Grid.Column="1" Classes="textlink" Content="模型服务"
+                                Margin="4,0,6,0" VerticalAlignment="Center"
+                                IsVisible="{Binding HasModelBuiltinSearch}"
+                                Click="OnOpenBuiltinSearchSettings" />
+                      </Grid>
+                    </StackPanel>
+                  </Border>
+                </Flyout>
+              </Button.Flyout>
+            </Button>
           </StackPanel>
-        </ToggleButton>
+        </Border>
       </WrapPanel>
 
       <Border Grid.Row="2" Classes="imageoptions" IsVisible="{Binding IsImageOptionsVisible}">
@@ -752,6 +814,35 @@
   </Border>
 
   <UserControl.Styles>
+    <Style Selector="Button.searchoption">
+      <Setter Property="Padding" Value="10,8" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    </Style>
+    <Style Selector="Button.searchoption:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Button.searchoption:disabled /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Opacity" Value="0.65" />
+    </Style>
+    <Style Selector="Button.searchfooter">
+      <Setter Property="Padding" Value="10,7" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+    </Style>
+    <Style Selector="Button.searchfooter:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
+    <Style Selector="Button.searchfooter:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
     <Style Selector="Button.modechip">
       <Setter Property="Height" Value="28" />
       <Setter Property="MinHeight" Value="28" />
@@ -988,6 +1079,9 @@
     </Style>
     <Style Selector="Button.effortsegment">
       <Setter Property="Padding" Value="8,0,10,0" />
+    </Style>
+    <Style Selector="Button.effortsegment.iconly">
+      <Setter Property="Padding" Value="9,0" />
     </Style>
     <Style Selector="Border.reasoningpill ToggleButton.toolchip:checked /template/ Border#PART_Root">
       <Setter Property="Background" Value="Transparent" />

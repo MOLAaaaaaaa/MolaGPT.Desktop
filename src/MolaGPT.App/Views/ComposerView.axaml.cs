@@ -26,6 +26,10 @@ public partial class ComposerView : UserControl
         // This is the phase WPF's PreviewKeyDown gave for free.
         PART_Input.AddHandler(KeyDownEvent, OnInputKeyDown, RoutingStrategies.Tunnel);
         PART_Attach.Click += OnAttachClick;
+        PART_SearchProviderList.AddHandler(Button.ClickEvent, OnSearchProviderRowClicked,
+            RoutingStrategies.Bubble);
+        if (PART_SearchProvider.Flyout is { } searchFlyout)
+            searchFlyout.Opened += (_, _) => (DataContext as ComposerViewModel)?.RefreshSearchProviderUi();
         PART_ClearPersona.Click += (_, _) => ClearPersona();
         PART_NewPersona.Click += (_, _) => OpenPersonaSettings(true);
         PART_ManagePersonas.Click += (_, _) => OpenPersonaSettings(false);
@@ -80,6 +84,31 @@ public partial class ComposerView : UserControl
     }
 
     public event EventHandler? ApprovalSettingsRequested;
+
+    public event EventHandler? SearchSettingsRequested;
+
+    public event EventHandler<string?>? ProviderToolsRequested;
+
+    private void OnSearchProviderRowClicked(object? sender, RoutedEventArgs e)
+    {
+        if (e.Source is not Button { DataContext: SearchProviderChoice choice, IsEnabled: true }
+            || DataContext is not ComposerViewModel vm) return;
+        vm.SelectSearchProviderCommand.Execute(choice);
+        PART_SearchProvider.Flyout?.Hide();
+    }
+
+    private void OnOpenSearchSettings(object? sender, RoutedEventArgs e)
+    {
+        PART_SearchProvider.Flyout?.Hide();
+        SearchSettingsRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnOpenBuiltinSearchSettings(object? sender, RoutedEventArgs e)
+    {
+        PART_SearchProvider.Flyout?.Hide();
+        var providerId = (DataContext as ComposerViewModel)?.ActiveBuiltinSearchProviderId;
+        ProviderToolsRequested?.Invoke(this, providerId);
+    }
 
     private void OnOpenApprovalSettings(object? sender, RoutedEventArgs e)
     {
