@@ -2029,7 +2029,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
 
         if (!options.AllowNetwork)
-            lines.Add("网络默认关闭，不要依赖下载文件或抓取网页。");
+            lines.Add("Python 环境默认断网，不要在代码里下载文件或抓取网页。");
 
         return "<运行环境>\n" + string.Join("\n", lines) + "\n</运行环境>";
     }

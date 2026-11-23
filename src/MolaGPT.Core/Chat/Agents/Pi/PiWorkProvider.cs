@@ -108,7 +108,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                 || BuiltinWebSearch.IsBuiltinProviderId(options.SearchProvider))
             && activeModel?.SupportsBuiltinSearch == true
             && BuiltinWebSearch.DetectVendor(creds.Endpoint) is { } detectedVendor
-            && BuiltinWebSearch.CanUseWireApi(detectedVendor, creds.Api))
+            && BuiltinWebSearch.CanUseWireApi(detectedVendor, creds.Api, creds.Model))
         {
             builtinVendor = detectedVendor;
             if (BuiltinWebSearch.ForcesThinking(detectedVendor, creds.Model) && request.UseThinking != true)
@@ -211,6 +211,11 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // its own coding-assistant prompt when nobody says otherwise, so failing to
         // forward these would quietly discard whatever the user selected.
         var systemPrompt = ExtractSystemPrompt(request.Messages);
+        if (builtinVendor is { } hintVendor
+            && BuiltinWebSearch.BuildSystemHint(hintVendor, creds.Api, creds.Model, builtinWebFetch) is { Length: > 0 } builtinHint)
+        {
+            systemPrompt = systemPrompt + "\n\n" + builtinHint;
+        }
 
         // The tool set is deliberately NOT part of the sidecar's identity: the
         // extension re-reads this catalogue every turn (before_agent_start) and

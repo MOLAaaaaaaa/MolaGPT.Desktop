@@ -77,8 +77,7 @@ public static class BuiltinWebSearch
         var normalized = NormalizeProviderType(providerType);
         return vendor switch
         {
-            // Keep the agent integration on Responses: it is the only API with V4 Pro web_search.
-            BuiltinSearchVendor.DeepSeek => normalized == "openai-response",
+            BuiltinSearchVendor.DeepSeek => normalized is "openai-compat" or "openai-response" or "anthropic",
             BuiltinSearchVendor.OpenAi => normalized == "openai-response",
             BuiltinSearchVendor.Bailian => normalized is "openai-compat" or "openai-response",
             BuiltinSearchVendor.Anthropic => normalized == "anthropic",
@@ -87,12 +86,15 @@ public static class BuiltinWebSearch
         };
     }
 
-    public static bool CanUseWireApi(BuiltinSearchVendor vendor, string? api)
+    public static bool CanUseWireApi(BuiltinSearchVendor vendor, string? api, string? modelId = null)
     {
         var normalized = api?.Trim().ToLowerInvariant();
         return vendor switch
         {
-            BuiltinSearchVendor.DeepSeek => normalized == "openai-responses",
+            BuiltinSearchVendor.DeepSeek when NormalizeModelId(modelId) == DeepSeekProModel =>
+                normalized == "openai-responses",
+            BuiltinSearchVendor.DeepSeek =>
+                normalized is "openai-completions" or "openai-responses" or "anthropic-messages",
             BuiltinSearchVendor.OpenAi => normalized == "openai-responses",
             BuiltinSearchVendor.Bailian => normalized is "openai-completions" or "openai-responses",
             BuiltinSearchVendor.Anthropic => normalized == "anthropic-messages",
@@ -131,7 +133,7 @@ public static class BuiltinWebSearch
 
     public static string DescribeToolHint(BuiltinSearchVendor vendor) => vendor switch
     {
-        BuiltinSearchVendor.DeepSeek => "仅部分模型支持搜索与网页浏览。与本地工具同时使用时，建议选择 DeepSeek V4 Pro。",
+        BuiltinSearchVendor.DeepSeek => "支持搜索与网页读取，仅部分模型可用，开启后默认启用深度思考。可能产生额外费用。",
         BuiltinSearchVendor.OpenAi => "支持搜索与网页浏览，仅部分模型可用。可能产生额外费用。",
         BuiltinSearchVendor.Bailian => "支持搜索，开启思考时含网页读取。仅部分模型可用，可能产生额外费用。",
         BuiltinSearchVendor.Anthropic => "支持搜索与网页读取，仅部分模型可用。可能产生额外费用。",
@@ -141,7 +143,7 @@ public static class BuiltinWebSearch
 
     public static string DescribeProtocolRequirement(BuiltinSearchVendor vendor) => vendor switch
     {
-        BuiltinSearchVendor.DeepSeek => "需使用 OpenAI Responses 协议。",
+        BuiltinSearchVendor.DeepSeek => "需使用 OpenAI Chat Completions、OpenAI Responses 或 Anthropic 协议。",
         BuiltinSearchVendor.OpenAi => "需使用 OpenAI Responses 协议。",
         BuiltinSearchVendor.Bailian => "需使用 OpenAI Chat Completions 或 OpenAI Responses 协议。",
         BuiltinSearchVendor.Anthropic => "需使用 Anthropic 协议。",
@@ -156,7 +158,9 @@ public static class BuiltinWebSearch
 
         return vendor switch
         {
-            BuiltinSearchVendor.DeepSeek => id is "deepseek-flash" or DeepSeekProModel,
+            BuiltinSearchVendor.DeepSeek => id == "deepseek-flash"
+                || (id == DeepSeekProModel
+                    && string.Equals(NormalizeProviderType(providerType), "openai-response", StringComparison.Ordinal)),
             BuiltinSearchVendor.OpenAi => DefaultSupportsOpenAiModel(id),
             BuiltinSearchVendor.Bailian => DefaultSupportsBailianModel(id, providerType),
             BuiltinSearchVendor.Anthropic => DefaultSupportsAnthropicModel(id),
@@ -169,18 +173,55 @@ public static class BuiltinWebSearch
     public static string AdjustEndpoint(BuiltinSearchVendor vendor, string endpoint, string api)
     {
         if (vendor != BuiltinSearchVendor.DeepSeek
-            || !string.Equals(api, "openai-responses", StringComparison.OrdinalIgnoreCase)
             || DetectVendor(endpoint) != BuiltinSearchVendor.DeepSeek
             || !Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
         {
             return endpoint;
         }
 
-        const string versioned = "/v1/responses";
-        var path = uri.AbsolutePath;
-        if (!path.EndsWith(versioned, StringComparison.Ordinal)) return endpoint;
+        if (string.Equals(api, "openai-responses", StringComparison.OrdinalIgnoreCase))
+        {
+            const string versioned = "/v1/responses";
+            var path = uri.AbsolutePath;
+            if (!path.EndsWith(versioned, StringComparison.Ordinal)) return endpoint;
 
-        return new UriBuilder(uri) { Path = path[..^versioned.Length] + "/responses" }.Uri.ToString();
+            return new UriBuilder(uri) { Path = path[..^versioned.Length] + "/responses" }.Uri.ToString();
+        }
+
+        if (string.Equals(api, "anthropic-messages", StringComparison.OrdinalIgnoreCase))
+        {
+            const string bareMessages = "/v1/messages";
+            var path = uri.AbsolutePath;
+            if (!path.EndsWith(bareMessages, StringComparison.Ordinal)
+                || path.EndsWith("/anthropic/v1/messages", StringComparison.Ordinal))
+            {
+                return endpoint;
+            }
+
+            return new UriBuilder(uri) { Path = path[..^bareMessages.Length] + "/anthropic/v1/messages" }.Uri.ToString();
+        }
+
+        return endpoint;
+    }
+
+    public static string? BuildSystemHint(
+        BuiltinSearchVendor vendor,
+        string? api,
+        string? modelId,
+        bool enableWebFetch)
+    {
+        if (vendor != BuiltinSearchVendor.DeepSeek
+            || !CanUseWireApi(vendor, api, modelId)
+            || NormalizeModelId(modelId) == DeepSeekProModel)
+        {
+            return null;
+        }
+
+        var scope = enableWebFetch ? "联网搜索与网页读取" : "联网搜索";
+        return "<联网搜索>\n"
+               + $"当前会话已启用 DeepSeek 服务端内置{scope}（系统内置 search / open / find 工具，不在客户端 function 列表中）。\n"
+               + "查询实时资讯、检索未知网址或核验事实时，直接在思考阶段发起内置检索并在检索完成后直接给出回答；不要在发起内置检索前先输出过渡回复，也不要误判为没有搜索工具或改用 browser / web_fetch 代替搜索引擎。\n"
+               + "</联网搜索>";
     }
 
     public static bool ReplacesLocalWebFetch(
@@ -189,7 +230,7 @@ public static class BuiltinWebSearch
         string? modelId,
         bool useThinking)
     {
-        if (!CanUseWireApi(vendor, api)) return false;
+        if (!CanUseWireApi(vendor, api, modelId)) return false;
         return vendor switch
         {
             BuiltinSearchVendor.Anthropic => true,
@@ -827,11 +868,10 @@ public sealed class ServerSearchSources(LocalToolOptions? options = null)
             {
                 var id = FirstString(block, "id") ?? $"srv_{++_seq}";
                 var rawName = FirstString(block, "name") ?? "web_search";
-                var toolName = rawName is "web_fetch" or "deepseek_read_url" ? "web_fetch" : "search_web";
-                var argsJson = NormalizeAnthropicInput(
-                    toolName,
+                var (toolName, argsJson) = NormalizeAnthropicInput(
+                    rawName,
                     block.TryGetProperty("input", out var inp) && inp.ValueKind == JsonValueKind.Object ? inp : default);
-                if (index >= 0) _anthropicBlocks[index] = new AnthropicBlock(id, toolName, new StringBuilder());
+                if (index >= 0) _anthropicBlocks[index] = new AnthropicBlock(id, rawName, new StringBuilder());
                 EmitRunning(id, toolName, argsJson);
                 return;
             }
@@ -870,8 +910,8 @@ public sealed class ServerSearchSources(LocalToolOptions? options = null)
             try
             {
                 using var argDoc = JsonDocument.Parse(finishedBlock.Json.ToString());
-                var updatedArgs = NormalizeAnthropicInput(finishedBlock.Name, argDoc.RootElement);
-                EmitRunning(finishedBlock.Id, finishedBlock.Name, updatedArgs);
+                var (updatedName, updatedArgs) = NormalizeAnthropicInput(finishedBlock.Name, argDoc.RootElement);
+                EmitRunning(finishedBlock.Id, updatedName, updatedArgs);
             }
             catch (JsonException)
             {
@@ -1008,6 +1048,7 @@ public sealed class ServerSearchSources(LocalToolOptions? options = null)
         if (_calls.TryGetValue(id, out var existing))
         {
             if (existing.Done) return;
+            existing.Name = toolName;
             if (!string.IsNullOrWhiteSpace(argsJson) && argsJson != "{}")
                 existing.Args = argsJson;
             EnqueueTool(id, existing.Name, existing.Args, failed: false, running: true, resultJson: null);
@@ -1075,14 +1116,19 @@ public sealed class ServerSearchSources(LocalToolOptions? options = null)
         return ("search_web", "{}");
     }
 
-    private static string NormalizeAnthropicInput(string toolName, JsonElement input)
+    private static (string ToolName, string ArgsJson) NormalizeAnthropicInput(string rawName, JsonElement input)
     {
-        if (input.ValueKind != JsonValueKind.Object) return "{}";
-        if (toolName == "web_fetch")
-            return BuildFetchArgs(FirstString(input, "url"));
+        var defaultTool = rawName is "web_fetch" or BuiltinWebSearch.DeepSeekReadUrlToolName
+            ? "web_fetch"
+            : "search_web";
+        if (input.ValueKind != JsonValueKind.Object) return (defaultTool, "{}");
+
+        var action = FirstString(input, "action");
+        if (defaultTool == "web_fetch" || action is "open_page" or "read_link" or "find_in_page")
+            return ("web_fetch", BuildFetchArgs(FirstString(input, "url"), FirstString(input, "pattern")));
 
         var queries = ReadStringList(input, "queries", "query");
-        return BuildSearchArgs(queries);
+        return ("search_web", BuildSearchArgs(queries));
     }
 
     private static string BuildSearchArgs(IReadOnlyList<string> queries) =>
