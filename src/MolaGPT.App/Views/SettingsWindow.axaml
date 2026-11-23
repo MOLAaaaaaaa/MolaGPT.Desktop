@@ -2086,6 +2086,8 @@
                                 HorizontalAlignment="Stretch" VerticalAlignment="Center">
                         <ComboBoxItem Tag="local" Content="本机" />
                         <ComboBoxItem Name="PART_WebFetchDeepSeekItem" Tag="deepseek" Content="DeepSeek" />
+                        <ComboBoxItem Name="PART_WebFetchTavilyItem" Tag="tavily" Content="Tavily" />
+                        <ComboBoxItem Name="PART_WebFetchExaItem" Tag="exa" Content="Exa" />
                       </ComboBox>
                     </Grid>
                     <Border Classes="divider" />

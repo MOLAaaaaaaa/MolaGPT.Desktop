@@ -633,10 +633,13 @@ public static partial class LocalToolRegistry
             maxChars = Math.Clamp(parsed, 1000, 30000);
         }
 
-        // 设置里打开「DeepSeek 网页抓取」后，读页改走 /v1/tools/fetch：服务端渲染
-        // 并把正文转成 Markdown，比本机正则去标签稳，代价是按次计费。
-        if (string.Equals(localOptions.FetchProvider?.Trim(), "deepseek", StringComparison.OrdinalIgnoreCase))
+        var fetchProvider = localOptions.FetchProvider?.Trim().ToLowerInvariant();
+        if (fetchProvider == "deepseek")
             return await FetchDeepSeekAsync(url, maxChars, localOptions, http, ct).ConfigureAwait(false);
+        if (fetchProvider == "tavily")
+            return await FetchTavilyAsync(url, maxChars, localOptions, http, ct).ConfigureAwait(false);
+        if (fetchProvider == "exa")
+            return await FetchExaAsync(url, maxChars, localOptions, http, ct).ConfigureAwait(false);
 
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.TryAddWithoutValidation("User-Agent", UserAgentProvider.FixedUa);
@@ -863,6 +866,199 @@ public static partial class LocalToolRegistry
             // 服务端只回正文，不回链接清单；空数组比缺字段更容易让模型理解。
             links = Array.Empty<string>()
         });
+    }
+
+    private static async Task<string> FetchTavilyAsync(
+        Uri url,
+        int maxChars,
+        LocalToolOptions options,
+        HttpClient http,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(options.FetchApiKey))
+            throw new InvalidOperationException("未配置 Tavily API Key，无法读取网页。");
+
+        var endpoint = CombineEndpoint(options.FetchBaseUrl, "https://api.tavily.com", "extract");
+        using var req = new HttpRequestMessage(HttpMethod.Post, endpoint);
+        req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + options.FetchApiKey);
+        req.Content = JsonContent.Create(new
+        {
+            urls = url.ToString(),
+            extract_depth = "basic",
+            format = "markdown"
+        });
+
+        using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        await EnsureExternalFetchSuccessAsync(resp, "Tavily", ct).ConfigureAwait(false);
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+
+        if (doc.RootElement.TryGetProperty("results", out var results)
+            && results.ValueKind == JsonValueKind.Array
+            && results.GetArrayLength() > 0)
+        {
+            var first = results[0];
+            var content = ReadString(first, "raw_content") ?? string.Empty;
+            var title = ReadString(first, "title") ?? ExtractMarkdownHeading(content) ?? url.ToString();
+            if (content.Length > maxChars)
+                content = content[..maxChars] + "\n[content truncated]";
+
+            return SerializeToolResult(new
+            {
+                success = true,
+                source = "local_web_fetch",
+                action = "scrape",
+                url = url.ToString(),
+                title,
+                content,
+                links = Array.Empty<string>()
+            });
+        }
+
+        string? failedReason = null;
+        if (doc.RootElement.TryGetProperty("failed_results", out var failed)
+            && failed.ValueKind == JsonValueKind.Array
+            && failed.GetArrayLength() > 0)
+        {
+            failedReason = ReadString(failed[0], "error");
+        }
+
+        throw new InvalidOperationException(string.IsNullOrWhiteSpace(failedReason)
+            ? "页面无法读取。"
+            : $"页面无法读取：{failedReason}");
+    }
+
+    private static async Task<string> FetchExaAsync(
+        Uri url,
+        int maxChars,
+        LocalToolOptions options,
+        HttpClient http,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(options.FetchApiKey))
+            throw new InvalidOperationException("未配置 Exa API Key，无法读取网页。");
+
+        var endpoint = CombineEndpoint(options.FetchBaseUrl, "https://api.exa.ai", "contents");
+        using var req = new HttpRequestMessage(HttpMethod.Post, endpoint);
+        req.Headers.TryAddWithoutValidation("x-api-key", options.FetchApiKey);
+        req.Content = JsonContent.Create(new
+        {
+            urls = new[] { url.ToString() },
+            text = new { maxCharacters = maxChars }
+        });
+
+        using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        await EnsureExternalFetchSuccessAsync(resp, "Exa", ct).ConfigureAwait(false);
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+
+        if (doc.RootElement.TryGetProperty("results", out var results)
+            && results.ValueKind == JsonValueKind.Array
+            && results.GetArrayLength() > 0)
+        {
+            var first = results[0];
+            var content = ReadString(first, "text") ?? string.Empty;
+            if (!string.IsNullOrEmpty(content))
+            {
+                var title = ReadString(first, "title") ?? url.ToString();
+                if (content.Length > maxChars)
+                    content = content[..maxChars] + "\n[content truncated]";
+
+                return SerializeToolResult(new
+                {
+                    success = true,
+                    source = "local_web_fetch",
+                    action = "scrape",
+                    url = url.ToString(),
+                    title,
+                    content,
+                    links = Array.Empty<string>()
+                });
+            }
+        }
+
+        string? errorTag = null;
+        if (doc.RootElement.TryGetProperty("statuses", out var statuses)
+            && statuses.ValueKind == JsonValueKind.Array
+            && statuses.GetArrayLength() > 0
+            && statuses[0].TryGetProperty("error", out var errorObj)
+            && errorObj.ValueKind == JsonValueKind.Object)
+        {
+            errorTag = ReadString(errorObj, "tag");
+        }
+
+        var message = errorTag?.Trim().ToUpperInvariant() switch
+        {
+            "CRAWL_NOT_FOUND" or "SOURCE_NOT_AVAILABLE" => "页面无法访问（可能已删除或需要登录）。",
+            "CRAWL_TIMEOUT" or "CRAWL_LIVECRAWL_TIMEOUT" => "读取超时，请稍后重试。",
+            "UNSUPPORTED_URL" => "不支持读取该链接。",
+            _ => "页面无法读取。"
+        };
+        throw new InvalidOperationException(message);
+    }
+
+    private static string? ExtractMarkdownHeading(string markdown)
+    {
+        if (string.IsNullOrWhiteSpace(markdown)) return null;
+        foreach (var rawLine in markdown.AsSpan().EnumerateLines())
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0) continue;
+            if (line.StartsWith("# ", StringComparison.Ordinal))
+            {
+                var heading = line[2..].Trim();
+                return heading.Length > 0 ? heading.ToString() : null;
+            }
+            break;
+        }
+        return null;
+    }
+
+    private static async Task EnsureExternalFetchSuccessAsync(
+        HttpResponseMessage resp,
+        string providerName,
+        CancellationToken ct)
+    {
+        if (resp.IsSuccessStatusCode) return;
+
+        string? detail = null;
+        try
+        {
+            var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(body))
+            {
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("error", out var err))
+                {
+                    detail = err.ValueKind == JsonValueKind.String
+                        ? err.GetString()
+                        : err.ValueKind == JsonValueKind.Object ? ReadString(err, "message") : null;
+                }
+                else if (doc.RootElement.TryGetProperty("detail", out var d))
+                {
+                    detail = d.ValueKind == JsonValueKind.String
+                        ? d.GetString()
+                        : d.ValueKind == JsonValueKind.Object ? ReadString(d, "error") : null;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or NotSupportedException)
+        {
+        }
+
+        var status = (int)resp.StatusCode;
+        var hint = status switch
+        {
+            401 => $"{providerName} API Key 无效。",
+            402 or 432 or 433 => $"{providerName} 账户额度不足。",
+            429 => "请求过于频繁，请稍后重试。",
+            >= 500 => $"{providerName} 服务异常，请稍后重试。",
+            _ => $"{providerName} 接口返回错误。"
+        };
+
+        throw new InvalidOperationException(string.IsNullOrWhiteSpace(detail)
+            ? $"{hint}（HTTP {status}）"
+            : $"{hint}（HTTP {status}）{detail}");
     }
 
     /// <summary>

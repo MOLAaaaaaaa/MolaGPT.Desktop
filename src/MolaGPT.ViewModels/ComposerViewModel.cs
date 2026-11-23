@@ -342,7 +342,8 @@ public sealed partial class ComposerViewModel : ObservableObject
                 // 都会改变下拉的内容与本次是否带上网抓取的配置。
                 if (e.PropertyName is nameof(SettingsViewModel.WebSearchProvider)
                     or nameof(SettingsViewModel.IsLoggedIn)
-                    or nameof(SettingsViewModel.DeepSeekFetchEnabled))
+                    or nameof(SettingsViewModel.DeepSeekFetchEnabled)
+                    or nameof(SettingsViewModel.WebFetchProvider))
                 {
                     RaiseSearchProviderChanged();
                 }
@@ -1449,11 +1450,11 @@ public sealed partial class ComposerViewModel : ObservableObject
             enabledTools["webPageMaxCharacters"] = _settings?.WebPageMaxCharacters ?? 12000;
             // DeepSeek 的网页抓取是可选的替换实现：同一个 Key、同一个账户，开着就
             // 走服务端的 /tools/fetch，关着仍然是本地抓取。
-            if (_settings?.EffectiveDeepSeekFetchEnabled == true)
+            if (_settings?.EffectiveWebFetchProvider is { } fetchProvider && fetchProvider != "local")
             {
-                enabledTools["fetchProvider"] = "deepseek";
-                enabledTools["fetchApiKey"] = _settings.DeepSeekFetchApiKey ?? string.Empty;
-                enabledTools["fetchBaseUrl"] = _settings.DeepSeekFetchBaseUrl;
+                enabledTools["fetchProvider"] = fetchProvider;
+                enabledTools["fetchApiKey"] = _settings.ActiveWebFetchApiKey ?? string.Empty;
+                enabledTools["fetchBaseUrl"] = _settings.ActiveWebFetchBaseUrl;
             }
             enabledTools["mcpServers"] = SubjectPersona?.Profile.EnableMcp == false
                 ? Array.Empty<MolaGPT.Core.Chat.LocalTools.McpServerOptions>()

@@ -923,14 +923,24 @@ public partial class SettingsWindow : MolaContentWindow
             }
 
             var deepSeekConfigured = _settings.IsWebSearchProviderConfigured("deepseek");
+            var tavilyConfigured = _settings.IsWebSearchProviderConfigured("tavily");
+            var exaConfigured = _settings.IsWebSearchProviderConfigured("exa");
             PART_WebFetchDeepSeekItem.IsEnabled = deepSeekConfigured;
-            var deepSeekFetch = _settings.EffectiveDeepSeekFetchEnabled;
-            PART_WebFetchMode.SelectedIndex = deepSeekFetch ? 1 : 0;
-            PART_WebFetchHint.Text = deepSeekFetch
-                ? "使用 DeepSeek Search 读取网页，按成功请求计费。"
-                : deepSeekConfigured
+            PART_WebFetchTavilyItem.IsEnabled = tavilyConfigured;
+            PART_WebFetchExaItem.IsEnabled = exaConfigured;
+            var fetchMode = _settings.EffectiveWebFetchProvider;
+            PART_WebFetchMode.SelectedItem = PART_WebFetchMode.Items.OfType<ComboBoxItem>()
+                .FirstOrDefault(item => Equals(item.Tag, fetchMode));
+            var allFetchConfigured = deepSeekConfigured && tavilyConfigured && exaConfigured;
+            PART_WebFetchHint.Text = fetchMode switch
+            {
+                "deepseek" => "使用 DeepSeek Search 读取网页，按成功请求计费。",
+                "tavily" => "使用 Tavily 提取网页正文，按服务商额度计费。",
+                "exa" => "使用 Exa 提取网页正文，按服务商额度计费。",
+                _ => allFetchConfigured
                     ? "本机读取不产生额外费用。"
-                    : "使用 DeepSeek 读取需先配置 DeepSeek Search。";
+                    : "本机读取不产生额外费用。其他方式需先配置对应搜索服务的 API Key。"
+            };
 
             PART_SearchStatus.Text = provider switch
             {
@@ -979,8 +989,9 @@ public partial class SettingsWindow : MolaContentWindow
     {
         if (_updatingSearchControls) return;
         if (PART_WebFetchMode.SelectedItem is not ComboBoxItem { Tag: string mode }) return;
-        var wantDeepSeek = mode == "deepseek" && _settings.IsWebSearchProviderConfigured("deepseek");
-        _settings.DeepSeekFetchEnabled = wantDeepSeek;
+        _settings.WebFetchProvider = mode == "local" || _settings.IsWebSearchProviderConfigured(mode)
+            ? mode
+            : "local";
         UpdateSearchStatusHint();
     }
 

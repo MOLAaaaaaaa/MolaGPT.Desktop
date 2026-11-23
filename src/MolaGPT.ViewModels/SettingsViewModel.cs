@@ -58,6 +58,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const string WebSearchMaxResultsKey = "web_search_max_results";
     private const string WebPageMaxCharactersKey = "web_page_max_characters";
     private const string DeepSeekFetchEnabledKey = "deepseek_fetch_enabled";
+    private const string WebFetchProviderKey = "web_fetch_provider";
     private const string DeepSeekSearchLinkedProviderKey = "web_search_linked_provider:deepseek";
     private const string WebSearchSecretPrefix = "web_search_api_key:";
     private const string ByokMcpServersKey = "byok_mcp_servers";
@@ -228,6 +229,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// <summary>网页读取改走 DeepSeek 的 /v1/tools/fetch。默认关闭：抓取按次计费，
     /// 而本机抓取对大多数页面已经够用。</summary>
     [ObservableProperty] private bool _deepSeekFetchEnabled;
+    [ObservableProperty] private string _webFetchProvider = "local";
     [ObservableProperty] private string? _deepSeekSearchLinkedProviderId;
 
     public event EventHandler? SearchConfigurationChanged;
@@ -477,6 +479,10 @@ public sealed partial class SettingsViewModel : ObservableObject
             if (int.TryParse(_settingsRepo.Get(WebPageMaxCharactersKey), out var maxChars))
                 WebPageMaxCharacters = Math.Clamp(maxChars, 1000, 30000);
             DeepSeekFetchEnabled = bool.TryParse(_settingsRepo.Get(DeepSeekFetchEnabledKey), out var dsFetch) && dsFetch;
+            var storedFetchProvider = _settingsRepo.Get(WebFetchProviderKey);
+            WebFetchProvider = storedFetchProvider is null
+                ? (DeepSeekFetchEnabled ? "deepseek" : "local")
+                : NormalizeWebFetchProvider(storedFetchProvider);
             DeepSeekSearchLinkedProviderId = _settingsRepo.Get(DeepSeekSearchLinkedProviderKey);
             AutoTitleEnabled = !bool.TryParse(
                 _settingsRepo.Get(ConversationTitleService.AutoTitleEnabledKey),
@@ -840,6 +846,31 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         if (_loadingSettings || _settingsRepo is null) return;
         _settingsRepo.Set(DeepSeekFetchEnabledKey, value.ToString());
+        if (value && WebFetchProvider == "local")
+            WebFetchProvider = "deepseek";
+        else if (!value && WebFetchProvider == "deepseek")
+            WebFetchProvider = "local";
+        RaiseSearchConfigurationChanged();
+    }
+
+    partial void OnWebFetchProviderChanged(string value)
+    {
+        if (_loadingSettings || _settingsRepo is null) return;
+        var provider = NormalizeWebFetchProvider(value);
+        if (!string.Equals(provider, value, StringComparison.Ordinal))
+        {
+            WebFetchProvider = provider;
+            return;
+        }
+        _settingsRepo.Set(WebFetchProviderKey, provider);
+        var isDeepSeek = provider == "deepseek";
+        if (DeepSeekFetchEnabled != isDeepSeek)
+        {
+            _loadingSettings = true;
+            try { DeepSeekFetchEnabled = isDeepSeek; }
+            finally { _loadingSettings = false; }
+        }
+        _settingsRepo.Set(DeepSeekFetchEnabledKey, isDeepSeek.ToString());
         RaiseSearchConfigurationChanged();
     }
 
@@ -852,6 +883,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     private void RaiseSearchConfigurationChanged()
     {
+        OnPropertyChanged(nameof(EffectiveWebFetchProvider));
         OnPropertyChanged(nameof(EffectiveDeepSeekFetchEnabled));
         SearchConfigurationChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -877,8 +909,31 @@ public sealed partial class SettingsViewModel : ObservableObject
             var other => !string.IsNullOrWhiteSpace(WebSearchApiKeyFor(other))
         };
 
-    public bool EffectiveDeepSeekFetchEnabled =>
-        DeepSeekFetchEnabled && IsWebSearchProviderConfigured("deepseek");
+    public static string NormalizeWebFetchProvider(string? provider) =>
+        provider?.Trim().ToLowerInvariant() switch
+        {
+            "deepseek" => "deepseek",
+            "tavily" => "tavily",
+            "exa" => "exa",
+            _ => "local"
+        };
+
+    public string EffectiveWebFetchProvider
+    {
+        get
+        {
+            var provider = NormalizeWebFetchProvider(WebFetchProvider);
+            return provider != "local" && IsWebSearchProviderConfigured(provider) ? provider : "local";
+        }
+    }
+
+    public bool EffectiveDeepSeekFetchEnabled => EffectiveWebFetchProvider == "deepseek";
+
+    public string? ActiveWebFetchApiKey =>
+        EffectiveWebFetchProvider is not "local" and var provider ? WebSearchApiKeyFor(provider) : null;
+
+    public string? ActiveWebFetchBaseUrl =>
+        EffectiveWebFetchProvider is not "local" and var provider ? WebSearchBaseUrlFor(provider) : null;
 
     public string? WebSearchApiKeyFor(string provider)
     {
