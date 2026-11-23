@@ -230,10 +230,11 @@ public static class BuiltinWebSearch
 
             case BuiltinSearchVendor.OpenAi when normalizedApi == "openai-responses":
                 AppendTypedTool(body, "web_search", "web_search", "web_search_preview");
+                // Web search rejects Pi's minimal effort; leave other settings to the API.
                 if (body["reasoning"] is JsonObject reasoning
                     && reasoning["effort"] is JsonValue value
                     && value.TryGetValue<string>(out var effort)
-                    && (effort == "minimal" || (effort == "none" && NormalizeModelId(modelId) == "gpt-5")))
+                    && effort == "minimal")
                 {
                     reasoning["effort"] = "low";
                 }
