@@ -111,7 +111,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             && BuiltinWebSearch.CanUseWireApi(detectedVendor, creds.Api))
         {
             builtinVendor = detectedVendor;
-            if (BuiltinWebSearch.ForcesThinking(detectedVendor) && request.UseThinking != true)
+            if (BuiltinWebSearch.ForcesThinking(detectedVendor, creds.Model) && request.UseThinking != true)
             {
                 request = request with
                 {

@@ -75,7 +75,7 @@ public sealed partial class ComposerViewModel
         EnableNetwork
         && AreNetworkToolsEnabled
         && ActiveBuiltinSearchVendor is { } vendor
-        && BuiltinWebSearch.ForcesThinking(vendor);
+        && BuiltinWebSearch.ForcesThinking(vendor, SubjectModel?.Id);
 
     public string ActiveSearchProvider =>
         ActiveBuiltinSearchVendor is { } vendor

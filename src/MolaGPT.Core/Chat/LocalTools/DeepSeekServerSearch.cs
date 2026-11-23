@@ -22,6 +22,7 @@ public static class BuiltinWebSearch
     public const string DeepSeekReadUrlToolName = "deepseek_read_url";
     public const string AnthropicToolType = "web_search_20250305";
     public const string AnthropicFetchToolType = "web_fetch_20250910";
+    private const string DeepSeekProModel = "deepseek-v4-pro";
 
     public static string ProviderId(BuiltinSearchVendor vendor) =>
         ProviderPrefix + vendor.ToString().ToLowerInvariant();
@@ -76,8 +77,7 @@ public static class BuiltinWebSearch
         var normalized = NormalizeProviderType(providerType);
         return vendor switch
         {
-            // DeepSeek 的 Chat Completions 与 Anthropic 兼容端点在携带本地 function 工具时会静默忽略服务端搜索工具；
-            // 仅 Responses 端点（/responses）支持本地工具与内置搜索共存。
+            // Keep the agent integration on Responses: it is the only API with V4 Pro web_search.
             BuiltinSearchVendor.DeepSeek => normalized == "openai-response",
             BuiltinSearchVendor.OpenAi => normalized == "openai-response",
             BuiltinSearchVendor.Bailian => normalized is "openai-compat" or "openai-response",
@@ -106,8 +106,8 @@ public static class BuiltinWebSearch
         && DetectVendor(baseUrl) is { } vendor
         && IsSupportedProviderType(vendor, providerType);
 
-    public static bool ForcesThinking(BuiltinSearchVendor vendor) =>
-        vendor == BuiltinSearchVendor.DeepSeek;
+    public static bool ForcesThinking(BuiltinSearchVendor vendor, string? modelId) =>
+        vendor == BuiltinSearchVendor.DeepSeek && NormalizeModelId(modelId) != DeepSeekProModel;
 
     public static string FullName(BuiltinSearchVendor vendor) => vendor switch
     {
@@ -131,7 +131,7 @@ public static class BuiltinWebSearch
 
     public static string DescribeToolHint(BuiltinSearchVendor vendor) => vendor switch
     {
-        BuiltinSearchVendor.DeepSeek => "支持搜索与网页读取，仅部分模型可用，开启后默认启用深度思考。可能产生额外费用。",
+        BuiltinSearchVendor.DeepSeek => "仅部分模型支持搜索与网页浏览。与本地工具同时使用时，建议选择 DeepSeek V4 Pro。",
         BuiltinSearchVendor.OpenAi => "支持搜索与网页浏览，仅部分模型可用。可能产生额外费用。",
         BuiltinSearchVendor.Bailian => "支持搜索，开启思考时含网页读取。仅部分模型可用，可能产生额外费用。",
         BuiltinSearchVendor.Anthropic => "支持搜索与网页读取，仅部分模型可用。可能产生额外费用。",
@@ -156,7 +156,7 @@ public static class BuiltinWebSearch
 
         return vendor switch
         {
-            BuiltinSearchVendor.DeepSeek => id == "deepseek-flash",
+            BuiltinSearchVendor.DeepSeek => id is "deepseek-flash" or DeepSeekProModel,
             BuiltinSearchVendor.OpenAi => DefaultSupportsOpenAiModel(id),
             BuiltinSearchVendor.Bailian => DefaultSupportsBailianModel(id, providerType),
             BuiltinSearchVendor.Anthropic => DefaultSupportsAnthropicModel(id),
@@ -225,7 +225,7 @@ public static class BuiltinWebSearch
         switch (vendor)
         {
             case BuiltinSearchVendor.DeepSeek:
-                ApplyDeepSeek(body, normalizedApi, enableWebFetch);
+                ApplyDeepSeek(body, normalizedApi, modelId, enableWebFetch);
                 break;
 
             case BuiltinSearchVendor.OpenAi when normalizedApi == "openai-responses":
@@ -275,7 +275,7 @@ public static class BuiltinWebSearch
         }
     }
 
-    private static void ApplyDeepSeek(JsonObject body, string api, bool enableWebFetch)
+    private static void ApplyDeepSeek(JsonObject body, string api, string? modelId, bool enableWebFetch)
     {
         switch (api)
         {
@@ -288,6 +288,20 @@ public static class BuiltinWebSearch
                 body.Remove("top_logprobs");
                 NormalizeResponseFormat(body);
                 FixDeepSeekToolChoice(body, "chat");
+                break;
+
+            case "openai-responses" or "responses" when NormalizeModelId(modelId) == DeepSeekProModel:
+                // Pro exposes web_search, not the Flash chatbot tools; declaring both is rejected.
+                var tools = EnsureToolsArray(body);
+                for (var i = tools.Count - 1; i >= 0; i--)
+                {
+                    if (tools[i] is JsonObject tool
+                        && (string?)tool["type"] is DeepSeekToolName or DeepSeekReadUrlToolName)
+                    {
+                        tools.RemoveAt(i);
+                    }
+                }
+                AppendTypedTool(body, "web_search", "web_search");
                 break;
 
             case "openai-responses" or "responses":
@@ -1052,6 +1066,9 @@ public sealed class ServerSearchSources(LocalToolOptions? options = null)
                 return ("web_fetch", BuildFetchArgs(FirstString(action, "url"), FirstString(action, "pattern")));
 
             var queries = ReadStringList(action, "queries", "query");
+            // DeepSeek can include its call ID as a query entry; it is not search text.
+            if (FirstString(item, "id") is { } id && queries.Contains($"ws_call_id={id}"))
+                queries = queries.Where(query => query != $"ws_call_id={id}").ToArray();
             return ("search_web", BuildSearchArgs(queries));
         }
 
