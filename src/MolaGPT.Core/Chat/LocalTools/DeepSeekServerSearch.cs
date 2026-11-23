@@ -18,7 +18,9 @@ public static class BuiltinWebSearch
 {
     public const string ProviderPrefix = "builtin:";
     public const string DeepSeekToolName = "deepseek_web_search";
+    public const string DeepSeekReadUrlToolName = "deepseek_read_url";
     public const string AnthropicToolType = "web_search_20250305";
+    public const string AnthropicFetchToolType = "web_fetch_20250910";
 
     public static string ProviderId(BuiltinSearchVendor vendor) =>
         ProviderPrefix + vendor.ToString().ToLowerInvariant();
@@ -126,11 +128,11 @@ public static class BuiltinWebSearch
 
     public static string DescribeToolHint(BuiltinSearchVendor vendor) => vendor switch
     {
-        BuiltinSearchVendor.DeepSeek => "仅部分模型支持。使用时开启深度思考，搜索不单独计费。",
-        BuiltinSearchVendor.OpenAi => "仅部分模型支持。搜索按次计费，模型用量另计。",
-        BuiltinSearchVendor.Bailian => "仅部分模型支持。搜索可能产生额外费用，模型用量另计。",
-        BuiltinSearchVendor.Anthropic => "仅部分模型支持。搜索按次计费，模型用量另计。",
-        BuiltinSearchVendor.Gemini => "仅部分模型支持，使用时可能产生额外费用。",
+        BuiltinSearchVendor.DeepSeek => "支持搜索与网页读取，仅部分模型可用。使用时开启深度思考，搜索不单独计费。",
+        BuiltinSearchVendor.OpenAi => "支持搜索与网页浏览，仅部分模型可用。搜索按次计费，模型用量另计。",
+        BuiltinSearchVendor.Bailian => "支持搜索，开启思考时支持网页读取，仅部分模型可用。搜索可能产生额外费用，模型用量另计。",
+        BuiltinSearchVendor.Anthropic => "支持搜索与网页读取，仅部分模型可用。搜索按次计费，网页读取仅计模型用量。",
+        BuiltinSearchVendor.Gemini => "支持搜索与网页读取，仅部分模型可用，使用时可能产生额外费用。",
         _ => string.Empty
     };
 
@@ -178,17 +180,41 @@ public static class BuiltinWebSearch
         return new UriBuilder(uri) { Path = path[..^versioned.Length] + "/responses" }.Uri.ToString();
     }
 
+    public static bool ReplacesLocalWebFetch(
+        BuiltinSearchVendor vendor,
+        string? api,
+        string? modelId,
+        bool useThinking)
+    {
+        if (!CanUseWireApi(vendor, api)) return false;
+        return vendor switch
+        {
+            BuiltinSearchVendor.Anthropic => true,
+            BuiltinSearchVendor.Gemini => true,
+            BuiltinSearchVendor.Bailian => useThinking && !IsBailianOmniModel(modelId),
+            _ => false
+        };
+    }
+
     public static Action<JsonObject> Wrap(
         BuiltinSearchVendor vendor,
         string api,
         string? modelId,
-        Action<JsonObject>? inner) => body =>
+        Action<JsonObject>? inner,
+        bool enableWebFetch = true,
+        bool useThinking = false) => body =>
     {
         inner?.Invoke(body);
-        Apply(body, vendor, api, modelId);
+        Apply(body, vendor, api, modelId, enableWebFetch, useThinking);
     };
 
-    public static void Apply(JsonObject body, BuiltinSearchVendor vendor, string api, string? modelId = null)
+    public static void Apply(
+        JsonObject body,
+        BuiltinSearchVendor vendor,
+        string api,
+        string? modelId = null,
+        bool enableWebFetch = true,
+        bool useThinking = false)
     {
         ArgumentNullException.ThrowIfNull(body);
         var normalizedApi = api.Trim().ToLowerInvariant();
@@ -196,7 +222,7 @@ public static class BuiltinWebSearch
         switch (vendor)
         {
             case BuiltinSearchVendor.DeepSeek:
-                ApplyDeepSeek(body, normalizedApi);
+                ApplyDeepSeek(body, normalizedApi, enableWebFetch);
                 break;
 
             case BuiltinSearchVendor.OpenAi when normalizedApi == "openai-responses":
@@ -211,37 +237,45 @@ public static class BuiltinWebSearch
 
             case BuiltinSearchVendor.Bailian when normalizedApi == "openai-responses":
                 AppendTypedTool(body, "web_search", "web_search");
+                if (enableWebFetch && useThinking && !IsBailianOmniModel(modelId))
+                {
+                    body["enable_thinking"] = true;
+                    AppendTypedTool(body, "web_extractor", "web_extractor");
+                }
                 break;
 
             case BuiltinSearchVendor.Bailian when normalizedApi == "openai-completions":
                 body["enable_search"] = true;
-                if (NormalizeModelId(modelId).Contains("omni", StringComparison.Ordinal))
+                if (IsBailianOmniModel(modelId))
                 {
-                    if (body["search_options"] is not JsonObject searchOptions)
-                    {
-                        searchOptions = new JsonObject();
-                        body["search_options"] = searchOptions;
-                    }
-                    searchOptions["search_strategy"] ??= "agent";
+                    EnsureSearchOptions(body)["search_strategy"] ??= "agent";
+                }
+                else if (enableWebFetch && useThinking)
+                {
+                    body["enable_thinking"] = true;
+                    EnsureSearchOptions(body)["search_strategy"] = "agent_max";
                 }
                 break;
 
             case BuiltinSearchVendor.Anthropic when normalizedApi == "anthropic-messages":
                 AppendAnthropicWebSearch(body);
+                if (enableWebFetch) AppendAnthropicWebFetch(body);
                 break;
 
             case BuiltinSearchVendor.Gemini when normalizedApi == "google-generative-ai":
                 AppendGeminiGoogleSearch(body);
+                if (enableWebFetch) AppendGeminiUrlContext(body);
                 break;
         }
     }
 
-    private static void ApplyDeepSeek(JsonObject body, string api)
+    private static void ApplyDeepSeek(JsonObject body, string api, bool enableWebFetch)
     {
         switch (api)
         {
             case "openai-completions" or "chat":
                 AppendTypedTool(body, DeepSeekToolName, DeepSeekToolName);
+                if (enableWebFetch) AppendTypedTool(body, DeepSeekReadUrlToolName, DeepSeekReadUrlToolName);
                 EnableDeepSeekThinking(body, thinkingDialect: true);
                 body.Remove("web_search_options");
                 body.Remove("logprobs");
@@ -252,6 +286,7 @@ public static class BuiltinWebSearch
 
             case "openai-responses" or "responses":
                 AppendTypedTool(body, DeepSeekToolName, DeepSeekToolName);
+                if (enableWebFetch) AppendTypedTool(body, DeepSeekReadUrlToolName, DeepSeekReadUrlToolName);
                 EnableDeepSeekThinking(body, thinkingDialect: false);
                 body.Remove("top_logprobs");
                 if (body["text"] is JsonObject text && text["format"] is JsonObject format
@@ -275,6 +310,7 @@ public static class BuiltinWebSearch
 
             case "anthropic-messages" or "messages":
                 AppendNamedServerTool(body, DeepSeekToolName, DeepSeekToolName);
+                if (enableWebFetch) AppendNamedServerTool(body, DeepSeekReadUrlToolName, DeepSeekReadUrlToolName);
                 EnableDeepSeekThinking(body, thinkingDialect: true);
                 FixDeepSeekToolChoice(body, "messages");
                 break;
@@ -335,6 +371,25 @@ public static class BuiltinWebSearch
         });
     }
 
+    private static void AppendAnthropicWebFetch(JsonObject body)
+    {
+        var tools = EnsureToolsArray(body);
+        for (var i = tools.Count - 1; i >= 0; i--)
+        {
+            if (tools[i] is not JsonObject obj) continue;
+            if (((string?)obj["type"])?.StartsWith("web_fetch", StringComparison.Ordinal) == true)
+                return;
+            if (string.Equals((string?)obj["name"], "web_fetch", StringComparison.Ordinal))
+                tools.RemoveAt(i);
+        }
+
+        tools.Add(new JsonObject
+        {
+            ["type"] = AnthropicFetchToolType,
+            ["name"] = "web_fetch"
+        });
+    }
+
     private static void AppendGeminiGoogleSearch(JsonObject body)
     {
         var tools = EnsureToolsArray(body);
@@ -346,6 +401,29 @@ public static class BuiltinWebSearch
 
         tools.Add(new JsonObject { ["googleSearch"] = new JsonObject() });
     }
+
+    private static void AppendGeminiUrlContext(JsonObject body)
+    {
+        var tools = EnsureToolsArray(body);
+        foreach (var existing in tools)
+        {
+            if (existing is JsonObject obj && (obj.ContainsKey("urlContext") || obj.ContainsKey("url_context")))
+                return;
+        }
+
+        tools.Add(new JsonObject { ["urlContext"] = new JsonObject() });
+    }
+
+    private static JsonObject EnsureSearchOptions(JsonObject body)
+    {
+        if (body["search_options"] is JsonObject searchOptions) return searchOptions;
+        searchOptions = new JsonObject();
+        body["search_options"] = searchOptions;
+        return searchOptions;
+    }
+
+    private static bool IsBailianOmniModel(string? modelId) =>
+        NormalizeModelId(modelId).Contains("omni", StringComparison.Ordinal);
 
     private static JsonArray EnsureToolsArray(JsonObject body)
     {
@@ -405,7 +483,9 @@ public static class BuiltinWebSearch
 
             case JsonObject choice when protocol != "messages"
                 && !string.Equals((string?)choice["type"], "none", StringComparison.OrdinalIgnoreCase)
-                && (protocol == "chat" || string.Equals((string?)choice["type"], DeepSeekToolName, StringComparison.OrdinalIgnoreCase)):
+                && (protocol == "chat"
+                    || string.Equals((string?)choice["type"], DeepSeekToolName, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals((string?)choice["type"], DeepSeekReadUrlToolName, StringComparison.OrdinalIgnoreCase)):
                 body["tool_choice"] = "auto";
                 break;
         }
@@ -627,14 +707,21 @@ public sealed class ServerSearchSources
                 {
                     Add(title, url, date);
                 }
+                else if (TryReadUrlMetadataSource(element, out var retrievedUrl))
+                {
+                    Add(retrievedUrl, retrievedUrl, null);
+                }
                 foreach (var property in element.EnumerateObject())
                 {
                     if (property.NameEquals("action"))
                     {
-                        if (property.Value.ValueKind == JsonValueKind.Object
-                            && property.Value.TryGetProperty("sources", out var results))
+                        if (property.Value.ValueKind == JsonValueKind.Object)
                         {
-                            Walk(results, source: true, groundingChunk: false);
+                            if (property.Value.TryGetProperty("sources", out var results))
+                                Walk(results, source: true, groundingChunk: false);
+                            else if (string.Equals(FirstString(property.Value, "type"), "open_page", StringComparison.Ordinal)
+                                     && TryReadSource(property.Value, allowUri: false, out var openTitle, out var openUrl, out var openDate))
+                                Add(openTitle, openUrl, openDate);
                         }
                         continue;
                     }
@@ -674,6 +761,28 @@ public sealed class ServerSearchSources
             ?? href;
         date = FirstString(obj, "published_at", "published_date", "date", "page_age");
         url = href;
+        return true;
+    }
+
+    private static bool TryReadUrlMetadataSource(JsonElement obj, out string url)
+    {
+        url = string.Empty;
+        var retrieved = FirstString(obj, "retrievedUrl", "retrieved_url");
+        if (string.IsNullOrWhiteSpace(retrieved)
+            || (!retrieved.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                && !retrieved.StartsWith("https://", StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        var status = FirstString(obj, "urlRetrievalStatus", "url_retrieval_status", "status");
+        if (!string.Equals(status, "URL_RETRIEVAL_STATUS_SUCCESS", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(status, "success", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        url = retrieved;
         return true;
     }
 

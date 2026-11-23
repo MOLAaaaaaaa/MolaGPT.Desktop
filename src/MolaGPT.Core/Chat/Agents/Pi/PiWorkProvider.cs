@@ -101,6 +101,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
 
         var creds = _config.ResolveCreds(request);
         BuiltinSearchVendor? builtinVendor = null;
+        var builtinWebFetch = false;
         if (options.Network
             && _config.BuiltinSearch
             && activeModel?.SupportsBuiltinSearch == true
@@ -108,7 +109,26 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             && BuiltinWebSearch.CanUseWireApi(detectedVendor, creds.Api))
         {
             builtinVendor = detectedVendor;
-            options = options with { SearchProvider = BuiltinWebSearch.ProviderId(detectedVendor) };
+            if (BuiltinWebSearch.ForcesThinking(detectedVendor) && request.UseThinking != true)
+            {
+                request = request with
+                {
+                    UseThinking = true,
+                    ReasoningEffort = string.IsNullOrWhiteSpace(request.ReasoningEffort)
+                        ? "high"
+                        : request.ReasoningEffort
+                };
+            }
+
+            builtinWebFetch = options.WebPage;
+            var replacesLocalFetch = builtinWebFetch
+                && BuiltinWebSearch.ReplacesLocalWebFetch(detectedVendor, creds.Api, creds.Model, request.UseThinking == true);
+            options = options with
+            {
+                SearchProvider = BuiltinWebSearch.ProviderId(detectedVendor),
+                WebPage = replacesLocalFetch ? false : options.WebPage
+            };
+
             var adjusted = BuiltinWebSearch.AdjustEndpoint(detectedVendor, creds.Endpoint, creds.Api);
             if (!string.Equals(adjusted, creds.Endpoint, StringComparison.Ordinal))
             {
@@ -153,17 +173,6 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         var hints = await _toolHost.DescribeAgentToolsAsync(options, ct).ConfigureAwait(false);
         var toolCatalogJson = BuildToolCatalog(localDefs.Concat(hostDefs), hints);
 
-        if (builtinVendor is { } thinkingVendor && BuiltinWebSearch.ForcesThinking(thinkingVendor) && request.UseThinking != true)
-        {
-            request = request with
-            {
-                UseThinking = true,
-                ReasoningEffort = string.IsNullOrWhiteSpace(request.ReasoningEffort)
-                    ? "high"
-                    : request.ReasoningEffort
-            };
-        }
-
         // Reasoning is asked for twice, on purpose, because neither half covers the
         // other:
         //
@@ -180,7 +189,18 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             creds = creds with { ExtraBody = MergeThinking(creds.ExtraBody, request, creds) };
 
         if (builtinVendor is { } activeBuiltin)
-            creds = creds with { AdaptBody = BuiltinWebSearch.Wrap(activeBuiltin, creds.Api, creds.Model, creds.AdaptBody) };
+        {
+            creds = creds with
+            {
+                AdaptBody = BuiltinWebSearch.Wrap(
+                    activeBuiltin,
+                    creds.Api,
+                    creds.Model,
+                    creds.AdaptBody,
+                    enableWebFetch: builtinWebFetch,
+                    useThinking: request.UseThinking == true)
+            };
+        }
 
         if (request.HistorySeed is { } history)
             await WriteHistoryAsync(request.ConversationId, history, creds, ct).ConfigureAwait(false);
@@ -483,6 +503,11 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                 if (entry.ContainsKey("googleSearch") || entry.ContainsKey("google_search"))
                 {
                     names.Add("googleSearch");
+                    continue;
+                }
+                if (entry.ContainsKey("urlContext") || entry.ContainsKey("url_context"))
+                {
+                    names.Add("urlContext");
                     continue;
                 }
 
