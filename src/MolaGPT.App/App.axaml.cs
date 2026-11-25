@@ -56,7 +56,7 @@ public partial class App : Application
 
     /// <summary>How long a window state has to hold before it counts. Sized
     /// against the ~1.5s Minimized→Normal→Minimized blip Windows emits on its
-    /// own; a real restore just waits this long for its prewarm.</summary>
+    /// own; a real restore just waits this long before leaving background mode.</summary>
     private static readonly TimeSpan BackgroundSettleDelay = TimeSpan.FromSeconds(3);
 
     public override void Initialize() => AvaloniaXamlLoader.Load(this);
@@ -98,6 +98,7 @@ public partial class App : Application
 
             settings.IsLoggedIn = !string.IsNullOrEmpty(auth.CurrentJwt);
             settings.MolaGptUsername = settings.IsLoggedIn ? auth.CurrentUsername : null;
+            if (settings.IsLoggedIn) cloudSync.AdoptSignedInAccountAtStartup();
 
             var accountSession = _services.GetRequiredService<AccountSessionCoordinator>();
             if (!settings.IsLoggedIn) accountSession.CleanupLoggedOutAccountState();
@@ -364,7 +365,13 @@ public partial class App : Application
                 catch (Exception ex) { DiagnosticLog.Write("storage", "启动清理失败：" + ex.Message); }
             });
             _ = RunStorageMaintenanceAsync(storage, startupStorage, _storageMaintenanceCts.Token);
-            _ = Task.Run(SweepOrphanedPiSessions);
+            var piSweepCutoff = DateTime.UtcNow;
+            var maintenanceToken = _storageMaintenanceCts.Token;
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(45), maintenanceToken).ConfigureAwait(false);
+                SweepOrphanedPiSessions(piSweepCutoff, maintenanceToken);
+            }, maintenanceToken);
             _ = Task.Run(SweepOrphanedAttachments);
             _ = Task.Run(CatchUpMemoryIndex);
             WireMemoryNotifications(notifications);
@@ -484,16 +491,16 @@ public partial class App : Application
         {
             // Reported per chunk; the banner only redraws when the whole
             // percent moves, which is the most a 344px card can show anyway.
-            var lastPercent = -1;
-            var progress = new Progress<double>(value =>
+            var lastPercent = int.MinValue;
+            var progress = new Progress<double?>(value =>
             {
                 main.ReportUpdateDownloadProgress(value);
 
-                var percent = Math.Clamp((int)(value * 100), 0, 100);
+                var percent = value is { } fraction ? Math.Clamp((int)(fraction * 100), 0, 100) : -1;
                 if (percent == lastPercent) return;
                 lastPercent = percent;
                 _notifications?.Progress(
-                    UpdateNotificationKey, $"正在下载 {package.Version}", $"{percent}%", value);
+                    UpdateNotificationKey, $"正在下载 {package.Version}", percent < 0 ? null : $"{percent}%", value);
             });
 
             _pendingUpdateInstallerPath = await autoUpdate.DownloadAndVerifyAsync(package, progress);
@@ -687,9 +694,9 @@ public partial class App : Application
         await conversations.ReloadAsync().ConfigureAwait(false);
     }
 
-    private void SweepOrphanedPiSessions()
+    private void SweepOrphanedPiSessions(DateTime cutoff, CancellationToken ct)
     {
-        if (_services is null) return;
+        if (_services is null || ct.IsCancellationRequested) return;
         try
         {
             var live = _services.GetRequiredService<ConversationRepository>()
@@ -697,7 +704,8 @@ public partial class App : Application
                 .Select(conversation => conversation.Id)
                 .ToArray();
             var children = _services.GetRequiredService<MessageRepository>().ListSubagentSessionKeys();
-            var removed = new PiWorkSessionSweeper(PiWorkSidecarLocator.SessionRoot).Sweep(live, children);
+            if (ct.IsCancellationRequested) return;
+            var removed = new PiWorkSessionSweeper(PiWorkSidecarLocator.SessionRoot).Sweep(live, children, cutoff, ct);
             if (removed > 0) DiagnosticLog.Write("pi-work", $"清理了 {removed} 个无主的 Pi 会话文件");
         }
         catch (Exception ex)
@@ -852,7 +860,7 @@ public partial class App : Application
             }
             if (!result.Success)
             {
-                LoginWindow.NotifyExternalLoginCompleted(false, result.ErrorMessage ?? "授权码兑换失败，请重新登录。");
+                LoginWindow.NotifyExternalLoginCompleted(false, result.ErrorMessage ?? "授权码兑换失败，请重新登录。", result.AppealToken);
                 return;
             }
         }
@@ -992,11 +1000,7 @@ public partial class App : Application
     {
         _services?.GetRequiredService<AgentBridgeService>().SetBackgroundMode(false);
         _services?.GetRequiredService<PiRuntime>().SetBackgroundMode(false);
-        // 补同步排在预热之前：它是网络等待，不占 UI 线程。
         _services?.GetRequiredService<CloudSyncService>().SetBackgroundMode(false);
-        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop
-            && desktop.MainWindow is MainWindow window)
-            window.StartActiveProviderPrewarm();
     }
 
     private static void BringToFront(Window window)

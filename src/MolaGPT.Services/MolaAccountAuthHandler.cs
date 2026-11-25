@@ -1,6 +1,7 @@
 using System.Net.Http;
 using System.Net.Http.Headers;
 using MolaGPT.Core.Auth;
+using MolaGPT.Core.Chat;
 using MolaGPT.Core.Net;
 
 namespace MolaGPT.Desktop.Services;
@@ -23,7 +24,8 @@ public sealed class MolaAccountAuthHandler(MolaGptAuthService auth) : Delegating
                 request.Headers.TryAddWithoutValidation("Idempotency-Key", Guid.NewGuid().ToString());
         }
         var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized
+            && (await ChatApiErrorHelper.ReadAccountHttpErrorAsync(response, cancellationToken).ConfigureAwait(false))?.NeedsSignIn == true)
         {
             var cleared = auth.LogoutIfCurrent(request.Headers.Authorization?.Parameter);
             DiagnosticLog.Write("account", $"request unauthorized session_cleared={cleared}");

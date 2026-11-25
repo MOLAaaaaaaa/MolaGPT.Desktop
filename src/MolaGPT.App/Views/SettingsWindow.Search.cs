@@ -51,9 +51,7 @@ public partial class SettingsWindow
 
     private readonly List<SearchEntry> _searchIndex = [];
 
-    /// <summary>Must run before the window gets its DataContext: bound text is
-    /// still empty then, so only what the XAML spells out gets indexed — a
-    /// status line's current wording is not a setting's name.</summary>
+    /// <summary>Index searchable titles from each settings page.</summary>
     private void BuildSearchIndex()
     {
         // Editors that are opened from inside a page rather than reached by
@@ -131,7 +129,6 @@ public partial class SettingsWindow
 
     private void InitializeSearch()
     {
-        BuildSearchIndex();
         PART_SettingsSearch.TextChanged += (_, _) => RunSearch();
         PART_SettingsSearch.KeyDown += OnSearchBoxKeyDown;
         PART_ClearSettingsSearch.Click += (_, _) =>
@@ -163,6 +160,14 @@ public partial class SettingsWindow
         {
             PART_SearchResults.ItemsSource = null;
             return;
+        }
+
+        if (_searchIndex.Count == 0)
+        {
+            // Search indexes rows as well as page names, including pages the
+            // user has not opened yet. Keep their controls for jumping to a hit.
+            foreach (var page in _navPages.Values) EnsurePageContent(page);
+            BuildSearchIndex();
         }
 
         var tokens = query.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);

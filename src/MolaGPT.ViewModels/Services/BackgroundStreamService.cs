@@ -60,6 +60,21 @@ public sealed class BackgroundStreamTask
     public int MissedStatusPolls { get; set; }
     internal CancellationTokenSource? PollCts { get; set; }
 
+    internal void ApplyCompletedStream(CompletedStreamData? data)
+    {
+        var error = data is null
+            ? new ChatRequestError("stream_unavailable", "暂时无法读取原有回答。")
+            : data.Error;
+        if (data is not null)
+        {
+            AssistantMessage.ReplaceContent(data.Text);
+            AssistantMessage.ServerSubagents = data.Subagents;
+            if (data.Sources is { Count: > 0 }) AssistantMessage.Sources = data.Sources;
+        }
+        AssistantMessage.SetRequestError(error);
+        CompletedSuccessfully = error is null;
+    }
+
     public bool TryBeginTitleGeneration() =>
         Interlocked.Exchange(ref _titleGenerationStarted, 1) == 0;
 }
@@ -135,32 +150,22 @@ public sealed class BackgroundStreamService
                 var status = await provider.CheckStreamStatusAsync(task.SessionId!, ct);
                 if (status is null)
                 {
-                    task.MissedStatusPolls++;
-                    if (task.MissedStatusPolls < 3)
-                        continue;
-
-                    task.IsCompleted = true;
-                    PublishCompletion(task.ConversationId, task.ConversationTitle, task.ModelLabel);
-                    break;
+                    if (++task.MissedStatusPolls < 3) continue;
                 }
-                task.MissedStatusPolls = 0;
-
-                if (status.Status == "completed")
+                else
                 {
-                    var data = await provider.FetchCompletedStreamAsync(task.SessionId!, ct);
-                    if (data is not null)
-                    {
-                        task.AssistantMessage.ReplaceContent(data.Text);
-                        task.CompletedSuccessfully = true;
-                        task.AssistantMessage.ServerSubagents = data.Subagents;
-                        if (data.Sources is { Count: > 0 })
-                            task.AssistantMessage.Sources = data.Sources;
-                    }
-
-                    task.IsCompleted = true;
-                    PublishCompletion(task.ConversationId, task.ConversationTitle, task.ModelLabel);
-                    break;
+                    task.MissedStatusPolls = 0;
+                    if (status.Status != "completed") continue;
                 }
+
+                var data = status is null ? null : await provider.FetchCompletedStreamAsync(task.SessionId!, ct);
+                task.ApplyCompletedStream(data);
+                task.IsCompleted = true;
+                if (task.AssistantMessage.RequestError is { } failure)
+                    PublishFailure(task.ConversationId, task.ConversationTitle, task.ModelLabel, failure.Message);
+                else
+                    PublishCompletion(task.ConversationId, task.ConversationTitle, task.ModelLabel);
+                break;
             }
         }
         catch (OperationCanceledException) { }

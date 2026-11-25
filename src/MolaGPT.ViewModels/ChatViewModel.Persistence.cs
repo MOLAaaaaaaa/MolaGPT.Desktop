@@ -49,7 +49,8 @@ public sealed partial class ChatViewModel
             vm.ContextWindow,
             vm.CompactionTokensBefore,
             vm.CompactionTokensAfter,
-            vm.CompactionReason);
+            vm.CompactionReason,
+            vm.RequestError);
     }
 
     private static string BuildMessageMeta(MessagePersistenceSnapshot snapshot)
@@ -63,6 +64,7 @@ public sealed partial class ChatViewModel
         if (!string.IsNullOrEmpty(current.PersonaName)) meta["persona_name"] = current.PersonaName;
         if (current.WasStopped) meta["stopped"] = true;
         if (snapshot.IsStreaming) meta["streaming"] = true;
+        if (snapshot.Error is not null) meta["error"] = JsonSerializer.SerializeToNode(snapshot.Error, MessageMetaJson);
         if (current.FinishReason is { Length: > 0 } finish && finish != "stop")
             meta["finish_reason"] = finish;
         if (current.Usage is not null) meta["response_stats"] = BuildUsageJson(current.Usage);
@@ -207,5 +209,6 @@ public sealed partial class ChatViewModel
         int ContextWindow,
         int CompactionTokensBefore,
         int CompactionTokensAfter,
-        string? CompactionReason);
+        string? CompactionReason,
+        ChatRequestError? Error);
 }

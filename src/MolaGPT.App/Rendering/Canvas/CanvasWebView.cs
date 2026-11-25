@@ -38,7 +38,7 @@ internal sealed class CanvasWebView : NativeControlHost
     private bool _allowSuspend;
     private bool _loading;
     private bool _suspending;
-    private int _powerVersion;
+
 
     public CanvasWebView()
     {
@@ -98,7 +98,6 @@ internal sealed class CanvasWebView : NativeControlHost
 
     private void RefreshPowerState()
     {
-        _powerVersion++;
         if (_controller is not { } controller) return;
         var visible = IsWebVisible;
         var idle = !visible && _allowSuspend && !_loading;
@@ -117,12 +116,11 @@ internal sealed class CanvasWebView : NativeControlHost
     private async Task SuspendAsync()
     {
         if (_controller is not { } controller || IsWebVisible || !_allowSuspend || _loading) return;
-        var version = _powerVersion;
         _suspending = true;
         try
         {
             await controller.CoreWebView2.TrySuspendAsync();
-            if (ReferenceEquals(controller, _controller) && version != _powerVersion)
+            if (ReferenceEquals(controller, _controller) && (IsWebVisible || !_allowSuspend || _loading))
             {
                 controller.CoreWebView2.Resume();
                 _suspending = false;
@@ -190,7 +188,6 @@ internal sealed class CanvasWebView : NativeControlHost
     protected override void DestroyNativeControlCore(IPlatformHandle control)
     {
         _idleTimer.Stop();
-        _powerVersion++;
         _suspending = false;
         _loading = false;
         var controller = _controller;

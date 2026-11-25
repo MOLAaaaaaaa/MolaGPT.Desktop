@@ -29,7 +29,7 @@
           <StackPanel>
             <ToggleButton Name="PART_toggle"
                           IsChecked="{Binding $parent[Expander].IsExpanded, Mode=TwoWay}"
-                          Background="Transparent" BorderThickness="0" Padding="4,2"
+                          Background="Transparent" BorderThickness="0" Padding="0,2,6,2"
                           MinHeight="28" HorizontalAlignment="Stretch"
                           HorizontalContentAlignment="Stretch">
               <DockPanel>
@@ -347,6 +347,12 @@
       </Border>
     </DataTemplate>
 
+    <DataTemplate DataType="r:ProcessTimelineRow">
+      <Border Classes="assistantcol" MaxWidth="720" Margin="0,2,0,6">
+        <r:ProcessTimelineView />
+      </Border>
+    </DataTemplate>
+
     <DataTemplate DataType="r:ToolRunRow">
       <Border Classes="assistantcol" MaxWidth="720" Margin="0,4">
         <r:ToolRunView />
@@ -483,8 +489,9 @@
           <Expander.Header>
             <Grid ColumnDefinitions="*,Auto,Auto,Auto" MinHeight="24"
                   r:Shimmer.IsActive="{Binding IsShimmering}">
-              <Grid Grid.Column="0" ColumnDefinitions="Auto,8,Auto,10,*" HorizontalAlignment="Left">
+              <Grid Grid.Column="0" ColumnDefinitions="16,8,Auto,10,*" HorizontalAlignment="Left">
                 <TextBlock Grid.Column="0" Classes="icon" Text="{Binding IconGlyph}"
+                           Width="16" TextAlignment="Center"
                            FontSize="12" VerticalAlignment="Center"
                            Foreground="{DynamicResource Brush.Text.Secondary}" />
                 <TextBlock Grid.Column="2" Text="{Binding DisplayLabel}" FontSize="12"
@@ -584,13 +591,29 @@
           <DockPanel LastChildFill="True">
             <TextBlock DockPanel.Dock="Left" Classes="icon" Text="&#xE7BA;" FontSize="14"
                        VerticalAlignment="Center" Margin="0,0,10,0"
-                       Foreground="{DynamicResource Brush.Error}" />
-            <Button DockPanel.Dock="Right" Classes="textlink"
-                    Content="{Binding Message.ActionErrorButtonLabel}"
-                    Click="OnErrorAction"
-                    VerticalAlignment="Center" Margin="12,0,0,0" />
+                       Foreground="{DynamicResource Brush.Text.Muted}" />
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" Margin="12,0,0,0">
+              <Button Classes="textlink"
+                      IsVisible="{Binding Message.IsWorkContinuationAvailable}"
+                      Content="继续任务" Click="OnResumePausedWork" />
+              <Button Classes="textlink"
+                      IsVisible="{Binding Message.HasErrorAction}"
+                      IsEnabled="{Binding Message.ActionErrorButtonEnabled}"
+                      Content="{Binding Message.ActionErrorButtonLabel}"
+                      Click="OnErrorAction" />
+            </StackPanel>
             <TextBlock Text="{Binding Message.ActionErrorText}"
-                       VerticalAlignment="Center" TextWrapping="Wrap" FontSize="12.5" />
+                       VerticalAlignment="Center" TextWrapping="Wrap" FontSize="12.5">
+              <TextBlock.Styles>
+                <Style Selector="TextBlock">
+                  <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+                </Style>
+                <Style Selector="TextBlock[Tag=True]">
+                  <Setter Property="Foreground" Value="{DynamicResource Brush.Warning.Foreground}" />
+                </Style>
+              </TextBlock.Styles>
+              <TextBlock.Tag><Binding Path="Message.IsAccountRestriction" /></TextBlock.Tag>
+            </TextBlock>
           </DockPanel>
         </Border>
 
@@ -630,7 +653,7 @@
         <!-- Retry lives on the composer view model, so it is invoked through the
              view rather than bound: the row's DataContext is the transcript row. -->
         <Button Classes="inlineaction" Click="OnRetry" ToolTip.Tip="重新回答（使用当前模型）"
-                IsVisible="{Binding Message.CanRegenerate}">
+                IsVisible="{Binding Message.CanRegenerate}" IsEnabled="{Binding Message.CanRetryReply}">
           <TextBlock Classes="icon" Text="&#xE72C;" FontSize="14" />
         </Button>
         <Button Classes="inlineaction" Click="OnCopyMessage" ToolTip.Tip="复制回答">
@@ -1048,6 +1071,14 @@
     <Style Selector="Button.toolsummary:pointerover /template/ Border#PART_Root">
       <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
     </Style>
+    <Style Selector="Button.processheader">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    </Style>
+    <Style Selector="Button.processheader:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Brush.Bg.HoverOverlay}" />
+    </Style>
 
     <Style Selector="Expander.toolbody">
       <Setter Property="Background" Value="Transparent" />
@@ -1324,6 +1355,27 @@
     <Style Selector="r|ThinkBlockView r|MarkdownListView.listview">
       <Setter Property="FontSize" Value="12" />
       <Setter Property="LineHeight" Value="21" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+    <Style Selector="StackPanel.thinkingbody > r|MarkdownTextBlock.prose">
+      <Setter Property="FontSize" Value="12.5" />
+      <Setter Property="LineHeight" Value="21" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="Margin" Value="0,0,0,6" />
+    </Style>
+    <Style Selector="StackPanel.thinkingbody > SelectableTextBlock.prose">
+      <Setter Property="FontSize" Value="12.5" />
+      <Setter Property="LineHeight" Value="21" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="Margin" Value="0,0,0,6" />
+    </Style>
+    <Style Selector="StackPanel.thinkingbody > r|MarkdownListView.listview">
+      <Setter Property="FontSize" Value="12.5" />
+      <Setter Property="LineHeight" Value="21" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+      <Setter Property="Margin" Value="0,2,0,6" />
+    </Style>
+    <Style Selector="StackPanel.thinkingbody > r|MarkdownTextBlock.heading">
       <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
     </Style>
 

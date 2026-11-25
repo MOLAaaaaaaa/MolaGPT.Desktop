@@ -3,7 +3,7 @@
         xmlns:views="clr-namespace:MolaGPT.App.Views"
         x:Class="MolaGPT.App.Views.LoginWindow"
         Title="登录 MolaGPT"
-        Width="372" Height="492"
+        Width="372" Height="524"
         CanResize="False"
         ShowInTaskbar="False"
         WindowStartupLocation="CenterOwner"
@@ -87,13 +87,18 @@
                 BorderThickness="1"
                 CornerRadius="{DynamicResource Radius.Sm}"
                 IsVisible="False">
-          <ScrollViewer VerticalScrollBarVisibility="Auto"
-                        HorizontalScrollBarVisibility="Disabled">
-            <TextBlock Name="PART_StatusText"
-                       Foreground="{DynamicResource Brush.Error}"
-                       FontSize="{DynamicResource Font.Size.Small}"
-                       TextWrapping="Wrap" />
-          </ScrollViewer>
+          <Grid RowDefinitions="*,Auto">
+            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+              <TextBlock Name="PART_StatusText"
+                         Foreground="{DynamicResource Brush.Error}"
+                         FontSize="{DynamicResource Font.Size.Small}"
+                         TextWrapping="Wrap" />
+            </ScrollViewer>
+            <Button Grid.Row="1" Name="PART_ViewRestrictions" Classes="textlink"
+                    Content="查看账户限制" Click="OnViewRestrictionsClick"
+                    HorizontalAlignment="Left" Margin="0,4,0,0" IsVisible="False" />
+          </Grid>
         </Border>
 
         <Grid Grid.Row="2" Margin="0,18,0,0" ColumnDefinitions="*,Auto,Auto">

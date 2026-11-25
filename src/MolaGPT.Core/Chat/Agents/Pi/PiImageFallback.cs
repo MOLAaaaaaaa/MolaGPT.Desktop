@@ -73,7 +73,8 @@ internal static class PiImageFallback
 
     private static bool IsUnsupportedError(JsonElement error)
     {
-        if (ReadMessage(error) is { } message && IsUnsupportedImage(message)) return true;
+        if ((error.ValueKind == JsonValueKind.Object && ReadString(error, "type") == "unsupported_image")
+            || (ReadMessage(error) is { } message && IsUnsupportedImage(message))) return true;
         if (error.ValueKind != JsonValueKind.Object
             || !error.TryGetProperty("metadata", out var metadata) || metadata.ValueKind != JsonValueKind.Object
             || ReadString(metadata, "raw") is not { } raw)

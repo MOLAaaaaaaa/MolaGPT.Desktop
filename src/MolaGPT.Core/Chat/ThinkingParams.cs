@@ -6,7 +6,7 @@ namespace MolaGPT.Core.Chat;
 /// The one place that turns a request's thinking settings into wire parameters.
 ///
 /// Providers disagree about how to ask for reasoning — DeepSeek wants
-/// <c>thinking:{type}</c>, Qwen wants <c>enable_thinking</c> plus a budget, the
+/// <c>thinking:{type}</c>, Qwen wants <c>enable_thinking</c> plus a budget or effort, the
 /// rest take <c>reasoning_effort</c> — so this is a dialect table, not a single
 /// key. It lives here because both the direct provider and the Pi path need the
 /// identical mapping: a second copy would drift, and the symptom would be a model
@@ -60,6 +60,12 @@ internal static class ThinkingParams
                 if (request.ThinkingBudgetTokens is { } budget)
                     body["thinking_budget"] = budget;
             }
+            else if (request.ThinkingParamKind == ThinkingParamKind.QwenReasoningEffort)
+            {
+                body["enable_thinking"] = true;
+                if ((request.ReasoningEffort ?? config?.DefaultEffort) is { } effort)
+                    body["reasoning_effort"] = effort;
+            }
             else if (request.ThinkingParamKind == ThinkingParamKind.GeminiBudget)
             {
                 body["reasoning_effort"] = request.ReasoningEffort ?? "medium";
@@ -107,7 +113,7 @@ internal static class ThinkingParams
 
         if (request.ThinkingParamKind == ThinkingParamKind.DeepSeekV4)
             body["thinking"] = new { type = "disabled" };
-        else if (request.ThinkingParamKind == ThinkingParamKind.QwenThinkingBudget)
+        else if (request.ThinkingParamKind is ThinkingParamKind.QwenThinkingBudget or ThinkingParamKind.QwenReasoningEffort)
             body["enable_thinking"] = false;
         else if (request.ThinkingParamKind is ThinkingParamKind.OpenAiReasoningEffort
                  or ThinkingParamKind.GeminiBudget

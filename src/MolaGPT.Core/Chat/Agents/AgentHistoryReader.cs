@@ -1,6 +1,5 @@
 using System.Buffers;
 using System.Collections.Concurrent;
-using System.Text;
 using System.Text.Json;
 
 namespace MolaGPT.Core.Chat.Agents;
@@ -310,10 +309,9 @@ public sealed partial class AgentHistoryReader
             {
                 foreach (var line in ReadFirstLines(fi.FullName, 80))
                 {
-                    JsonElement root2;
-                    try { using var doc = JsonDocument.Parse(line); root2 = doc.RootElement.Clone(); }
-                    catch { continue; }
-                    if (root2.ValueKind != JsonValueKind.Object) continue;
+                    using var doc = ParseHistoryLine(line);
+                    if (doc is null || doc.RootElement.ValueKind != JsonValueKind.Object) continue;
+                    var root2 = doc.RootElement;
 
                     if (sessionId is null && root2.TryGetProperty("sessionId", out var sid))
                         sessionId = sid.GetString();
@@ -416,10 +414,9 @@ public sealed partial class AgentHistoryReader
             {
                 foreach (var line in ReadFirstLines(fi.FullName, 40))
                 {
-                    JsonElement r;
-                    try { using var doc = JsonDocument.Parse(line); r = doc.RootElement.Clone(); }
-                    catch { continue; }
-                    if (r.ValueKind != JsonValueKind.Object) continue;
+                    using var doc = ParseHistoryLine(line);
+                    if (doc is null || doc.RootElement.ValueKind != JsonValueKind.Object) continue;
+                    var r = doc.RootElement;
 
                     if (r.TryGetProperty("payload", out var pl) && pl.ValueKind == JsonValueKind.Object)
                     {
@@ -509,21 +506,25 @@ public sealed partial class AgentHistoryReader
     /// </summary>
     private const int MaxScannedLineBytes = 64 * 1024;
 
+    private static JsonDocument? ParseHistoryLine(ReadOnlyMemory<byte> line)
+    {
+        try { return JsonDocument.Parse(line); }
+        catch (JsonException) { return null; }
+    }
+
     /// <summary>
-    /// Read up to <paramref name="max"/> lines without loading the whole file,
-    /// and without ever allocating a string for a line longer than
-    /// <see cref="MaxScannedLineBytes"/> — such a line is scanned past and
-    /// counts against the budget, exactly as if it had been read and ignored.
-    /// UTF-8 is assumed (both CLIs write it); a leading BOM is stripped.
+    /// Read up to <paramref name="max"/> UTF-8 lines. Each slice is valid only
+    /// until the iterator advances. An overlong line still counts against the
+    /// budget and a leading BOM is stripped.
     /// </summary>
-    private static IEnumerable<string> ReadFirstLines(string path, int max)
+    private static IEnumerable<ReadOnlyMemory<byte>> ReadFirstLines(string path, int max)
     {
         using var stream = OpenSharedStream(path);
         var buffer = ArrayPool<byte>.Shared.Rent(MaxScannedLineBytes);
         var atFileStart = true;
 
         // A line is [start, end) in buffer; strip CR and a leading UTF-8 BOM.
-        string? Decode(int start, int end)
+        ReadOnlyMemory<byte> Slice(int start, int end)
         {
             if (end > start && buffer[end - 1] == (byte)'\r') end--;
             if (atFileStart)
@@ -535,7 +536,7 @@ public sealed partial class AgentHistoryReader
                     start += 3;
                 }
             }
-            return end > start ? Encoding.UTF8.GetString(buffer, start, end - start) : null;
+            return end > start ? buffer.AsMemory(start, end - start) : default;
         }
 
         try
@@ -551,10 +552,10 @@ public sealed partial class AgentHistoryReader
                 if (newline >= 0)
                 {
                     lines++;
-                    var line = skipping ? null : Decode(start, newline);
+                    var line = skipping ? default : Slice(start, newline);
                     skipping = false;
                     start = newline + 1;
-                    if (line is not null) yield return line;
+                    if (!line.IsEmpty) yield return line;
                     continue;
                 }
 
@@ -582,8 +583,8 @@ public sealed partial class AgentHistoryReader
             // Trailing line with no newline terminator.
             if (!skipping && lines < max && used > start)
             {
-                var line = Decode(start, used);
-                if (line is not null) yield return line;
+                var line = Slice(start, used);
+                if (!line.IsEmpty) yield return line;
             }
         }
         finally

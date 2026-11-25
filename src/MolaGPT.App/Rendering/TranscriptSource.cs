@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Text.RegularExpressions;
 using Avalonia.Threading;
 using MolaGPT.Presentation;
 using MolaGPT.Presentation.Artifacts;
@@ -38,14 +39,18 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         public readonly Dictionary<string, ToolCallViewModel> WebTools = new();
     }
 
+    private static readonly Regex s_htmlComment = new(@"<!--[\s\S]*?-->", RegexOptions.Compiled);
+
     private readonly ChatViewModel _chat;
     private readonly Dictionary<MessageViewModel, Segment> _segments = new();
     private readonly List<MessageViewModel> _order = new();
     private readonly HashSet<MessageViewModel> _dirty = new();
     private readonly Dictionary<MessageViewModel, Dictionary<string, ToolRunRow>> _toolRuns = new();
+    private readonly Dictionary<MessageViewModel, Dictionary<string, ProcessTimelineRow>> _processTimelines = new();
     private readonly Func<bool> _canAutoCollapse;
     private readonly DispatcherTimer _toolFoldTimer;
     private readonly HashSet<ToolRunRow> _changedToolRuns = new();
+    private readonly HashSet<ProcessTimelineRow> _changedTimelines = new();
     private bool _building;
 
     // Fences the user switched between chip and code, by message and ordinal.
@@ -73,6 +78,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         _toolFoldTimer.Stop();
         _toolFoldTimer.Tick -= OnToolFoldTick;
         foreach (var message in _toolRuns.Keys.ToArray()) RemoveToolRuns(message);
+        foreach (var message in _processTimelines.Keys.ToArray()) RemoveProcessTimelines(message);
         _chat.Messages.CollectionChanged -= OnMessagesChanged;
         _chat.PropertyChanged -= OnChatPropertyChanged;
         foreach (var message in _order) Unsubscribe(message);
@@ -132,6 +138,8 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
             _fenceChoices.Remove(gone);
         foreach (var gone in _toolRuns.Keys.Where(m => !_chat.Messages.Contains(m)).ToArray())
             RemoveToolRuns(gone);
+        foreach (var gone in _processTimelines.Keys.Where(m => !_chat.Messages.Contains(m)).ToArray())
+            RemoveProcessTimelines(gone);
 
         CheckReentrancy();
         Items.Clear();
@@ -183,6 +191,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         _dirty.Remove(message);
         _fenceChoices.Remove(message);
         RemoveToolRuns(message);
+        RemoveProcessTimelines(message);
         Unsubscribe(message);
         _chat.ArtifactWorkspace.RemoveMessage(message);
         ShiftFrom(index, -segment.Rows.Count);
@@ -282,6 +291,17 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         }
     }
 
+    private void RemoveProcessTimelines(MessageViewModel message)
+    {
+        if (!_processTimelines.Remove(message, out var timelines)) return;
+        foreach (var timeline in timelines.Values)
+        {
+            timeline.Changed -= OnProcessTimelineChanged;
+            _changedTimelines.Remove(timeline);
+            timeline.Dispose();
+        }
+    }
+
     private void OnToolRunChanged(object? sender, EventArgs e)
     {
         if (sender is not ToolRunRow run || _building) return;
@@ -289,17 +309,42 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         MarkDirty(run.Message);
     }
 
+    private void OnProcessTimelineChanged(object? sender, EventArgs e)
+    {
+        if (sender is not ProcessTimelineRow timeline || _building) return;
+        _changedTimelines.Add(timeline);
+        MarkDirty(timeline.Message);
+    }
+
     private void OnToolFoldTick(object? sender, EventArgs e)
     {
-        var pending = _toolRuns.Values.SelectMany(runs => runs.Values)
+        var pendingRuns = _toolRuns.Values.SelectMany(runs => runs.Values)
             .Where(run => run.NeedsAutoCollapse).ToArray();
-        if (pending.Length == 0)
+        var pendingTimelines = _processTimelines.Values.SelectMany(timelines => timelines.Values)
+            .Where(timeline => timeline.NeedsAutoCollapse).ToArray();
+        if (pendingRuns.Length == 0 && pendingTimelines.Length == 0)
         {
             _toolFoldTimer.Stop();
             return;
         }
         var allowed = _canAutoCollapse();
-        foreach (var run in pending) run.TryAutoCollapse(allowed);
+        foreach (var run in pendingRuns) run.TryAutoCollapse(allowed);
+        foreach (var timeline in pendingTimelines) timeline.TryAutoCollapse(allowed);
+    }
+
+    private static bool IsVisuallyEmptyBlock(RenderBlock block)
+    {
+        if (block is not ParagraphBlock paragraph) return false;
+        var text = paragraph.Markdown;
+        if (string.IsNullOrEmpty(text)) return true;
+        if (text.Contains("<!--", StringComparison.Ordinal))
+            text = s_htmlComment.Replace(text, string.Empty);
+        foreach (var ch in text)
+        {
+            if (!char.IsWhiteSpace(ch) && ch != '\u200B' && ch != '\uFEFF')
+                return false;
+        }
+        return true;
     }
 
     internal static int CountProseCharacters(IEnumerable<RenderBlock> blocks)
@@ -418,9 +463,13 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         var fences = new List<FenceSnapshot>();
         if (!_toolRuns.TryGetValue(message, out var cachedRuns))
             _toolRuns[message] = cachedRuns = new Dictionary<string, ToolRunRow>();
+        if (!_processTimelines.TryGetValue(message, out var cachedTimelines))
+            _processTimelines[message] = cachedTimelines = new Dictionary<string, ProcessTimelineRow>(StringComparer.Ordinal);
         var seenRuns = new HashSet<string>();
+        var seenTimelines = new HashSet<string>(StringComparer.Ordinal);
         var followingProse = new Dictionary<ToolRunRow, int>();
         var pendingTools = new List<IReadOnlyList<ToolCallViewModel>>();
+        var pendingProcess = new List<ProcessRunInput>();
         var markupTools = new Dictionary<string, MarkupUnitBlock>();
         var thinkingTools = message.ToolCalls.Count > 0 ? WebToolPresentation.ThinkingTools(message) : null;
         var seenWebCalls = new HashSet<string>(StringComparer.Ordinal);
@@ -429,6 +478,22 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
                 .ToDictionary(unit => unit.ToolCallId!, StringComparer.Ordinal)
             : null;
         ToolRunRow? precedingRun = null;
+
+        void AddPendingTools(IReadOnlyList<ToolCallViewModel> tools)
+        {
+            if (tools.Count == 0) return;
+            var key = tools[0].GroupKey;
+            if (key is not null
+                && pendingProcess.LastOrDefault() is ProcessToolInput { Tools.Count: > 0 } previous
+                && previous.Tools[0].GroupKey == key)
+            {
+                pendingProcess[^1] = new ProcessToolInput(previous.Tools.Concat(tools).ToArray());
+            }
+            else
+            {
+                pendingProcess.Add(new ProcessToolInput(tools));
+            }
+        }
 
         void FlushTools()
         {
@@ -471,6 +536,53 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
             }
         }
 
+        void FlushProcess(bool hasFollowingBody)
+        {
+            if (pendingProcess.Count == 0) return;
+
+            if (pendingProcess.Any(step => step is ProcessThinkingInput))
+            {
+                var firstKey = pendingProcess[0] switch
+                {
+                    ProcessThinkingInput thinking => $"t:{thinking.Segment.TimelineIndex}",
+                    ProcessToolInput tools when tools.Tools.Count > 0 => $"g:{tools.Tools[0].Id}",
+                    _ => $"i:{rows.Count}"
+                };
+                var initial = !cachedTimelines.TryGetValue(firstKey, out var timeline);
+                if (initial)
+                {
+                    timeline = new ProcessTimelineRow(message, firstKey);
+                    timeline.Changed += OnProcessTimelineChanged;
+                    cachedTimelines[firstKey] = timeline;
+                }
+                _building = true;
+                try
+                {
+                    timeline!.Sync(
+                        pendingProcess,
+                        animateNewEntries: !messageDone,
+                        markupTools,
+                        hasFollowingBody,
+                        settled: messageDone,
+                        initial);
+                }
+                finally { _building = false; }
+                seenTimelines.Add(firstKey);
+                rows.Add(timeline!);
+                precedingRun = null;
+                pendingProcess.Clear();
+                return;
+            }
+
+            foreach (var step in pendingProcess)
+            {
+                if (step is ProcessToolInput tools)
+                    WebToolPresentation.Add(pendingTools, tools.Tools);
+            }
+            pendingProcess.Clear();
+            FlushTools();
+        }
+
         for (var i = 0; i < message.DisplayBlocks.Count; i++)
         {
             var block = message.DisplayBlocks[i];
@@ -485,14 +597,14 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
                             is { Kind: MarkupUnitKind.DsAnalysis, Tag: "mcp", IsClosed: true }) continue;
                 }
                 if (thinkingTools?.TryGetValue(tool.Id, out var thinkingMarkup) == true) markupTools[tool.Id] = thinkingMarkup.Markup;
-                WebToolPresentation.Add(pendingTools, [tool]);
+                AddPendingTools([tool]);
                 continue;
             }
             if (block.ToolGroup is { } group && group.Items.Count > 0)
             {
                 foreach (var item in group.Items)
                     if (thinkingTools?.TryGetValue(item.Id, out var thinkingMarkup) == true) markupTools[item.Id] = thinkingMarkup.Markup;
-                WebToolPresentation.Add(pendingTools, group.Items.ToArray());
+                AddPendingTools(group.Items.ToArray());
                 continue;
             }
             if (block.IsText)
@@ -502,7 +614,9 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
                 segment.Documents[i] = document;
                 foreach (var renderBlock in document.Blocks)
                 {
-                    if (WebToolPresentation.HandleSpecial(renderBlock, pendingTools, markupTools)) continue;
+                    IReadOnlyList<IReadOnlyList<ToolCallViewModel>> lastPendingTools =
+                        pendingProcess.LastOrDefault() is ProcessToolInput lastTools ? [lastTools.Tools] : [];
+                    if (WebToolPresentation.HandleSpecial(renderBlock, lastPendingTools, markupTools)) continue;
                     if (renderBlock is MarkupUnitBlock markup && WebToolPresentation.IsTool(markup))
                     {
                         var unit = markup.Unit;
@@ -524,10 +638,11 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
                         var presentationPending = !messageDone && unit.PresentationPending && i == message.DisplayBlocks.Count - 1;
                         var webTool = WebToolPresentation.Update(message, markup, segment.WebTools, id, messageDone, presentationPending);
                         markupTools[id] = markup;
-                        WebToolPresentation.Add(pendingTools, [webTool]);
+                        AddPendingTools([webTool]);
                         continue;
                     }
-                    FlushTools();
+                    if (IsVisuallyEmptyBlock(renderBlock)) continue;
+                    FlushProcess(hasFollowingBody: true);
                     if (precedingRun is { NeedsProseSignal: true } && followingProse[precedingRun] < 240)
                         followingProse[precedingRun] += CountProseCharacters([renderBlock]);
                     switch (renderBlock)
@@ -553,11 +668,14 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
             }
             else if (block.Thinking is { } thinking)
             {
-                FlushTools();
-                rows.Add(new ThinkingRow(message, thinking, i));
+                // 只有以「思考」开头的过程向后聚合工具与后续思考；
+                // 先前已出现的纯工具调用（例如口播正文后的执行动作）不被后续思考倒吸。
+                if (pendingProcess.Count > 0 && !pendingProcess.Any(step => step is ProcessThinkingInput))
+                    FlushProcess(hasFollowingBody: true);
+                pendingProcess.Add(new ProcessThinkingInput(thinking));
             }
         }
-        FlushTools();
+        FlushProcess(hasFollowingBody: false);
         foreach (var id in segment.WebTools.Keys.Where(id => !markupTools.ContainsKey(id)).ToArray())
             segment.WebTools.Remove(id);
         _building = true;
@@ -572,6 +690,15 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
                     if (run.NeedsAutoCollapse) _toolFoldTimer.Start();
                 }
             }
+            foreach (var key in seenTimelines)
+            {
+                var timeline = cachedTimelines[key];
+                if (timeline.NeedsAutoCollapse)
+                {
+                    timeline.TryAutoCollapse(_canAutoCollapse());
+                    if (timeline.NeedsAutoCollapse) _toolFoldTimer.Start();
+                }
+            }
         }
         finally { _building = false; }
         foreach (var gone in cachedRuns.Keys.Where(id => !seenRuns.Contains(id)).ToArray())
@@ -581,6 +708,14 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
             _changedToolRuns.Remove(removed);
             removed.Dispose();
             cachedRuns.Remove(gone);
+        }
+        foreach (var gone in cachedTimelines.Keys.Where(id => !seenTimelines.Contains(id)).ToArray())
+        {
+            var removed = cachedTimelines[gone];
+            removed.Changed -= OnProcessTimelineChanged;
+            _changedTimelines.Remove(removed);
+            removed.Dispose();
+            cachedTimelines.Remove(gone);
         }
 
         // Drop parses for text blocks that no longer exist, so a retry that
@@ -597,7 +732,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         {
             if (rows[index] is MarkupRow markup && hasLaterActivity && markup.Block.Unit.PresentationPending)
                 markup.Refresh(markup.Block with { Unit = markup.Block.Unit with { PresentationPending = false } });
-            if (rows[index] is MarkupRow or ThinkingRow or ProseRow or ToolRunRow) hasLaterActivity = true;
+            if (rows[index] is MarkupRow or ThinkingRow or ProcessTimelineRow or ProseRow or ToolRunRow) hasLaterActivity = true;
         }
 
         // Both flags are the view model's own rules, the same ones the WPF
@@ -662,6 +797,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
     private void Splice(MessageViewModel message, Segment segment)
     {
         var toolHeights = segment.Rows.OfType<ToolRunRow>().ToDictionary(run => run, run => run.EstimatedHeight);
+        var timelineHeights = segment.Rows.OfType<ProcessTimelineRow>().ToDictionary(row => row, row => row.EstimatedHeight);
         var next = Build(message, segment);
         var previous = segment.Rows;
 
@@ -693,6 +829,9 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
             if (carried is ToolRunRow toolRun && (_changedToolRuns.Contains(toolRun)
                 || toolHeights.TryGetValue(toolRun, out var oldHeight) && Math.Abs(oldHeight - toolRun.EstimatedHeight) > 0.5))
                 (grown ??= new List<int>()).Add(i);
+            if (carried is ProcessTimelineRow timeline && (_changedTimelines.Contains(timeline)
+                || timelineHeights.TryGetValue(timeline, out var oldTimelineHeight) && Math.Abs(oldTimelineHeight - timeline.EstimatedHeight) > 0.5))
+                (grown ??= new List<int>()).Add(i);
             next[i] = carried;
         }
 
@@ -720,6 +859,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
         var delta = next.Count - previous.Count;
         segment.Rows = next;
         _changedToolRuns.RemoveWhere(run => ReferenceEquals(run.Message, message));
+        _changedTimelines.RemoveWhere(timeline => ReferenceEquals(timeline.Message, message));
         ShiftFrom(_order.IndexOf(message) + 1, delta);
     }
 }

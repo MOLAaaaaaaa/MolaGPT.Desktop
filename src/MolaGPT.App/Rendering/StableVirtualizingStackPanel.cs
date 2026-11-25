@@ -24,6 +24,7 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
 
     private readonly Dictionary<object, double> _heights = new(ItemIdentityComparer.Instance);
     private readonly Dictionary<object, RealizedItem> _realized = new(ItemIdentityComparer.Instance);
+    private const int RecyclePoolCapacity = 12;
     private readonly Dictionary<object, Stack<Control>> _recyclePool = new();
     private readonly HashSet<Control> _registeredAnchors = [];
 
@@ -385,6 +386,7 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
     {
         HeaderRow => 60,
         UserMessageRow => 96,
+        ProcessTimelineRow timeline => timeline.EstimatedHeight,
         ToolRunRow run => run.EstimatedHeight,
         ToolRow { IsExpanded: true } => 180,
         ToolRow => 28,
@@ -520,7 +522,7 @@ public sealed class StableVirtualizingStackPanel : VirtualizingPanel
             }
 
             realized.Control.IsVisible = false;
-            pool.Push(realized.Control);
+            if (pool.Count < RecyclePoolCapacity) pool.Push(realized.Control);
         }
     }
 

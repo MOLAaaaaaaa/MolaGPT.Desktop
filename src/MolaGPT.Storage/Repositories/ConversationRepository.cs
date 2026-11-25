@@ -30,6 +30,14 @@ public sealed class ConversationRepository
             .ToList();
     }
 
+    public Dictionary<string, string> ListActivePersonaAssignments()
+    {
+        using var conn = _db.Open();
+        return conn.Query<(string Id, string PersonaId)>(
+            "SELECT id, persona_id FROM conversations WHERE deleted_at IS NULL AND persona_id IS NOT NULL")
+            .ToDictionary(row => row.Id, row => row.PersonaId, StringComparer.Ordinal);
+    }
+
     public Dictionary<string, string> FindByMessageContent(string query, CancellationToken cancellationToken = default)
     {
         var needle = query.Trim();
@@ -85,6 +93,15 @@ public sealed class ConversationRepository
     {
         using var conn = _db.Open();
         return conn.Query<ConversationRow>($"SELECT {SelectColumns} FROM conversations").ToList();
+    }
+
+    public IReadOnlyList<(ConversationRow Row, string? Setting)> ListAllWithSetting(string settingKeyPrefix)
+    {
+        using var conn = _db.Open();
+        return conn.Query<ConversationRow, string?, (ConversationRow, string?)>(
+            $"SELECT {SelectColumns}, s.value AS SettingValue FROM conversations AS c " +
+            "LEFT JOIN settings AS s ON s.key = @settingKeyPrefix || c.id",
+            (row, setting) => (row, setting), new { settingKeyPrefix }, splitOn: "SettingValue").AsList();
     }
 
     /// <summary>

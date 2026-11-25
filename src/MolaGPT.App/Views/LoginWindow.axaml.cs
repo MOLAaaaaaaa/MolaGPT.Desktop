@@ -15,15 +15,16 @@ public partial class LoginWindow : MolaContentWindow
     private readonly ProviderRegistry _registry;
     private readonly MolaGptLocalToolsRegistrar _localToolsRegistrar;
     private bool _waitingForExternal;
+    private string? _appealToken;
     public static bool HasPendingExternalLogin { get; private set; }
 
     public static event Action<ExternalLoginCompletion>? ExternalLoginCompleted;
 
-    public static bool NotifyExternalLoginCompleted(bool success, string? message = null)
+    public static bool NotifyExternalLoginCompleted(bool success, string? message = null, string? appealToken = null)
     {
         var handler = ExternalLoginCompleted;
         if (handler is null) return false;
-        handler(new ExternalLoginCompletion(success, message));
+        handler(new ExternalLoginCompletion(success, message, appealToken));
         return true;
     }
 
@@ -67,6 +68,7 @@ public partial class LoginWindow : MolaContentWindow
             return;
         }
 
+        SetAppealToken(null);
         ShowStatus("登录中...");
         SetBusy(true);
         try
@@ -75,6 +77,7 @@ public partial class LoginWindow : MolaContentWindow
             if (!result.Success)
             {
                 ShowStatus(result.ErrorMessage ?? "登录失败。");
+                SetAppealToken(result.AppealToken);
                 return;
             }
 
@@ -115,6 +118,7 @@ public partial class LoginWindow : MolaContentWindow
 
     private void StartOAuthFlow(string url)
     {
+        SetAppealToken(null);
         _waitingForExternal = true;
         HasPendingExternalLogin = true;
         try
@@ -153,7 +157,31 @@ public partial class LoginWindow : MolaContentWindow
             _auth.CancelOAuth();
             SetBusy(false);
             ShowStatus(completion.Message ?? "第三方登录失败，请重试。");
+            SetAppealToken(completion.AppealToken);
         });
+    }
+
+    private void SetAppealToken(string? token)
+    {
+        _appealToken = token;
+        PART_ViewRestrictions.IsVisible = !string.IsNullOrEmpty(token);
+    }
+
+    private async void OnViewRestrictionsClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (_appealToken is not { } token) return;
+        SetBusy(true);
+        try
+        {
+            var url = await _auth.CreateAccountSecurityLinkAsync(token);
+            if (_appealToken == token && !CommunityLinks.TryOpenBrowser(url))
+                ShowStatus("无法打开浏览器，请重试。");
+        }
+        catch (Exception)
+        {
+            ShowStatus("暂时无法打开账户安全，请重新登录后重试。");
+        }
+        finally { SetBusy(false); }
     }
 
     private void ShowStatus(string message)
@@ -170,7 +198,8 @@ public partial class LoginWindow : MolaContentWindow
         PART_Google.IsEnabled = !busy;
         PART_Microsoft.IsEnabled = !busy;
         PART_LinuxDo.IsEnabled = !busy;
+        PART_ViewRestrictions.IsEnabled = !busy;
     }
 }
 
-public sealed record ExternalLoginCompletion(bool Success, string? Message);
+public sealed record ExternalLoginCompletion(bool Success, string? Message, string? AppealToken = null);

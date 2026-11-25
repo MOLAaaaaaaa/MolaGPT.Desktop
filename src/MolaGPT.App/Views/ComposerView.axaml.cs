@@ -5,6 +5,7 @@ using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
@@ -25,6 +26,16 @@ public partial class ComposerView : UserControl
         // saw the key at all: "Enter 发送" was on, and Enter still broke the line.
         // This is the phase WPF's PreviewKeyDown gave for free.
         PART_Input.AddHandler(KeyDownEvent, OnInputKeyDown, RoutingStrategies.Tunnel);
+        PART_Input.AddHandler(TextInputEvent, (_, e) =>
+        {
+            if (string.IsNullOrWhiteSpace(PART_Input.Text) && !string.IsNullOrWhiteSpace(e.Text)
+                && DataContext is ComposerViewModel vm)
+                _ = PrewarmProviderAsync(vm);
+        }, RoutingStrategies.Tunnel);
+        PART_Input.PastingFromClipboard += (_, _) =>
+        {
+            if (DataContext is ComposerViewModel vm) _ = PrewarmProviderAsync(vm);
+        };
         PART_Attach.Click += OnAttachClick;
         PART_SearchProviderList.AddHandler(Button.ClickEvent, OnSearchProviderRowClicked,
             RoutingStrategies.Bubble);
@@ -280,6 +291,14 @@ public partial class ComposerView : UserControl
         if (vm.SendCommand.CanExecute(null)) vm.SendCommand.Execute(null);
     }
 
+    private static async Task PrewarmProviderAsync(ComposerViewModel vm)
+    {
+        if (vm.Chat.ActiveProvider is not PiWorkProvider provider) return;
+        try { await provider.PrewarmAsync().ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { DiagnosticLog.Write("pi-work", "预热 Agent 运行时失败：" + ex.Message); }
+    }
+
     // ---- attachments -------------------------------------------------------
 
     private async void OnAttachClick(object? sender, RoutedEventArgs e)
@@ -316,6 +335,7 @@ public partial class ComposerView : UserControl
         if (result.Attachment is { } attachment)
         {
             vm.Attachments.Add(attachment);
+            _ = PrewarmProviderAsync(vm);
             return;
         }
 

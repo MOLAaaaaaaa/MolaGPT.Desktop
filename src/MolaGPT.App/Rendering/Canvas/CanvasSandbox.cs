@@ -67,7 +67,7 @@ internal sealed partial class CanvasSandbox
         "worker-src 'self' blob:; child-src blob:; frame-src 'none'; object-src 'none'; " +
         "base-uri 'self'; form-action 'none'; manifest-src 'none'";
 
-    private readonly Dictionary<string, string> _documents = new(StringComparer.OrdinalIgnoreCase);
+    private string? _currentHtml;
     private CoreWebView2? _core;
     private string? _currentHost;
     private string? _currentUrl;
@@ -89,6 +89,7 @@ internal sealed partial class CanvasSandbox
     public void Attach(CoreWebView2 core)
     {
         if (ReferenceEquals(core, _core)) return;
+        Detach();
         _core = core;
 
         var settings = core.Settings;
@@ -103,13 +104,46 @@ internal sealed partial class CanvasSandbox
         core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
         core.WebResourceRequested += OnWebResourceRequested;
         core.NavigationStarting += OnNavigationStarting;
-        core.DOMContentLoaded += (_, e) => OnPageLoaded(e.NavigationId);
-        core.NavigationCompleted += (_, e) => OnPageLoaded(e.NavigationId);
+        core.DOMContentLoaded += OnDomContentLoaded;
+        core.NavigationCompleted += OnNavigationCompleted;
         core.NewWindowRequested += OnNewWindowRequested;
-        core.DownloadStarting += (_, e) => e.Cancel = true;
-        core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
+        core.DownloadStarting += OnDownloadStarting;
+        core.PermissionRequested += OnPermissionRequested;
         core.WebMessageReceived += OnWebMessageReceived;
     }
+
+    public void Detach()
+    {
+        if (_core is not { } core) return;
+        _core = null;
+        _loading?.TrySetResult();
+        _loading = null;
+        _currentHtml = null;
+        _currentHost = null;
+        _currentUrl = null;
+        _navigationId = null;
+
+        core.WebResourceRequested -= OnWebResourceRequested;
+        core.NavigationStarting -= OnNavigationStarting;
+        core.DOMContentLoaded -= OnDomContentLoaded;
+        core.NavigationCompleted -= OnNavigationCompleted;
+        core.NewWindowRequested -= OnNewWindowRequested;
+        core.DownloadStarting -= OnDownloadStarting;
+        core.PermissionRequested -= OnPermissionRequested;
+        core.WebMessageReceived -= OnWebMessageReceived;
+    }
+
+    private void OnDomContentLoaded(object? sender, CoreWebView2DOMContentLoadedEventArgs e) =>
+        OnPageLoaded(e.NavigationId);
+
+    private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e) =>
+        OnPageLoaded(e.NavigationId);
+
+    private static void OnDownloadStarting(object? sender, CoreWebView2DownloadStartingEventArgs e) =>
+        e.Cancel = true;
+
+    private static void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e) =>
+        e.State = CoreWebView2PermissionState.Deny;
 
     /// <param name="originKey">Stable per logical artifact, so its storage
     /// survives new versions and app restarts.</param>
@@ -119,7 +153,7 @@ internal sealed partial class CanvasSandbox
     {
         if (_core is null) return Task.CompletedTask;
         var host = "c-" + originKey + HostSuffix;
-        _documents[host] = html;
+        _currentHtml = html;
         _currentHost = host;
         Traffic = new CanvasTraffic();
         TrafficChanged?.Invoke(this, EventArgs.Empty);
@@ -151,6 +185,7 @@ internal sealed partial class CanvasSandbox
         _loading?.TrySetResult();
         _loading = null;
         _currentHost = null;
+        _currentHtml = null;
         _currentUrl = null;
         _navigationId = null;
         try
@@ -363,7 +398,8 @@ window.__molaTheme=function(t){var r=document.documentElement;r.style.colorSchem
     private CoreWebView2WebResourceResponse ServeLocal(CoreWebView2 core, Uri uri)
     {
         var path = uri.AbsolutePath;
-        if (path is "/" or "/index.html" && _documents.TryGetValue(uri.Host, out var html))
+        if (path is "/" or "/index.html" && _currentHtml is { } html
+            && string.Equals(uri.Host, _currentHost, StringComparison.OrdinalIgnoreCase))
         {
             return core.Environment.CreateWebResourceResponse(
                 new MemoryStream(Encoding.UTF8.GetBytes(html)), 200, "OK",

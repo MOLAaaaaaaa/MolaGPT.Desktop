@@ -53,17 +53,19 @@ internal static class PersonaAvatarImages
         {
             var comma = value.IndexOf(',');
             if (comma < 0) return null;
-            var bytes = Convert.FromBase64String(value[(comma + 1)..]);
+            var payload = value.AsSpan(comma + 1);
+            var bytes = new byte[payload.Length / 4 * 3];
+            if (!Convert.TryFromBase64Chars(payload, bytes, out var length)) return null;
 
             // The avatar box is square and fills by cropping, so it is the
             // portrait's *short* side that has to reach the target: scaling the
             // long one down to it leaves Skia an image smaller than the box,
             // which then gets upscaled and looks soft.
-            using var probe = new MemoryStream(bytes);
+            using var probe = new MemoryStream(bytes, 0, length, writable: false);
             using var codec = SKCodec.Create(probe);
             var tallerThanWide = codec is null || codec.Info.Height >= codec.Info.Width;
 
-            using var stream = new MemoryStream(bytes);
+            using var stream = new MemoryStream(bytes, 0, length, writable: false);
             return tallerThanWide
                 ? Bitmap.DecodeToWidth(stream, pixels, BitmapInterpolationMode.HighQuality)
                 : Bitmap.DecodeToHeight(stream, pixels, BitmapInterpolationMode.HighQuality);

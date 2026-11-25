@@ -31,12 +31,15 @@ public partial class SettingsWindow
     private MolaGptCredits? _displayedCredits;
     private long? _expiredCreditsRefreshAt;
 
-    private void InitializeAccountPage(MolaGptProxyProvider? proxy)
+    private void InitializeAccountPage()
     {
-        _proxy = proxy;
+        PART_SyncNow.Click += OnSyncNowClick;
+        PART_SyncConversations.Click += OnSyncConversationsClick;
         PART_UsageModels.ItemsSource = _accountModels;
         PART_AccountAction.Click += (_, _) => AccountRequested?.Invoke(this, EventArgs.Empty);
         PART_Logout.Click += OnLogoutClick;
+        PART_AccountSecurity.Click += async (_, _) => await OpenAccountSecurityAsync();
+        PART_AccountSecurityDetail.Click += async (_, _) => await OpenAccountSecurityAsync();
         PART_RefreshUsage.Click += (_, _) => _ = RefreshUsageAsync(force: true);
         PART_OpenSupport.Click += (_, _) => SupportRequested?.Invoke(this, EventArgs.Empty);
         _creditsRefreshTimer.Tick += (_, _) => UpdateCreditsRefresh();
@@ -47,6 +50,7 @@ public partial class SettingsWindow
             _settings.GitHubStarPromptShown = true;
             CommunityLinks.TryOpenBrowser(CommunityLinks.GitHubUrl);
         };
+        RefreshAccountUi();
     }
 
     internal void OpenAccountPage()
@@ -70,7 +74,11 @@ public partial class SettingsWindow
             _expiredCreditsRefreshAt = null;
             _creditsRefreshTimer.Stop();
             _settings.IsDonor = false;
-            PART_RefreshUsage.IsEnabled = true;
+            if (HasPageContent(PAGE_Account))
+            {
+                PART_RefreshUsage.IsEnabled = true;
+                UpdateAccountSecurityBanner(null);
+            }
         }
 
         _settings.IsLoggedIn = loggedIn;
@@ -78,12 +86,14 @@ public partial class SettingsWindow
 
         var name = string.IsNullOrWhiteSpace(username) ? "MolaGPT 用户" : username;
         PART_AccountNavName.Text = loggedIn ? name : "登录 MolaGPT";
+        UpdateSearchStatusHint();
+        if (!HasPageContent(PAGE_Account)) return;
         PART_AccountStatus.Text = loggedIn ? name : "MolaGPT 账号";
         PART_AccountAction.IsVisible = !loggedIn;
+        PART_AccountSecurity.IsVisible = loggedIn;
         PART_AccountBadgeDot.IsVisible = loggedIn;
-        UpdateSearchStatusHint();
         PART_UsageSection.IsVisible = loggedIn && _proxy is not null;
-        PART_LogoutSection.IsVisible = loggedIn && _auth is not null;
+        PART_Logout.IsVisible = loggedIn && _auth is not null;
 
         if (loggedIn)
         {
@@ -95,6 +105,7 @@ public partial class SettingsWindow
         }
 
         PART_AccountDetail.Text = "登录后可在桌面端使用 MolaGPT 的模型、对话同步与个性化记忆。";
+        UpdateAccountSecurityBanner(null);
         _settings.IsDonor = false;
         PART_CloudSyncStatus.Text = string.Empty;
         _usageFetchedAt = null;
@@ -154,6 +165,7 @@ public partial class SettingsWindow
 
         _settings.IsDonor = status.IsDonor;
         PART_AccountDetail.Text = status.Unlimited ? "无限制账户" : status.IsDonor ? "支持者" : "已注册用户";
+        UpdateAccountSecurityBanner(status.WorkSecurityStatus);
         if (status.Membership is { } membership && !status.Unlimited)
             PART_AccountDetail.Text = membership.TierLabel
                 + (membership.ExpiryLabel.Length == 0 ? string.Empty : " · " + membership.ExpiryLabel);
@@ -337,6 +349,20 @@ public partial class SettingsWindow
         return (value / 1_000_000.0).ToString("0.#", CultureInfo.InvariantCulture) + "M";
     }
 
+    private async Task OpenAccountSecurityAsync()
+    {
+        if (_auth is null) return;
+        try { CommunityLinks.TryOpenBrowser(await _auth.CreateAccountSecurityLinkAsync()); }
+        catch (Exception) { PART_AccountDetail.Text = "暂时无法打开账户安全，请稍后重试。"; }
+    }
+
+    private void UpdateAccountSecurityBanner(string? securityStatus)
+    {
+        var hasRestriction = !string.IsNullOrWhiteSpace(securityStatus);
+        PART_AccountSecurityMessage.Text = hasRestriction ? securityStatus! : string.Empty;
+        PART_AccountSecurityBanner.IsVisible = hasRestriction;
+    }
+
     private void ShowUsageStatus(string? message)
     {
         PART_UsageStatus.Text = message ?? string.Empty;
@@ -369,10 +395,13 @@ public partial class SettingsWindow
     private async void OnLogoutClick(object? sender, RoutedEventArgs e)
     {
         if (_auth is null) return;
+        var cloudSyncEnabled = _settings.SyncConversations;
         var confirmed = await Confirm.AskAsync(
             this,
             "退出登录",
-            "退出后将无法继续使用 MolaGPT 模型，未下载到本地的云端对话占位会被清除，已下载的本地对话会保留。",
+            cloudSyncEnabled
+                ? "退出后将清除本机缓存的 MolaGPT Chat 聊天记录。"
+                : "退出后将无法使用 MolaGPT 模型，本地聊天记录仍会保留。",
             "退出登录");
         if (!confirmed) return;
 
@@ -383,7 +412,9 @@ public partial class SettingsWindow
         try
         {
             if (!await _auth.LogoutRemoteAsync())
-                _notifications?.Warning("会话撤销未确认", "请联系管理员撤销旧会话。");
+                _notifications?.Warning("会话撤销未确认", "撤销失败。");
+            if (cloudSyncEnabled && string.IsNullOrWhiteSpace(_auth.CurrentJwt))
+                _cloudSync?.CleanupLocalOfficialHistoryForLogout();
             RefreshAccountUi();
         }
         finally

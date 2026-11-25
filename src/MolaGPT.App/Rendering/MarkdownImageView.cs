@@ -132,6 +132,10 @@ public sealed class MarkdownImageView : TemplatedControl
         _load = null;
         _topLevel = null;
         _pressedPosition = null;
+        _image.Source = null;
+        _bitmap = null;
+        _image.IsVisible = false;
+        _fallback.IsVisible = true;
         base.OnDetachedFromVisualTree(e);
     }
 

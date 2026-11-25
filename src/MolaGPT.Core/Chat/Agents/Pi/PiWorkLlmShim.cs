@@ -26,6 +26,112 @@ namespace MolaGPT.Core.Chat.Agents.Pi;
 /// </summary>
 public sealed class PiWorkLlmShim : IDisposable
 {
+    // Inspect the same SSE bytes that are relayed to Pi. Never alter the wire stream.
+    private sealed class WorkStreamErrorObserver(Action<ChatRequestError?>? report)
+    {
+        private const int MaxLineBytes = 64 * 1024;
+        private readonly MemoryStream _line = new();
+        private string? _eventName;
+        private bool _discardLine;
+        private bool _reported;
+        public bool HasError => _reported;
+        private StringBuilder? _legacyCandidate = new();
+
+        public void Complete()
+        {
+            if (_reported) return;
+            if (!_discardLine && _line.Length > 0) ReadLine();
+            if (!_reported && ChatApiErrorHelper.ReadLegacySharedQuota(_legacyCandidate?.ToString()) is { } error)
+                Report(error);
+        }
+
+        private void Report(ChatRequestError error)
+        {
+            if (_reported) return;
+            _reported = true;
+            report?.Invoke(error);
+        }
+
+        private void ObserveLegacyText(JsonElement root)
+        {
+            if (_legacyCandidate is null || root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("choices", out var choices) || choices.ValueKind != JsonValueKind.Array
+                || choices.GetArrayLength() == 0 || choices[0].ValueKind != JsonValueKind.Object
+                || !choices[0].TryGetProperty("delta", out var delta) || delta.ValueKind != JsonValueKind.Object)
+                return;
+            if (delta.TryGetProperty("tool_calls", out var tools) && tools.ValueKind == JsonValueKind.Array && tools.GetArrayLength() > 0)
+            {
+                _legacyCandidate = null;
+                return;
+            }
+            if (!delta.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.String) return;
+            var part = content.GetString() ?? "";
+            var notice = ChatApiErrorHelper.LegacySharedQuotaNotice;
+            if (_legacyCandidate.Length + part.Length > notice.Length + 64)
+            {
+                _legacyCandidate = null;
+                return;
+            }
+            _legacyCandidate.Append(part);
+            var probe = _legacyCandidate.ToString().TrimStart();
+            if (!notice.StartsWith(probe, StringComparison.Ordinal) && !string.Equals(probe.TrimEnd(), notice, StringComparison.Ordinal))
+                _legacyCandidate = null;
+        }
+
+        public void Feed(ReadOnlySpan<byte> bytes)
+        {
+            if (_reported || report is null) return;
+            while (!bytes.IsEmpty)
+            {
+                var end = bytes.IndexOf((byte)'\n');
+                var segment = end >= 0 ? bytes[..end] : bytes;
+                if (!_discardLine && _line.Length + segment.Length <= MaxLineBytes)
+                    _line.Write(segment);
+                else
+                    _discardLine = true;
+                if (end < 0) return;
+                if (!_discardLine) ReadLine();
+                _line.SetLength(0);
+                _discardLine = false;
+                if (_reported) return;
+                bytes = bytes[(end + 1)..];
+            }
+        }
+
+        private void ReadLine()
+        {
+            var line = Encoding.UTF8.GetString(_line.GetBuffer(), 0, (int)_line.Length).TrimEnd('\r');
+            if (line.Length == 0) { _eventName = null; return; }
+            if (line.StartsWith("event:", StringComparison.Ordinal))
+            {
+                _eventName = line[6..].Trim();
+                return;
+            }
+            if (!line.StartsWith("data:", StringComparison.Ordinal)) return;
+            var data = line[5..].Trim();
+            if (data.Length == 0) return;
+            if (data == "[DONE]")
+            {
+                if (ChatApiErrorHelper.ReadLegacySharedQuota(_legacyCandidate?.ToString()) is { } legacy)
+                    Report(legacy);
+                return;
+            }
+            ChatRequestError? error;
+            try
+            {
+                using var document = JsonDocument.Parse(data);
+                error = ChatApiErrorHelper.ReadBusinessError(document.RootElement, _eventName);
+                if (error is null) ObserveLegacyText(document.RootElement);
+            }
+            catch (JsonException)
+            {
+                error = _eventName is "error" or "mola_error" or "response.failed"
+                    ? ChatApiErrorHelper.ReadProviderError(data) : null;
+            }
+            if (error is not null) Report(error);
+        }
+    }
+
     /// <summary>Where a turn's LLM traffic should actually go, resolved per turn.</summary>
     /// <param name="Endpoint">Absolute URL of the real chat-completions endpoint
     /// (account relay <c>.php</c>, or a BYOK provider's chat endpoint).</param>
@@ -66,7 +172,11 @@ public sealed class PiWorkLlmShim : IDisposable
         Action<System.Text.Json.Nodes.JsonObject>? AdaptBody = null,
         Action<HttpResponseMessage>? ResponseReceived = null,
         string? ModelId = null,
-        Action<ReadOnlyMemory<byte>>? RelayTap = null);
+        Action<ReadOnlyMemory<byte>>? RelayTap = null,
+        CancellationToken TurnCancellation = default,
+        IProgress<PendingStatusDelta>? WorkStatus = null,
+        Action<ChatRequestError?>? WorkError = null,
+        Func<ChatRequestError?>? ReadWorkError = null);
 
     public sealed record GenerationOptions(
         string Api, double? Temperature, double? TopP, int? MaxTokens,
@@ -179,7 +289,8 @@ public sealed class PiWorkLlmShim : IDisposable
     private async Task HandleAsync(HttpListenerContext ctx)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var requestId = Guid.NewGuid().ToString("N")[..8];
+        var operationKey = Guid.NewGuid().ToString("N");
+        var requestId = operationKey[..8];
         var outcome = "failed";
         _log?.Invoke($"[llm-shim] request={requestId} started");
         try
@@ -205,8 +316,10 @@ public sealed class PiWorkLlmShim : IDisposable
                 return;
             }
 
+            using var requestLifetime = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, target.TurnCancellation);
+            var ct = requestLifetime.Token;
             using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-            var body = await reader.ReadToEndAsync().ConfigureAwait(false);
+            var body = await reader.ReadToEndAsync(ct).ConfigureAwait(false);
             var preparedBody = RewriteBody(body, target);
             if (target.AdaptBody is { } adapt
                 && System.Text.Json.Nodes.JsonNode.Parse(preparedBody) is System.Text.Json.Nodes.JsonObject adapted)
@@ -214,15 +327,28 @@ public sealed class PiWorkLlmShim : IDisposable
                 adapt(adapted);
                 preparedBody = adapted.ToJsonString(RelaxedJson);
             }
+            var official = Uri.TryCreate(url, UriKind.Absolute, out var endpoint)
+                && endpoint.Scheme == "https" && endpoint.Host == "chatgpt.wljay.cn" && endpoint.IsDefaultPort
+                && endpoint.AbsolutePath == "/v2/api/auth/desktop_chat_completions.php";
+            var retriedConcurrency = false;
             for (var attempt = 0; attempt < 2; attempt++)
             {
+                // Pi may retry an SSE failure as another HTTP request. The first
+                // terminal error belongs to this turn and must not spend more quota.
+                if (official && target.ReadWorkError?.Invoke() is { } priorError)
+                {
+                    outcome = "work_error_latched";
+                    await WriteError(ctx, 409, priorError.Message).ConfigureAwait(false);
+                    return;
+                }
                 var attemptStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 target.PromptPrepared?.Invoke(preparedBody);
                 using var upstream = new HttpRequestMessage(HttpMethod.Post, url)
                 {
                     Content = new StringContent(preparedBody, Encoding.UTF8, "application/json"),
                 };
-                var token = await target.TokenProvider(_cts.Token).ConfigureAwait(false);
+                if (official) upstream.Headers.TryAddWithoutValidation("Idempotency-Key", operationKey);
+                var token = await target.TokenProvider(ct).ConfigureAwait(false);
                 if (!string.IsNullOrEmpty(token))
                 {
                     switch (target.Auth)
@@ -248,11 +374,33 @@ public sealed class PiWorkLlmShim : IDisposable
                     upstream.Headers.TryAddWithoutValidation("session-id", sessionId);
 
                 using var resp = await target.Http
-                    .SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, _cts.Token)
+                    .SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, ct)
                     .ConfigureAwait(false);
                 _log?.Invoke($"[llm-shim] request={requestId} attempt={attempt + 1} HTTP={(int)resp.StatusCode} headers_ms={System.Diagnostics.Stopwatch.GetElapsedTime(attemptStarted).TotalMilliseconds:F0}");
 
-                if (resp.StatusCode == HttpStatusCode.Unauthorized)
+                ChatRequestError? workError = null;
+                if (official && !resp.IsSuccessStatusCode && resp.Content.Headers.ContentType?.MediaType == "application/json")
+                {
+                    var error = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                    try
+                    {
+                        using var json = JsonDocument.Parse(error);
+                        workError = ChatApiErrorHelper.ReadBusinessError(json.RootElement, httpStatus: (int)resp.StatusCode, accountRequest: true);
+                    }
+                    catch (JsonException) { }
+
+                    if (!retriedConcurrency && resp.StatusCode == HttpStatusCode.TooManyRequests
+                        && workError is { Type: "concurrency_limit", Retryable: true, RetryAfter: > 0 and <= 30 })
+                    {
+                        retriedConcurrency = true;
+                        target.WorkStatus?.Report(new PendingStatusDelta(
+                            "等待其他回答完成", $"{workError.RetryAfter.Value} 秒后重试。"));
+                        await Task.Delay(TimeSpan.FromSeconds(workError.RetryAfter.Value), ct).ConfigureAwait(false);
+                        attempt--;
+                        continue;
+                    }
+                }
+                if (resp.StatusCode == HttpStatusCode.Unauthorized && (workError is null || workError.NeedsSignIn))
                 {
                     try { target.OnUnauthorized?.Invoke(token); }
                     catch (Exception ex) { _log?.Invoke("[llm-shim] unauthorized handler: " + ex.Message); }
@@ -263,26 +411,34 @@ public sealed class PiWorkLlmShim : IDisposable
                     catch (Exception ex) { _log?.Invoke("[llm-shim] response observer: " + ex.Message); }
                 }
 
-                await using var upstreamStream = await resp.Content.ReadAsStreamAsync(_cts.Token).ConfigureAwait(false);
+                await using var upstreamStream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
                 var prefix = attempt == 0
-                    ? await ReadResponsePrefixAsync(upstreamStream, resp, _cts.Token).ConfigureAwait(false)
+                    ? await ReadResponsePrefixAsync(upstreamStream, resp, ct).ConfigureAwait(false)
                     : (Bytes: Array.Empty<byte>(), UnsupportedImage: false);
                 if (prefix.UnsupportedImage && PiImageFallback.ReplaceImages(preparedBody) is { } textOnly)
                 {
                     preparedBody = textOnly.ToJsonString(RelaxedJson);
+                    operationKey = Guid.NewGuid().ToString("N");
                     _log?.Invoke($"[llm-shim] request={requestId} retrying without image blocks");
                     continue;
                 }
 
+                // The existing image-capability fallback is resolved before
+                // recording a terminal error. Never clear a previous error.
+                if (official && workError is not null) target.WorkError?.Invoke(workError);
                 ctx.Response.StatusCode = (int)resp.StatusCode;
                 ctx.Response.ContentType = resp.Content.Headers.ContentType?.ToString() ?? "text/event-stream";
                 ctx.Response.SendChunked = true;
                 var buffer = new byte[8192];
+                var errorObserver = official && resp.IsSuccessStatusCode
+                    && resp.Content.Headers.ContentType?.MediaType == "text/event-stream"
+                    ? new WorkStreamErrorObserver(target.WorkError) : null;
                 ReadOnlyMemory<byte> chunk = prefix.Bytes;
                 do
                 {
                     if (!chunk.IsEmpty)
                     {
+                        errorObserver?.Feed(chunk.Span);
                         if (target.RelayTap is { } tap)
                         {
                             // Watchers must never break the relay: a parse error in
@@ -292,8 +448,8 @@ public sealed class PiWorkLlmShim : IDisposable
                         }
                         try
                         {
-                            await ctx.Response.OutputStream.WriteAsync(chunk, _cts.Token).ConfigureAwait(false);
-                            await ctx.Response.OutputStream.FlushAsync(_cts.Token).ConfigureAwait(false);
+                            await ctx.Response.OutputStream.WriteAsync(chunk, ct).ConfigureAwait(false);
+                            await ctx.Response.OutputStream.FlushAsync(ct).ConfigureAwait(false);
                         }
                         catch (Exception ex) when (ex is HttpListenerException or IOException or ObjectDisposedException)
                         {
@@ -301,11 +457,20 @@ public sealed class PiWorkLlmShim : IDisposable
                             return;
                         }
                     }
-                    var read = await upstreamStream.ReadAsync(buffer, _cts.Token).ConfigureAwait(false);
+                    // The gateway emits a canonical OpenAI error and ends the
+                    // stream. Do not relay another upstream read after that error.
+                    if (errorObserver?.HasError == true)
+                    {
+                        outcome = "stream_error";
+                        return;
+                    }
+                    var read = await upstreamStream.ReadAsync(buffer, ct).ConfigureAwait(false);
                     chunk = buffer.AsMemory(0, read);
                 }
                 while (!chunk.IsEmpty);
-                outcome = resp.IsSuccessStatusCode ? "completed" : "http_error";
+                errorObserver?.Complete();
+                outcome = errorObserver?.HasError == true ? "stream_error"
+                    : resp.IsSuccessStatusCode ? "completed" : "http_error";
                 return;
             }
         }
@@ -315,9 +480,10 @@ public sealed class PiWorkLlmShim : IDisposable
             try { await WriteError(ctx, 401, ex.Message).ConfigureAwait(false); }
             catch { /* client gone */ }
         }
-        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
             outcome = "cancelled";
+            ctx.Response.Abort();
         }
         catch (Exception ex)
         {

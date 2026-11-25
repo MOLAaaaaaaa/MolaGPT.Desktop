@@ -18,7 +18,7 @@ namespace MolaGPT.Core.Chat.Agents.Pi;
 ///   <item>A sweep also reclaims files orphaned by routes that notify nobody — a
 ///     crash mid-turn, a database reset, a conversation purge.</item>
 /// </list>
-/// Runs at startup only, when no sidecar can hold a session file open.
+/// Startup maintenance only considers files that predate the sweep's cutoff.
 /// </summary>
 public sealed class PiWorkSessionSweeper
 {
@@ -31,6 +31,8 @@ public sealed class PiWorkSessionSweeper
     /// Returns the number of files deleted.
     /// </summary>
     /// <param name="liveSubagentKeys">Child sessions named in retained conversation history.</param>
+    /// <param name="cutoff">Only files created and last written before this time are eligible.</param>
+    /// <param name="ct">Stops a deferred sweep when the application shuts down.</param>
     /// <remarks>
     /// Matching is by <em>containment</em> of the sanitised conversation id in the file
     /// name, because Pi decorates the name it is given (<c>&lt;timestamp&gt;_&lt;id&gt;.jsonl</c>).
@@ -39,7 +41,8 @@ public sealed class PiWorkSessionSweeper
     /// is the safe direction to err in.
     /// </remarks>
     public int Sweep(IReadOnlyCollection<string> liveConversationIds,
-        IReadOnlyCollection<string>? liveSubagentKeys = null)
+        IReadOnlyCollection<string>? liveSubagentKeys = null, DateTime? cutoff = null,
+        CancellationToken ct = default)
     {
         // An empty set almost certainly means "could not read the database", not
         // "the user has no conversations". Deleting everything on that reading
@@ -56,11 +59,15 @@ public sealed class PiWorkSessionSweeper
         var removed = 0;
         foreach (var file in Directory.EnumerateFiles(_sessionRoot, "*.jsonl", SearchOption.AllDirectories))
         {
+            if (ct.IsCancellationRequested) break;
             var name = Path.GetFileNameWithoutExtension(file);
             if (live.Any(id => name.Contains(id, StringComparison.Ordinal))) continue;
 
             try
             {
+                if (cutoff is { } time
+                    && (File.GetCreationTimeUtc(file) >= time || File.GetLastWriteTimeUtc(file) >= time))
+                    continue;
                 File.Delete(file);
                 removed++;
             }

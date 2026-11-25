@@ -36,6 +36,7 @@ public sealed class ArtifactCanvasBody : UserControl
     // enough to read as live. It was 250 ms when each one rebuilt the whole file.
     private static readonly TimeSpan StreamingInterval = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan RevealTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan WebReleaseDelay = TimeSpan.FromMinutes(5);
 
     // Created on first use: the browser process behind it costs ~100 MB,
     // which a user who never opens a page should not pay.
@@ -58,6 +59,7 @@ public sealed class ArtifactCanvasBody : UserControl
     private readonly Border _errorBar;
     private readonly Border _trafficBar;
     private readonly DispatcherTimer _streamingTimer;
+    private readonly DispatcherTimer _webReleaseTimer;
     private CodeView? _sourceView;
     private ScrollViewer? _sourceScroller;
     private (string Id, int Version)? _sourceDocument;
@@ -222,7 +224,29 @@ public sealed class ArtifactCanvasBody : UserControl
             Render();
         };
 
+        _webReleaseTimer = new DispatcherTimer { Interval = WebReleaseDelay };
+        _webReleaseTimer.Tick += (_, _) =>
+        {
+            _webReleaseTimer.Stop();
+            if (!_webMode) ReleaseWebView();
+        };
+
         ActualThemeVariantChanged += (_, _) => OnThemeChanged();
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        _streamingTimer.Stop();
+        _webReleaseTimer.Stop();
+        base.OnDetachedFromVisualTree(e);
+    }
+
+    private void ReleaseWebView()
+    {
+        if (_web is not { } web) return;
+        _sandbox.Detach();
+        _web = null;
+        _stage.Children.Remove(web);
     }
 
     // ---- entry -----------------------------------------------------------------
@@ -334,7 +358,11 @@ public sealed class ArtifactCanvasBody : UserControl
 
             _sandbox.Blank();
         }
-        if (_web is not null) _web.AllowSuspend = true;
+        if (_web is not null)
+        {
+            _web.AllowSuspend = true;
+            if (!_webReleaseTimer.IsEnabled) _webReleaseTimer.Start();
+        }
 
         _trafficBar.IsVisible = false;
         Track(content as ImageMarkupView);
@@ -344,6 +372,7 @@ public sealed class ArtifactCanvasBody : UserControl
 
     private async Task ShowWebAsync(string originKey, string html, int generation, bool staticPreview)
     {
+        _webReleaseTimer.Stop();
         _webMode = true;
         _webReady = false;
         _snapshot = false;
@@ -403,6 +432,7 @@ public sealed class ArtifactCanvasBody : UserControl
             _web.IsVisible = false;
             _webMode = false;
             _webReady = false;
+            _webReleaseTimer.Start();
             _trafficBar.IsVisible = false;
             _native.Content = Empty(
                 "网页预览不可用",

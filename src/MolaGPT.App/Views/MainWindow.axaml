@@ -68,9 +68,15 @@
           <Grid IsVisible="{Binding !IsImageWorkbenchVisible}">
             <!-- Transcript fills the card; the composer floats over it. -->
             <views:TranscriptView Name="PART_Transcript" />
-            <views:ComposerView Name="PART_Composer"
-                                VerticalAlignment="Bottom"
-                                Margin="40,0,40,24" />
+            <StackPanel Name="PART_ComposerOverlay" VerticalAlignment="Bottom" Margin="40,0,40,24">
+              <StackPanel Orientation="Horizontal" Spacing="8" Margin="10,0,0,5"
+                          IsVisible="{Binding HasAccountSecurityStatus}">
+                <TextBlock Text="{Binding AccountSecurityStatus}" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Brush.Text.Secondary}" FontSize="12" />
+                <Button Padding="8,3" Content="查看详情" Click="OnAccountSecurityClick" />
+              </StackPanel>
+              <views:ComposerView Name="PART_Composer" />
+            </StackPanel>
           </Grid>
           <ContentControl Name="PART_ImageWorkbenchHost"
                           Margin="0,72,0,0"

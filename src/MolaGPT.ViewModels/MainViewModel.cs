@@ -75,6 +75,10 @@ public sealed partial class MainViewModel : ObservableObject
     private int _usageRefreshVersion;
     private UsageSource _usageSource;
     private (MolaGptStatus Status, DateTimeOffset ReadAt)? _molaGptStatus;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasAccountSecurityStatus))]
+    private string? _accountSecurityStatus;
+    public bool HasAccountSecurityStatus => !string.IsNullOrWhiteSpace(AccountSecurityStatus);
 
     public MainViewModel(
         ConversationListViewModel conversationList,
@@ -298,39 +302,39 @@ public sealed partial class MainViewModel : ObservableObject
             usage.Clear();
         }
 
-        switch (source)
+        var official = MolaGptProviderIds.IsMolaGptAccount(Chat.ActiveProvider?.Id);
+        var desktopWork = Chat.ActiveProvider?.Id == MolaGptProviderIds.LocalTools;
+        var cached = _molaGptStatus?.Status;
+        AccountSecurityStatus = official ? (desktopWork ? cached?.WorkSecurityStatus : cached?.SecurityStatus) : null;
+        Composer.CanResumeRestrictedWork = false;
+        if (!Settings.IsLoggedIn || _molaGptProxy is null || (!official && source == UsageSource.None)) return;
+
+        try
         {
-            case UsageSource.MolaGpt:
-                var modelId = Chat.ActiveModel?.Id ?? string.Empty;
-                if (!force && _molaGptStatus is { } cached && DateTimeOffset.UtcNow - cached.ReadAt < UsageFreshFor)
+            if (force || _molaGptStatus is not { } last || DateTimeOffset.UtcNow - last.ReadAt >= UsageFreshFor)
+            {
+                cached = await _molaGptProxy.FetchStatusAsync(ct);
+                if (version != _usageRefreshVersion) return;
+                if (cached is null)
                 {
-                    usage.ShowCredits(cached.Status, modelId);
+                    Settings.IsLoggedIn = false;
+                    AccountSecurityStatus = null;
                     return;
                 }
-                try
-                {
-                    var status = await _molaGptProxy!.FetchStatusAsync(ct);
-                    if (version != _usageRefreshVersion) return;
-                    if (status is null)
-                    {
-                        Settings.IsLoggedIn = false;
-                        return;
-                    }
-                    _molaGptStatus = (status, DateTimeOffset.UtcNow);
-                    Settings.IsDonor = status.IsDonor;
-                    usage.ShowCredits(status, Chat.ActiveModel?.Id ?? string.Empty);
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (MolaGptAuthExpiredException)
-                {
-                    if (version == _usageRefreshVersion) Settings.IsLoggedIn = false;
-                }
-                catch (Exception) { }
-                return;
-
-            default:
-                return;
+                _molaGptStatus = (cached, DateTimeOffset.UtcNow);
+                Settings.IsDonor = cached.IsDonor;
+            }
+            AccountSecurityStatus = official ? (desktopWork ? cached!.WorkSecurityStatus : cached!.SecurityStatus) : null;
+            Composer.CanResumeRestrictedWork = desktopWork && cached!.CanResumeWork;
+            if (source == UsageSource.MolaGpt)
+                usage.ShowCredits(cached!, Chat.ActiveModel?.Id ?? string.Empty);
         }
+        catch (OperationCanceledException) { throw; }
+        catch (MolaGptAuthExpiredException)
+        {
+            if (version == _usageRefreshVersion) Settings.IsLoggedIn = false;
+        }
+        catch (Exception) { }
     }
 
     /// <summary>The drawer is offered whenever the conversation has anything in
@@ -898,9 +902,15 @@ public sealed partial class MainViewModel : ObservableObject
         UpdateAvailable = true;
     }
 
-    public void ReportUpdateDownloadProgress(double progress)
+    public void ReportUpdateDownloadProgress(double? progress)
     {
-        var percent = Math.Clamp((int)(progress * 100), 0, 100);
+        if (progress is not { } value)
+        {
+            UpdateChipDetail = string.Empty;
+            UpdateTooltip = "正在下载更新";
+            return;
+        }
+        var percent = Math.Clamp((int)(value * 100), 0, 100);
         UpdateChipDetail = $"{percent}%";
         UpdateTooltip = $"正在下载更新 {percent}%";
     }

@@ -4,7 +4,6 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MolaGPT.Core.Chat;
-using MolaGPT.Core.Chat.Tasks;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
 
 namespace MolaGPT.Storage.Repositories;
@@ -57,59 +56,75 @@ public sealed class MessageRepository
             new { conversationId }).ToList();
     }
 
-    public IReadOnlyList<MessageRow> ListAll(string conversationId)
+    public HashSet<string> ListConversationIdsWithMessages()
     {
         using var conn = _db.Open();
-        return conn.Query<MessageRow>(
-            @"SELECT id AS Id, conversation_id AS ConversationId, role AS Role, content AS Content,
+        return conn.Query<string>("SELECT DISTINCT conversation_id FROM messages").ToHashSet(StringComparer.Ordinal);
+    }
+
+    public bool HasActiveMessages(string conversationId)
+    {
+        using var conn = _db.Open();
+        return conn.ExecuteScalar<bool>(@"SELECT EXISTS (
+            SELECT 1 FROM conversations AS c
+            JOIN conversation_timelines AS t ON t.id = c.active_timeline_id
+            JOIN messages AS m ON m.id = t.leaf_message_id
+            WHERE c.id = @conversationId
+        )", new { conversationId });
+    }
+
+    private const string ListAllSql = @"SELECT id AS Id, conversation_id AS ConversationId, role AS Role, content AS Content,
                      meta AS Meta, created_at AS CreatedAt, parent_id AS ParentId
               FROM messages
               WHERE conversation_id = @conversationId
-              ORDER BY created_at ASC, rowid ASC",
-            new { conversationId }).ToList();
+              ORDER BY created_at ASC, rowid ASC";
+
+    private const string ActiveTimelineJoin = @" FROM conversations AS c
+             JOIN conversation_timelines AS t ON t.id = c.active_timeline_id";
+
+    public IReadOnlyList<MessageRow> ListAll(string conversationId)
+    {
+        using var conn = _db.Open();
+        return conn.Query<MessageRow>(ListAllSql, new { conversationId }).AsList();
+    }
+
+    public MessageRow? GetActiveLeaf(string conversationId)
+    {
+        using var conn = _db.Open();
+        return conn.QuerySingleOrDefault<MessageRow>(@"SELECT m.id AS Id, m.conversation_id AS ConversationId,
+            m.role AS Role, m.content AS Content, '' AS Meta, m.created_at AS CreatedAt, m.parent_id AS ParentId" +
+            ActiveTimelineJoin + @" JOIN messages AS m ON m.id = t.leaf_message_id
+            WHERE c.id = @conversationId", new { conversationId });
+    }
+
+    public (IReadOnlyList<MessageRow> All, string? ActiveLeafId) ReadConversationSnapshot(string conversationId)
+    {
+        using var conn = _db.Open();
+        using var tx = conn.BeginTransaction(deferred: true);
+        var parameters = new { conversationId };
+        var leaf = conn.QuerySingleOrDefault<string>(
+            "SELECT t.leaf_message_id" + ActiveTimelineJoin + " WHERE c.id = @conversationId", parameters, tx);
+        var rows = conn.Query<MessageRow>(ListAllSql, parameters, tx).AsList();
+        tx.Commit();
+        return (rows, leaf);
     }
 
     public IReadOnlyList<string> ListSubagentSessionKeys(string? conversationId = null)
     {
         using var conn = _db.Open();
-        var metas = conn.Query<string>(
-            @"SELECT m.meta FROM messages AS m
+        using var command = conn.CreateCommand();
+        // GetStream needs the rowid and the original column to open a SqliteBlob.
+        command.CommandText = @"SELECT m.rowid, m.meta FROM messages AS m
               JOIN conversations AS c ON c.id = m.conversation_id
               WHERE (@conversationId IS NULL OR c.id = @conversationId) AND m.role = 'assistant'
-                AND (m.meta LIKE '%spawn_agent%' OR m.meta LIKE '%followup_agent%')", new { conversationId });
+                AND (m.meta LIKE '%spawn_agent%' OR m.meta LIKE '%followup_agent%')";
+        command.Parameters.AddWithValue("@conversationId", (object?)conversationId ?? DBNull.Value);
+        using var reader = command.ExecuteReader();
         var keys = new HashSet<string>(StringComparer.Ordinal);
-        void Collect(JsonElement tools)
+        while (reader.Read())
         {
-            if (tools.ValueKind != JsonValueKind.Array) return;
-            foreach (var tool in tools.EnumerateArray())
-            {
-                if (tool.ValueKind != JsonValueKind.Object
-                    || !tool.TryGetProperty("name", out var name)
-                    || name.ValueKind != JsonValueKind.String
-                    || !tool.TryGetProperty("result_preview_json", out var preview)
-                    || preview.ValueKind != JsonValueKind.String) continue;
-                var stored = SubagentTool.ReadStored(new ToolCallDelta(string.Empty,
-                    name.GetString()!, string.Empty, ResultPreviewJson: preview.GetString()));
-                if (stored is not null) keys.Add("subagent_" + stored.AgentId);
-            }
-        }
-        foreach (var meta in metas)
-        {
-            try
-            {
-                using var doc = JsonDocument.Parse(meta);
-                var root = doc.RootElement;
-                if (root.TryGetProperty("tool_calls", out var tools)) Collect(tools);
-                if (root.TryGetProperty("retry", out var retry)
-                    && retry.ValueKind == JsonValueKind.Object
-                    && retry.TryGetProperty("attempts", out var attempts)
-                    && attempts.ValueKind == JsonValueKind.Array)
-                    foreach (var attempt in attempts.EnumerateArray())
-                        if (attempt.ValueKind == JsonValueKind.Object
-                            && attempt.TryGetProperty("tool_calls", out var attemptTools))
-                            Collect(attemptTools);
-            }
-            catch (JsonException) { }
+            using var stream = reader.GetStream(1);
+            SubagentSessionMetadata.CollectKeys(stream, keys);
         }
         return keys.ToArray();
     }

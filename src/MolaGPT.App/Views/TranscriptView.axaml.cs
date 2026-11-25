@@ -213,7 +213,8 @@ public partial class TranscriptView : UserControl
 
     internal bool CanAutoCollapseTools() => _followBottom && !_wheelAnimating && !_jumping
         && !_selectionDragging && _selection is null && _pressedBlock is null
-        && !this.GetVisualDescendants().OfType<ToolRunView>().Any(view => view.IsPointerOver);
+        && !this.GetVisualDescendants().OfType<ToolRunView>().Any(view => view.IsPointerOver)
+        && !this.GetVisualDescendants().OfType<ProcessTimelineView>().Any(view => view.IsPointerOver);
 
     private void OnRowsChanged()
     {
@@ -801,8 +802,10 @@ public partial class TranscriptView : UserControl
 
         _messageMenu.Items.Clear();
         _messageMenu.Items.Add(MenuEntry("编辑", () => EditRequested?.Invoke(this, message)));
-        if (message.Role == "assistant" && message.IsLatestAssistant && message.FullContent.Length > 0)
-            _messageMenu.Items.Add(MenuEntry("续写", () => ContinueRequested?.Invoke(this, message)));
+        if (message.Role == "assistant" && message.IsLatestAssistant
+            && (message.RequestError?.IsPausedWork == true ? message.IsWorkContinuationAvailable : message.FullContent.Length > 0))
+            _messageMenu.Items.Add(MenuEntry(message.RequestError?.IsPausedWork == true ? "继续任务" : "续写",
+                () => ContinueRequested?.Invoke(this, message)));
         _messageMenu.Items.Add(new MenuItem { Header = "-" });
         _messageMenu.Items.Add(MenuEntry("从此处建立分支", () => ForkRequested?.Invoke(this, message)));
         _messageMenu.Items.Add(MenuEntry("分支为新对话", () => BranchToConversationRequested?.Invoke(this, message)));
@@ -1021,6 +1024,12 @@ public partial class TranscriptView : UserControl
     {
         if (sender is Control { DataContext: TranscriptRow row })
             ErrorActionRequested?.Invoke(this, row.Message);
+    }
+
+    private void OnResumePausedWork(object? sender, RoutedEventArgs e)
+    {
+        if (sender is Control { DataContext: TranscriptRow row } && row.Message.IsWorkContinuationAvailable)
+            ContinueRequested?.Invoke(this, row.Message);
     }
 
     public event EventHandler<MessageViewModel>? ErrorActionRequested;

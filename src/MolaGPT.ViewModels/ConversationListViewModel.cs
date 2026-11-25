@@ -370,12 +370,9 @@ public sealed partial class ConversationListViewModel : ObservableObject
     private void RefreshAllPersonaLabels()
     {
         if (_repository is null || _personas is null) return;
-        var byId = _repository.ListActive().ToDictionary(r => r.Id, r => r.PersonaId);
+        var byId = _repository.ListActivePersonaAssignments();
         foreach (var item in Items)
-        {
-            if (byId.TryGetValue(item.Id, out var pid))
-                item.PersonaLabel = _personas.Find(pid)?.Name;
-        }
+            item.PersonaLabel = _personas.Find(byId.GetValueOrDefault(item.Id))?.Name;
     }
 
     /// <summary>Reload from SQLite (or use mocks when no repository is wired).</summary>

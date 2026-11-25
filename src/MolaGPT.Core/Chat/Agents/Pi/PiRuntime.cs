@@ -25,6 +25,7 @@ public sealed class PiRuntime : IAsyncDisposable
     /// three normal-turn permits remain available while up to eight child turns
     /// run, so a parent waiting for its child never occupies the child's slot.</summary>
     public const int DefaultMaxSidecars = 11;
+    private const int MaxIdleSidecars = 2;
     private const int MaxSubagentSidecars = 8;
 
     /// <summary>How long an unused sidecar lingers before it is reclaimed. The pool
@@ -441,19 +442,23 @@ public sealed class PiRuntime : IAsyncDisposable
     {
         _shim.SetTarget(entry.Token, null);
         _bridge.SetBinding(entry.Token, null);
-        var retire = false;
+        Entry? victim = null;
         lock (_gate)
         {
             entry.InUse = false;
             entry.LastUsedUtc = DateTime.UtcNow;
             if (entry.RetireOnRelease || (_background && entry.ConversationKey is null))
             {
-                _entries.Remove(entry);
-                retire = true;
+                victim = entry;
             }
+            else if (_entries.Count(e => !e.InUse) > MaxIdleSidecars)
+            {
+                victim = _entries.Where(e => !e.InUse).MinBy(e => e.LastUsedUtc);
+            }
+            if (victim is not null) _entries.Remove(victim);
         }
         ReleaseSlots(classSlots);
-        if (retire) RetireDetached(entry);
+        if (victim is not null) RetireDetached(victim);
     }
 
     internal void ReleaseLease(Entry entry, SemaphoreSlim classSlots) => Release(entry, classSlots);

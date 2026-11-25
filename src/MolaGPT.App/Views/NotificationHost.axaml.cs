@@ -69,6 +69,18 @@ public partial class NotificationHost : UserControl
         RefreshOverflow();
     }
 
+    internal bool UpdateExistingProgress(AppNotification notification)
+    {
+        if (string.IsNullOrEmpty(notification.Key)) return false;
+        var existing = _banners.FirstOrDefault(b => b.Key == notification.Key
+            && b.Notification.Kind == NotifyKind.Progress);
+        if (existing is null) return false;
+
+        existing.Apply(notification);
+        RefreshOverflow();
+        return true;
+    }
+
     internal void SetSecondaryWindowLayout(bool secondaryWindow)
     {
         _overflowFlyout?.Hide();

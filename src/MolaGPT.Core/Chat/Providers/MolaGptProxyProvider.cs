@@ -91,7 +91,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
                 SupportsVision: showImageUpload,
                 SupportsThinking: supportsThinking,
                 SupportsReasoningEffort: supportsReasoning,
-                SupportsToolCalling: true));
+                SupportsToolCalling: true,
+                ThinkingConfig: ReadQwenReasoningConfig(cfg)));
             apiMap[modelName] = apiUrl;
         }
 
@@ -149,12 +150,29 @@ public sealed class MolaGptProxyProvider : IChatProvider
                 SupportsThinking: supportsThinking,
                 SupportsReasoningEffort: supportsReasoning,
                 SupportsToolCalling: supportsToolCalling,
-                ThinkingConfig: BuildLocalToolsThinkingConfig(
+                ThinkingConfig: ReadQwenReasoningConfig(cfg) ?? BuildLocalToolsThinkingConfig(
                     modelName!, supportsThinking, supportsReasoning,
                     cfg["reasoningEffortAdapter"]?.GetValue<string>())));
         }
 
         return list;
+    }
+
+    private static ThinkingConfig? ReadQwenReasoningConfig(JsonObject cfg)
+    {
+        if (cfg["supportsReasoningEffort"]?.GetValue<bool>() != true
+            || cfg["reasoningEffortAdapter"]?.GetValue<string>() != "openai_chat_reasoning_effort"
+            || cfg["reasoningToggleAdapter"]?.GetValue<string>() != "qwen_enable_thinking")
+            return null;
+
+        // The thinking toggle already represents "none".
+        var levels = cfg["reasoningEffortLevels"] is JsonArray configured
+            ? ThinkingEffortLevels.Normalize(configured.Select(level => level?.GetValue<string>() ?? ""))
+                .Where(level => level != "none").ToArray()
+            : [];
+        var defaultEffort = cfg["defaultReasoningEffort"]?.GetValue<string>()?.Trim().ToLowerInvariant();
+        return new ThinkingConfig(ThinkingParamKind.QwenReasoningEffort,
+            EffortLevels: levels, DefaultEffort: levels.Contains(defaultEffort) ? defaultEffort : null);
     }
 
     private static ThinkingConfig? BuildLocalToolsThinkingConfig(
@@ -308,6 +326,10 @@ public sealed class MolaGptProxyProvider : IChatProvider
             }
         }
 
+        var security = user["account_security"];
+        var permissions = security?["permissions"];
+        var workModelBlocked = permissions?["blocked_model_scopes"] is JsonArray scopes
+            && scopes.Any(scope => scope?.GetValue<string>() == "desktop_chat");
         return new MolaGptStatus(
             Username: username,
             Unlimited: unlimited,
@@ -318,7 +340,37 @@ public sealed class MolaGptProxyProvider : IChatProvider
             ModelStatus: modelStatus,
             Credits: credits,
             PersonalizedMemoryEnabled: personalizedMemoryEnabled,
-            Membership: user["membership"]?.Deserialize<AccountMembership>());
+            Membership: user["membership"]?.Deserialize<AccountMembership>(),
+            SecurityStatus: ReadSecurityStatus(security, desktopWork: false, workModelBlocked: workModelBlocked),
+            WorkSecurityStatus: ReadSecurityStatus(security, desktopWork: true, workModelBlocked: workModelBlocked),
+            CanResumeWork: permissions?["account_access"]?.GetValue<bool>() == true
+                && permissions["official_models"]?.GetValue<bool>() == true
+                && permissions["free_usage"]?.GetValue<bool>() == true
+                && !workModelBlocked);
+    }
+
+    private static string? ReadSecurityStatus(JsonNode? security, bool desktopWork, bool workModelBlocked)
+    {
+        var permissions = security?["permissions"];
+        var restrictions = (security?["restrictions"] as JsonArray)?.OfType<JsonObject>() ?? [];
+        string? Recovery(IEnumerable<JsonObject> active, string field)
+        {
+            var dates = active.Select(r => r[field]?.GetValue<long>()).ToArray();
+            if (dates.Length == 0 || dates.Any(t => t is null || t <= DateTimeOffset.UtcNow.ToUnixTimeSeconds())) return null;
+            return DateTimeOffset.FromUnixTimeSeconds(dates.Max()!.Value).ToLocalTime().ToString("M月d日 HH:mm");
+        }
+        if (permissions?["official_models"]?.GetValue<bool>() == false || (desktopWork && workModelBlocked))
+        {
+            var applicable = restrictions.Where(r => r["affects"] is JsonArray scopes && scopes.Any(s =>
+                s?.GetValue<string>() is "account" or "official_models"
+                || (desktopWork && s?.GetValue<string>() is ("desktop_chat" or "desktop_gateway"))));
+            var label = permissions?["official_models"]?.GetValue<bool>() == false
+                ? "官方模型服务暂时受限。" : "桌面 Work 暂时受限。";
+            return label + (Recovery(applicable, "ends_at") is { } end ? $"预计于 {end} 恢复。" : "");
+        }
+        return permissions?["free_usage"]?.GetValue<bool>() == false
+            ? "免费额度暂时受限。" + (Recovery(restrictions.Where(r => r["type"]?.GetValue<string>() == "free_cooldown"), "blocked_until")
+                is { } freeEnd ? $"预计于 {freeEnd} 起逐步恢复。" : "") : null;
     }
 
     /// <summary>Reads a JSON number as a double. PHP emits credit values as
@@ -464,6 +516,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
             ["reasoning_effort"] = request.ReasoningEffort ?? "medium",
             ["enabled_tools"] = enabledTools,
             ["client_features"] = new { subagents = 1 },
+            ["mola_error_protocol"] = 1,
             ["privacy_mode"] = false
         };
         if (request.Temperature is { } temperature) bodyDict["temperature"] = temperature;
@@ -497,14 +550,18 @@ public sealed class MolaGptProxyProvider : IChatProvider
         httpReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
 
         using var resp = await _http.SendAsync(httpReq, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-        if (resp.StatusCode == HttpStatusCode.Unauthorized)
+        if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Conflict
+            && await ChatApiErrorHelper.ReadAccountHttpErrorAsync(resp, ct).ConfigureAwait(false) is { } rejection)
         {
-            // JWT was rejected; almost always a UA-binding
-            // mismatch (the UA hashed into the token differs from the UA we
-            // just sent). Dropping the token forces the user to re-login,
-            // which will also re-issue the UA hash for the new value.
-            _auth.LogoutIfCurrent(jwt);
-            throw new MolaGptAuthExpiredException();
+            if (rejection.Type != "request_already_accepted")
+                throw new ChatRequestException(rejection);
+
+            var wait = resp.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(2);
+            await Task.Delay(wait, ct).ConfigureAwait(false);
+            await foreach (var chunk in ResumeStreamAsync((string)bodyDict["session_id"]!, 0, apiUrlRel, ct, missingRunError: rejection)
+                .ConfigureAwait(false))
+                yield return chunk;
+            yield break;
         }
         await ChatApiErrorHelper.EnsureSuccessAsync(resp, "MolaGPT 对话请求", ct).ConfigureAwait(false);
 
@@ -544,8 +601,10 @@ public sealed class MolaGptProxyProvider : IChatProvider
             {
                 using var doc = JsonDocument.Parse(ev.Data);
                 var root = doc.RootElement;
+                if (ChatApiErrorHelper.ReadBusinessError(root, ev.EventName) is { } businessError)
+                    throw new ChatRequestException(businessError);
                 if (ChatApiErrorHelper.TryExtractStreamingError(root, out var streamError))
-                    throw new InvalidOperationException(streamError);
+                    throw new ChatRequestException(ChatApiErrorHelper.ReadProviderError(streamError));
                 if (root.TryGetProperty("molagpt_subagents", out var subagents))
                 {
                     chunk = new ChatChunk(Subagents: JsonNode.Parse(subagents.GetRawText())!.AsObject(), RawJson: ev.Data);
@@ -571,7 +630,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
                 if (root.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
                 {
                     var choice = choices[0];
-                    if (choice.TryGetProperty("delta", out var delta))
+                    if (choice.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.Object)
                     {
                         var toolText = toolSynthesizer.HandleToolCalls(delta);
                         if (toolText is not null)
@@ -1164,7 +1223,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
         string sessionId,
         int offset,
         string apiUrl,
-        [EnumeratorCancellation] CancellationToken ct)
+        [EnumeratorCancellation] CancellationToken ct,
+        ChatRequestError? missingRunError = null)
     {
         var jwt = _auth.CurrentJwt;
         if (string.IsNullOrEmpty(jwt))
@@ -1177,7 +1237,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
         {
             ["action"] = "resume",
             ["session_id"] = sessionId,
-            ["offset"] = offset
+            ["offset"] = offset,
+            ["mola_error_protocol"] = 1
         };
 
         using var httpReq = new HttpRequestMessage(HttpMethod.Post, fullUrl)
@@ -1188,10 +1249,9 @@ public sealed class MolaGptProxyProvider : IChatProvider
 
         using var resp = await _http.SendAsync(httpReq, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         if (resp.StatusCode == HttpStatusCode.Unauthorized)
-        {
-            _auth.LogoutIfCurrent(jwt);
-            throw new MolaGptAuthExpiredException();
-        }
+            throw new ChatRequestException((await ChatApiErrorHelper.ReadAccountHttpErrorAsync(resp, ct).ConfigureAwait(false))!);
+        if (resp.StatusCode == HttpStatusCode.NotFound)
+            throw new ChatRequestException(missingRunError ?? new ChatRequestError("stream_unavailable", "暂时无法读取原有回答。"));
         await ChatApiErrorHelper.EnsureSuccessAsync(resp, "MolaGPT 流恢复", ct).ConfigureAwait(false);
 
         await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
@@ -1223,8 +1283,10 @@ public sealed class MolaGptProxyProvider : IChatProvider
             {
                 using var doc = JsonDocument.Parse(ev.Data);
                 var root = doc.RootElement;
+                if (ChatApiErrorHelper.ReadBusinessError(root, ev.EventName) is { } businessError)
+                    throw new ChatRequestException(businessError);
                 if (ChatApiErrorHelper.TryExtractStreamingError(root, out var streamError))
-                    throw new InvalidOperationException(streamError);
+                    throw new ChatRequestException(ChatApiErrorHelper.ReadProviderError(streamError));
                 if (root.TryGetProperty("molagpt_subagents", out var subagents))
                 {
                     chunk = new ChatChunk(Subagents: JsonNode.Parse(subagents.GetRawText())!.AsObject(), RawJson: ev.Data);
@@ -1247,7 +1309,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
                 if (root.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
                 {
                     var choice = choices[0];
-                    if (choice.TryGetProperty("delta", out var delta))
+                    if (choice.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.Object)
                     {
                         var toolText = toolSynthesizer.HandleToolCalls(delta);
                         if (toolText is not null)
@@ -1336,15 +1398,22 @@ public sealed class MolaGptProxyProvider : IChatProvider
             }
         }
 
+        var runStatus = root.TryGetProperty("run_status", out var statusNode) ? statusNode.GetString() : null;
+        var terminalError = runStatus switch
+        {
+            "lost" => new ChatRequestError("interrupted", "网络中断，回答没有完成。", Retryable: true),
+            "error" => new ChatRequestError("server_error", "请求暂时无法完成，请稍后重试。", Retryable: true),
+            _ => null
+        };
         if (root.TryGetProperty("raw_sse", out var rawNode)
             && rawNode.ValueKind == JsonValueKind.String)
         {
             var parsed = await ParseCompletedRawSseAsync(rawNode.GetString() ?? string.Empty, sources, ct)
                 .ConfigureAwait(false);
-            return parsed with { Text = string.IsNullOrEmpty(parsed.Text) ? text : parsed.Text };
+            return parsed with { Text = string.IsNullOrEmpty(parsed.Text) ? text : parsed.Text, Error = parsed.Error ?? terminalError };
         }
 
-        return new CompletedStreamData(text, sources);
+        return new CompletedStreamData(text, sources, Error: terminalError);
     }
 
     private static async Task<CompletedStreamData> ParseCompletedRawSseAsync(
@@ -1355,6 +1424,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         var text = new StringBuilder();
         IReadOnlyList<SourceReference>? sources = fallbackSources;
         JsonObject? subagentBatches = null;
+        ChatRequestError? error = null;
         await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(rawSse));
         var thinkSplitter = new InlineThinkSplitter();
         var toolSynthesizer = new ToolCallContentSynthesizer();
@@ -1376,6 +1446,11 @@ public sealed class MolaGptProxyProvider : IChatProvider
             {
                 using var doc = JsonDocument.Parse(ev.Data);
                 var root = doc.RootElement;
+                if (ChatApiErrorHelper.ReadBusinessError(root, ev.EventName) is { } failure)
+                {
+                    error = failure;
+                    break;
+                }
                 if (root.TryGetProperty("molagpt_subagents", out var frame))
                 {
                     subagentBatches = ServerSubagents.Merge(subagentBatches, JsonNode.Parse(frame.GetRawText())!.AsObject());
@@ -1401,7 +1476,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
                     continue;
 
                 var choice = choices[0];
-                if (!choice.TryGetProperty("delta", out var delta))
+                if (!choice.TryGetProperty("delta", out var delta) || delta.ValueKind != JsonValueKind.Object)
                     continue;
 
                 var toolText = toolSynthesizer.HandleToolCalls(delta);
@@ -1435,7 +1510,10 @@ public sealed class MolaGptProxyProvider : IChatProvider
         AppendVisibleText(text, toolSynthesizer.FinalizeOpenBlocks());
         var finalTail = thinkSplitter.Flush();
         AppendVisibleText(text, finalTail.Visible);
-        return new CompletedStreamData(text.ToString(), sources, ServerSubagents.Finish(subagentBatches));
+        var content = text.ToString();
+        error ??= ChatApiErrorHelper.ReadLegacySharedQuota(content);
+        return new CompletedStreamData(ChatApiErrorHelper.WithoutSharedQuotaTail(content, error), sources,
+            ServerSubagents.Finish(subagentBatches), error);
     }
 
     private static void AppendVisibleText(StringBuilder builder, string? value)
@@ -1446,7 +1524,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
 }
 
 public sealed record StreamSessionStatus(string Status, int ChunksCount, long TotalBytes);
-public sealed record CompletedStreamData(string Text, IReadOnlyList<SourceReference>? Sources, JsonObject? Subagents = null);
+public sealed record CompletedStreamData(string Text, IReadOnlyList<SourceReference>? Sources,
+    JsonObject? Subagents = null, ChatRequestError? Error = null);
 public sealed record MolaGptPreparedAttachments(IReadOnlyList<Attachment> Attachments, string? SystemHint);
 internal sealed record MolaGptUploadResult(string FileName, string? Url, string FilePathOnHost);
 internal sealed record MolaGptSandboxEntry(string TypeLabel, string FileName, string SandboxPath, string? Url);
@@ -1467,7 +1546,10 @@ public sealed record MolaGptStatus(
     IReadOnlyDictionary<string, MolaGptModelStatus> ModelStatus,
     MolaGptCredits? Credits = null,
     bool? PersonalizedMemoryEnabled = null,
-    AccountMembership? Membership = null);
+    AccountMembership? Membership = null,
+    string? SecurityStatus = null,
+    string? WorkSecurityStatus = null,
+    bool CanResumeWork = false);
 
 public sealed record MolaGptModelLimit(
     string DisplayName,

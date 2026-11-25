@@ -99,6 +99,11 @@ internal sealed class NotificationRouter : IDisposable
             return;
         }
 
+        // Keep an already displayed progress banner current while the window
+        // is inactive. New notifications and outcomes still wait for return.
+        if (_host.UpdateExistingProgress(notification) && notification.Kind == NotifyKind.Progress)
+            return;
+
         // Everything else waits. A runtime finishing its download in the
         // background is worth knowing about, but not worth a toast.
         if (!string.IsNullOrEmpty(notification.Key))

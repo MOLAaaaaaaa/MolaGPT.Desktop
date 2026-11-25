@@ -1080,7 +1080,8 @@ public sealed partial class ComposerViewModel : ObservableObject
                     BuildExtras(), isMolaGptImageGenerationSend, outgoingAttachments,
                     imageGenerationAspectRatio, imageGenerationStyle),
                 ThinkingBudgetTokens: IsThinkingEnabled ? ThinkingBudgetTokens : null,
-                ThinkingParamKind: ResolveActiveThinkingParamKind(), RolePrompt: role?.Plan);
+                ThinkingParamKind: ResolveActiveThinkingParamKind(), RolePrompt: role?.Plan,
+                WorkStatus: CreateWorkStatus(provider, assistantMsg));
             req = ApplyRoleRequestOptions(req, BuildHistorySeed(userMsg), maxTokens);
             RememberTurnTemplate(conversationId, provider, model, req, assistantMsg);
             var streamTask = RunStreamLoopAsync(provider, req, assistantMsg, cts, streamContext);
@@ -1105,7 +1106,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         catch (MolaGptAuthExpiredException ex)
         {
             failureMessage = ex.Message;
-            streamContext.AssistantMessage.AppendDelta($"\n\n> {ex.Message}");
+            ClassifyActionableError(streamContext.AssistantMessage, ex);
             try
             {
                 if (MolaGptProviderIds.IsMolaGptAccount(provider.Id) && _chat.ActiveProvider?.Id == provider.Id)
@@ -1120,7 +1121,6 @@ public sealed partial class ComposerViewModel : ObservableObject
         catch (Exception ex)
         {
             failureMessage = ex.Message;
-            streamContext.AssistantMessage.AppendDelta($"\n\n> **错误**：{ex.Message}");
             ClassifyActionableError(streamContext.AssistantMessage, ex);
         }
         finally
@@ -1230,15 +1230,8 @@ public sealed partial class ComposerViewModel : ObservableObject
             if (status is null || status.Status == "completed")
             {
                 var data = await proxyProvider.FetchCompletedStreamAsync(task.SessionId!, CancellationToken.None);
-                if (data is not null)
-                {
-                    task.AssistantMessage.ReplaceContent(data.Text);
-                    task.CompletedSuccessfully = true;
-                    task.AssistantMessage.ServerSubagents = data.Subagents;
-                    _chat.RefreshServerSubagents();
-                    if (data.Sources is { Count: > 0 })
-                        task.AssistantMessage.Sources = data.Sources;
-                }
+                task.ApplyCompletedStream(data);
+                _chat.RefreshServerSubagents();
                 task.AssistantMessage.FinishStreaming();
                 CompleteStreamContext(task, publishNotification: false);
                 return;
@@ -1266,7 +1259,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                task.AssistantMessage.AppendDelta($"\n\n> **恢复失败**：{ex.Message}");
+                ClassifyActionableError(task.AssistantMessage, ex);
             }
             finally
             {
@@ -1328,6 +1321,13 @@ public sealed partial class ComposerViewModel : ObservableObject
                 if (trackingTask is not null && chunk.RawJson is not null)
                     trackingTask.ReceivedChunkCount++;
                 if (chunk.FinishReason is not null) break;
+            }
+
+            if (!cts.IsCancellationRequested && MolaGptProviderIds.IsMolaGptAccount(provider.Id)
+                && ChatApiErrorHelper.ReadLegacySharedQuota(assistantMsg.FullContent) is { } quotaError)
+            {
+                assistantMsg.ReplaceContent(string.Empty);
+                throw new ChatRequestException(quotaError);
             }
 
             if (trackingTask is not null && !cts.IsCancellationRequested)
@@ -1394,6 +1394,13 @@ public sealed partial class ComposerViewModel : ObservableObject
                 if (trackingTask is not null && chunk.RawJson is not null)
                     trackingTask.ReceivedChunkCount++;
                 if (chunk.FinishReason is not null) break;
+            }
+
+            if (!cts.IsCancellationRequested && MolaGptProviderIds.IsMolaGptAccount(provider.Id)
+                && ChatApiErrorHelper.ReadLegacySharedQuota(assistantMsg.FullContent) is { } quotaError)
+            {
+                assistantMsg.ReplaceContent(string.Empty);
+                throw new ChatRequestException(quotaError);
             }
 
             if (trackingTask is not null && !cts.IsCancellationRequested)
@@ -2178,7 +2185,8 @@ public sealed partial class ComposerViewModel : ObservableObject
     }
 
     [RelayCommand(CanExecute = nameof(CanRetry), AllowConcurrentExecutions = true)]
-    public Task RetryAsync(MessageViewModel? assistantMsg) => GenerateAgainAsync(assistantMsg, false);
+    public Task RetryAsync(MessageViewModel? assistantMsg) =>
+        CanRetry(assistantMsg) ? GenerateAgainAsync(assistantMsg, false) : Task.CompletedTask;
 
     [RelayCommand(CanExecute = nameof(CanContinue), AllowConcurrentExecutions = true)]
     public Task ContinueAsync(MessageViewModel? assistantMsg) => GenerateAgainAsync(assistantMsg, true);
@@ -2202,6 +2210,9 @@ public sealed partial class ComposerViewModel : ObservableObject
         if (assistantMsg is null || activeProvider is null || activeModel is null) return;
         var index = _chat.Messages.IndexOf(assistantMsg);
         if (index < 0 || !assistantMsg.IsLatestAssistant) return;
+        var restartingPausedWork = continuation && assistantMsg.RequestError?.IsPausedWork == true;
+        if (restartingPausedWork && !CanContinue(assistantMsg)) return;
+        var workResumeEntryId = restartingPausedWork ? assistantMsg.RequestError?.WorkResumeEntryId : null;
 
         var previousUser = _chat.Messages
             .Take(index)
@@ -2297,9 +2308,11 @@ public sealed partial class ComposerViewModel : ObservableObject
             IReadOnlyList<ChatMessage>? seed;
             if (continuation)
             {
-                seed = _chat.RoleContext.NeedsHistorySync
+                seed = !restartingPausedWork && _chat.RoleContext.NeedsHistorySync
                     ? BuildContinuationHistorySeed() : null;
-                msgs.Add(new ChatMessage(ChatMessage.RoleUser, "接着上一条回复继续写，只输出后续内容。"));
+                msgs.Add(new ChatMessage(ChatMessage.RoleUser, restartingPausedWork
+                    ? PiWorkProvider.ResumePrompt
+                    : "接着上一条回复继续写，只输出后续内容。"));
             }
             else seed = BuildHistorySeed(previousUser);
 
@@ -2316,7 +2329,9 @@ public sealed partial class ComposerViewModel : ObservableObject
                 ExtraBody: extras,
                 ThinkingBudgetTokens: IsThinkingEnabled ? ThinkingBudgetTokens : null,
                 ThinkingParamKind: thinkingKind,
-                RolePrompt: role?.Plan);
+                RolePrompt: role?.Plan,
+                WorkResumeEntryId: workResumeEntryId,
+                WorkStatus: CreateWorkStatus(activeProvider, assistantMsg));
             req = ApplyRoleRequestOptions(req, seed, maxTokens);
             RememberTurnTemplate(conversationId, activeProvider, activeModel, req, assistantMsg);
 
@@ -2336,7 +2351,6 @@ public sealed partial class ComposerViewModel : ObservableObject
         catch (Exception ex)
         {
             failureMessage = ex.Message;
-            assistantMsg.AppendDelta($"\n\n> **错误**：{ex.Message}");
             ClassifyActionableError(assistantMsg, ex);
         }
         finally
@@ -2374,16 +2388,22 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// Balance/402 → model selector.</summary>
     private static void ClassifyActionableError(MessageViewModel assistantMsg, Exception ex)
     {
-        var message = ex.Message ?? string.Empty;
-
-        if (message.Contains("402", StringComparison.Ordinal)
-            || message.Contains("Insufficient Balance", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("余额", StringComparison.Ordinal))
+        var error = ex switch
         {
-            assistantMsg.SetActionableError(
-                MessageErrorAction.SwitchModel,
-                "当前模型不可用或余额不足，换一个模型再试。");
-        }
+            ChatRequestException request => request.Error,
+            MolaGptAuthExpiredException => new ChatRequestError("auth_expired", "登录状态已失效，请重新登录。", Reauth: true),
+            HttpRequestException => new ChatRequestError("network", "无法连接服务，请检查网络后重试。", Retryable: true),
+            IOException => new ChatRequestError("interrupted", "连接中断，回答没有完成。", Retryable: true),
+            _ when ex.Message.Contains("402", StringComparison.Ordinal)
+                || ex.Message.Contains("Insufficient Balance", StringComparison.OrdinalIgnoreCase)
+                || ex.Message.Contains("余额", StringComparison.Ordinal) =>
+                new ChatRequestError("model_entitlement", "当前模型不可用或余额不足。", NextAction: "switch_model"),
+            _ => new ChatRequestError("server_error", "请求暂时无法完成，请稍后重试。", Retryable: true)
+        };
+        var cleaned = ChatApiErrorHelper.WithoutSharedQuotaTail(assistantMsg.FullContent, error);
+        if (!string.Equals(cleaned, assistantMsg.FullContent, StringComparison.Ordinal))
+            assistantMsg.ReplaceContent(cleaned);
+        assistantMsg.SetRequestError(error);
     }
 
     private bool CanSend()
@@ -2396,6 +2416,15 @@ public sealed partial class ComposerViewModel : ObservableObject
                && (!providerReady || !HasUnsupportedImages(Attachments, _chat.ActiveProvider, _chat.ActiveModel));
     }
 
+    private static IProgress<PendingStatusDelta>? CreateWorkStatus(IChatProvider provider, MessageViewModel message)
+    {
+        if (!string.Equals(provider.Id, MolaGptProviderIds.LocalTools, StringComparison.Ordinal)) return null;
+        return new Progress<PendingStatusDelta>(status =>
+        {
+            if (message.IsStreaming) message.SetPendingStatus(status.Label, status.Detail, status.IsRoutes);
+        });
+    }
+
     private bool CanStop() => IsSending;
     private bool CanGenerateReply(MessageViewModel? message) =>
         !IsSending
@@ -2406,10 +2435,30 @@ public sealed partial class ComposerViewModel : ObservableObject
         && _chat.ActiveProvider is not null
         && _chat.ActiveModel is not null;
 
-    private bool CanRetry(MessageViewModel? message) => CanGenerateReply(message) && message!.HasPreviousUser;
+    private bool CanRetry(MessageViewModel? message)
+    {
+        if (!CanGenerateReply(message) || !message!.HasPreviousUser) return false;
+        if (message.RequestError is not { } error) return true;
+        if (error.IsPausedWork || error.Type == "request_already_accepted"
+            || error.RetryAt > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            || (_chat.CurrentMode.IsLocalAgent() && message.HasToolCalls)) return false;
+        return error.NextAction != "switch_model" || _chat.ActiveModel?.DisplayName != message.ModelLabel;
+    }
 
-    private bool CanContinue(MessageViewModel? message) => CanGenerateReply(message)
-        && _chat.CurrentMode.IsLocalAgent() && !string.IsNullOrWhiteSpace(message?.FullContent);
+    internal bool CanResumeRestrictedWork { get; set; }
+
+    private bool CanContinue(MessageViewModel? message)
+    {
+        if (!CanGenerateReply(message) || !_chat.CurrentMode.IsLocalAgent()) return false;
+        if (message!.RequestError is { IsPausedWork: true } error)
+            return CanResumeRestrictedWork && error.WorkResumeEntryId is not null
+                && (error.NextAction != "switch_model" || _chat.ActiveModel?.DisplayName != message.ModelLabel)
+                && !(error.RetryAt > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+                && _chat.CurrentMode == AppMode.Work && message.HasPreviousUser
+                && _chat.ActiveProvider is PiWorkProvider { Id: MolaGptProviderIds.LocalTools } pi
+                && _chat.ConversationId is { } id && pi.HasSession(id);
+        return !string.IsNullOrWhiteSpace(message.FullContent);
+    }
 
     private bool HasUnsupportedImages(
         IEnumerable<Attachment> attachments,
@@ -2703,6 +2752,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         bool publishNotification,
         string? failureMessage = null)
     {
+        failureMessage ??= streamContext.AssistantMessage.RequestError?.Message;
         OnStreamCompletedForTasks(streamContext);
         PrepareCompletedResponse(streamContext, failureMessage);
 

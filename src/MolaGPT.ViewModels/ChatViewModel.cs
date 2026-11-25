@@ -624,15 +624,21 @@ public sealed partial class ChatViewModel : ObservableObject
                     await pendingWrites.ConfigureAwait(false);
                     var conversation = _conversationRepo?.Get(conversationId);
                     RecoverInterruptedReply(conversationId, conversation);
-                    var activeRows = _messageRepo.List(conversationId);
-                    var allRows = _messageRepo.ListAll(conversationId);
-                    var messages = PrepareMessageSnapshot(activeRows, conversationId);
+                    var (allRows, activeLeafId) = _messageRepo.ReadConversationSnapshot(conversationId);
+                    var byId = allRows.ToDictionary(row => row.Id, StringComparer.Ordinal);
+                    var activeRows = new List<MessageRow>();
+                    var activeIds = new HashSet<string>(StringComparer.Ordinal);
+                    for (var id = activeLeafId; id is not null && byId.TryGetValue(id, out var row)
+                         && activeIds.Add(id); id = row.ParentId)
+                        activeRows.Add(row);
+                    activeRows.Reverse();
+
+                    var spend = new ConversationSpendCalculator.Accumulator();
+                    var messages = PrepareMessageSnapshot(activeRows, conversationId, spend);
                     ApplyBranchMetadata(messages, allRows);
-                    // allRows is already in hand for the branch metadata, and it is
-                    // exactly the set the bill is owed on — abandoned branches
-                    // included — so the total rides along instead of re-querying.
-                    var spend = ConversationSpendCalculator.From(allRows);
-                    return (messages, conversation, spend);
+                    foreach (var row in allRows)
+                        if (!activeIds.Contains(row.Id)) spend.Add(row.Meta);
+                    return (messages, conversation, spend: spend.Build());
                 }).ConfigureAwait(true);
                 PerfTrace?.Invoke("load.read+meta",
                     $"{readSw.Elapsed.TotalMilliseconds:N0} ms  msgs={snapshot.messages.Count}");
@@ -719,7 +725,7 @@ public sealed partial class ChatViewModel : ObservableObject
     {
         if (_piSessionRoot is null || _messageRepo is null || conversation is null
             || conversation.ProviderId == MolaGptProviderIds.Proxy) return;
-        var last = _messageRepo.List(conversationId).LastOrDefault();
+        var last = _messageRepo.GetActiveLeaf(conversationId);
         if (last is null || last.Role != ChatMessage.RoleUser) return;
         var recovered = PiSessionRecovery.Recover(_piSessionRoot, conversationId, last.CreatedAt, last.Content);
         if (recovered.Chunks.Count == 0) return;
@@ -746,7 +752,8 @@ public sealed partial class ChatViewModel : ObservableObject
             message.Timestamp.ToUnixTimeMilliseconds(), last.Id));
     }
 
-    private static List<PreparedMessage> PrepareMessageSnapshot(IReadOnlyList<MessageRow> rows, string conversationId)
+    private static List<PreparedMessage> PrepareMessageSnapshot(IReadOnlyList<MessageRow> rows, string conversationId,
+        ConversationSpendCalculator.Accumulator? spend = null)
     {
         var prepared = new List<PreparedMessage>(rows.Count);
         var workspaceContext = PythonArtifactMarkdownRewriter.CreateWorkspaceContext(conversationId);
@@ -800,12 +807,14 @@ public sealed partial class ChatViewModel : ObservableObject
             double? firstTokenSeconds = null;
             double? generationSeconds = null;
             string? compactionReason = null;
+            ChatRequestError? requestError = null;
             JsonObject? serverSubagents = null;
             if (!string.IsNullOrEmpty(row.Meta))
             {
                 try
                 {
                     using var doc = JsonDocument.Parse(row.Meta);
+                    spend?.Add(doc.RootElement);
                     if (doc.RootElement.TryGetProperty("persona_id", out var roleId)) personaId = roleId.GetString();
                     if (doc.RootElement.TryGetProperty("persona_name", out var roleName)) personaName = roleName.GetString();
                     if (doc.RootElement.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String)
@@ -830,6 +839,8 @@ public sealed partial class ChatViewModel : ObservableObject
                     toolCalls = ParseToolCalls(doc.RootElement);
                     thinkingSegments = ParseThinkingSegments(doc.RootElement);
                     (toolCalls, thinkingSegments) = InferMissingTimelineIndexes(toolCalls, thinkingSegments);
+                    if (doc.RootElement.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+                        requestError = error.Deserialize<ChatRequestError>();
                     wasStopped = doc.RootElement.TryGetProperty("stopped", out var st)
                                  && st.ValueKind == JsonValueKind.True;
                     if (doc.RootElement.TryGetProperty("streaming", out var streaming)
@@ -905,7 +916,7 @@ public sealed partial class ChatViewModel : ObservableObject
                 generationSeconds,
                 personaId,
                 personaName,
-                row.ParentId) { ArtifactRefs = artifactRefs, FinishReason = finishReason, Subagents = serverSubagents });
+                row.ParentId) { ArtifactRefs = artifactRefs, FinishReason = finishReason, Subagents = serverSubagents, RequestError = requestError });
         }
 
         return prepared;
@@ -956,6 +967,7 @@ public sealed partial class ChatViewModel : ObservableObject
             CompactionTokensAfter = prepared.CompactionTokensAfter,
             AutoCollapseThinkingOnComplete = AutoCollapseThinking
         };
+        vm.SetRequestError(prepared.RequestError);
         if (prepared.BranchSiblingIds is { Count: > 1 } branchIds)
             vm.SetBranchSiblings(branchIds, prepared.BranchIndex);
         if (prepared.ToolCalls is { Count: > 0 })
@@ -1010,6 +1022,7 @@ public sealed partial class ChatViewModel : ObservableObject
     {
         public IReadOnlyList<ArtifactRefChip>? ArtifactRefs { get; init; }
         public string? FinishReason { get; init; }
+        public ChatRequestError? RequestError { get; init; }
         public JsonObject? Subagents { get; init; }
     }
 
@@ -1343,6 +1356,7 @@ public sealed partial class ChatViewModel : ObservableObject
             ["stopped"] = attempt.WasStopped ? true : (JsonNode?)null
         };
         if (attempt.Subagents is not null) result["subagents"] = attempt.Subagents.DeepClone();
+        if (attempt.Error is not null) result["error"] = JsonSerializer.SerializeToNode(attempt.Error, MessageMetaJson);
         if (attempt.FinishReason is { Length: > 0 } finish && finish != "stop")
             result["finish_reason"] = finish;
         if (BuildTurnTimingJson(attempt.FirstTokenSeconds, attempt.GenerationSeconds) is { } timing)
@@ -1828,7 +1842,9 @@ public sealed partial class ChatViewModel : ObservableObject
                 item.TryGetProperty("persona_id", out var personaId) && personaId.ValueKind == JsonValueKind.String ? personaId.GetString() : null,
                 item.TryGetProperty("persona_name", out var personaName) && personaName.ValueKind == JsonValueKind.String ? personaName.GetString() : null,
                 ReadString(item, "finish_reason"),
-                item.TryGetProperty("subagents", out var sa) ? Core.Chat.ServerSubagents.Finish(JsonNode.Parse(sa.GetRawText())!.AsObject()) : null));
+                item.TryGetProperty("subagents", out var sa) ? Core.Chat.ServerSubagents.Finish(JsonNode.Parse(sa.GetRawText())!.AsObject()) : null,
+                item.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object
+                    ? error.Deserialize<ChatRequestError>() : null));
         }
 
         var current = ReadInt(retry, "current") ?? Math.Max(0, attempts.Count - 1);
@@ -2072,13 +2088,11 @@ public sealed partial class ChatViewModel : ObservableObject
         if (IndexOfIgnoreCase(content, "<think") >= 0)
             return SplitInlineThinkTags(content);
 
-        var splitter = new InlineThinkSplitter();
-        var fed = splitter.Feed(content);
-        var flushed = splitter.Flush();
-        var visible = fed.Visible + flushed.Visible;
-        var thinking = fed.Thinking + flushed.Thinking;
-
-        return new InlineThinkingParts(visible, string.IsNullOrWhiteSpace(thinking) ? null : thinking.Trim());
+        // No inline <think> tag: return verbatim so HTML comments (such as
+        // <!--PY_OUTPUT_END--> or comments in code fences) are not stripped here,
+        // which would shift persisted thinking_segments / tool_calls content_offset
+        // indexes. Output markers are hidden at render time by MolaGptMarkupSplitter.
+        return new InlineThinkingParts(content, null);
     }
 
     private static InlineThinkingParts SplitInlineThinkTags(string content)

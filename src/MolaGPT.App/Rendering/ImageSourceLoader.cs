@@ -1,4 +1,5 @@
 using Avalonia.Media.Imaging;
+using System.Runtime.CompilerServices;
 using System.Text;
 
 namespace MolaGPT.App.Rendering;
@@ -19,12 +20,15 @@ namespace MolaGPT.App.Rendering;
 /// </summary>
 public static class ImageSourceLoader
 {
-    /// <summary>Matches MarkdownPresenter.MarkdownImageCacheCapacity. Small on
-    /// purpose — these are decoded surfaces, not compressed bytes.</summary>
-    private const int CacheCapacity = 32;
-
+    private const long CacheBudget = 32L * 1024 * 1024;
+    private const long RemoteSourceBudget = 32L * 1024 * 1024;
+    private const int RemoteSourceCapacity = 32;
     private static readonly Dictionary<string, Bitmap> s_cache = new(StringComparer.Ordinal);
     private static readonly List<string> s_order = [];
+    private static readonly ConditionalWeakTable<Bitmap, BitmapMemoryPressure> s_pressure = new();
+    private static readonly LinkedList<(string Url, byte[] Bytes)> s_remoteSources = new();
+    private static long s_cacheBytes;
+    private static long s_remoteSourceBytes;
     private static readonly SemaphoreSlim s_gate = new(1, 1);
 
     private static readonly HttpClient s_http = new()
@@ -43,8 +47,7 @@ public static class ImageSourceLoader
                 var url = key[..key.LastIndexOf('|')].Trim().Trim('"', '\'');
                 if (!url.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
                     && !TryResolveLocalPath(url, out _)) continue;
-                s_cache.Remove(key);
-                s_order.Remove(key);
+                RemoveCached(key);
             }
         }
     }
@@ -89,25 +92,48 @@ public static class ImageSourceLoader
 
         lock (s_cache)
         {
-            while (s_cache.Count >= CacheCapacity && s_order.Count > 0)
-            {
-                var oldest = s_order[0];
-                s_order.RemoveAt(0);
-                // Controls may still display this shared bitmap after eviction.
-                s_cache.Remove(oldest);
-            }
-
             if (s_cache.TryGetValue(key, out var raced))
             {
                 bitmap.Dispose();
                 return raced;
             }
 
-            s_cache[key] = bitmap;
-            s_order.Add(key);
+            var bytes = BitmapBytes(bitmap);
+            s_pressure.Add(bitmap, new BitmapMemoryPressure(bytes));
+            if (bytes <= CacheBudget)
+            {
+                while (s_cacheBytes + bytes > CacheBudget) RemoveCached(s_order[0]);
+                s_cache[key] = bitmap;
+                s_order.Add(key);
+                s_cacheBytes += bytes;
+            }
         }
 
         return bitmap;
+    }
+
+    private static long BitmapBytes(Bitmap bitmap) =>
+        (long)bitmap.PixelSize.Width * bitmap.PixelSize.Height * 4;
+
+    private static void RemoveCached(string key)
+    {
+        // The view can still be displaying this shared bitmap.
+        s_cache.Remove(key, out var bitmap);
+        s_cacheBytes -= BitmapBytes(bitmap!);
+        s_order.Remove(key);
+    }
+
+    private sealed class BitmapMemoryPressure
+    {
+        private readonly long _bytes;
+
+        public BitmapMemoryPressure(long bytes)
+        {
+            _bytes = bytes;
+            GC.AddMemoryPressure(bytes);
+        }
+
+        ~BitmapMemoryPressure() => GC.RemoveMemoryPressure(_bytes);
     }
 
     private static async Task<Bitmap?> DecodeAsync(string url, int decodeWidth, CancellationToken ct)
@@ -134,18 +160,62 @@ public static class ImageSourceLoader
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return null;
         if (uri.Scheme is not ("http" or "https")) return null;
 
-        // Throttled to one download at a time: a transcript scrolled quickly can
-        // ask for dozens at once, and the images are decorative — none of them
-        // is worth saturating the connection the streaming response is using.
-        await s_gate.WaitAsync(ct).ConfigureAwait(false);
-        try
+        var source = FindRemoteSource(url);
+        if (source is null)
         {
-            var bytes = await s_http.GetByteArrayAsync(uri, ct).ConfigureAwait(false);
-            return Decode(new MemoryStream(bytes), decodeWidth);
+            // Keep downloads serial so they don't compete with the streaming reply.
+            await s_gate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                source = FindRemoteSource(url);
+                if (source is null)
+                {
+                    var bytes = await s_http.GetByteArrayAsync(uri, ct).ConfigureAwait(false);
+                    var bitmap = Decode(new MemoryStream(bytes, writable: false), decodeWidth);
+                    if (bitmap is not null) CacheRemoteSource(url, bytes);
+                    return bitmap;
+                }
+            }
+            finally
+            {
+                s_gate.Release();
+            }
         }
-        finally
+
+        // A cache hit bypasses the asynchronous download, so decode off the UI thread.
+        return await Task.Run(() => Decode(new MemoryStream(source, writable: false), decodeWidth), ct)
+            .ConfigureAwait(false);
+    }
+
+    private static byte[]? FindRemoteSource(string url)
+    {
+        lock (s_remoteSources)
         {
-            s_gate.Release();
+            for (var node = s_remoteSources.First; node is not null; node = node.Next)
+            {
+                if (node.Value.Url != url) continue;
+                s_remoteSources.Remove(node);
+                s_remoteSources.AddFirst(node);
+                return node.Value.Bytes;
+            }
+        }
+        return null;
+    }
+
+    private static void CacheRemoteSource(string url, byte[] bytes)
+    {
+        if (bytes.Length > RemoteSourceBudget) return;
+        // Keep the encoded image available after the bitmap is evicted, even
+        // if the URL has since expired. Callers insert under the download gate.
+        lock (s_remoteSources)
+        {
+            while (s_remoteSources.Count >= RemoteSourceCapacity || s_remoteSourceBytes + bytes.Length > RemoteSourceBudget)
+            {
+                s_remoteSourceBytes -= s_remoteSources.Last!.Value.Bytes.Length;
+                s_remoteSources.RemoveLast();
+            }
+            s_remoteSources.AddFirst((url, bytes));
+            s_remoteSourceBytes += bytes.Length;
         }
     }
 

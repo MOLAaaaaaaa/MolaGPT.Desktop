@@ -81,7 +81,6 @@ public sealed partial class AgentBridgeStatusViewModel : ObservableObject
         _relay = relay;
         _sync = SynchronizationContext.Current ?? new SynchronizationContext();
         bridge.SessionsChanged += OnSessionsChanged;
-        _ = LoadAsync();
     }
 
     private void OnSessionsChanged(IReadOnlyList<AgentSessionStateDto> snap)
@@ -132,6 +131,7 @@ public sealed partial class AgentBridgeStatusViewModel : ObservableObject
         IsBridgeEnabled = enabled;
         _isSignedIn = signedIn;
         BridgeStatusText = DescribeBridge();
+        if (enabled) _ = LoadAsync();
     }
 
     /// <summary>The relay only runs signed in, so an enabled bridge is not
@@ -160,6 +160,7 @@ public sealed partial class AgentBridgeStatusViewModel : ObservableObject
             IsBridgeEnabled = true;
             BridgeStatusText = DescribeBridge();
             ApplyBridgeEnabled?.Invoke(true);
+            await LoadAsync().ConfigureAwait(true);
         }
         else
         {

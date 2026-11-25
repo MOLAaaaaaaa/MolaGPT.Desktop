@@ -18,14 +18,9 @@ public partial class SettingsWindow
     private const string MemoryConsolidationNotificationKey = "memory-consolidation";
     private MemoryPageViewModel? _memoryPage;
 
-    private void InitializeMemoryPage(MemoryPageViewModel? page)
+    private void InitializeMemoryPage()
     {
-        _memoryPage = page;
-        if (page is null)
-        {
-            PAGE_Memory.IsVisible = false;
-            return;
-        }
+        if (_memoryPage is not { } page) return;
 
         PART_MemoryBody.DataContext = page;
         SyncMemoryBudgetChoice();

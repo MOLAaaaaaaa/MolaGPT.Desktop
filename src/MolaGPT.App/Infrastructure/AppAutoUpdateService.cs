@@ -34,7 +34,7 @@ internal sealed class AppAutoUpdateService(HttpClient http)
 
     public async Task<string> DownloadAndVerifyAsync(
         UpdatePackage package,
-        IProgress<double>? progress = null,
+        IProgress<double?>? progress = null,
         CancellationToken ct = default)
     {
         var targetDir = Path.Combine(
@@ -60,6 +60,7 @@ internal sealed class AppAutoUpdateService(HttpClient http)
         response.EnsureSuccessStatusCode();
 
         var total = response.Content.Headers.ContentLength;
+        if (total is not > 0) progress?.Report(null);
         await using (var input = await response.Content.ReadAsStreamAsync(ct))
         await using (var output = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None))
         {

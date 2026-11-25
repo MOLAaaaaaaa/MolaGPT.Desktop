@@ -20,7 +20,11 @@ public enum MessageErrorAction
 {
     None = 0,
     /// <summary>Balance/model failure (e.g. HTTP 402) — open the model selector.</summary>
-    SwitchModel
+    SwitchModel,
+    Retry,
+    SignIn,
+    AccountSecurity,
+    ViewUsage
 }
 
 /// <summary>
@@ -152,18 +156,61 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasActionError))]
     [NotifyPropertyChangedFor(nameof(ActionErrorButtonLabel))]
+    [NotifyPropertyChangedFor(nameof(HasErrorAction))]
     private MessageErrorAction _errorAction = MessageErrorAction.None;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasActionError))]
     private string? _actionErrorText;
 
-    public bool HasActionError => ErrorAction != MessageErrorAction.None
-                                  && !string.IsNullOrWhiteSpace(ActionErrorText);
+    public bool HasActionError => !string.IsNullOrWhiteSpace(ActionErrorText);
+    public bool HasErrorAction => ErrorAction != MessageErrorAction.None
+        && (ErrorAction != MessageErrorAction.Retry || IsLatestAssistant);
+    public bool IsAccountRestriction => RequestError?.Type is "account_restricted" or "work_account_paused";
+    public bool ActionErrorButtonEnabled => ErrorAction != MessageErrorAction.Retry || CanRetryReply;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ActionErrorButtonEnabled))]
+    private bool _canRetryReply = true;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ActionErrorButtonLabel))]
+    [NotifyPropertyChangedFor(nameof(ActionErrorButtonEnabled))]
+    private long _errorRetrySeconds;
+    [ObservableProperty] private bool _isWorkContinuationAvailable;
+    public ChatRequestError? RequestError { get; private set; }
+
+    public void RefreshErrorAction(bool canContinueWork = false, bool canRetry = true)
+    {
+        ErrorRetrySeconds = ErrorAction == MessageErrorAction.Retry && RequestError?.RetryAt is { } at
+            ? Math.Max(0, (at - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 999) / 1000)
+            : 0;
+        CanRetryReply = canRetry && ErrorRetrySeconds == 0;
+        IsWorkContinuationAvailable = RequestError?.IsPausedWork == true && canContinueWork;
+    }
+
+    public void SetRequestError(ChatRequestError? error)
+    {
+        RequestError = error;
+        SetActionableError(error switch
+        {
+            { NeedsSignIn: true } => MessageErrorAction.SignIn,
+            { NextAction: "account_security" } => MessageErrorAction.AccountSecurity,
+            { NextAction: "switch_model" } => MessageErrorAction.SwitchModel,
+            { NextAction: "view_usage" } or { Type: "quota_exhausted" } => MessageErrorAction.ViewUsage,
+            { Retryable: true, IsPausedWork: false } => MessageErrorAction.Retry,
+            _ => MessageErrorAction.None
+        }, error?.Message ?? string.Empty);
+        RefreshErrorAction();
+        OnPropertyChanged(nameof(IsAccountRestriction));
+        OnPropertyChanged(nameof(ActionErrorButtonEnabled));
+    }
 
     public string ActionErrorButtonLabel => ErrorAction switch
     {
-        MessageErrorAction.SwitchModel => "换个模型",
+        MessageErrorAction.SwitchModel => "切换模型",
+        MessageErrorAction.Retry => ErrorRetrySeconds > 0 ? $"{ErrorRetrySeconds} 秒后重试" : "重新回答",
+        MessageErrorAction.SignIn => "重新登录",
+        MessageErrorAction.AccountSecurity => "查看详情",
+        MessageErrorAction.ViewUsage => "查看用量",
         _ => string.Empty
     };
 
@@ -882,6 +929,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         Content = string.Empty;
         Thinking = null;
         WasStopped = false;
+        SetRequestError(null);
         FinishReason = null;
         ThinkingSegments.Clear();
         ToolCalls.Clear();
@@ -974,7 +1022,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
             GenerationSeconds,
             PersonaId,
             PersonaName,
-            FinishReason, (JsonObject?)ServerSubagents?.DeepClone());
+            FinishReason, (JsonObject?)ServerSubagents?.DeepClone(), RequestError);
     }
 
     [RelayCommand(CanExecute = nameof(CanPreviousAttempt))]
@@ -1019,6 +1067,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         Sources = attempt.Sources;
         ServerSubagents = (JsonObject?)attempt.Subagents?.DeepClone();
         WasStopped = attempt.WasStopped;
+        SetRequestError(attempt.Error);
         FinishReason = attempt.FinishReason;
         if (attempt.ToolCalls is { Count: > 0 })
         {
@@ -1232,7 +1281,12 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         PreviousAttemptCommand.NotifyCanExecuteChanged();
         NextAttemptCommand.NotifyCanExecuteChanged();
     }
-    partial void OnIsLatestAssistantChanged(bool value) => OnPropertyChanged(nameof(HasRetryBar));
+    partial void OnIsLatestAssistantChanged(bool value)
+    {
+        OnPropertyChanged(nameof(HasRetryBar));
+        OnPropertyChanged(nameof(HasErrorAction));
+        if (!value) IsWorkContinuationAvailable = false;
+    }
 
     private void OnActionStateChanged()
     {
@@ -1560,7 +1614,8 @@ public sealed record MessageAttempt(
     string? PersonaId = null,
     string? PersonaName = null,
     string? FinishReason = null,
-    JsonObject? Subagents = null);
+    JsonObject? Subagents = null,
+    ChatRequestError? Error = null);
 /// <summary>
 /// Lightweight representation of a sent attachment, kept on the message
 /// view-model after the original <see cref="MolaGPT.Core.Models.Attachment"/>

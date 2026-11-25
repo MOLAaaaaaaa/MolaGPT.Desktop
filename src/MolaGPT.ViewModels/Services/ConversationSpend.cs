@@ -29,35 +29,43 @@ public static class ConversationSpendCalculator
     /// not the active-path query, or abandoned branches go missing from the bill.</param>
     public static ConversationSpend From(IEnumerable<MessageRow> rows)
     {
-        var totals = new Dictionary<string, (double Cost, int Turns)>(StringComparer.OrdinalIgnoreCase);
-        var total = 0d;
+        var spend = new Accumulator();
+        foreach (var row in rows) spend.Add(row.Meta);
+        return spend.Build();
+    }
 
-        foreach (var row in rows)
+    internal sealed class Accumulator
+    {
+        private readonly Dictionary<string, (double Cost, int Turns)> _totals = new(StringComparer.OrdinalIgnoreCase);
+        private double _total;
+
+        public void Add(string? meta)
         {
-            if (string.IsNullOrWhiteSpace(row.Meta)) continue;
-            JsonDocument doc;
-            try { doc = JsonDocument.Parse(row.Meta); }
-            catch (JsonException) { continue; }
-
-            using (doc)
+            if (string.IsNullOrWhiteSpace(meta)) return;
+            try
             {
-                if (doc.RootElement.ValueKind != JsonValueKind.Object) continue;
-                var model = ReadModel(doc.RootElement) ?? "未知模型";
+                using var doc = JsonDocument.Parse(meta);
+                Add(doc.RootElement);
+            }
+            catch (JsonException) { }
+        }
 
-                foreach (var (cost, attemptModel) in ReadCosts(doc.RootElement, model))
-                {
-                    total += cost;
-                    var current = totals.GetValueOrDefault(attemptModel);
-                    totals[attemptModel] = (current.Cost + cost, current.Turns + 1);
-                }
+        public void Add(JsonElement meta)
+        {
+            if (meta.ValueKind != JsonValueKind.Object) return;
+            var model = ReadModel(meta) ?? "未知模型";
+            foreach (var (cost, attemptModel) in ReadCosts(meta, model))
+            {
+                _total += cost;
+                var current = _totals.GetValueOrDefault(attemptModel);
+                _totals[attemptModel] = (current.Cost + cost, current.Turns + 1);
             }
         }
 
-        var byModel = totals
+        public ConversationSpend Build() => new(_total, _totals
             .Select(pair => new ModelSpend(pair.Key, pair.Value.Cost, pair.Value.Turns))
             .OrderByDescending(item => item.CostUsd)
-            .ToList();
-        return new ConversationSpend(total, byModel);
+            .ToList());
     }
 
     /// <summary>

@@ -12,6 +12,7 @@ public enum ThinkingParamKind
     GeminiThinkingLevel,
     GeminiBudget,
     QwenThinkingBudget,
+    QwenReasoningEffort,
 }
 
 /// <param name="Mandatory">The provider says this model always reasons. Nothing may be

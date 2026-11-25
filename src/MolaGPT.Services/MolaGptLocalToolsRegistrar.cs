@@ -127,11 +127,12 @@ public sealed class MolaGptLocalToolsRegistrar
                 models[0].Id,
                 api,
                 AuthHeader: true),
-            request => new PiProviderCreds(
-                endpoint,
-                _ => Task.FromResult(_auth.CurrentJwt),
-                request.ModelId,
-                OnUnauthorized: failedJwt => _auth.LogoutIfCurrent(failedJwt)));
+            request =>
+            {
+                var jwt = _auth.CurrentJwt;
+                return new PiProviderCreds(endpoint, _ => Task.FromResult(jwt), request.ModelId,
+                    OnUnauthorized: failedJwt => _auth.LogoutIfCurrent(failedJwt));
+            });
 
         if (_activePi is { } current && current.TryUpdateConfig(config))
         {

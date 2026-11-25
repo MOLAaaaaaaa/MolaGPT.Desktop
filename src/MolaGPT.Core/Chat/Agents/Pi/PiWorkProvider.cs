@@ -69,6 +69,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     }
 
     public string Id => _config.ProviderId;
+    public const string ResumePrompt = "从暂停处继续任务。使用现有工具结果和工作成果，不要重复已完成的操作。";
     public string DisplayName => _config.DisplayName;
     public ProviderKind Kind => ProviderKind.MolaGptLocalTools;
     public IReadOnlyList<ProviderModel> Models => _config.Models;
@@ -264,6 +265,7 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             };
         }
 
+        ChatRequestError? workError = null;
         var target = new PiWorkLlmShim.ForwardTarget(
             _http,
             creds.Endpoint,
@@ -280,13 +282,27 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             creds.AdaptBody,
             creds.ResponseReceived,
             ModelId: creds.Model,
-            RelayTap: serverSources is null ? null : serverSources.Feed);
+            RelayTap: serverSources is null ? null : serverSources.Feed,
+            TurnCancellation: ct,
+            WorkStatus: request.WorkStatus,
+            WorkError: value =>
+            {
+                if (value is not null) Interlocked.CompareExchange(ref workError, value, null);
+            },
+            ReadWorkError: () => Volatile.Read(ref workError));
+
+        var turnKey = request.ConversationId ?? PiRuntime.DraftKey;
+        if (request.WorkResumeEntryId is { } entryId
+            && PiSessionRecovery.LastEntryId(PiRuntime.ResolveSessionPath(_config.Spec.SessionRoot, turnKey)) != entryId)
+        {
+            throw new ChatRequestException(new ChatRequestError("work_checkpoint_changed", "任务记录已变化，无法从暂停处继续。"));
+        }
 
         // Waits when every slot is busy, which is the point: three turns really are
         // in flight and a fourth process costs more than the wait.
         await using var lease = await _runtime.AcquireAsync(
             _config.Spec,
-            request.ConversationId ?? PiRuntime.DraftKey,
+            turnKey,
             target,
             binding,
             ct,
@@ -320,13 +336,14 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         // on file" distinct from "this turn happened to cost nothing".
         var priced = activeModel?.Pricing is not null;
 
-        var turnKey = request.ConversationId ?? PiRuntime.DraftKey;
+        var hadTools = false;
         var turn = new ActiveTurn(lease.Session);
         _activeTurns[turnKey] = turn;
         try
         {
             await foreach (var line in lease.Session
-                               .SendTurnAsync(creds.Model, thinkingLevel, userText, images, ct)
+                               .SendTurnAsync(creds.Model, thinkingLevel, userText, images, ct,
+                                   autoRetry: !MolaGptProviderIds.IsMolaGptAccount(Id))
                                .ConfigureAwait(false))
             {
                 if (Volatile.Read(ref promptError) is { } roleError) throw new InvalidOperationException(roleError);
@@ -347,7 +364,9 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
                     turn,
                     ref errorMessage,
                     ref finalStopReason);
-                if (chunk is not null) yield return chunk;
+                hadTools |= chunk?.Tool is not null;
+                if (chunk is not null && (chunk.FinishReason is null || Volatile.Read(ref workError) is null))
+                    yield return chunk;
                 if (serverSources is not null && serverSources.TryTakeTools(out var postTools))
                 {
                     foreach (var tool in postTools)
@@ -380,6 +399,25 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             if (serverSources.TryTake(out var serverTrailing)) yield return new ChatChunk(Sources: serverTrailing);
         }
 
+        var error = Volatile.Read(ref workError);
+        var hasWorkToResume = hadTools || request.WorkResumeEntryId is not null;
+        if (error is null && hasWorkToResume && MolaGptProviderIds.IsMolaGptAccount(Id) && errorMessage is not null)
+            error = new ChatRequestError("server_error", HumanizeAgentError(errorMessage), Retryable: true);
+        if (error is not null)
+        {
+            if ((error.Type == "account_restricted" || (hasWorkToResume && (error.Retryable || error.NextAction == "switch_model")))
+                && PiSessionRecovery.LastEntryId(PiRuntime.ResolveSessionPath(_config.Spec.SessionRoot, turnKey)) is { } checkpoint)
+            {
+                error = error with
+                {
+                    Type = error.Type == "account_restricted" ? "work_account_paused" : "work_paused",
+                    Message = "任务已暂停。" + error.Message,
+                    Retryable = false,
+                    WorkResumeEntryId = checkpoint
+                };
+            }
+            throw new ChatRequestException(error);
+        }
         if (errorMessage is not null)
             throw new InvalidOperationException(HumanizeAgentError(errorMessage));
     }

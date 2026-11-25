@@ -8,6 +8,7 @@ using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Templates;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
@@ -156,10 +157,20 @@ public partial class SettingsWindow : MolaContentWindow
     private const string GeminiNativeBaseUrl = "https://generativelanguage.googleapis.com/v1beta/";
 
     /// <summary>Show the card for controlling MolaGPT conversations from a phone.</summary>
+    private MolaGPT.Desktop.Services.Remote.RemoteWorkSettingsViewModel? _remoteWork;
+    private StackPanel? _remoteWorkSection;
+
     public void AttachRemoteWork(MolaGPT.Desktop.Services.Remote.RemoteWorkSettingsViewModel remoteWork)
     {
-        PART_RemoteWorkSection.DataContext = remoteWork;
-        PART_RemoteWorkSection.IsVisible = true;
+        _remoteWork = remoteWork;
+        BindRemoteWorkSection();
+    }
+
+    private void BindRemoteWorkSection()
+    {
+        if (_remoteWorkSection is not { } section || _remoteWork is null) return;
+        section.DataContext = _remoteWork;
+        section.IsVisible = true;
     }
 
     public SettingsWindow(
@@ -219,8 +230,6 @@ public partial class SettingsWindow : MolaContentWindow
 
         InitializeComponent();
         PAGE_PersonalData.IsEnabled = personalData is not null;
-        // Before DataContext: the search index reads the text the XAML spells
-        // out, and bound text is still empty at this point.
         InitializeSearch();
 
         foreach (var item in PART_Nav.Items.OfType<ListBoxItem>())
@@ -228,8 +237,8 @@ public partial class SettingsWindow : MolaContentWindow
             if (item.Tag is string name && this.FindControl<StackPanel>(name) is { } page)
                 _navPages[item] = page;
         }
-        PART_PersonaEditor.DataContext = _emptyPersona;
-        InitializeMemoryPage(memoryPage);
+
+        _memoryPage = memoryPage;
         PAGE_Agent.DataContext = _agentStatus;
         PAGE_Network.DataContext = _settings.NetworkProxy;
         PAGE_Personas.DataContext = _personas;
@@ -238,107 +247,21 @@ public partial class SettingsWindow : MolaContentWindow
         // settings, so it keeps the window's SettingsViewModel context.
         _browserBridge = new BrowserBridgeStatusViewModel(
             new WebBridgeClient(_byokHttpFactory?.Invoke() ?? new HttpClient()));
-        PART_BrowserBridgeCard.DataContext = _browserBridge;
+
         DataContext = _settings;
-        PART_AccountEntryNewBadge.IsVisible = _accountEntryWasNew && _settings.ShowStatusDots;
-        PART_AccountEntryCard.EffectiveViewportChanged += (_, e) =>
-        {
-            _accountEntryViewport = e.EffectiveViewport;
-            MarkAccountEntrySeen();
-        };
-        InitializeAccountPage(proxy);
-        PART_ContentScroll.SizeChanged += (_, _) => UpdatePersonaViewport();
-        PART_PersonaPageHeader.SizeChanged += (_, _) => UpdatePersonaViewport();
-        PART_PersonaModeFilter.SelectionChanged += (_, _) => RefreshPersonaLibrary();
-        PART_ClearPersonaSearch.Click += (_, _) =>
-        {
-            PART_PersonaSearch.Clear();
-            PART_PersonaSearch.Focus();
-        };
+        _proxy = proxy;
 
-        PART_Nav.SelectionChanged += (_, _) => ShowSelectedPage();
         PART_Nav.SelectedItem = _settings.ShowAccountFeatures ? PART_AccountNav : PART_AppearanceNav;
-        BuildThemeChoices();
-        BuildCornerStyleChoices();
-        BuildSearchProviderChoices();
-        BuildPermissionChoices();
-        BuildFontScaleChoices();
-        PART_TrayMinimize.IsChecked = _settings.TrayCloseBehavior == TrayCloseBehavior.MinimizeToTray;
-        PART_TrayExit.IsChecked = _settings.TrayCloseBehavior == TrayCloseBehavior.Exit;
-        PART_TrayMinimize.Click += (_, _) => _settings.TrayCloseBehavior = TrayCloseBehavior.MinimizeToTray;
-        PART_TrayExit.Click += (_, _) => _settings.TrayCloseBehavior = TrayCloseBehavior.Exit;
+        PART_Nav.SelectionChanged += (_, _) => ShowSelectedPage();
+        ShowSelectedPage();
 
-        PART_ProviderModels.ItemsSource = _providerModels;
-        PART_ProviderHeaders.ItemsSource = _providerHeaders;
-        PART_PersonaList.ItemsSource = _personas.Personas;
-        PART_PersonaIcons.ItemsSource = PersonaIconCatalog.All
-            .Select(icon => new PersonaIconRow(icon.Glyph, icon.Label));
-        PART_McpServers.ItemsSource = _settings.McpServers;
-        InitializeResponsePostProcessing();
-        _providerModels.CollectionChanged += (_, _) => RefreshProviderModelEmptyState();
-
-        PART_AddProvider.Click += (_, _) => EditProvider(null, "chat");
-        PART_AddImageProvider.Click += (_, _) => EditProvider(null, "image");
-        PART_AddProviderModel.Click += (_, _) => AddProviderModel();
-        PART_AddProviderHeader.Click += (_, _) => _providerHeaders.Add(new HeaderRow());
-        PART_RevealProviderKey.Click += (_, _) =>
-            PART_ProviderApiKey.PasswordChar = PART_ProviderApiKey.PasswordChar == '\0' ? '•' : '\0';
-        PART_RevealSearchKey.Click += (_, _) =>
-            PART_SearchApiKey.PasswordChar = PART_SearchApiKey.PasswordChar == '\0' ? '•' : '\0';
-        PART_TestSearch.Click += OnTestSearch;
-        PART_UseDetectedDeepSeek.Click += OnUseDetectedDeepSeek;
-        PART_UnlinkDeepSeekSearch.Click += OnUnlinkDeepSeekSearch;
-        PART_DeepSeekLinkedCombo.SelectionChanged += OnDeepSeekLinkedComboChanged;
-        PART_OpenBuiltinSearchProviders.Click += (_, _) => OpenProvidersPage();
-        PART_WebFetchMode.SelectionChanged += OnWebFetchModeChanged;
-        PART_ProviderBuiltinSearch.IsCheckedChanged += OnProviderBuiltinSearchChanged;
-        PART_CancelProviderEdit.Click += (_, _) => CloseProviderEditor();
-        PART_BackProvider.Click += (_, _) => CloseProviderEditor();
-        PART_SaveProvider.Click += (_, _) => SaveProvider();
-        PART_DeleteEditingProvider.Click += OnDeleteEditingProvider;
-        PART_DetectProviderModels.Click += OnDetectProviderModels;
-        PART_FetchEditingProviderPricing.Click += OnFetchEditingProviderPricing;
-        PART_FetchAllPricing.Click += OnFetchAllPricing;
-        PART_ResolvePricingConflicts.Click += OnResolvePricingConflicts;
-        PART_ClosePricingResult.Click += (_, _) => PART_PricingResult.IsVisible = false;
-        PART_TestProvider.Click += OnTestProvider;
-        PART_ProviderPreset.SelectionChanged += OnProviderPresetChanged;
-        PART_ProviderType.SelectionChanged += OnProviderTypeChanged;
-        PART_ProviderApiSource.IsCheckedChanged += OnProviderSourceChanged;
-        PART_ProviderChatGptSource.IsCheckedChanged += OnProviderSourceChanged;
-        InitializeChatGpt();
-        PART_ProviderImageFormat.SelectionChanged += OnProviderImageFormatChanged;
-        PART_ProviderBaseUrl.TextChanged += OnProviderEndpointChanged;
-        PART_ProviderHttps.IsCheckedChanged += OnProviderHttpsChanged;
-        PART_ProviderApiPath.TextChanged += OnProviderEndpointChanged;
-        PART_ProviderImageEditPath.TextChanged += OnProviderEndpointChanged;
-        PART_ProviderImageChatPath.TextChanged += OnProviderEndpointChanged;
-        PART_DetectedModelSearch.TextChanged += (_, _) => RefreshDetectedModelFilter();
-        PART_SelectAllDetectedModels.Click += OnSelectAllDetectedModels;
-        PART_CloseDetectedModels.Click += (_, _) => CloseDetectedModels();
-        PART_CancelDetectedModels.Click += (_, _) => CloseDetectedModels();
-        PART_AddDetectedModels.Click += OnAddDetectedModels;
-        PART_AddMcp.Click += (_, _) => EditMcp(null);
-        PART_CancelMcp.Click += (_, _) => CloseMcpEditor();
-        PART_SaveMcp.Click += (_, _) => SaveMcp();
-        PART_TestMcp.Click += OnTestMcp;
-        PART_McpTransport.SelectionChanged += (_, _) => ShowMcpTransportFields();
-        PART_RevealMcpToken.Click += (_, _) =>
-            PART_McpToken.PasswordChar = PART_McpToken.PasswordChar == '\0' ? '•' : '\0';
-        PART_SyncNow.Click += OnSyncNowClick;
-        PART_SyncConversations.Click += OnSyncConversationsClick;
-        PART_RevokeAll.Click += (_, _) => _settings.RevokeAllToolGrants();
-        PART_OpenApprovalSettings.Click += (_, _) => PART_Nav.SelectedItem = PART_ApprovalNav;
-        PART_ApprovalSandboxSettings.Click += (_, _) => OpenSandboxPage();
-        PART_ApprovalBrowserSettings.Click += (_, _) => OpenBrowserPage();
 
         RefreshProviders();
         RefreshAccountUi();
         RefreshMcpServers();
         RefreshSpecializedModelChoices();
         RefreshSkills();
-        LoadPersonaForm(null);
-        RefreshPersonaLibrary();
+
         Closing += (_, _) =>
         {
             PersistEditingPersona();
@@ -369,27 +292,14 @@ public partial class SettingsWindow : MolaContentWindow
             _ = RefreshRuntimeStatusAsync();
         };
 
-        PART_TestImageGeneration.IsEnabled = _imageGenerationTool is not null;
-        PART_TestSearch.IsEnabled = _byokHttpFactory is not null;
-        PART_DetectProviderModels.IsEnabled = _byokHttpFactory is not null;
-        PART_FetchEditingProviderPricing.IsEnabled = _byokHttpFactory is not null;
-        PART_FetchAllPricing.IsEnabled = _byokHttpFactory is not null;
-        PART_TestProvider.IsEnabled = _byokHttpFactory is not null;
-        PART_ConfigureSandbox.IsEnabled = _pythonRuntime is not null && _piSidecar is not null;
-        PART_BrowsePython.IsEnabled = _pythonRuntime is not null;
-        // A skill is a SKILL.md the model opens on demand, so skills work as soon
-        // as the chat can open one — read_file is enough, Python is not required.
-        // The page stays in the rail either way: hiding it only taught people the
-        // app had no skills. When nothing can read files, the page says so.
-        PART_SkillsUnreachable.IsVisible = !CanReachSkills();
-        RefreshPythonBrowseButton();
-
         PropertyChangedEventHandler settingsChanged = (_, args) =>
         {
             if (args.PropertyName is nameof(SettingsViewModel.PythonToolEnabled)
                 or nameof(SettingsViewModel.FileToolsEnabled))
-                PART_SkillsUnreachable.IsVisible = !CanReachSkills();
-            else if (args.PropertyName == nameof(SettingsViewModel.ShowStatusDots))
+            {
+                if (HasPageContent(PAGE_Skills)) PART_SkillsUnreachable.IsVisible = !CanReachSkills();
+            }
+            else if (args.PropertyName == nameof(SettingsViewModel.ShowStatusDots) && HasPageContent(PAGE_Appearance))
             {
                 PART_AccountEntryNewBadge.IsVisible = _accountEntryWasNew && _settings.ShowStatusDots;
             }
@@ -453,7 +363,7 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void MarkAccountEntrySeen()
     {
-        if (!_settings.AccountEntrySeen && IsActive && PAGE_Appearance.IsVisible
+        if (!_settings.AccountEntrySeen && IsActive && PAGE_Appearance.IsVisible && HasPageContent(PAGE_Appearance)
             && PART_AccountEntryCard.Bounds.Width > 0 && PART_AccountEntryCard.Bounds.Height > 0
             && _accountEntryViewport.Contains(new Rect(PART_AccountEntryCard.Bounds.Size)))
             _settings.AccountEntrySeen = true;
@@ -461,8 +371,12 @@ public partial class SettingsWindow : MolaContentWindow
 
     internal void OpenAgentPage()
     {
+        if (ReferenceEquals(PART_Nav.SelectedItem, PART_AgentNav))
+        {
+            if (_agentStatus is not null) _ = _agentStatus.LoadAsync();
+            return;
+        }
         PART_Nav.SelectedItem = PART_AgentNav;
-        if (_agentStatus is not null) _ = _agentStatus.LoadAsync();
     }
 
     internal void OpenSandboxPage()
@@ -611,11 +525,43 @@ public partial class SettingsWindow : MolaContentWindow
         await window.ShowDialog(this);
     }
 
+    private void EnsurePageContent(StackPanel page)
+    {
+        if (page.Children.Count != 0
+            || !Resources.TryGetResource(page.Name + ".Content", ActualThemeVariant, out var resource)
+            || resource is not IControlTemplate template) return;
+
+        if (template.Build(this) is not { } content) return;
+        if (page == PAGE_Agent)
+        {
+            _remoteWorkSection = content.NameScope.Find("PART_RemoteWorkSection") as StackPanel;
+            BindRemoteWorkSection();
+        }
+        _deferredPageNames.Add(page, content.NameScope);
+        page.Children.Add(content.Result);
+        if (page == PAGE_Providers) InitializeProviderPage();
+        if (page == PAGE_Personas) InitializePersonaPage();
+        if (page == PAGE_System) InitializeSystemPage();
+        if (page == PAGE_PostProcessing) InitializeResponsePostProcessing();
+        if (page == PAGE_Memory) InitializeMemoryPage();
+        if (page == PAGE_Search) InitializeSearchPage();
+        if (page == PAGE_ImageGeneration) InitializeImageGenerationPage();
+        if (page == PAGE_Vision) RefreshSpecializedModelChoices();
+        if (page == PAGE_Sandbox) InitializeSandboxPage();
+        if (page == PAGE_Browser) InitializeBrowserPage();
+        if (page == PAGE_Approval) InitializeApprovalPage();
+        if (page == PAGE_Mcp) InitializeMcpPage();
+        if (page == PAGE_Skills) InitializeSkillsPage();
+        if (page == PAGE_Account) InitializeAccountPage();
+        if (page == PAGE_Appearance) InitializeAppearancePage();
+    }
+
     private void ShowSelectedPage()
     {
         // A group heading has no page; leave the current one up.
         if (PART_Nav.SelectedItem is not ListBoxItem item || !_navPages.TryGetValue(item, out var page)) return;
 
+        EnsurePageContent(page);
         foreach (var other in _navPages.Values) other.IsVisible = other == page;
         // The rail scrolls at the default height. A page opened from elsewhere —
         // a search hit, 「去设置」, the Agent entry — should show where it sits.
@@ -755,19 +701,24 @@ public partial class SettingsWindow : MolaContentWindow
             _settings.RefreshImageGenerationProviderModels();
             _settings.RefreshVisionProviderModels();
 
-            PART_ImageGenerationModel.ItemsSource = null;
-            PART_ImageGenerationModel.ItemsSource = _settings.ImageGenerationProviderModels;
-            PART_ImageGenerationModel.SelectedItem = _settings.ImageGenerationProviderModels.FirstOrDefault(option =>
-                string.Equals(option.ProviderId, _settings.ImageGenerationProviderId, StringComparison.Ordinal)
-                && string.Equals(option.ModelId, _settings.ImageGenerationModelId, StringComparison.Ordinal));
+            if (HasPageContent(PAGE_ImageGeneration))
+            {
+                PART_ImageGenerationModel.ItemsSource = null;
+                PART_ImageGenerationModel.ItemsSource = _settings.ImageGenerationProviderModels;
+                PART_ImageGenerationModel.SelectedItem = _settings.ImageGenerationProviderModels.FirstOrDefault(option =>
+                    string.Equals(option.ProviderId, _settings.ImageGenerationProviderId, StringComparison.Ordinal)
+                    && string.Equals(option.ModelId, _settings.ImageGenerationModelId, StringComparison.Ordinal));
+                RefreshImageGenerationStatus();
+            }
 
-            PART_VisionModel.ItemsSource = null;
-            PART_VisionModel.ItemsSource = _settings.VisionProviderModels;
-            PART_VisionModel.SelectedItem = _settings.VisionProviderModels.FirstOrDefault(option =>
-                string.Equals(option.ProviderId, _settings.VisionProxyProviderId, StringComparison.Ordinal)
-                && string.Equals(option.ModelId, _settings.VisionProxyModelId, StringComparison.Ordinal));
-
-            RefreshImageGenerationStatus();
+            if (HasPageContent(PAGE_Vision))
+            {
+                PART_VisionModel.ItemsSource = null;
+                PART_VisionModel.ItemsSource = _settings.VisionProviderModels;
+                PART_VisionModel.SelectedItem = _settings.VisionProviderModels.FirstOrDefault(option =>
+                    string.Equals(option.ProviderId, _settings.VisionProxyProviderId, StringComparison.Ordinal)
+                    && string.Equals(option.ModelId, _settings.VisionProxyModelId, StringComparison.Ordinal));
+            }
         }
         finally
         {
@@ -841,8 +792,10 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void UpdateSearchStatusHint()
     {
+        if (!HasPageContent(PAGE_Search)) return;
         _updatingSearchControls = true;
         try
+
         {
             var provider = SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider);
             PART_SearchProvider.SelectedItem = PART_SearchProvider.Items.OfType<ComboBoxItem>()
@@ -1073,6 +1026,7 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void RefreshProviders()
     {
+        if (!HasPageContent(PAGE_Providers)) return;
         var chatProviders = _settings.Providers
             .Where(provider => !SettingsViewModel.IsImagePurpose(provider.Purpose))
             .Select(provider => new ProviderCardRow(provider, ChatProviderInactiveReason(provider)))
@@ -1179,6 +1133,7 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void CloseProviderEditor()
     {
+        if (!HasPageContent(PAGE_Providers)) return;
         _chatGptSignIn?.Cancel();
         PART_ChatGptError.IsVisible = false;
         CloseDetectedModels();
@@ -2964,7 +2919,7 @@ public partial class SettingsWindow : MolaContentWindow
             return;
         }
 
-        if (e.Key != Key.Escape) return;
+        if (e.Key != Key.Escape || !HasPageContent(PAGE_Providers)) return;
         if (PART_DetectedModelsPanel.IsVisible)
         {
             CloseDetectedModels();
@@ -2979,8 +2934,10 @@ public partial class SettingsWindow : MolaContentWindow
 
     // ---- MCP servers -------------------------------------------------------
 
-    private void RefreshMcpServers() =>
-        PART_NoMcpServers.IsVisible = _settings.McpServers.Count == 0;
+    private void RefreshMcpServers()
+    {
+        if (HasPageContent(PAGE_Mcp)) PART_NoMcpServers.IsVisible = _settings.McpServers.Count == 0;
+    }
 
     private void OnEditMcp(object? sender, RoutedEventArgs e)
     {
@@ -3191,6 +3148,7 @@ public partial class SettingsWindow : MolaContentWindow
     /// </summary>
     private async Task RefreshRuntimeStatusAsync(bool rescanStorage = false)
     {
+        if (!HasPageContent(PAGE_Sandbox)) return;
         if (_pythonRuntime is null || _piSidecar is null)
         {
             PART_SandboxStatus.Text = "运行环境不可用";
@@ -3519,6 +3477,7 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void RefreshPythonBrowseButton()
     {
+        if (!HasPageContent(PAGE_Sandbox)) return;
         var path = NormalizedPythonPath();
         PART_BrowsePython.Content = !string.IsNullOrWhiteSpace(path) && File.Exists(path)
             ? "重新选择..."
@@ -3573,6 +3532,7 @@ public partial class SettingsWindow : MolaContentWindow
     private void RefreshSkills()
     {
         _skills.Reload();
+        if (!HasPageContent(PAGE_Skills)) return;
         // Two flat lists under two section headings, the way 模型服务 splits
         // 对话服务 from 图像服务 — it replaces the per-row 内置 / 自定义 badge,
         // and 删除 only ever appears in the half where it applies.

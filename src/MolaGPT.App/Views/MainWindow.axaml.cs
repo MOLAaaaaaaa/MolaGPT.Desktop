@@ -14,7 +14,6 @@ using MolaGPT.App.Infrastructure;
 using MolaGPT.App.Rendering;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
-using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
@@ -93,7 +92,6 @@ public partial class MainWindow : MolaWindow
     private ImageGenerationWorkbenchView? _imageWorkbench;
     private Task<bool>? _agentRuntimeSetupTask;
     private bool _agentRuntimeActivated;
-    private bool _hasOpened;
     private int _compactionTokensBeforeAtStart;
     private readonly Transitions _artifactPanelTransitions = new();
     private bool _artifactResizeActive;
@@ -193,8 +191,8 @@ public partial class MainWindow : MolaWindow
         PART_Composer.DataContext = _composer;
         // The composer floats over the transcript; whatever height it has is kept
         // clear at the transcript's bottom.
-        PART_Composer.SizeChanged += (_, e) => PART_Transcript.SetBottomReserve(
-            e.NewSize.Height + PART_Composer.Margin.Bottom - ComposerOverTranscriptPadding);
+        PART_ComposerOverlay.SizeChanged += (_, e) => PART_Transcript.SetBottomReserve(
+            e.NewSize.Height + PART_ComposerOverlay.Margin.Bottom - ComposerOverTranscriptPadding);
         DataContext = _main;
         ApplyFontScale(_settings.FontScale);
         StreamTailFade.Configure(_settings.StreamFadeEnabled);
@@ -352,10 +350,40 @@ public partial class MainWindow : MolaWindow
         };
         PART_Transcript.StopTaskRequested += (_, taskId) => _chat.StopTask(taskId);
 
-        // The only recoverable error the view model raises is "switch model",
-        // and the picker lives in the header — so the banner's button opens it
-        // rather than duplicating the list.
-        PART_Transcript.ErrorActionRequested += (_, _) => PART_Header.OpenModelSelector();
+        PART_Transcript.ErrorActionRequested += async (_, message) =>
+        {
+            switch (message.ErrorAction)
+            {
+                case MessageErrorAction.SwitchModel:
+                    PART_Header.OpenModelSelector();
+                    break;
+                case MessageErrorAction.Retry:
+                    if (_composer.RetryCommand.CanExecute(message)) await _composer.RetryAsync(message);
+                    break;
+                case MessageErrorAction.SignIn:
+                    await OpenLoginAsync(this, force: true);
+                    break;
+                case MessageErrorAction.AccountSecurity:
+                    await OpenAccountSecurityAsync();
+                    break;
+                case MessageErrorAction.ViewUsage:
+                    await OpenAccountAsync();
+                    break;
+            }
+        };
+        var errorActionTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        errorActionTimer.Tick += (_, _) =>
+        {
+            foreach (var message in _chat.Messages)
+            {
+                if (message.RequestError is null) continue;
+                message.RefreshErrorAction(_composer.ContinueCommand.CanExecute(message),
+                    _composer.RetryCommand.CanExecute(message));
+            }
+        };
+        errorActionTimer.Start();
+        Closed += (_, _) => errorActionTimer.Stop();
+        Activated += (_, _) => _ = _main.RefreshUsageAsync(force: true);
 
         _chat.PropertyChanged += OnChatPropertyChanged;
         // The gauge instance outlives every conversation, so one subscription covers
@@ -373,14 +401,11 @@ public partial class MainWindow : MolaWindow
 
         Opened += (_, _) =>
         {
-            _hasOpened = true;
             PART_Composer.FocusInput();
-            StartActiveProviderPrewarm();
             AnnounceStrandedAgentRuntime();
         };
         Closed += (_, _) =>
         {
-            _hasOpened = false;
             _auth.LoggedOut -= OnLoggedOut;
             _settings.PropertyChanged -= OnSettingsPropertyChanged;
             _chat.ContextGauge.PropertyChanged -= OnContextGaugePropertyChanged;
@@ -508,9 +533,6 @@ public partial class MainWindow : MolaWindow
 
     private void OnChatPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(ChatViewModel.ActiveProvider))
-            StartActiveProviderPrewarm();
-
         if (e.PropertyName is nameof(ChatViewModel.CurrentMode)
             or nameof(ChatViewModel.ActiveModel)
             or nameof(ChatViewModel.ActiveModelLabel)
@@ -518,20 +540,6 @@ public partial class MainWindow : MolaWindow
         {
             SyncChrome();
         }
-    }
-
-    internal void StartActiveProviderPrewarm()
-    {
-        if (!_hasOpened) return;
-        if (_chat.ActiveProvider is not PiWorkProvider provider) return;
-        _ = PrewarmAsync(provider);
-    }
-
-    private static async Task PrewarmAsync(PiWorkProvider provider)
-    {
-        try { await provider.PrewarmAsync().ConfigureAwait(false); }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) { DiagnosticLog.Write("pi-work", "预热 Agent 运行时失败：" + ex.Message); }
     }
 
     private void SyncChrome()
@@ -987,6 +995,15 @@ public partial class MainWindow : MolaWindow
     /// <summary>The title bar's account button: sign in, or — once signed in —
     /// the MolaGPT 账号 page, which holds usage alongside the account's
     /// settings.</summary>
+    private async void OnAccountSecurityClick(object? sender, Avalonia.Interactivity.RoutedEventArgs args) =>
+        await OpenAccountSecurityAsync();
+
+    private async Task OpenAccountSecurityAsync()
+    {
+        try { CommunityLinks.TryOpenBrowser(await _auth.CreateAccountSecurityLinkAsync()); }
+        catch (Exception) { _notifications.Error("暂时无法打开账户安全", "请稍后重试。", "account-security"); }
+    }
+
     private async Task OpenAccountAsync()
     {
         if (string.IsNullOrEmpty(_auth.CurrentJwt))
@@ -999,9 +1016,9 @@ public partial class MainWindow : MolaWindow
         _settingsWindow?.OpenAccountPage();
     }
 
-    private async Task<bool> OpenLoginAsync(Window owner)
+    private async Task<bool> OpenLoginAsync(Window owner, bool force = false)
     {
-        if (!string.IsNullOrEmpty(_auth.CurrentJwt)) return true;
+        if (!force && !string.IsNullOrEmpty(_auth.CurrentJwt)) return true;
 
         var login = new LoginWindow(_auth, _proxy, _providers, _localToolsRegistrar);
         var success = await login.ShowDialog<bool>(owner);
@@ -1011,6 +1028,7 @@ public partial class MainWindow : MolaWindow
 
     internal void CompleteAccountLogin()
     {
+        _cloudSync.BindCurrentAccountAfterLogin();
         RefreshAccountState();
         if (!_settings.IsLoggedIn) return;
 

@@ -71,6 +71,9 @@ public static class PiSessionRecovery
             lastStopReason is not ("stop" or "length") || hadPendingTools);
     }
 
+    internal static string? LastEntryId(string sessionPath) =>
+        File.Exists(sessionPath) ? ReadEntries(sessionPath).LastOrDefault()?.Id : null;
+
     private static bool HasVisibleContent(ChatChunk chunk) =>
         chunk.DeltaText is { Length: > 0 }
         || chunk.DeltaThinking is { Length: > 0 }

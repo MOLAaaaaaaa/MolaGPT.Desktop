@@ -27,7 +27,9 @@ public sealed record ChatRequest(
     string? HistoryRevision = null,
     RolePromptPlan? RolePrompt = null,
     bool IsSubagent = false,
-    ChatRequest? Parent = null);
+    ChatRequest? Parent = null,
+    string? WorkResumeEntryId = null,
+    IProgress<PendingStatusDelta>? WorkStatus = null);
 
 /// <summary>
 /// Keys the app packs into <see cref="ChatRequest.ExtraBody"/> for its own

@@ -31,6 +31,8 @@ public sealed class MolaGptAuthService
     public const string DefaultOAuthExchangeUrl = "https://chatgpt.wljay.cn/v2/api/auth/oauth_exchange.php";
     public const string DefaultWarmupUrl = "https://chatgpt.wljay.cn/v2/";
     public const string DefaultLogoutUrl = "https://chatgpt.wljay.cn/v2/api/auth/logout.php";
+    public const string AccountSecurityUrl = "https://chatgpt.wljay.cn/v2/account/security/";
+    private const string AccountSecurityApiPath = "/v2/api/auth/risk_appeal.php";
     public const string DefaultRefreshUrl = "https://chatgpt.wljay.cn/v2/api/auth/session_refresh.php";
 
     private readonly HttpClient _http;
@@ -107,6 +109,39 @@ public sealed class MolaGptAuthService
         }
     }
 
+    public async Task<string> CreateAccountSecurityLinkAsync(string? appealToken = null, CancellationToken ct = default)
+    {
+        var jwt = appealToken ?? CurrentJwt;
+        if (string.IsNullOrEmpty(jwt)) return AccountSecurityUrl;
+        if (appealToken is null) jwt = await GetAccessTokenAsync(jwt, ct).ConfigureAwait(false);
+        var origin = new Uri(DefaultWarmupUrl);
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(origin, AccountSecurityApiPath));
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+        request.Content = JsonContent.Create(new { operation = "handoff" });
+        using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+        await ChatApiErrorHelper.EnsureSuccessAsync(response, "账户安全", ct).ConfigureAwait(false);
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+        var path = doc.RootElement.GetProperty("path").GetString();
+        if (path is null || !path.StartsWith(AccountSecurityApiPath + "?handoff=", StringComparison.Ordinal))
+            throw new InvalidOperationException("暂时无法打开账户安全。");
+        return new Uri(origin, path).AbsoluteUri;
+    }
+
+    private static LoginResult ReadRejectedLogin(string content)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(content);
+            var root = doc.RootElement;
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("appeal_only", out var scope)
+                && scope.ValueKind == JsonValueKind.True && root.TryGetProperty("appeal_token", out var token)
+                && token.ValueKind == JsonValueKind.String)
+                return new LoginResult(false, null, "账户已暂停使用，请查看限制详情。", token.GetString());
+        }
+        catch (JsonException) { }
+        return new LoginResult(false, null, SummarizeLoginBody(content));
+    }
+
     public async Task<LoginResult> LoginAsync(string username, string password, CancellationToken ct = default)
     {
         long generation;
@@ -129,7 +164,7 @@ public sealed class MolaGptAuthService
         if (!resp.IsSuccessStatusCode)
         {
             var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            return new LoginResult(false, null, $"HTTP {(int)resp.StatusCode}: {SummarizeLoginBody(body)}");
+            return ReadRejectedLogin(body);
         }
 
         var content = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
@@ -300,7 +335,7 @@ public sealed class MolaGptAuthService
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         var content = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
-            return new LoginResult(false, null, $"HTTP {(int)resp.StatusCode}: {SummarizeLoginBody(content)}");
+            return ReadRejectedLogin(content);
 
         LoginPayload? payload;
         try { payload = JsonSerializer.Deserialize<LoginPayload>(content); }
@@ -516,7 +551,7 @@ public sealed record UserInfo(
     [property: JsonPropertyName("username")] string Username,
     [property: JsonPropertyName("unlimited")] bool Unlimited);
 
-public sealed record LoginResult(bool Success, UserInfo? UserInfo, string? ErrorMessage);
+public sealed record LoginResult(bool Success, UserInfo? UserInfo, string? ErrorMessage, string? AppealToken = null);
 
 /// <summary>
 /// Thrown when chat / model-list calls receive 401. The caller should display

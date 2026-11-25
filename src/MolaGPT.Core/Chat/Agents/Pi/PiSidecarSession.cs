@@ -31,7 +31,7 @@ public sealed class PiSidecarSession : IAsyncDisposable
     private Pipe? _pipe;
     private string? _activeModel;
     private string? _activeThinkingLevel;
-    private bool _autoRetryEnabled;
+    private bool? _autoRetryEnabled;
 
     public PiSidecarSession(PiSidecarLaunchOptions launch, Action<string>? log = null)
     {
@@ -172,7 +172,7 @@ public sealed class PiSidecarSession : IAsyncDisposable
         _pipe = pipe;
         _activeModel = null;
         _activeThinkingLevel = null;
-        _autoRetryEnabled = false;
+        _autoRetryEnabled = null;
 
         _ = Task.Run(() => PumpAsync(pipe));
 
@@ -551,7 +551,7 @@ public sealed class PiSidecarSession : IAsyncDisposable
             await RequestAsync("switch_session", new { sessionPath }, ct).ConfigureAwait(false);
             _activeModel = null;
             _activeThinkingLevel = null;
-            _autoRetryEnabled = false;
+            _autoRetryEnabled = null;
             return wasAlive;
         }
         finally
@@ -704,7 +704,8 @@ public sealed class PiSidecarSession : IAsyncDisposable
         string thinkingLevel,
         string userText,
         IReadOnlyList<PiImage> images,
-        [EnumeratorCancellation] CancellationToken ct)
+        [EnumeratorCancellation] CancellationToken ct,
+        bool autoRetry = true)
     {
         await _turnGate.WaitAsync(ct).ConfigureAwait(false);
         Pipe? pipe = null;
@@ -761,12 +762,10 @@ public sealed class PiSidecarSession : IAsyncDisposable
                     Send(new { type = "set_thinking_level", level = thinkingLevel });
                     _activeThinkingLevel = thinkingLevel;
                 }
-                if (!_autoRetryEnabled)
+                if (_autoRetryEnabled != autoRetry)
                 {
-                    // Let Pi ride out a provider hiccup instead of surfacing it as a
-                    // failed turn the user has to retry by hand.
-                    Send(new { type = "set_auto_retry", enabled = true });
-                    _autoRetryEnabled = true;
+                    Send(new { type = "set_auto_retry", enabled = autoRetry });
+                    _autoRetryEnabled = autoRetry;
                 }
 
                 // Images ride on the prompt command rather than being flattened into

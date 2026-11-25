@@ -136,6 +136,38 @@ public sealed class CloudSyncService
         _settings = settings;
     }
 
+    private bool IsCurrentAccount(long generation, string? username) =>
+        _auth.SessionGeneration == generation
+        && !string.IsNullOrWhiteSpace(_auth.CurrentJwt)
+        && string.Equals(_auth.CurrentUsername, username, StringComparison.Ordinal);
+
+    private void ThrowIfAccountChanged(long generation, string? username)
+    {
+        if (!IsCurrentAccount(generation, username))
+            throw new OperationCanceledException("账户切换，请求已取消。");
+    }
+
+    // Keep the thousands-of-rows merge loop free of credential decryptions.
+    private void ThrowIfAccountGenerationChanged(long generation)
+    {
+        if (_auth.SessionGeneration != generation)
+            throw new OperationCanceledException("账户切换，请求已取消。");
+    }
+
+    // Preserve already-signed-in legacy users at startup, before any cloud sync.
+    // A subsequent interactive login must never adopt orphaned unknown history.
+    public void AdoptSignedInAccountAtStartup()
+    {
+        var username = _auth.CurrentUsername;
+        if (string.IsNullOrWhiteSpace(_auth.CurrentJwt)
+            || string.IsNullOrWhiteSpace(username)
+            || !string.IsNullOrWhiteSpace(_settings.Get(BoundAccountKey))) return;
+
+        _settings.Set(BoundAccountKey, username);
+    }
+
+    public void BindCurrentAccountAfterLogin() => EnforceAccountBinding();
+
     public async Task<CloudSyncResult> SyncAsync(
         IProgress<string>? progress = null,
         CancellationToken ct = default,
@@ -144,6 +176,9 @@ public sealed class CloudSyncService
     {
         if (Interlocked.Exchange(ref _isSyncing, 1) == 1)
             throw new InvalidOperationException("云同步正在进行中。");
+
+        var sessionGeneration = _auth.SessionGeneration;
+        var sessionAccount = _auth.CurrentUsername;
 
         // Carried on the status event so the shell can tell "you asked for this"
         // from "the timer fired". Progress and success are only worth announcing
@@ -170,6 +205,7 @@ public sealed class CloudSyncService
 
             if (bool.TryParse(_settings.Get(SyncEnabledKey), out var enabled) && !enabled)
                 throw new InvalidOperationException("请先开启对话数据同步。");
+            ThrowIfAccountChanged(sessionGeneration, sessionAccount);
 
             // Account-binding guard (cross-account leak prevention): if the
             // local MolaGPT data is bound to a different account than the one
@@ -177,7 +213,12 @@ public sealed class CloudSyncService
             // and reset sync state BEFORE building the dirty set. Otherwise a
             // first sync would upload the previous account's retained
             // conversations to the new account.
-            var accountBinding = await Task.Run(() => EnforceAccountBinding(), token).ConfigureAwait(false);
+            var accountBinding = await Task.Run(() =>
+            {
+                ThrowIfAccountChanged(sessionGeneration, sessionAccount);
+                return EnforceAccountBinding();
+            }, token).ConfigureAwait(false);
+            ThrowIfAccountChanged(sessionGeneration, sessionAccount);
 
             var lastSync = _settings.Get(LastSyncKey) ?? EpochIso;
             var lastSyncMs = ToUnixMilliseconds(lastSync);
@@ -192,12 +233,15 @@ public sealed class CloudSyncService
                     .ToArray(), token)
                 .ConfigureAwait(false);
 
+            ThrowIfAccountChanged(sessionGeneration, sessionAccount);
             if (deletedIds.Length > 0)
                 await DeleteCloudConversationsAsync(jwt, deletedIds, token).ConfigureAwait(false);
+            ThrowIfAccountChanged(sessionGeneration, sessionAccount);
 
             Report("正在整理本地对话...");
             var dirty = await Task.Run(() => BuildDirtyConversations(lastSyncMs, isFirstSync), token)
                 .ConfigureAwait(false);
+            ThrowIfAccountChanged(sessionGeneration, sessionAccount);
             Report(dirty.Count > 0
                 ? $"正在上传 {dirty.Count} 个本地更新..."
                 : "正在拉取云端对话列表...");
@@ -208,6 +252,7 @@ public sealed class CloudSyncService
                 ["last_sync_timestamp"] = lastSync,
                 ["dirty_conversations"] = dirty
             }, token, progress).ConfigureAwait(false);
+            ThrowIfAccountChanged(sessionGeneration, sessionAccount);
 
             if (dirty.Count > 0 && !HasServerMetadata(syncResult))
             {
@@ -219,17 +264,21 @@ public sealed class CloudSyncService
                     ["last_sync_timestamp"] = refreshTimestamp,
                     ["dirty_conversations"] = new JsonArray()
                 }, token, progress).ConfigureAwait(false);
+                ThrowIfAccountChanged(sessionGeneration, sessionAccount);
             }
 
             var syncTimestamp = syncResult["new_sync_timestamp"]?.GetValue<string>() ?? DateTimeOffset.UtcNow.ToString("O");
             Report("正在合并对话列表...");
             var merge = await Task.Run(() =>
             {
-                var result = MergeServerMetadata(syncResult, syncTimestamp);
+                ThrowIfAccountChanged(sessionGeneration, sessionAccount);
+                var result = MergeServerMetadata(syncResult, syncTimestamp, sessionGeneration, sessionAccount);
+                ThrowIfAccountChanged(sessionGeneration, sessionAccount);
                 _settings.Set(LastSyncKey, syncTimestamp);
                 var uploadedRows = MarkUploadedConversations(dirty, syncTimestamp);
                 return result with { ChangedRows = result.ChangedRows.Concat(uploadedRows).ToList() };
             }, token).ConfigureAwait(false);
+            ThrowIfAccountChanged(sessionGeneration, sessionAccount);
 
             if (publishStatus)
                 PublishStatus(CloudSyncState.Success, "同步成功");
@@ -245,6 +294,11 @@ public sealed class CloudSyncService
                     .Distinct(StringComparer.Ordinal)
                     .ToList(),
                 RequiresFullReload: false);
+        }
+        catch (OperationCanceledException) when (!IsCurrentAccount(sessionGeneration, sessionAccount))
+        {
+            DiagnosticLog.Write("sync", "discarded stale result after account change");
+            throw;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -440,10 +494,16 @@ public sealed class CloudSyncService
     public async Task<bool> FetchConversationToLocalAsync(string conversationId, CancellationToken ct = default)
     {
         var jwt = _auth.CurrentJwt;
-        if (string.IsNullOrWhiteSpace(jwt)) return false;
+        var generation = _auth.SessionGeneration;
+        var username = _auth.CurrentUsername;
+        if (string.IsNullOrWhiteSpace(jwt) || !IsCurrentAccount(generation, username)) return false;
 
-        var accountBinding = await Task.Run(() => EnforceAccountBinding(), ct).ConfigureAwait(false);
-        if (accountBinding.PurgedConversationCount > 0) return false;
+        var accountBinding = await Task.Run(() =>
+        {
+            if (!IsCurrentAccount(generation, username)) return AccountBindingResult.Empty;
+            return EnforceAccountBinding();
+        }, ct).ConfigureAwait(false);
+        if (!IsCurrentAccount(generation, username) || accountBinding.PurgedConversationCount > 0) return false;
 
         var refreshKey = DetailRefreshKey(conversationId);
         var needsRefresh = !string.IsNullOrWhiteSpace(_settings.Get(refreshKey));
@@ -484,7 +544,8 @@ public sealed class CloudSyncService
             return false;
         }
 
-        if (detail is null || detail["messages"] is not JsonArray messages || messages.Count == 0)
+        if (!IsCurrentAccount(generation, username)
+            || detail is null || detail["messages"] is not JsonArray messages || messages.Count == 0)
             return false;
 
         var metadata = detail["metadata"] as JsonObject;
@@ -499,6 +560,7 @@ public sealed class CloudSyncService
             SetConversationSyncTimestamp(conversationId, metadataUpdated);
         }
 
+        if (!IsCurrentAccount(generation, username)) return false;
         _messages.ReplaceConversationMessages(conversationId, ToLocalMessages(conversationId, messages));
         _settings.Remove(refreshKey);
         _settings.Set(DetailParserVersionKey(conversationId), DetailParserVersion);
@@ -548,17 +610,23 @@ public sealed class CloudSyncService
     public async Task<bool> PushSingleConversationAsync(string conversationId, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(conversationId)) return false;
+        var generation = _auth.SessionGeneration;
+        var username = _auth.CurrentUsername;
         while (Interlocked.Exchange(ref _isSyncing, 1) == 1)
             await Task.Delay(1000, ct).ConfigureAwait(false);
 
         try
         {
             var jwt = _auth.CurrentJwt;
-            if (string.IsNullOrWhiteSpace(jwt)) return false;
+            if (string.IsNullOrWhiteSpace(jwt) || !IsCurrentAccount(generation, username)) return false;
             if (bool.TryParse(_settings.Get(SyncEnabledKey), out var enabled) && !enabled) return false;
 
-            var accountBinding = await Task.Run(() => EnforceAccountBinding(), ct).ConfigureAwait(false);
-            if (accountBinding.PurgedConversationCount > 0) return false;
+            var accountBinding = await Task.Run(() =>
+            {
+                ThrowIfAccountChanged(generation, username);
+                return EnforceAccountBinding();
+            }, ct).ConfigureAwait(false);
+            if (!IsCurrentAccount(generation, username) || accountBinding.PurgedConversationCount > 0) return false;
 
             var snapshot = await Task.Run(() =>
             {
@@ -567,6 +635,7 @@ public sealed class CloudSyncService
                 return (conversation, messages);
             }, ct).ConfigureAwait(false);
 
+            if (!IsCurrentAccount(generation, username)) return false;
             var row = snapshot.conversation;
             if (row is null || row.DeletedAt is not null) return false;
             if (!IsCloudSyncable(row)) return false;
@@ -585,12 +654,14 @@ public sealed class CloudSyncService
                 }
             };
 
+            if (!IsCurrentAccount(generation, username)) return false;
             var result = await PostSyncAsync(jwt, new JsonObject
             {
                 ["action"] = "full_sync",
                 ["last_sync_timestamp"] = _settings.Get(LastSyncKey) ?? EpochIso,
                 ["dirty_conversations"] = dirty
             }, ct).ConfigureAwait(false);
+            if (!IsCurrentAccount(generation, username)) return false;
 
             var syncTimestamp = result["new_sync_timestamp"]?.GetValue<string>() ?? DateTimeOffset.UtcNow.ToString("O");
             SetConversationSyncTimestamp(conversationId, syncTimestamp);
@@ -612,6 +683,8 @@ public sealed class CloudSyncService
     public async Task PushDeletedConversationsAsync(IReadOnlyList<string> conversationIds, CancellationToken ct = default)
     {
         if (conversationIds.Count == 0) return;
+        var generation = _auth.SessionGeneration;
+        var username = _auth.CurrentUsername;
         if (string.IsNullOrWhiteSpace(_auth.CurrentJwt))
         {
             ForgetLoggedOutLocalDeletes(conversationIds);
@@ -629,10 +702,15 @@ public sealed class CloudSyncService
                 ForgetLoggedOutLocalDeletes(conversationIds);
                 return;
             }
+            if (!IsCurrentAccount(generation, username)) return;
             if (bool.TryParse(_settings.Get(SyncEnabledKey), out var enabled) && !enabled) return;
 
-            var accountBinding = await Task.Run(() => EnforceAccountBinding(), ct).ConfigureAwait(false);
-            if (accountBinding.PurgedConversationCount > 0) return;
+            var accountBinding = await Task.Run(() =>
+            {
+                ThrowIfAccountChanged(generation, username);
+                return EnforceAccountBinding();
+            }, ct).ConfigureAwait(false);
+            if (!IsCurrentAccount(generation, username) || accountBinding.PurgedConversationCount > 0) return;
 
             var ids = conversationIds
                 .Where(id => !string.IsNullOrWhiteSpace(id))
@@ -641,7 +719,9 @@ public sealed class CloudSyncService
             if (ids.Length == 0) return;
 
             PublishStatus(CloudSyncState.Syncing, "正在同步删除...");
+            if (!IsCurrentAccount(generation, username)) return;
             await DeleteCloudConversationsAsync(jwt, ids, ct).ConfigureAwait(false);
+            if (!IsCurrentAccount(generation, username)) return;
             foreach (var id in ids)
             {
                 _settings.Remove(ConversationSyncKey(id));
@@ -773,6 +853,16 @@ public sealed class CloudSyncService
         return ExtractGeneratedTitle(result);
     }
 
+    // Explicit sign-out with cloud sync enabled only. Token expiry retains
+    // local history so reauthentication as the same user is seamless.
+    public int CleanupLocalOfficialHistoryForLogout()
+    {
+        if (!string.IsNullOrWhiteSpace(_auth.CurrentJwt)) return 0;
+        var purged = PurgeLocalOfficialConversations();
+        _settings.Remove(LastSyncKey);
+        return purged.Count;
+    }
+
     public int CleanupLocalPlaceholdersForLogout()
     {
         var deletedIds = _conversations.HardDeleteEmptyByProvider(MolaGptProviderId);
@@ -805,40 +895,35 @@ public sealed class CloudSyncService
         if (string.IsNullOrWhiteSpace(current)) return AccountBindingResult.Empty;
 
         var bound = _settings.Get(BoundAccountKey);
-        if (string.IsNullOrWhiteSpace(bound))
-        {
-            // First time binding (or upgraded from a pre-binding build): adopt
-            // the current account without purging. Existing local data is
-            // assumed to belong to this account.
-            _settings.Set(BoundAccountKey, current);
-            return AccountBindingResult.Empty;
-        }
-
         if (string.Equals(bound, current, StringComparison.Ordinal)) return AccountBindingResult.Empty;
 
-        // Different account: purge previous account's local MolaGPT data.
-        var purged = _conversations.PurgeAllByProvider(MolaGptProviderId);
-        foreach (var id in purged)
-        {
-            _settings.Remove(ConversationSyncKey(id));
-            _settings.Remove(CloudMetadataKey(id));
-            _settings.Remove(DetailRefreshKey(id));
-            _settings.Remove(DetailParserVersionKey(id));
-            _settings.Remove(TitleGeneratedKey(id));
-        }
+        // Missing binding after an interactive login means older local rows
+        // have unknown ownership. Never upload them to a newly signed-in user.
+        // Already-signed-in upgrades were adopted at app startup instead.
+        var purged = PurgeLocalOfficialConversations();
         _settings.Remove(LastSyncKey);
         _settings.Set(BoundAccountKey, current);
+        return new AccountBindingResult(purged.Count, purged);
+    }
+
+    private IReadOnlyList<string> PurgeLocalOfficialConversations()
+    {
+        var purged = _conversations.PurgeAllByProvider(MolaGptProviderId);
+        foreach (var id in purged)
+            ForgetPurgedConversation(id);
         if (purged.Count > 0)
             LocalConversationsChanged?.Invoke(this, EventArgs.Empty);
-        return new AccountBindingResult(purged.Count, purged);
+        return purged;
     }
 
     private JsonArray BuildDirtyConversations(long lastSyncMs, bool isFirstSync)
     {
         var dirty = new JsonArray();
+        var conversationsWithMessages = _messages.ListConversationIdsWithMessages();
         foreach (var row in _conversations.ListActive())
         {
-            if (!IsCloudSyncable(row)) continue;
+            if (!IsCloudSyncable(row) || !conversationsWithMessages.Contains(row.Id)) continue;
+            if (!isFirstSync && row.UpdatedAt <= lastSyncMs && !NeedsGeneratedTitle(row)) continue;
 
             var rows = _messages.List(row.Id);
             if (rows.Count == 0) continue;
@@ -861,8 +946,10 @@ public sealed class CloudSyncService
         return dirty;
     }
 
-    private CloudMetadataMergeResult MergeServerMetadata(JsonObject syncResult, string syncTimestamp)
+    private CloudMetadataMergeResult MergeServerMetadata(
+        JsonObject syncResult, string syncTimestamp, long sessionGeneration, string? sessionAccount)
     {
+        ThrowIfAccountChanged(sessionGeneration, sessionAccount);
         var upserted = 0;
         var remoteDeleted = 0;
         var changedRows = new List<ConversationRow>();
@@ -872,6 +959,7 @@ public sealed class CloudSyncService
         {
             foreach (var node in updatedContent.OfType<JsonObject>())
             {
+                ThrowIfAccountGenerationChanged(sessionGeneration);
                 if (node["metadata"] is not JsonObject metadata) continue;
                 var id = metadata["id"]?.GetValue<string>();
                 if (string.IsNullOrWhiteSpace(id)) continue;
@@ -891,29 +979,28 @@ public sealed class CloudSyncService
         if (syncResult["full_metadata_list"] is not JsonArray serverList)
             return new CloudMetadataMergeResult(upserted, remoteDeleted, changedRows, removedIds);
 
+        // Read the local rows and sync markers together. Only candidates for
+        // writes need a fresh point lookup while the response is being merged.
+        var local = _conversations.ListAllWithSetting(ConversationSyncPrefix)
+            .ToDictionary(item => item.Row.Id, StringComparer.Ordinal);
         var serverIds = new HashSet<string>(StringComparer.Ordinal);
         var merged = 0;
         foreach (var node in serverList)
         {
+            ThrowIfAccountGenerationChanged(sessionGeneration);
             if (node is not JsonObject metadata) continue;
             var id = metadata["id"]?.GetValue<string>();
             if (string.IsNullOrWhiteSpace(id)) continue;
             serverIds.Add(id);
 
             var serverUpdatedAt = ParseCloudTimestamp(metadata["updated_at"] ?? metadata["time"]);
+            if (HasNewerLocalMetadata(local.GetValueOrDefault(id).Row, serverUpdatedAt)) continue;
             var existing = _conversations.Get(id);
-            if (existing is not null)
-            {
-                if (existing.DeletedAt is long deletedAt && deletedAt >= serverUpdatedAt)
-                    continue;
-                if (existing.DeletedAt is null && existing.UpdatedAt >= serverUpdatedAt)
-                    continue;
-            }
+            if (HasNewerLocalMetadata(existing, serverUpdatedAt)) continue;
 
-            var shouldRefreshDetail = existing is not null
-                && existing.DeletedAt is null
+            var shouldRefreshDetail = existing is { DeletedAt: null }
                 && serverUpdatedAt > existing.UpdatedAt
-                && _messages.List(id).Count > 0;
+                && _messages.HasActiveMessages(id);
 
             var row = ToLocalConversation(metadata, existing);
             _conversations.Upsert(row);
@@ -925,11 +1012,17 @@ public sealed class CloudSyncService
             merged++;
         }
 
-        foreach (var row in _conversations.ListActive())
+        foreach (var (row, syncTimestampValue) in local.Values)
         {
-            if (!IsCloudSyncable(row)) continue;
-            if (!HasConversationSyncTimestamp(row.Id)) continue;
-            if (serverIds.Contains(row.Id)) continue;
+            ThrowIfAccountGenerationChanged(sessionGeneration);
+            if (row.DeletedAt is not null || !IsCloudSyncable(row)) continue;
+            if (string.IsNullOrWhiteSpace(syncTimestampValue) || serverIds.Contains(row.Id)) continue;
+
+            // An outgoing update can finish while a full list is being merged.
+            // A sync marker changed since the snapshot cannot prove deletion.
+            if (_conversations.Get(row.Id) is not { DeletedAt: null } current || !IsCloudSyncable(current)
+                || !string.Equals(_settings.Get(ConversationSyncKey(row.Id)), syncTimestampValue, StringComparison.Ordinal))
+                continue;
 
             _conversations.SoftDelete(row.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             _settings.Remove(ConversationSyncKey(row.Id));
@@ -940,6 +1033,9 @@ public sealed class CloudSyncService
 
         return new CloudMetadataMergeResult(upserted + merged, remoteDeleted, changedRows, removedIds);
     }
+
+    private static bool HasNewerLocalMetadata(ConversationRow? row, long serverUpdatedAt) =>
+        row is not null && (row.DeletedAt ?? row.UpdatedAt) >= serverUpdatedAt;
 
     private static bool HasServerMetadata(JsonObject syncResult) =>
         syncResult["full_metadata_list"] is JsonArray { Count: > 0 };
@@ -1155,10 +1251,12 @@ public sealed class CloudSyncService
         return metadata;
     }
 
+    private static bool NeedsGeneratedTitle(ConversationRow row) =>
+        string.IsNullOrWhiteSpace(row.Title) || row.Title == "新对话";
+
     private ConversationRow EnsureGeneratedTitle(ConversationRow row, IReadOnlyList<MessageRow> rows)
     {
-        if (!string.IsNullOrWhiteSpace(row.Title) && row.Title != "新对话")
-            return row;
+        if (!NeedsGeneratedTitle(row)) return row;
 
         var firstUser = rows.FirstOrDefault(message => message.Role == "user");
         var title = ChatViewModel.GenerateTitle(firstUser?.Content);
