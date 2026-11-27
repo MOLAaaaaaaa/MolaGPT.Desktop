@@ -18,79 +18,109 @@ public static class SseStreamReader
         Stream stream,
         [EnumeratorCancellation] CancellationToken ct)
     {
-        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: true);
-        var data = new StringBuilder();
-        string? eventName = null;
-        string? id = null;
+        var parser = new SseEventParser(1024 * 1024, 4 * 1024 * 1024);
+        var buffer = new byte[8192];
+        int count;
+        while ((count = await stream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+            foreach (var item in parser.Feed(buffer.AsMemory(0, count))) yield return item;
+        if (parser.Complete() is { } last) yield return last;
+    }
+}
 
-        while (!ct.IsCancellationRequested)
+// The relay observes the same frames with a smaller budget. It skips an entire
+// oversized event, whereas a consumer of the stream must report interruption.
+internal sealed class SseEventParser(int maxLine, int maxEvent, bool skipOversized = false)
+{
+    private readonly MemoryStream _line = new();
+    private readonly StringBuilder _data = new();
+    private string? _name, _id;
+    private int _eventBytes, _dataLines;
+    private bool _first = true, _afterCr, _nonemptyLine, _discard;
+
+    public IEnumerable<SsePayload> Feed(ReadOnlyMemory<byte> bytes)
+    {
+        while (!bytes.IsEmpty)
         {
-            var line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
-            if (line is null) break; // EOF
-
-            if (line.Length == 0)
+            if (_afterCr)
             {
-                // Dispatch event
-                if (data.Length > 0 || eventName is not null)
+                _afterCr = false;
+                if (bytes.Span[0] == '\n') { bytes = bytes[1..]; continue; }
+            }
+            var end = bytes.Span.IndexOfAny((byte)'\r', (byte)'\n');
+            var count = end < 0 ? bytes.Length : end;
+            if (count > 0)
+            {
+                _nonemptyLine = true;
+                if (!_discard)
                 {
-                    yield return new SsePayload(eventName, data.ToString(), id);
-                    data.Clear();
-                    eventName = null;
-                    id = null;
+                    var length = _line.Length + count;
+                    if (length > maxLine || _eventBytes + length > maxEvent)
+                    {
+                        if (!skipOversized)
+                            throw new InvalidDataException(length > maxLine
+                                ? $"SSE line exceeds {maxLine} bytes." : $"SSE event exceeds {maxEvent} bytes.");
+                        _discard = true;
+                    }
+                    else _line.Write(bytes.Span[..count]);
                 }
-                continue;
             }
-
-            if (line[0] == ':')
-            {
-                // Comment / heartbeat — ignore.
-                continue;
-            }
-
-            // Slice with spans so each line costs no intermediate field/value
-            // string allocations on the hot data path — only "event"/"id"
-            // values (rare) are materialized.
-            var lineSpan = line.AsSpan();
-            int colon = lineSpan.IndexOf(':');
-            ReadOnlySpan<char> field;
-            ReadOnlySpan<char> value;
-            if (colon < 0)
-            {
-                field = lineSpan;
-                value = default;
-            }
-            else
-            {
-                field = lineSpan[..colon];
-                value = lineSpan[(colon + 1)..];
-                if (value.Length > 0 && value[0] == ' ') value = value[1..];
-            }
-
-            if (field.SequenceEqual("data"))
-            {
-                if (data.Length > 0) data.Append('\n');
-                data.Append(value);
-            }
-            else if (field.SequenceEqual("event"))
-            {
-                eventName = value.ToString();
-            }
-            else if (field.SequenceEqual("id"))
-            {
-                id = value.ToString();
-            }
-            // else "retry": reconnection time; we don't auto-reconnect at this layer.
+            if (end < 0) yield break;
+            _afterCr = bytes.Span[end] == '\r';
+            bytes = bytes[(end + 1)..];
+            if (EndLine() is { } item) yield return item;
         }
+    }
 
-        // Flush trailing event without final blank line
-        if (data.Length > 0 || eventName is not null)
+    public SsePayload? Complete()
+    {
+        if (_nonemptyLine) EndLine();
+        return Dispatch(terminated: false);
+    }
+
+    private SsePayload? EndLine()
+    {
+        if (!_nonemptyLine) return Dispatch();
+        var line = _line.GetBuffer().AsSpan(0, (int)_line.Length);
+        if (_first && line.StartsWith(Encoding.UTF8.Preamble)) line = line[Encoding.UTF8.Preamble.Length..];
+        _first = false;
+        if (!_discard && !line.IsEmpty && line[0] != ':')
         {
-            yield return new SsePayload(eventName, data.ToString(), id);
+            _eventBytes += line.Length + 1;
+            int colon = line.IndexOf((byte)':');
+            var field = colon < 0 ? line : line[..colon];
+            var value = colon < 0 ? default : line[(colon + 1)..];
+            if (!value.IsEmpty && value[0] == ' ') value = value[1..];
+            if (field.SequenceEqual("data"u8))
+            {
+                if (_dataLines++ > 0) _data.Append('\n');
+                _data.Append(Encoding.UTF8.GetString(value));
+            }
+            else if (field.SequenceEqual("event"u8)) _name = Encoding.UTF8.GetString(value);
+            else if (field.SequenceEqual("id"u8)) _id = Encoding.UTF8.GetString(value);
         }
+        _line.SetLength(0);
+        _nonemptyLine = false;
+        return null;
+    }
+
+    private SsePayload? Dispatch(bool terminated = true)
+    {
+        var item = !_discard && (_dataLines > 0 || _name is not null)
+            ? new SsePayload(_name, _data.ToString(), _id) { DataLines = _dataLines, IsTerminated = terminated }
+            : null;
+        if (item is not null || _discard) _id = null;
+        _data.Clear();
+        _name = null;
+        _eventBytes = _dataLines = 0;
+        _discard = false;
+        _first = false;
+        return item;
     }
 }
 
 public sealed record SsePayload(string? EventName, string Data, string? Id)
 {
     public bool IsDone => Data == "[DONE]";
+    internal int DataLines { get; init; }
+    internal bool IsTerminated { get; init; } = true;
 }

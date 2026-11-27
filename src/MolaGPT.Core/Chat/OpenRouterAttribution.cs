@@ -18,8 +18,12 @@ public static class OpenRouterAttribution
     {
         if (string.IsNullOrWhiteSpace(baseUrl)) return false;
         if (!Uri.TryCreate(baseUrl.Trim(), UriKind.Absolute, out var uri)) return false;
-        return uri.Host.EndsWith("openrouter.ai", StringComparison.OrdinalIgnoreCase);
+        return IsOpenRouterHost(uri);
     }
+
+    internal static bool IsOpenRouterHost(Uri uri) =>
+        uri.Host.Equals("openrouter.ai", StringComparison.OrdinalIgnoreCase)
+        || uri.Host.EndsWith(".openrouter.ai", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Adds OpenRouter ranking headers when <paramref name="baseUrl"/> is OpenRouter,

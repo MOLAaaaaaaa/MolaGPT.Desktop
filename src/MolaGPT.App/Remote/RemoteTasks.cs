@@ -2,7 +2,7 @@ using System.Text.Json.Nodes;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Tasks;
 
-namespace MolaGPT.Desktop.Services.Remote;
+namespace MolaGPT.App.Remote;
 
 /// <summary>
 /// A conversation's background work as a phone receives it: the tasks still running,

@@ -97,4 +97,7 @@ public sealed record ToolCallDelta(
     int? TimelineIndex = null,
     string? BackgroundTaskId = null,
     string? TaskState = null,
-    string? Activity = null);
+    string? Activity = null,
+    ToolCallOrigin Origin = ToolCallOrigin.Execution);
+
+public enum ToolCallOrigin { Execution, Arguments }

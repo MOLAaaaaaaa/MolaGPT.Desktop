@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using MolaGPT.Core.Models;
 
 namespace MolaGPT.Core.Chat;
@@ -9,9 +8,8 @@ namespace MolaGPT.Core.Chat;
 /// </summary>
 public sealed class ProviderRegistry
 {
-    private readonly ConcurrentDictionary<string, IChatProvider> _providers = new();
-    private readonly System.Threading.Lock _orderGate = new();
-    private readonly List<string> _providerOrder = new();
+    private readonly OrderedDictionary<string, IChatProvider> _providers = new(StringComparer.Ordinal);
+    private readonly System.Threading.Lock _gate = new();
 
     /// <summary>Notified whenever the provider set changes (add / remove / refresh).</summary>
     public event EventHandler? Changed;
@@ -20,52 +18,55 @@ public sealed class ProviderRegistry
     {
         get
         {
-            lock (_orderGate)
-            {
-                var providers = new List<IChatProvider>(_providers.Count);
-                foreach (var id in _providerOrder)
-                {
-                    if (_providers.TryGetValue(id, out var provider))
-                        providers.Add(provider);
-                }
-
-                foreach (var provider in _providers.Values)
-                {
-                    if (!_providerOrder.Contains(provider.Id))
-                        providers.Add(provider);
-                }
-
-                return providers;
-            }
+            lock (_gate)
+                return _providers.Values.ToArray();
         }
     }
 
     public void Register(IChatProvider provider)
     {
         ArgumentNullException.ThrowIfNull(provider);
-        _providers[provider.Id] = provider;
-        lock (_orderGate)
-        {
-            if (!_providerOrder.Contains(provider.Id))
-                _providerOrder.Add(provider.Id);
-        }
+        lock (_gate)
+            _providers[provider.Id] = provider;
         Changed?.Invoke(this, EventArgs.Empty);
     }
 
     public bool Unregister(string providerId)
     {
-        var removed = _providers.TryRemove(providerId, out _);
+        bool removed;
+        lock (_gate)
+            removed = _providers.Remove(providerId);
         if (removed)
-        {
-            lock (_orderGate)
-                _providerOrder.Remove(providerId);
             Changed?.Invoke(this, EventArgs.Empty);
-        }
         return removed;
     }
 
-    public IChatProvider? GetById(string providerId) =>
-        _providers.TryGetValue(providerId, out var p) ? p : null;
+    /// <summary>Publishes a batch after all of its replacements and removals are visible.</summary>
+    public void ApplyChanges(IReadOnlyDictionary<string, IChatProvider?> changes)
+    {
+        var changed = false;
+        lock (_gate)
+        {
+            foreach (var (id, provider) in changes)
+            {
+                if (provider is null)
+                    changed |= _providers.Remove(id);
+                else
+                {
+                    _providers[id] = provider;
+                    changed = true;
+                }
+            }
+        }
+        if (changed)
+            Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    public IChatProvider? GetById(string providerId)
+    {
+        lock (_gate)
+            return _providers.GetValueOrDefault(providerId);
+    }
 
     /// <summary>
     /// Resolve the provider that currently owns a given model id. If multiple providers
@@ -74,7 +75,7 @@ public sealed class ProviderRegistry
     /// </summary>
     public (IChatProvider Provider, ProviderModel Model)? FindModel(string providerId, string modelId)
     {
-        if (!_providers.TryGetValue(providerId, out var provider)) return null;
+        if (GetById(providerId) is not { } provider) return null;
         var model = provider.Models.FirstOrDefault(m => m.Id == modelId);
         return model is null ? null : (provider, model);
     }

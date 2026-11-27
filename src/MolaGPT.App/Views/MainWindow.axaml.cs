@@ -12,20 +12,13 @@ using Avalonia.Styling;
 using Avalonia.Threading;
 using MolaGPT.App.Infrastructure;
 using MolaGPT.App.Rendering;
+using MolaGPT.App.Remote;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
-using MolaGPT.Core.Chat.LocalTools;
-using MolaGPT.Core.Chat.Providers;
-using MolaGPT.Core.Chat.Tools;
-using MolaGPT.Core.Chat.Tools.Browser;
-using MolaGPT.Core.Chat.Tools.ImageGeneration;
-using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Models;
 using MolaGPT.Desktop.Services;
 using MolaGPT.Storage;
-using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels;
-using MolaGPT.ViewModels.Agents;
 
 namespace MolaGPT.App.Views;
 
@@ -37,69 +30,32 @@ public partial class MainWindow : MolaWindow
     private readonly ComposerViewModel _composer;
     private readonly SettingsViewModel _settings;
     private readonly UpdateCheckService _updateCheck;
-    private readonly ProviderRegistry _providers;
     private readonly MolaGptAuthService _auth;
-    private readonly MolaGptProxyProvider _proxy;
-    private readonly MolaGptLocalToolsRegistrar _localToolsRegistrar;
     private readonly CloudSyncService _cloudSync;
-    private readonly AgentBridgeStatusViewModel _agentStatus;
-    private readonly McpClientManager _mcp;
-    private readonly ImageGenerationTool _imageGenerationTool;
-    private readonly AttachmentStore _attachmentStore;
-    private readonly ConversationRepository _conversationRepository;
-    private readonly MessageRepository _messageRepository;
-    private readonly PythonRuntimeManager _pythonRuntime;
+    private readonly ImageWorkbenchTasks _imageTasks;
     private readonly PythonRuntimeSetup _pythonSetup;
-    private readonly PiSidecarRuntimeManager _piSidecar;
-    private readonly PiWorkSidecarLocator _piSidecarLocator;
+    private readonly AgentRuntimeSetup _agentRuntime;
     private readonly NotificationCenter _notifications;
-    private readonly SkillsViewModel _skills;
-    private readonly BrowserActivityLog _browserActivity;
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly IChatToolHost _toolHost;
-    private readonly PiByokProviderFactory _piByokProviderFactory;
-    private readonly PersonalizationViewModel _personalization;
-    private readonly MemoryPageViewModel _memoryPage;
-    private readonly PersonalDataService _personalData;
+    private readonly Func<SettingsWindow> _createSettingsWindow;
+    private readonly Func<LoginWindow> _createLoginWindow;
+    private readonly RemoteWorkSettingsViewModel _remoteWork;
     private readonly SponsorsService _sponsors;
     private readonly MembershipService _membership;
     private bool _openingMembership;
 
-    /// <summary>Set by the app once remote control exists; shown in 设置 → 远程控制.</summary>
-    public MolaGPT.Desktop.Services.Remote.RemoteWorkSettingsViewModel? RemoteWork
-    {
-        get => _remoteWork;
-        set
-        {
-            _remoteWork = value;
-            if (value is null) return;
-            PART_TitleBar.SetRemotePhoneConnected(value.PhoneConnected);
-            value.PropertyChanged += (_, e) =>
-            {
-                if (e.PropertyName == nameof(value.PhoneConnected))
-                    PART_TitleBar.SetRemotePhoneConnected(value.PhoneConnected);
-            };
-        }
-    }
-
-    private MolaGPT.Desktop.Services.Remote.RemoteWorkSettingsViewModel? _remoteWork;
-
     private bool _sidebarCollapsed;
     private SettingsWindow? _settingsWindow;
-    internal StorageService? Storage { get; set; }
     private AboutWindow? _aboutWindow;
     private SupportWindow? _supportWindow;
     private ImageGenerationWorkbenchView? _imageWorkbench;
-    private Task<bool>? _agentRuntimeSetupTask;
-    private bool _agentRuntimeActivated;
+    internal string? DisplayedImageTaskId => _main.IsImageWorkbenchVisible ? _imageWorkbench?.ConversationId : null;
     private int _compactionTokensBeforeAtStart;
     private readonly Transitions _artifactPanelTransitions = new();
     private bool _artifactResizeActive;
     private Point _artifactResizeStart;
     private double _artifactResizeStartWidth;
     private double _artifactCanvasWidth = 480;
-
-    private const string AgentRuntimeNotificationKey = "pi-sidecar";
 
     /// <summary>Shared so that flipping sides twice in a row replaces the banner
     /// instead of stacking two.</summary>
@@ -116,78 +72,49 @@ public partial class MainWindow : MolaWindow
     /// injection path of their own; they reach it through their TopLevel.</summary>
     internal NotificationCenter NotificationCenter => _notifications;
 
-    public MainWindow(
+    internal MainWindow(
         MainViewModel main,
-        ChatViewModel chat,
-        ConversationListViewModel conversations,
-        ComposerViewModel composer,
         ProviderRegistry providers,
-        SettingsViewModel settings,
         UpdateCheckService updateCheck,
         MolaGptAuthService auth,
-        MolaGptProxyProvider proxy,
-        MolaGptLocalToolsRegistrar localToolsRegistrar,
         CloudSyncService cloudSync,
-        AgentBridgeStatusViewModel agentStatus,
-        McpClientManager mcp,
-        ImageGenerationTool imageGenerationTool,
         AttachmentStore attachmentStore,
-        ConversationRepository conversationRepository,
-        MessageRepository messageRepository,
-        PythonRuntimeManager pythonRuntime,
-        PiSidecarRuntimeManager piSidecar,
-        PiWorkSidecarLocator piSidecarLocator,
+        ImageWorkbenchTasks imageTasks,
+        PythonRuntimeSetup pythonSetup,
+        AgentRuntimeSetup agentRuntime,
         NotificationCenter notifications,
-        SkillsViewModel skills,
-        BrowserActivityLog browserActivity,
         IHttpClientFactory httpClientFactory,
-        IChatToolHost toolHost,
-        PiByokProviderFactory piByokProviderFactory,
-        PersonalizationViewModel personalization,
-        MemoryPageViewModel memoryPage,
-        PersonalDataService personalData,
+        Func<SettingsWindow> createSettingsWindow,
+        Func<LoginWindow> createLoginWindow,
+        RemoteWorkSettingsViewModel remoteWork,
         SponsorsService sponsors,
         MembershipService membership)
     {
         _main = main;
         _main.CopyTextRequested += OnCopyTextRequested;
-        _chat = chat;
-        _conversations = conversations;
-        _composer = composer;
-        _settings = settings;
+        _chat = main.Chat;
+        _conversations = main.ConversationList;
+        _composer = main.Composer;
+        _settings = main.Settings;
         _updateCheck = updateCheck;
-        _providers = providers;
         _auth = auth;
-        _proxy = proxy;
-        _localToolsRegistrar = localToolsRegistrar;
         _cloudSync = cloudSync;
-        _agentStatus = agentStatus;
-        _mcp = mcp;
-        _imageGenerationTool = imageGenerationTool;
-        _attachmentStore = attachmentStore;
-        _conversationRepository = conversationRepository;
-        _messageRepository = messageRepository;
-        _pythonRuntime = pythonRuntime;
-        _piSidecar = piSidecar;
-        _piSidecarLocator = piSidecarLocator;
+        _imageTasks = imageTasks;
         _notifications = notifications;
-        _skills = skills;
-        _browserActivity = browserActivity;
         _httpClientFactory = httpClientFactory;
-        _toolHost = toolHost;
-        _piByokProviderFactory = piByokProviderFactory;
-        _personalization = personalization;
-        _memoryPage = memoryPage;
-        _personalData = personalData;
         _sponsors = sponsors;
         _membership = membership;
-        _pythonSetup = new PythonRuntimeSetup(pythonRuntime, settings, notifications);
+        _pythonSetup = pythonSetup;
+        _agentRuntime = agentRuntime;
+        _createSettingsWindow = createSettingsWindow;
+        _createLoginWindow = createLoginWindow;
+        _remoteWork = remoteWork;
         _composer.EnsureAgentRuntimeAsync = EnsureAgentRuntimeForSendAsync;
 
         InitializeComponent();
         PART_Sidebar.DataContext = _conversations;
         PART_Transcript.DataContext = _chat;
-        PART_Transcript.AttachAttachmentStore(_attachmentStore);
+        PART_Transcript.AttachAttachmentStore(attachmentStore);
         PART_Composer.DataContext = _composer;
         // The composer floats over the transcript; whatever height it has is kept
         // clear at the transcript's bottom.
@@ -198,6 +125,8 @@ public partial class MainWindow : MolaWindow
         StreamTailFade.Configure(_settings.StreamFadeEnabled);
         _settings.PropertyChanged += OnSettingsPropertyChanged;
         PART_TitleBar.SetSettingsNoticeVisible(_settings.AccountEntryIsNew);
+        PART_TitleBar.SetRemotePhoneConnected(_remoteWork.PhoneConnected);
+        _remoteWork.PropertyChanged += OnRemoteWorkPropertyChanged;
 
         PART_Header.AttachProviders(providers);
         PART_Header.AttachMain(_main);
@@ -220,21 +149,6 @@ public partial class MainWindow : MolaWindow
         PART_Composer.SearchSettingsRequested += (_, _) => OpenSearchSettings();
         PART_Composer.ProviderToolsRequested += (_, providerId) => OpenProviderToolsSettings(providerId);
         PART_Composer.PersonaSelectionFailed += (_, error) => _notifications.Error("角色切换失败", error, "persona-selection");
-        _chat.HistorySaveFailed += error => _notifications.Error("回复版本保存失败", error, "message-history");
-        // An event, not a state: this turn ran without the server's tools.
-        _mcp.ServerUnavailable += (server, error) =>
-            _notifications.Warning($"MCP 服务器「{server.Name}」不可用", error, "mcp-" + server.Id);
-        _composer.AutoStorySummaryAsync = async (conversationId, providerId, modelId, ct) =>
-        {
-            try
-            {
-                if (providerId is null || modelId is null || _providers.FindModel(providerId, modelId) is not { } target) return;
-                using var http = _httpClientFactory.CreateClient(HttpClientNames.Byok);
-                await _chat.AutoSummarizeAsync(conversationId, new MolaGPT.Core.Chat.OneShotCompletionClient(http),
-                    target.Provider, target.Model, ct);
-            }
-            catch (Exception ex) { _notifications.Error("剧情整理失败", ex.Message, "story-summary-" + conversationId); }
-        };
         _main.SystemPromptRequested = () => _ = OpenSystemPromptAsync();
         _main.ImageWorkbenchRequested = conversationId => OpenImageWorkbench(conversationId);
 
@@ -292,8 +206,6 @@ public partial class MainWindow : MolaWindow
         // move, and a banner restating it is noise.
         PART_Header.ModeBoundaryCrossed += (_, mode) =>
         {
-            _conversations.ClearSelection();
-            _chat.StartDraftConversation();
             _notifications.Info(
                 $"已切换到 {ModelSelectorRow.SideLabel(mode)}",
                 "已为你新建一个对话",
@@ -371,8 +283,7 @@ public partial class MainWindow : MolaWindow
                     break;
             }
         };
-        var errorActionTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-        errorActionTimer.Tick += (_, _) =>
+        void RefreshVisibleMessageErrors()
         {
             foreach (var message in _chat.Messages)
             {
@@ -380,10 +291,20 @@ public partial class MainWindow : MolaWindow
                 message.RefreshErrorAction(_composer.ContinueCommand.CanExecute(message),
                     _composer.RetryCommand.CanExecute(message));
             }
+        }
+        var errorActionTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        errorActionTimer.Tick += (_, _) =>
+        {
+            if (!IsVisible || WindowState == WindowState.Minimized) return;
+            RefreshVisibleMessageErrors();
         };
         errorActionTimer.Start();
         Closed += (_, _) => errorActionTimer.Stop();
-        Activated += (_, _) => _ = _main.RefreshUsageAsync(force: true);
+        Activated += (_, _) =>
+        {
+            RefreshVisibleMessageErrors();
+            _ = _main.RefreshUsageAsync(force: true);
+        };
 
         _chat.PropertyChanged += OnChatPropertyChanged;
         // The gauge instance outlives every conversation, so one subscription covers
@@ -391,7 +312,6 @@ public partial class MainWindow : MolaWindow
         // rewrites the conversation, and — until now — happened entirely inside a
         // popup nobody has open at the time.
         _chat.ContextGauge.PropertyChanged += OnContextGaugePropertyChanged;
-        _auth.LoggedOut += OnLoggedOut;
         _composer.Attachments.CollectionChanged += OnComposerAttachmentsChanged;
         SyncChrome();
         RefreshAccountState();
@@ -402,12 +322,16 @@ public partial class MainWindow : MolaWindow
         Opened += (_, _) =>
         {
             PART_Composer.FocusInput();
-            AnnounceStrandedAgentRuntime();
+            _agentRuntime.OfferUpdateForIncompatibleInstall(OpenProviderSettings);
         };
         Closed += (_, _) =>
         {
-            _auth.LoggedOut -= OnLoggedOut;
             _settings.PropertyChanged -= OnSettingsPropertyChanged;
+            _chat.PropertyChanged -= OnChatPropertyChanged;
+            _remoteWork.PropertyChanged -= OnRemoteWorkPropertyChanged;
+            _main.SystemPromptRequested = null;
+            _main.ImageWorkbenchRequested = null;
+            _composer.EnsureAgentRuntimeAsync = null;
             _chat.ContextGauge.PropertyChanged -= OnContextGaugePropertyChanged;
             _main.PropertyChanged -= OnMainPropertyChanged;
             _main.CopyTextRequested -= OnCopyTextRequested;
@@ -426,7 +350,7 @@ public partial class MainWindow : MolaWindow
         if (e.Action != NotifyCollectionChangedAction.Add || e.NewItems is null) return;
         if (_chat.ActiveProvider?.Kind == ProviderKind.MolaGptProxy) return;
         if (_chat.ActivePersona?.Profile.EnablePython == false) return;
-        if (!HasCompatibleAgentRuntime()) return;
+        if (!_agentRuntime.IsCompatible) return;
         _pythonSetup.OfferForAttachments(e.NewItems.OfType<Attachment>());
     }
 
@@ -437,31 +361,7 @@ public partial class MainWindow : MolaWindow
         PART_TitleBar.SetAccountFeaturesVisible(show);
         _conversations.ShowAccountConversations = show;
         _chat.AccountProvidersAllowed = show;
-        if (!show) LeaveAccountProviders();
-    }
-
-    /// <summary>
-    /// The entry went off while an account model is active. Staying on it would
-    /// keep writing a conversation the sidebar no longer shows, so an account
-    /// conversation on screen is left for a new one, and the model moves to the
-    /// user's own key — or to none when there is no key.
-    /// </summary>
-    private void LeaveAccountProviders()
-    {
-        if (!MolaGptProviderIds.IsMolaGptAccount(_chat.ActiveProvider?.Id)) return;
-
-        // Read from the store, not the sidebar: a search can filter the row out.
-        if (_chat.ConversationId is { } id
-            && MolaGptProviderIds.IsMolaGptAccount(_conversationRepository.Get(id)?.ProviderId))
-        {
-            if (_composer.IsSending) _composer.DetachToBackground();
-            _conversations.ClearSelection();
-            _chat.StartDraftConversation();
-        }
-
-        if (_chat.SwitchToMode(AppMode.Byok, out _)) return;
-        _chat.ActiveProvider = null;
-        _chat.ActiveModel = null;
+        if (!show) _main.LeaveHiddenAccountProviders();
     }
 
     /// <summary>
@@ -520,6 +420,10 @@ public partial class MainWindow : MolaWindow
             ApplyAccountFeatureVisibility();
         if (e.PropertyName == nameof(SettingsViewModel.AccountEntryIsNew))
             PART_TitleBar.SetSettingsNoticeVisible(_settings.AccountEntryIsNew);
+        PART_TitleBar.SetRemotePhoneConnected(_remoteWork.PhoneConnected);
+        _remoteWork.PropertyChanged += OnRemoteWorkPropertyChanged;
+        if (e.PropertyName == nameof(SettingsViewModel.AccountSessionGeneration))
+            RefreshAccountState();
     }
 
     internal void ApplyFontScale(double value)
@@ -594,6 +498,7 @@ public partial class MainWindow : MolaWindow
         // would only catch up on the next unrelated chat change.
         if (e.PropertyName is nameof(MainViewModel.IsImageWorkbenchVisible))
         {
+            if (!_main.IsImageWorkbenchVisible) _imageWorkbench?.SetPresented(false);
             SyncChrome();
         }
     }
@@ -712,199 +617,51 @@ public partial class MainWindow : MolaWindow
         }
     }
 
+    private int _modeRequest;
+
     private async void SwitchMode(string mode)
     {
-        var target = string.Equals(mode, "chat", StringComparison.Ordinal)
-            ? AppMode.Chat
-            : AppMode.Work;
-        var fromMode = _chat.CurrentMode;
+        var request = ++_modeRequest;
+        var target = mode == "chat" ? AppMode.Chat : AppMode.Work;
+        if (_main.TrySwitchMode(target)) return;
 
-        // The runtime gate never blocks navigation with a modal: without a
-        // compatible runtime we announce the update banner (same key the
-        // download progress later reuses) and carry on — either into Work when
-        // the providers are already registered (the send gate still guards),
-        // or staying put with the banner explaining the gap.
-        if (target == AppMode.Work && !await EnsureAgentRuntimeUsableAsync())
-            AnnounceAgentRuntimeUpdate();
-
-        // Clicking "Work" while already in an agent mode switches nothing,
-        // matching MainViewModel.SwitchMode — but over the image workbench both
-        // segments are unlit precisely so they read as the way back, so the
-        // click still has to close it.
-        if (target == AppMode.Work && _chat.CurrentMode.IsLocalAgent())
+        if (target == AppMode.Work)
         {
-            if (_main.IsImageWorkbenchVisible) LeaveImageWorkbench();
+            var conversationId = _chat.ConversationId;
+            var inWorkbench = _main.IsImageWorkbenchVisible;
+            var ready = await _agentRuntime.EnsureUsableAsync();
+            if (request != _modeRequest || conversationId != _chat.ConversationId
+                || inWorkbench != _main.IsImageWorkbenchVisible)
+                return;
+            if (!ready)
+            {
+                _agentRuntime.OfferInstall(OpenProviderSettings);
+                return;
+            }
+            if (!_main.TrySwitchMode(target)) OpenProviderSettings();
             return;
         }
 
-        if (!_chat.SwitchToMode(target, out var needsLogin))
+        if (_settings.IsLoggedIn)
         {
-            // Work with nothing to run on is a missing model service, not a missing
-            // login: the account is one of the wallets Work can draw on, and a
-            // signed-out user who only brought their own key should land where keys
-            // are added. Without a runtime the gap is the runtime instead, and the
-            // banner above already says so.
-            if (target == AppMode.Work)
-            {
-                if (HasCompatibleAgentRuntime()) OpenProviderSettings();
-                return;
-            }
-
-            if (!needsLogin)
-            {
-                OpenSettings();
-                return;
-            }
-
-            if (!await OpenLoginAsync(this)) return;
-            if (!_chat.SwitchToMode(target, out _)) return;
+            OpenSettings();
+            return;
         }
-
-        if (fromMode.CrossesChatBoundary(target))
-        {
-            _conversations.ClearSelection();
-            _chat.StartDraftConversation();
-        }
-        LeaveImageWorkbench();
+        if (await OpenLoginAsync(this) && request == _modeRequest)
+            _main.TrySwitchMode(target);
     }
 
-    private void LeaveImageWorkbench()
+    private void OnRemoteWorkPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        _imageWorkbench?.NotifyHiddenWhileGenerating();
-        _main.IsImageWorkbenchVisible = false;
-        SyncChrome();
-    }
-
-    private bool HasCompatibleAgentRuntime() => _piSidecarLocator.TryResolve() is not null;
-
-    /// <summary>Resolve a compatible sidecar and register the agent providers.
-    /// Never downloads and never prompts: a missing/expired runtime just
-    /// reports false, and the caller announces the update banner. An
-    /// in-flight download is joined so send waits for it instead of
-    /// starting a second one.</summary>
-    private async Task<bool> EnsureAgentRuntimeUsableAsync()
-    {
-        if (_piSidecarLocator.TryResolve() is not null)
-        {
-            // "No agent provider registered yet" is the trigger, but it is also the
-            // *outcome* when the account has no Work models and no BYOK row is
-            // configured — so without this latch every send would re-register every
-            // row and re-fetch the account's model list. Cleared by
-            // DeactivateAgentRuntime, which is what settings calls after a change
-            // that could produce a different answer.
-            if (!_agentRuntimeActivated
-                && !_providers.Providers.Any(provider => provider.Kind != ProviderKind.MolaGptProxy))
-            {
-                _agentRuntimeActivated = true;
-                await ActivateAgentRuntimeAsync();
-            }
-            return true;
-        }
-        if (_agentRuntimeSetupTask is { } running)
-        {
-            try
-            {
-                return await running;
-            }
-            catch
-            {
-                // Narrated inside the download itself; the caller re-announces.
-                return false;
-            }
-        }
-        return false;
-    }
-
-    /// <summary>Same deal as the app update: no modal, keep using everything
-    /// else, one sticky banner on the shared key with the download behind its
-    /// action button. Re-posting replaces in place, so tab-hopping never
-    /// stacks banners; a dismissed banner comes back on the next entry.</summary>
-    private void AnnounceAgentRuntimeUpdate(string? body = null)
-    {
-        if (_agentRuntimeSetupTask is not null) return; // progress banner owns the key
-        var updating = _piSidecar.GetInstalled() is not null;
-        _notifications.Notify(new AppNotification
-        {
-            Key = AgentRuntimeNotificationKey,
-            Kind = NotifyKind.Info,
-            Title = updating ? "Agent 运行环境有更新" : "需要 Agent 运行环境",
-            Body = body ?? (updating ? null : "使用 Work 与 BYOK 前需要此环境。"),
-            ActionText = updating ? "更新" : "下载",
-            Action = StartAgentRuntimeDownload,
-            Sticky = true
-        });
-    }
-
-    internal void AnnounceAvailableAgentRuntimeUpdate()
-    {
-        if (_piSidecar.GetCompatibleInstalled() is not null)
-            AnnounceAgentRuntimeUpdate();
-    }
-
-    /// <summary>
-    /// Say so when the runtime went stale underneath the user rather than waiting
-    /// for them to walk into it.
-    ///
-    /// Raising <see cref="PiSidecarRuntimeManager.RequiredContractVersion"/> strands
-    /// every install built against the older contract, and the app installer does
-    /// not touch the runtime directory — so an upgrade can empty Work and every
-    /// BYOK row out of the picker with nothing on screen to explain it. That has
-    /// now shipped twice. The banner is the missing half of the contract gate.
-    ///
-    /// Deliberately narrow, because a banner on every launch is the failure mode on
-    /// the other side: a machine that never had a runtime is not announced here —
-    /// nothing was taken away, and entering Work already asks for it. Only the
-    /// "this worked yesterday" case qualifies, and only when the account has
-    /// something for it to have taken.
-    /// </summary>
-    private void AnnounceStrandedAgentRuntime()
-    {
-        if (_piSidecarLocator.TryResolve() is not null) return;
-        if (_piSidecar.GetInstalled() is null) return;
-        if (!HasLocalSideConfiguration()) return;
-
-        DiagnosticLog.Write("pi-sidecar", "已安装的 Agent 运行环境契约过旧，Work 与 BYOK 已从选择器中消失。");
-        AnnounceAgentRuntimeUpdate("本地模型暂时不可用，更新后恢复 Work 与 BYOK。");
-    }
-
-    /// <summary>Whether anything here expects the local side to work: a chat service
-    /// the user saved, or an account that carries Work.</summary>
-    private bool HasLocalSideConfiguration() =>
-        _settings.IsLoggedIn
-        || _settings.Providers.Any(entry =>
-            entry.Enabled && !SettingsViewModel.IsImagePurpose(entry.Purpose));
-
-    private void StartAgentRuntimeDownload()
-    {
-        if (_agentRuntimeSetupTask is not null) return;
-        _ = RunAgentRuntimeDownloadAsync();
-    }
-
-    private async Task RunAgentRuntimeDownloadAsync()
-    {
-        var setup = DownloadAgentRuntimeAsync();
-        _agentRuntimeSetupTask = setup;
-        try
-        {
-            await setup.ConfigureAwait(false);
-        }
-        catch
-        {
-            // DownloadAgentRuntimeAsync narrates its own failures; reaching here
-            // only means TryResolve threw after a reported success.
-        }
-        finally
-        {
-            if (ReferenceEquals(_agentRuntimeSetupTask, setup))
-                _agentRuntimeSetupTask = null;
-        }
+        if (e.PropertyName == nameof(RemoteWorkSettingsViewModel.PhoneConnected))
+            PART_TitleBar.SetRemotePhoneConnected(_remoteWork.PhoneConnected);
     }
 
     private async Task<bool> EnsureAgentRuntimeForSendAsync()
     {
-        if (!await EnsureAgentRuntimeUsableAsync())
+        if (!await _agentRuntime.EnsureUsableAsync())
         {
-            AnnounceAgentRuntimeUpdate();
+            _agentRuntime.OfferInstall(OpenProviderSettings);
             return false;
         }
         if (_chat.ActiveProvider is not null && _chat.ActiveModel is not null) return true;
@@ -914,82 +671,6 @@ public partial class MainWindow : MolaWindow
         // that cannot help a signed-out user here.
         OpenProviderSettings();
         return false;
-    }
-
-    private async Task<bool> DownloadAgentRuntimeAsync()
-    {
-        _notifications.Progress(AgentRuntimeNotificationKey, "正在准备 Agent 运行环境");
-        try
-        {
-            var progress = new Progress<SandboxProgress>(item =>
-                _notifications.Progress(
-                    AgentRuntimeNotificationKey,
-                    "正在准备 Agent 运行环境",
-                    item.Message,
-                    item.Fraction > 0 ? item.Fraction : null));
-            var installed = await _piSidecar.DownloadAndInstallAsync(progress);
-            await ActivateAgentRuntimeAsync();
-            AnnounceAgentRuntimeReady(installed.Version);
-            _pythonSetup.OfferAfterAgentRuntime();
-            return _piSidecarLocator.TryResolve() is not null;
-        }
-        catch (Exception ex)
-        {
-            _notifications.Error("Agent 运行环境下载失败", ex.Message, AgentRuntimeNotificationKey);
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// With no model to run on, being ready is half the story, so the banner
-    /// carries the other half and stays until it is used or closed. Otherwise
-    /// it is plain news and leaves on its own.
-    /// </summary>
-    private void AnnounceAgentRuntimeReady(string version)
-    {
-        var hasModel = _providers.Providers.Any(provider => provider.Kind != ProviderKind.MolaGptProxy);
-        _notifications.Notify(new AppNotification
-        {
-            Key = AgentRuntimeNotificationKey,
-            Kind = NotifyKind.Success,
-            Title = "Agent 运行环境已就绪",
-            Body = hasModel ? version : "添加模型服务后即可开始对话。",
-            ActionText = hasModel ? null : "添加模型服务",
-            Action = hasModel ? null : OpenProviderSettings,
-            Sticky = !hasModel
-        });
-    }
-
-    private async Task ActivateAgentRuntimeAsync()
-    {
-        _agentRuntimeActivated = true;
-        foreach (var entry in _settings.Providers)
-        {
-            try
-            {
-                ProviderRestorer.ApplyEntry(
-                    entry,
-                    _providers,
-                    () => _httpClientFactory.CreateClient(HttpClientNames.Byok),
-                    _toolHost,
-                    _piByokProviderFactory);
-            }
-            catch (Exception ex)
-            {
-                DiagnosticLog.Write("pi-byok", $"注册 {entry.Name} 失败：{ex.Message}");
-            }
-        }
-
-        try { await _localToolsRegistrar.RefreshAsync(); }
-        catch (Exception ex) { DiagnosticLog.Write("pi-work", "刷新 Work 失败：" + ex.Message); }
-    }
-
-    private void DeactivateAgentRuntime()
-    {
-        _agentRuntimeActivated = false;
-        _localToolsRegistrar.Deactivate();
-        foreach (var entry in _settings.Providers)
-            ProviderRestorer.RemoveEntry(entry.Id, _providers, _piByokProviderFactory);
     }
 
     /// <summary>The title bar's account button: sign in, or — once signed in —
@@ -1012,15 +693,14 @@ public partial class MainWindow : MolaWindow
             return;
         }
 
-        OpenSettings();
-        _settingsWindow?.OpenAccountPage();
+        OpenSettings(window => window.OpenAccountPage());
     }
 
     private async Task<bool> OpenLoginAsync(Window owner, bool force = false)
     {
         if (!force && !string.IsNullOrEmpty(_auth.CurrentJwt)) return true;
 
-        var login = new LoginWindow(_auth, _proxy, _providers, _localToolsRegistrar);
+        var login = _createLoginWindow();
         var success = await login.ShowDialog<bool>(owner);
         if (success) CompleteAccountLogin();
         return success;
@@ -1028,9 +708,7 @@ public partial class MainWindow : MolaWindow
 
     internal void CompleteAccountLogin()
     {
-        _cloudSync.BindCurrentAccountAfterLogin();
-        RefreshAccountState();
-        if (!_settings.IsLoggedIn) return;
+        if (!_auth.ReadSession().IsLoggedIn) return;
 
         _ = _main.RefreshUsageAsync(force: true);
         _ = SyncAfterLoginAsync();
@@ -1071,24 +749,8 @@ public partial class MainWindow : MolaWindow
         }
     }
 
-    private void OnLoggedOut(object? sender, EventArgs e)
-    {
-        if (Dispatcher.UIThread.CheckAccess())
-            RefreshAccountState();
-        else
-            Dispatcher.UIThread.Post(RefreshAccountState);
-    }
-
-    private void RefreshAccountState()
-    {
-        var loggedIn = !string.IsNullOrEmpty(_auth.CurrentJwt);
-        _settings.IsLoggedIn = loggedIn;
-        if (!loggedIn && SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider) == "molagpt")
-            _settings.WebSearchProvider = "duckduckgo";
-        _settings.MolaGptUsername = loggedIn ? _auth.CurrentUsername : null;
-        PART_TitleBar.SetAccountState(loggedIn, _auth.CurrentUsername);
-        _settingsWindow?.RefreshAccountUi();
-    }
+    private void RefreshAccountState() =>
+        PART_TitleBar.SetAccountState(_settings.IsLoggedIn, _settings.MolaGptUsername);
 
     private void ToggleTheme()
     {
@@ -1102,41 +764,19 @@ public partial class MainWindow : MolaWindow
     /// would show the same view model through two sets of controls, and the one
     /// the user is not looking at would be the one holding stale text.
     /// </summary>
-    internal void OpenSettings()
-    {
-        OpenSettings(openAgent: false);
-    }
+    internal void OpenSettings() => OpenSettings(null);
 
-    private void OpenPersonaSettings(bool startNew)
-    {
-        OpenSettings();
-        _settingsWindow?.OpenPersonaPage(startNew, _chat.ActivePersonaId);
-    }
+    private void OpenPersonaSettings(bool startNew) =>
+        OpenSettings(window => window.OpenPersonaPage(startNew, _chat.ActivePersonaId));
 
-    /// <summary>The approval menu's 「去设置」: the review model is only chosen here.</summary>
-    private void OpenApprovalSettings()
-    {
-        OpenSettings();
-        _settingsWindow?.OpenApprovalPage();
-    }
+    private void OpenApprovalSettings() => OpenSettings(window => window.OpenApprovalPage());
 
-    private void OpenProviderSettings()
-    {
-        OpenSettings();
-        _settingsWindow?.OpenProvidersPage();
-    }
+    internal void OpenProviderSettings() => OpenSettings(window => window.OpenProvidersPage());
 
-    private void OpenSearchSettings()
-    {
-        OpenSettings();
-        _settingsWindow?.OpenSearchPage();
-    }
+    private void OpenSearchSettings() => OpenSettings(window => window.OpenSearchPage());
 
-    private void OpenProviderToolsSettings(string? providerId)
-    {
-        OpenSettings();
-        _settingsWindow?.OpenProviderTools(providerId);
-    }
+    private void OpenProviderToolsSettings(string? providerId) =>
+        OpenSettings(window => window.OpenProviderTools(providerId));
 
     private async Task OpenSystemPromptAsync()
     {
@@ -1153,30 +793,15 @@ public partial class MainWindow : MolaWindow
             && string.Equals(existing.ConversationId, conversationId, StringComparison.Ordinal))
         {
             _main.IsImageWorkbenchVisible = true;
+            existing.SetPresented(true);
             PART_Header.RefreshSecondaryUi();
             return;
         }
 
-        // Replacing a workbench that is mid-generation orphans it: the run still
-        // finishes and still writes to the gallery, but its view is gone. Say so
-        // before it disappears — the same banner the close button raises, on the
-        // same key, so it collapses into one entry rather than stacking. The new
-        // sidebar button makes this one click away, where the old entry was three.
-        _imageWorkbench?.NotifyHiddenWhileGenerating();
-
-        var workbench = new ImageGenerationWorkbenchView(
-            _settings,
-            _imageGenerationTool,
-            _attachmentStore,
-            _conversationRepository,
-            _messageRepository,
-            conversationId,
-            (title, modelId) => _conversations.CreateImageWorkbenchConversation(title, modelId),
-            (id, generating) => _conversations.SetGenerating(id, generating),
-            _notifications);
+        _imageWorkbench?.SetPresented(false);
+        var workbench = new ImageGenerationWorkbenchView(_settings, _imageTasks, conversationId, _notifications);
         workbench.CloseRequested += (_, _) =>
         {
-            workbench.NotifyHiddenWhileGenerating();
             _main.CloseImageWorkbench();
             PART_Header.RefreshSecondaryUi();
             _ = _conversations.ReloadAsync();
@@ -1192,56 +817,37 @@ public partial class MainWindow : MolaWindow
         _imageWorkbench = workbench;
         PART_ImageWorkbenchHost.Content = workbench;
         _main.IsImageWorkbenchVisible = true;
+        workbench.SetPresented(true);
         PART_Header.RefreshSecondaryUi();
     }
 
-    internal void OpenAgentSettings()
-    {
-        OpenSettings(openAgent: true);
-    }
+    internal void OpenAgentSettings() => OpenSettings(window => window.OpenAgentPage());
 
-    /// <summary>Open settings on the browser page — the「浏览器未连接」banner's action.</summary>
-    internal void OpenBrowserSettings()
-    {
-        OpenSettings(openAgent: false);
-        _settingsWindow?.OpenBrowserPage();
-    }
+    internal void OpenBrowserSettings() => OpenSettings(window => window.OpenBrowserPage());
 
     internal void OpenSelectionSettings()
     {
         if (!IsVisible) Show();
         if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
         Activate();
-        OpenSettings(openAgent: false);
-        _settingsWindow?.OpenSelectionPage();
+        OpenSettings(window => window.OpenSelectionPage());
     }
 
-    private void OpenSettings(bool openAgent)
+    private void OpenSettings(Action<SettingsWindow>? navigate)
     {
         if (_settingsWindow is { } existing)
         {
-            if (openAgent) existing.OpenAgentPage();
+            navigate?.Invoke(existing);
             existing.Activate();
             return;
         }
 
-        var window = new SettingsWindow(
-            _settings, _auth, _cloudSync, _conversations, _agentStatus, _main.Personas, _mcp,
-            _imageGenerationTool, _pythonRuntime, _piSidecar, _notifications, _skills, _browserActivity,
-            () => _httpClientFactory.CreateClient(HttpClientNames.Byok), _providers, _toolHost, _piByokProviderFactory,
-            ActivateAgentRuntimeAsync, DeactivateAgentRuntime, _personalization, _memoryPage, _proxy,
-            _pythonSetup, _personalData,
-            new MolaAccountSearchClient(_httpClientFactory.CreateClient(HttpClientNames.MolaGpt), _auth))
-        { Storage = Storage };
-        if (RemoteWork is { } remoteWork) window.AttachRemoteWork(remoteWork);
-        window.AccountRequested += async (_, _) =>
-        {
-            if (await OpenLoginAsync(window)) window.RefreshAccountUi();
-        };
+        var window = _createSettingsWindow();
+        window.AccountRequested += async (_, _) => await OpenLoginAsync(window);
         window.SupportRequested += async (_, _) => await OpenMembershipAsync(window);
         window.Closed += (_, _) => _settingsWindow = null;
         _settingsWindow = window;
-        if (openAgent) window.OpenAgentPage();
+        navigate?.Invoke(window);
         window.Show(this);
     }
 

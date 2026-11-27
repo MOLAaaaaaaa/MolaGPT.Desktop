@@ -88,7 +88,7 @@ internal sealed class AppAutoUpdateService(HttpClient http)
         return targetPath;
     }
 
-    public static void StartInstallerAfterExit(string installerPath)
+    public static void StartInstallerAfterExit(string installerPath, string expectedSha256)
     {
         if (!File.Exists(installerPath)) throw new FileNotFoundException("安装包不存在。", installerPath);
         var executable = Environment.ProcessPath;
@@ -117,6 +117,8 @@ internal sealed class AppAutoUpdateService(HttpClient http)
         startInfo.ArgumentList.Add(scriptPath);
         startInfo.ArgumentList.Add("-Installer");
         startInfo.ArgumentList.Add(installerPath);
+        startInfo.ArgumentList.Add("-ExpectedSha256");
+        startInfo.ArgumentList.Add(expectedSha256);
         startInfo.ArgumentList.Add("-AppExe");
         startInfo.ArgumentList.Add(executable);
         startInfo.ArgumentList.Add("-ParentPid");
@@ -136,6 +138,7 @@ internal sealed class AppAutoUpdateService(HttpClient http)
     private const string InstallerScript = """
 param(
     [Parameter(Mandatory = $true)][string]$Installer,
+    [Parameter(Mandatory = $true)][string]$ExpectedSha256,
     [Parameter(Mandatory = $true)][string]$AppExe,
     [Parameter(Mandatory = $true)][int]$ParentPid,
     [Parameter(Mandatory = $true)][string]$LogPath
@@ -156,6 +159,29 @@ function Test-ProcessRunning([int]$ProcessId) {
         return $running
     } catch [System.ArgumentException] {
         return $false
+    }
+}
+
+function Start-VerifiedInstaller {
+    # Keep the file open without write/delete sharing through process creation.
+    $file = [System.IO.File]::OpenRead($Installer)
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = [BitConverter]::ToString($sha.ComputeHash($file)).Replace("-", "")
+        } finally {
+            $sha.Dispose()
+        }
+        if ($ExpectedSha256 -notmatch '\A[0-9a-fA-F]{64}\z' -or $hash -ne $ExpectedSha256) {
+            throw "安装包校验失败，请重新下载。"
+        }
+        $info = [System.Diagnostics.ProcessStartInfo]::new()
+        $info.FileName = $Installer
+        $info.Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-"
+        $info.UseShellExecute = $false
+        return [System.Diagnostics.Process]::Start($info)
+    } finally {
+        $file.Dispose()
     }
 }
 
@@ -323,11 +349,7 @@ try {
                 if (Test-ProcessRunning $ParentPid) { return }
 
                 Write-UpdateLog "starting installer: $Installer"
-                $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-                $startInfo.FileName = $Installer
-                $startInfo.Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-"
-                $startInfo.UseShellExecute = $false
-                $script:InstallerProcess = [System.Diagnostics.Process]::Start($startInfo)
+                $script:InstallerProcess = Start-VerifiedInstaller
                 if ($null -eq $script:InstallerProcess) {
                     throw "installer process did not start"
                 }

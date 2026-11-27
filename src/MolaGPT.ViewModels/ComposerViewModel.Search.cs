@@ -1,6 +1,7 @@
 using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Models;
 
 namespace MolaGPT.ViewModels;
 

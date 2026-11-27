@@ -1,4 +1,5 @@
 using Dapper;
+using Microsoft.Data.Sqlite;
 
 namespace MolaGPT.Storage.Repositories;
 
@@ -16,16 +17,24 @@ public sealed class SettingsRepository
     public void Set(string key, string value)
     {
         using var conn = _db.Open();
-        conn.Execute(
-            "INSERT INTO settings (key, value) VALUES (@key, @value) " +
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            new { key, value });
+        WriteValue(conn, null, key, value);
     }
 
     public void Remove(string key)
     {
         using var conn = _db.Open();
-        conn.Execute("DELETE FROM settings WHERE key = @key", new { key });
+        WriteValue(conn, null, key, null);
+    }
+
+    internal static void WriteValue(SqliteConnection conn, SqliteTransaction? tx, string key, string? value)
+    {
+        if (value is null)
+            conn.Execute("DELETE FROM settings WHERE key = @key", new { key }, tx);
+        else
+            conn.Execute(
+                "INSERT INTO settings (key, value) VALUES (@key, @value) " +
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                new { key, value }, tx);
     }
 
     public void RemoveByPrefix(string prefix)

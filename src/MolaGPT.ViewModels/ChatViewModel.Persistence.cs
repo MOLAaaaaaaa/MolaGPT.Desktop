@@ -1,8 +1,10 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Encodings.Web;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Models;
+using MolaGPT.Storage;
 
 namespace MolaGPT.ViewModels;
 
@@ -10,26 +12,74 @@ public sealed partial class ChatViewModel
 {
     private static readonly JsonSerializerOptions MessageMetaJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private readonly Lock _messageWriteGate = new();
-    private Task _messageWriteTask = Task.CompletedTask;
+    private readonly Dictionary<string, Task> _messageWrites = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, MessagePersistenceSnapshot> _unsavedMessages = new();
 
-    private Task QueueMessageWrite(string messageId, MessagePersistenceSnapshot snapshot)
+    internal bool HasUnsavedMessages(string conversationId) =>
+        _unsavedMessages.Values.Any(message => message.ConversationId == conversationId);
+
+    private void WriteMessage(string messageId, MessagePersistenceSnapshot snapshot)
     {
-        var repository = _messageRepo!;
-        return QueueMessageWrite(() => repository.Update(
-            messageId, snapshot.CurrentAttempt.Content, BuildMessageMeta(snapshot)));
+        var initial = snapshot.InitialRow ?? _unsavedMessages.GetValueOrDefault(messageId)?.InitialRow;
+        try
+        {
+            var content = snapshot.CurrentAttempt.Content;
+            var meta = BuildMessageMeta(snapshot);
+            if (initial is not null)
+                _messageRepo!.Insert(initial with { Content = content, Meta = meta });
+            else if (!_messageRepo!.Update(messageId, content, meta))
+                throw new InvalidOperationException("消息已不存在，无法保存回答。");
+            _unsavedMessages.TryRemove(messageId, out _);
+        }
+        catch
+        {
+            _unsavedMessages[messageId] = snapshot with { InitialRow = initial };
+            throw;
+        }
     }
 
-    private Task QueueMessageWrite(Action write)
+    private Task QueueMessageWrite(string messageId, MessagePersistenceSnapshot snapshot) =>
+        QueueMessageWrite(snapshot.ConversationId!, () => WriteMessage(messageId, snapshot));
+
+    private Task QueueMessageWrite(string conversationId, Action write)
     {
         lock (_messageWriteGate)
         {
             // Continue on the thread pool even when the preceding write has already
             // completed. The queued work reads only the captured state, never the VM.
-            _messageWriteTask = _messageWriteTask.ContinueWith(
+            var prior = _messageWrites.GetValueOrDefault(conversationId) ?? Task.CompletedTask;
+            var result = prior.ContinueWith(
                 _ => write(),
                 CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
-            return _messageWriteTask;
+            _messageWrites[conversationId] = result;
+            _ = result.ContinueWith(finished =>
+            {
+                _ = finished.Exception;
+                lock (_messageWriteGate)
+                    if (_messageWrites.GetValueOrDefault(conversationId) == finished)
+                        _messageWrites.Remove(conversationId);
+            },
+                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            return result;
         }
+    }
+
+    internal async Task<bool> TrySaveAsync(Func<Task> save)
+    {
+        try { await save().ConfigureAwait(false); return true; }
+        catch (Exception ex) { HistorySaveFailed?.Invoke(ex.Message); return false; }
+    }
+
+    internal async Task RetryUnsavedMessagesAsync()
+    {
+        Task[] pending;
+        lock (_messageWriteGate) pending = _messageWrites.Values.ToArray();
+        await Task.WhenAll(pending).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        foreach (var (id, message) in _unsavedMessages.OrderBy(pair => pair.Value.InitialRow?.CreatedAt))
+            await TrySaveAsync(() => QueueMessageWrite(message.ConversationId!, () =>
+            {
+                if (_unsavedMessages.TryGetValue(id, out var snapshot)) WriteMessage(id, snapshot);
+            })).ConfigureAwait(false);
     }
 
     private static MessagePersistenceSnapshot CapturePersistenceSnapshot(MessageViewModel vm)
@@ -151,26 +201,7 @@ public sealed partial class ChatViewModel
         }
 
         if (snapshot.CurrentAttempt.ToolCalls is { Count: > 0 })
-        {
-            meta["tool_calls"] = new JsonArray(snapshot.CurrentAttempt.ToolCalls
-                .Select(t => (JsonNode)new JsonObject
-                {
-                    ["id"] = t.Id,
-                    ["name"] = t.Name,
-                    ["status"] = t.Status,
-                    ["label"] = t.Label,
-                    ["summary"] = t.Summary,
-                    ["detail"] = t.Detail,
-                    ["arguments_json"] = t.ArgumentsJson,
-                    ["result_preview_json"] = t.ResultPreviewJson,
-                    ["provider"] = t.Provider,
-                    ["content_offset"] = t.ContentOffset,
-                    ["timeline_index"] = t.TimelineIndex,
-                    ["background_task_id"] = t.BackgroundTaskId,
-                    ["task_state"] = t.TaskState
-                })
-                .ToArray());
-        }
+            meta["tool_calls"] = BuildToolCallsJson(snapshot.CurrentAttempt.ToolCalls);
         if (snapshot.CurrentAttempt.ThinkingSegments is { Count: > 0 })
         {
             meta["thinking_segments"] = new JsonArray(snapshot.CurrentAttempt.ThinkingSegments
@@ -210,5 +241,7 @@ public sealed partial class ChatViewModel
         int CompactionTokensBefore,
         int CompactionTokensAfter,
         string? CompactionReason,
-        ChatRequestError? Error);
+        ChatRequestError? Error,
+        MessageRow? InitialRow = null,
+        string? ConversationId = null);
 }

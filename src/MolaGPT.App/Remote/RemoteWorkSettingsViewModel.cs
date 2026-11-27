@@ -2,9 +2,10 @@ using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MolaGPT.Core.Remote;
+using MolaGPT.Desktop.Services.Remote;
 using MolaGPT.Storage.Repositories;
 
-namespace MolaGPT.Desktop.Services.Remote;
+namespace MolaGPT.App.Remote;
 
 public sealed partial class PairedPhoneRow(PairedPhone phone, Action<PairedPhoneRow> remove)
 {
@@ -23,7 +24,7 @@ public sealed partial class PairedPhoneRow(PairedPhone phone, Action<PairedPhone
 /// <summary>The 设置 → 远程控制 card. One switch: while on, phones signed in to
 /// the same account pair with one tap, and any phone pairs with a code shown
 /// here (the anonymous link, end-to-end encrypted).</summary>
-public sealed partial class RemoteWorkSettingsViewModel : ObservableObject
+public sealed partial class RemoteWorkSettingsViewModel : ObservableObject, IDisposable
 {
     public const string EnabledKey = "remote.work.enabled";
     private const string HintedKey = "remote.work.hinted";
@@ -32,6 +33,7 @@ public sealed partial class RemoteWorkSettingsViewModel : ObservableObject
     private readonly SettingsRepository _settings;
     private readonly Action<Action> _post;
     private readonly Timer _countdown;
+    private bool _disposed;
 
     public RemoteWorkSettingsViewModel(RemoteControlHost host, SettingsRepository settings, Action<Action> post)
     {
@@ -39,14 +41,34 @@ public sealed partial class RemoteWorkSettingsViewModel : ObservableObject
         _settings = settings;
         _post = post;
         _isEnabled = settings.Get(EnabledKey) == "true";
-        host.StateChanged += () => _post(RefreshState);
-        host.AnonymousPairingChanged += () => _post(RefreshPairing);
-        host.Phones.Changed += () => _post(RefreshPhones);
-        host.ConnectedPhonesChanged += () => _post(() => PhoneConnected = host.HasConnectedPhones);
-        _countdown = new Timer(_ => _post(RefreshCountdown), null, Timeout.Infinite, Timeout.Infinite);
+        _countdown = new Timer(_ => Post(RefreshCountdown), null, Timeout.Infinite, Timeout.Infinite);
+        host.StateChanged += OnStateChanged;
+        host.AnonymousPairingChanged += OnPairingChanged;
+        host.Phones.Changed += OnPhonesChanged;
+        host.ConnectedPhonesChanged += OnConnectedPhonesChanged;
         RefreshState();
         RefreshPairing();
         RefreshPhones();
+    }
+
+    private void Post(Action update) => _post(() =>
+    {
+        if (!_disposed) update();
+    });
+
+    private void OnStateChanged() => Post(RefreshState);
+    private void OnPairingChanged() => Post(RefreshPairing);
+    private void OnPhonesChanged() => Post(RefreshPhones);
+    private void OnConnectedPhonesChanged() => Post(() => PhoneConnected = _host.HasConnectedPhones);
+
+    public void Dispose()
+    {
+        _disposed = true;
+        _host.StateChanged -= OnStateChanged;
+        _host.AnonymousPairingChanged -= OnPairingChanged;
+        _host.Phones.Changed -= OnPhonesChanged;
+        _host.ConnectedPhonesChanged -= OnConnectedPhonesChanged;
+        _countdown.Dispose();
     }
 
     /// <summary>Raised when the switch flips, so the app starts or stops the host.</summary>

@@ -173,22 +173,23 @@ public static class PiSessionRecovery
     private static List<PersistedEntry> ReadEntries(string path)
     {
         var entries = new List<PersistedEntry>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var line in File.ReadLines(path))
         {
             try
             {
                 using var doc = JsonDocument.Parse(line);
                 var root = doc.RootElement;
-                if (!root.TryGetProperty("id", out var id)
-                    || id.ValueKind != JsonValueKind.String) continue;
+                if (root.ValueKind != JsonValueKind.Object || ReadString(root, "id") is not { Length: > 0 } id) continue;
 
                 JsonElement? message = null;
                 if (root.TryGetProperty("message", out var value)
                     && value.ValueKind == JsonValueKind.Object)
                     message = value.Clone();
+                if (ReadString(root, "type") == "message" && message is null || !seen.Add(id)) continue;
 
                 entries.Add(new PersistedEntry(
-                    id.GetString() ?? string.Empty,
+                    id,
                     ReadString(root, "parentId"),
                     message is { } m ? ReadLong(m, "timestamp") : ReadLong(root, "timestamp"),
                     message));
@@ -202,8 +203,7 @@ public static class PiSessionRecovery
     private static IReadOnlyList<PersistedEntry> ActiveBranch(IReadOnlyList<PersistedEntry> entries)
     {
         if (entries.Count == 0) return Array.Empty<PersistedEntry>();
-        var byId = entries.Where(entry => entry.Id.Length > 0)
-            .ToDictionary(entry => entry.Id, StringComparer.Ordinal);
+        var byId = entries.ToDictionary(entry => entry.Id, StringComparer.Ordinal);
         var branch = new List<PersistedEntry>();
         var current = entries[^1];
         var seen = new HashSet<string>(StringComparer.Ordinal);

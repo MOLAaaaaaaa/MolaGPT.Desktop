@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Microsoft.Web.WebView2.Core;
 
 namespace MolaGPT.App.Rendering.Canvas;
@@ -47,7 +46,7 @@ internal sealed class CanvasTraffic
 /// throws — and a per-artifact one keeps two pages' storage apart. The CSP
 /// travels as a response header, ahead of anything the page itself declares.
 /// </summary>
-internal sealed partial class CanvasSandbox
+internal sealed class CanvasSandbox
 {
     public const string HostSuffix = ".mola-canvas.example";
 
@@ -74,6 +73,14 @@ internal sealed partial class CanvasSandbox
     private long _navigationSequence;
     private ulong? _navigationId;
     private TaskCompletionSource? _loading;
+    private CancellationTokenSource? _pageRequests;
+
+    private void CancelPageRequests()
+    {
+        _pageRequests?.Cancel();
+        _pageRequests?.Dispose();
+        _pageRequests = null;
+    }
 
     public CanvasTraffic Traffic { get; private set; } = new();
 
@@ -115,6 +122,7 @@ internal sealed partial class CanvasSandbox
     public void Detach()
     {
         if (_core is not { } core) return;
+        CancelPageRequests();
         _core = null;
         _loading?.TrySetResult();
         _loading = null;
@@ -152,6 +160,8 @@ internal sealed partial class CanvasSandbox
     public Task Show(string originKey, string html)
     {
         if (_core is null) return Task.CompletedTask;
+        CancelPageRequests();
+        _pageRequests = new CancellationTokenSource();
         var host = "c-" + originKey + HostSuffix;
         _currentHtml = html;
         _currentHost = host;
@@ -182,6 +192,7 @@ internal sealed partial class CanvasSandbox
     /// the canvas shows something native instead.</summary>
     public void Blank()
     {
+        CancelPageRequests();
         _loading?.TrySetResult();
         _loading = null;
         _currentHost = null;
@@ -218,18 +229,6 @@ internal sealed partial class CanvasSandbox
 
     // ---- documents ------------------------------------------------------------------
 
-    [GeneratedRegex(@"<html\b([^>]*)>", RegexOptions.IgnoreCase)]
-    private static partial Regex HtmlOpen();
-
-    [GeneratedRegex(@"<head\b[^>]*>([\s\S]*?)</head\s*>", RegexOptions.IgnoreCase)]
-    private static partial Regex HeadBlock();
-
-    [GeneratedRegex(@"<body\b([^>]*)>([\s\S]*?)(?:</body\s*>|$)", RegexOptions.IgnoreCase)]
-    private static partial Regex BodyBlock();
-
-    [GeneratedRegex(@"<!doctype[^>]*>|</?html\b[^>]*>|<head\b[^>]*>[\s\S]*?</head\s*>|</?body\b[^>]*>", RegexOptions.IgnoreCase)]
-    private static partial Regex DocumentShell();
-
     /// <summary>
     /// Re-assembles the model's page with our head first: charset, viewport,
     /// theme variables and the error bridge, then the page's own head. The
@@ -238,20 +237,7 @@ internal sealed partial class CanvasSandbox
     /// </summary>
     public static string BuildHtml(string source, CanvasTheme theme)
     {
-        var htmlAttributes = HtmlOpen().Match(source) is { Success: true } html ? html.Groups[1].Value : string.Empty;
-        var userHead = HeadBlock().Match(source) is { Success: true } head ? head.Groups[1].Value : string.Empty;
-        string bodyAttributes;
-        string body;
-        if (BodyBlock().Match(source) is { Success: true } bodyMatch)
-        {
-            bodyAttributes = bodyMatch.Groups[1].Value;
-            body = bodyMatch.Groups[2].Value;
-        }
-        else
-        {
-            bodyAttributes = string.Empty;
-            body = DocumentShell().Replace(source, string.Empty);
-        }
+        var (htmlAttributes, userHead, bodyAttributes, body) = HtmlDocumentShell.Extract(source);
 
         return "<!doctype html><html" + htmlAttributes + "><head><meta charset=\"utf-8\">"
                + "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
@@ -355,7 +341,7 @@ window.__molaTheme=function(t){var r=document.documentElement;r.style.colorSchem
 
         if (uri.Scheme is not ("http" or "https")) return;
 
-        if (!CdnProxy.IsAllowed(uri.Host))
+        if (_pageRequests is null || !CdnProxy.IsAllowed(uri))
         {
             Traffic.Blocked++;
             Traffic.BlockedHosts.Add(uri.Host);
@@ -365,10 +351,14 @@ window.__molaTheme=function(t){var r=document.documentElement;r.style.colorSchem
         }
 
         var traffic = Traffic;
+        var ct = _pageRequests.Token;
         var deferral = e.GetDeferral();
         try
         {
-            var response = await CdnProxy.FetchAsync(uri, CancellationToken.None);
+            // Completing an abandoned deferral without a response would let WebView2 fetch it.
+            e.Response = core.Environment.CreateWebResourceResponse(null, 410, "Gone", "Content-Type: text/plain");
+            var response = await CdnProxy.FetchAsync(uri, ct);
+            ct.ThrowIfCancellationRequested();
             if (response is null)
             {
                 traffic.Failed++;
@@ -385,13 +375,16 @@ window.__molaTheme=function(t){var r=document.documentElement;r.style.colorSchem
 
             if (ReferenceEquals(traffic, Traffic)) TrafficChanged?.Invoke(this, EventArgs.Empty);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex) when (ex is InvalidOperationException or System.Runtime.InteropServices.COMException)
         {
             // The page went away while we were fetching.
         }
         finally
         {
-            deferral.Complete();
+            try { deferral.Complete(); }
+            catch (Exception ex) when (ct.IsCancellationRequested
+                && ex is InvalidOperationException or System.Runtime.InteropServices.COMException) { }
         }
     }
 

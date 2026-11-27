@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Text;
-using System.Text.RegularExpressions;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Models;
@@ -84,16 +83,16 @@ public sealed class ConversationTitleService
                 return null;
 
             var rows = _messages.List(conversationId);
-            if (ConversationTitleText.IsImageWorkbenchConversation(rows)) return null;
+            if (IsImageWorkbenchConversation(rows)) return null;
 
-            var window = ConversationTitleText.BuildWindow(rows);
+            var window = BuildWindow(rows);
             var firstUser = window.FirstOrDefault(message => message.Role == ChatMessage.RoleUser)?.Text;
             var lastAssistant = window.LastOrDefault(message => message.Role == ChatMessage.RoleAssistant)?.Text;
             if (string.IsNullOrWhiteSpace(firstUser) || string.IsNullOrWhiteSpace(lastAssistant))
                 return null;
             if (!string.Equals(
                     original.Title,
-                    ChatViewModel.GenerateTitle(firstUser),
+                    ConversationTitleText.GenerateTitle(firstUser),
                     StringComparison.Ordinal))
             {
                 // A non-fallback title means the user (or another source) already
@@ -116,7 +115,7 @@ public sealed class ConversationTitleService
                 var target = ResolveByokTarget(providerId, modelId);
                 if (target is null) return null;
 
-                var prompt = ConversationTitleText.BuildPrompt(
+                var prompt = BuildPrompt(
                     window,
                     CultureInfo.CurrentUICulture.DisplayName);
                 var raw = await RequestByokTitleAsync(
@@ -226,7 +225,7 @@ public sealed class ConversationTitleService
         var client = new OneShotCompletionClient(httpFactory());
         var text = await client.CompleteAsync(
             target,
-            model.Id,
+            model,
             [new ChatMessage(ChatMessage.RoleUser, prompt)],
             // Deliberately uncapped rather than "a title is short, so cap it low":
             // on a model whose reasoning cannot be switched off, thinking tokens
@@ -234,45 +233,18 @@ public sealed class ConversationTitleService
             // before the title is ever emitted.
             maxTokens: null,
             useThinking: false,
-            thinkingKind: model.ThinkingConfig?.Kind
-                          ?? ThinkingParamKindInference.InferFromModelId(model.Id),
             ct: ct).ConfigureAwait(false);
 
         return text.Length > TitleMaxChars ? text[..TitleMaxChars] : text;
     }
 
     private const int TitleMaxChars = 4096;
-}
 
-public sealed record ConversationTitleMessage(string Role, string Text);
-
-public static class ConversationTitleText
-{
     private const int MaxMessages = 6;
     private const int MaxCharsPerMessage = 500;
     private const int MaxTotalChars = 3000;
 
-    private static readonly Regex ClosedThinkTag = new(
-        @"<think(?:ing)?>.*?</think(?:ing)?>",
-        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant);
-
-    private static readonly Regex OpenThinkTag = new(
-        @"<think(?:ing)?>.*",
-        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant);
-
-    private static readonly Regex EdgeMarkers = new(
-        "^[\"'“”‘’「」『』《》*#\\s]+|[\"'“”‘’「」『』《》*\\s]+$",
-        RegexOptions.CultureInvariant);
-
-    private static readonly Regex TitlePrefix = new(
-        @"^(标题|title)\s*[:：]\s*",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
-    private static readonly Regex HttpError = new(
-        @"HTTP\s*[45]\d\d",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
-    public static IReadOnlyList<ConversationTitleMessage> BuildWindow(
+    private static IReadOnlyList<ConversationTitleMessage> BuildWindow(
         IReadOnlyList<MessageRow> messages)
     {
         var picked = new List<ConversationTitleMessage>(MaxMessages);
@@ -289,7 +261,7 @@ public static class ConversationTitleText
                 continue;
             }
 
-            var text = MessageViewModel.StripSystemHints(message.Content).Trim();
+            var text = ChatMessageText.StripSystemHints(message.Content);
             if (string.IsNullOrWhiteSpace(text)) continue;
             if (text.Length > MaxCharsPerMessage) text = text[..MaxCharsPerMessage];
 
@@ -301,11 +273,11 @@ public static class ConversationTitleText
         return picked;
     }
 
-    public static bool IsImageWorkbenchConversation(IReadOnlyList<MessageRow> messages) =>
+    private static bool IsImageWorkbenchConversation(IReadOnlyList<MessageRow> messages) =>
         messages.Any(message =>
             message.Meta?.Contains("\"image_workbench\"", StringComparison.OrdinalIgnoreCase) == true);
 
-    public static string BuildPrompt(
+    private static string BuildPrompt(
         IReadOnlyList<ConversationTitleMessage> messages,
         string locale)
     {
@@ -327,27 +299,5 @@ public static class ConversationTitleText
             """;
     }
 
-    public static string? CleanGeneratedTitle(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return null;
-
-        var withoutThinking = OpenThinkTag.Replace(ClosedThinkTag.Replace(raw, " "), " ");
-        var title = withoutThinking
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
-        if (string.IsNullOrWhiteSpace(title) || LooksLikeErrorPayload(title)) return null;
-
-        title = EdgeMarkers.Replace(title, string.Empty);
-        title = TitlePrefix.Replace(title, string.Empty).Trim();
-        if (LooksLikeErrorPayload(title)) return null;
-        title = title.Trim('。', '，', ',', '.', ':', '：', ';', '；', '!', '！', '?', '？');
-        if (title.Length > 30) title = title[..30].Trim();
-        return string.IsNullOrWhiteSpace(title) ? null : title;
-    }
-
-    private static bool LooksLikeErrorPayload(string text) =>
-        text.StartsWith('{')
-        || text.StartsWith('[')
-        || text.StartsWith('<')
-        || HttpError.IsMatch(text);
+    private sealed record ConversationTitleMessage(string Role, string Text);
 }

@@ -9,11 +9,13 @@ using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Threading;
 using MolaGPT.Core.Auth;
+using MolaGPT.Core.Chat;
+using MolaGPT.Core.Models;
 using MolaGPT.Core.Net;
+using MolaGPT.Core.Runtime;
+using MolaGPT.Presentation;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
-using MolaGPT.ViewModels;
-using MolaGPT.ViewModels.Services;
 
 namespace MolaGPT.Desktop.Services;
 
@@ -30,12 +32,10 @@ public sealed class CloudSyncService
     private const string ConversationSyncPrefix = "cloud_sync.conversation_timestamp.";
     private const string ConversationMetadataPrefix = "cloud_sync.metadata.";
     private const string TitleGeneratedPrefix = "cloud_sync.ai_title_generated.";
-    private const string MolaGptProviderId = "molagpt-proxy";
-    private const string MolaGptLocalToolsProviderId = "molagpt-local-tools";
     /// <summary>
     /// Work-mode (MolaGPT local-tools agent) cloud sync is intentionally NOT
     /// surfaced yet. Work conversations stay local for now; the sync pipeline
-    /// only processes <see cref="MolaGptProviderId"/> (Chat) rows. This flag is
+    /// only processes <see cref="MolaGptProviderIds.Proxy"/> (Chat) rows. This flag is
     /// the seam for a future opt-in: when flipped, extend
     /// <see cref="IsMolaGptCloudConversation"/> to also admit Work rows and add
     /// a Work-specific upload branch. No UI references this — it is code-level
@@ -71,8 +71,8 @@ public sealed class CloudSyncService
     private readonly ConversationRepository _conversations;
     private readonly MessageRepository _messages;
     private readonly SettingsRepository _settings;
+    private readonly IActivityTracker _activity;
     private int _isSyncing;
-    private volatile bool _syncIsUserInitiated;
     private CancellationTokenSource? _periodicSyncCts;
     private volatile bool _background;
     private long _lastSyncAttemptTicks = DateTime.UtcNow.Ticks;
@@ -83,43 +83,34 @@ public sealed class CloudSyncService
 
     public bool RequiresCloudDeletion(ConversationRow row) => IsCloudSyncable(row);
 
-    // A global sync timestamp can advance while a new deletion is being made.
-    // Confirm each tombstone with the server before dropping the local row.
     public async Task<IReadOnlySet<string>> ConfirmDeletionsForPurgeAsync(
         IReadOnlyList<ConversationRow> rows, CancellationToken ct = default)
     {
-        var confirmed = new HashSet<string>(StringComparer.Ordinal);
+        var session = _auth.ReadSession();
         var jwt = _auth.CurrentJwt;
-        var account = _auth.CurrentUsername;
-        if (rows.Count == 0 || string.IsNullOrWhiteSpace(jwt) || string.IsNullOrWhiteSpace(account)
-            || !string.Equals(_settings.Get(BoundAccountKey), account, StringComparison.Ordinal)
+        if (rows.Count == 0 || string.IsNullOrWhiteSpace(jwt) || !session.IsLoggedIn
+            || !string.Equals(_settings.Get(BoundAccountKey), session.Username, StringComparison.Ordinal)
             || (bool.TryParse(_settings.Get(SyncEnabledKey), out var enabled) && !enabled)
             || Interlocked.CompareExchange(ref _isSyncing, 1, 0) != 0)
-            return confirmed;
+            return new HashSet<string>();
+        using var activityLease = _activity.Acquire("cloud-purge");
         try
         {
-            var candidates = rows.Where(row => IsCloudSyncable(row) && row.DeletedAt is not null
-                && _conversations.Get(row.Id)?.DeletedAt == row.DeletedAt).Select(row => row.Id).Distinct().ToArray();
-            if (candidates.Length == 0) return confirmed;
+            ThrowIfAccountChanged(session.Generation, session.Username);
+            var candidates = rows.Select(row => (Version: _conversations.GetCloudVersion(row.Id, ConversationSyncPrefix), row.DeletedAt))
+                .Where(item => item.Version is not null && item.Version.Row.DeletedAt == item.DeletedAt)
+                .Select(item => item.Version!).DistinctBy(version => version.Row.Id).ToArray();
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(PushTimeout);
-            await DeleteCloudConversationsAsync(jwt, candidates, timeout.Token).ConfigureAwait(false);
-            if (string.Equals(jwt, _auth.CurrentJwt, StringComparison.Ordinal)
-                && string.Equals(account, _auth.CurrentUsername, StringComparison.Ordinal)
-                && string.Equals(account, _settings.Get(BoundAccountKey), StringComparison.Ordinal))
-                confirmed.UnionWith(candidates);
-            return confirmed;
+            return await SyncDeletionsAsync(jwt, candidates, session.Generation, timeout.Token).ConfigureAwait(false);
         }
         finally { Interlocked.Exchange(ref _isSyncing, 0); }
     }
 
     public void ForgetPurgedConversation(string id)
     {
-        _settings.Remove(ConversationSyncKey(id));
-        _settings.Remove(CloudMetadataKey(id));
-        _settings.Remove(DetailRefreshKey(id));
-        _settings.Remove(DetailParserVersionKey(id));
-        _settings.Remove(TitleGeneratedKey(id));
+        foreach (var key in DeletedConversationChanges(id).Keys)
+            _settings.Remove(key);
     }
 
     public CloudSyncService(
@@ -127,13 +118,15 @@ public sealed class CloudSyncService
         MolaGptAuthService auth,
         ConversationRepository conversations,
         MessageRepository messages,
-        SettingsRepository settings)
+        SettingsRepository settings,
+        IActivityTracker? activity = null)
     {
         _http = http;
         _auth = auth;
         _conversations = conversations;
         _messages = messages;
         _settings = settings;
+        _activity = activity ?? NullActivityTracker.Instance;
     }
 
     private bool IsCurrentAccount(long generation, string? username) =>
@@ -177,28 +170,25 @@ public sealed class CloudSyncService
         if (Interlocked.Exchange(ref _isSyncing, 1) == 1)
             throw new InvalidOperationException("云同步正在进行中。");
 
+        using var activityLease = _activity.Acquire("cloud-sync");
         var sessionGeneration = _auth.SessionGeneration;
         var sessionAccount = _auth.CurrentUsername;
-
-        // Carried on the status event so the shell can tell "you asked for this"
-        // from "the timer fired". Progress and success are only worth announcing
-        // for the former; failures are worth announcing either way.
-        _syncIsUserInitiated = userInitiated;
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(SyncTimeout);
         var token = timeoutCts.Token;
         void Report(string message)
         {
+            if (_auth.SessionGeneration != sessionGeneration) return;
             progress?.Report(message);
             if (publishStatus)
-                PublishStatus(CloudSyncState.Syncing, message);
+                PublishStatus(sessionGeneration, CloudSyncState.Syncing, message, userInitiated);
         }
 
         try
         {
             if (publishStatus)
-                PublishStatus(CloudSyncState.Syncing, "正在同步对话...");
+                PublishStatus(sessionGeneration, CloudSyncState.Syncing, "正在同步对话...", userInitiated);
             var jwt = _auth.CurrentJwt;
             if (string.IsNullOrWhiteSpace(jwt))
                 throw new InvalidOperationException("请先登录 MolaGPT 账号。");
@@ -213,81 +203,79 @@ public sealed class CloudSyncService
             // and reset sync state BEFORE building the dirty set. Otherwise a
             // first sync would upload the previous account's retained
             // conversations to the new account.
-            var accountBinding = await Task.Run(() =>
-            {
-                ThrowIfAccountChanged(sessionGeneration, sessionAccount);
-                return EnforceAccountBinding();
-            }, token).ConfigureAwait(false);
+            var accountBinding = await Task.Run(() => EnforceAccountBindingForSession(sessionGeneration), token)
+                .ConfigureAwait(false);
             ThrowIfAccountChanged(sessionGeneration, sessionAccount);
 
             var lastSync = _settings.Get(LastSyncKey) ?? EpochIso;
-            var lastSyncMs = ToUnixMilliseconds(lastSync);
-            var isFirstSync = string.Equals(lastSync, EpochIso, StringComparison.Ordinal);
+            var versions = await Task.Run(() => _conversations.ListCloudVersions(ConversationSyncPrefix)
+                .Where(version => IsCloudSyncable(version.Row))
+                .ToDictionary(version => version.Row.Id, StringComparer.Ordinal), token).ConfigureAwait(false);
 
             Report("正在同步删除状态...");
-            var deletedIds = await Task.Run(() => _conversations.ListDeletedSince(lastSyncMs)
-                    .Where(IsCloudSyncable)
-                    .Select(row => row.Id)
-                    .Where(id => !string.IsNullOrWhiteSpace(id))
-                    .Distinct(StringComparer.Ordinal)
-                    .ToArray(), token)
-                .ConfigureAwait(false);
-
             ThrowIfAccountChanged(sessionGeneration, sessionAccount);
-            if (deletedIds.Length > 0)
-                await DeleteCloudConversationsAsync(jwt, deletedIds, token).ConfigureAwait(false);
+            var deletedIds = await SyncDeletionsAsync(jwt,
+                versions.Values.Where(version => version.Changes != CloudChanges.None).ToArray(),
+                sessionGeneration, token).ConfigureAwait(false);
             ThrowIfAccountChanged(sessionGeneration, sessionAccount);
 
             Report("正在整理本地对话...");
-            var dirty = await Task.Run(() => BuildDirtyConversations(lastSyncMs, isFirstSync), token)
-                .ConfigureAwait(false);
+            var uploads = await Task.Run(() => BuildConversationUploads(versions.Values), token).ConfigureAwait(false);
+            var dirty = new JsonArray(uploads.Where(upload => !upload.AlreadySubmitted)
+                .Select(upload => upload.ToPayload()).ToArray());
             ThrowIfAccountChanged(sessionGeneration, sessionAccount);
             Report(dirty.Count > 0
                 ? $"正在上传 {dirty.Count} 个本地更新..."
                 : "正在拉取云端对话列表...");
 
-            var syncResult = await PostSyncAsync(jwt, new JsonObject
-            {
-                ["action"] = "full_sync",
-                ["last_sync_timestamp"] = lastSync,
-                ["dirty_conversations"] = dirty
-            }, token, progress).ConfigureAwait(false);
+            var (syncResult, syncTimestamp) = await PostFullSyncAsync(jwt, lastSync, dirty, token, progress)
+                .ConfigureAwait(false);
             ThrowIfAccountChanged(sessionGeneration, sessionAccount);
 
             if (dirty.Count > 0 && !HasServerMetadata(syncResult))
             {
                 Report("正在刷新云端对话列表...");
-                var refreshTimestamp = syncResult["new_sync_timestamp"]?.GetValue<string>() ?? lastSync;
-                syncResult = await PostSyncAsync(jwt, new JsonObject
-                {
-                    ["action"] = "full_sync",
-                    ["last_sync_timestamp"] = refreshTimestamp,
-                    ["dirty_conversations"] = new JsonArray()
-                }, token, progress).ConfigureAwait(false);
+                (syncResult, syncTimestamp) = await PostFullSyncAsync(jwt, syncTimestamp, new JsonArray(), token, progress)
+                    .ConfigureAwait(false);
                 ThrowIfAccountChanged(sessionGeneration, sessionAccount);
             }
 
-            var syncTimestamp = syncResult["new_sync_timestamp"]?.GetValue<string>() ?? DateTimeOffset.UtcNow.ToString("O");
+            if (syncResult["full_metadata_list"] is not JsonArray serverList)
+                throw new InvalidDataException("云端会话列表格式错误。");
             Report("正在合并对话列表...");
+            var (uploadedRows, superseded, unconfirmed) = await Task.Run(
+                () => ConfirmUploadsAsync(jwt, uploads, serverList, syncTimestamp, sessionGeneration, token), token)
+                .ConfigureAwait(false);
             var merge = await Task.Run(() =>
             {
                 ThrowIfAccountChanged(sessionGeneration, sessionAccount);
-                var result = MergeServerMetadata(syncResult, syncTimestamp, sessionGeneration, sessionAccount);
-                ThrowIfAccountChanged(sessionGeneration, sessionAccount);
-                _settings.Set(LastSyncKey, syncTimestamp);
-                var uploadedRows = MarkUploadedConversations(dirty, syncTimestamp);
-                return result with { ChangedRows = result.ChangedRows.Concat(uploadedRows).ToList() };
+                var result = MergeServerMetadata(syncResult, serverList, syncTimestamp, sessionGeneration, sessionAccount,
+                    versions, superseded, token);
+                if (!_auth.TryCommitForSession(sessionGeneration, () =>
+                    {
+                        token.ThrowIfCancellationRequested();
+                        _settings.Set(LastSyncKey, syncTimestamp);
+                        return true;
+                    }))
+                    ThrowIfAccountGenerationChanged(sessionGeneration);
+                return result;
             }, token).ConfigureAwait(false);
             ThrowIfAccountChanged(sessionGeneration, sessionAccount);
+            if (unconfirmed > 0)
+            {
+                if (merge.ChangedRows.Count > 0 || merge.RemovedIds.Count > 0 || uploadedRows.Count > 0 || deletedIds.Count > 0)
+                    LocalConversationsChanged?.Invoke(this, EventArgs.Empty);
+                throw new InvalidOperationException($"云端未确认 {unconfirmed} 个本地更新，改动已保留。");
+            }
 
             if (publishStatus)
-                PublishStatus(CloudSyncState.Success, "同步成功");
+                PublishStatus(sessionGeneration, CloudSyncState.Success, "同步成功", userInitiated);
             return new CloudSyncResult(
-                Uploaded: dirty.Count,
+                Uploaded: uploadedRows.Count,
                 Downloaded: merge.Upserted,
-                Deleted: accountBinding.PurgedConversationCount + deletedIds.Length + merge.RemoteDeleted,
+                Deleted: accountBinding.PurgedConversationCount + deletedIds.Count + merge.RemoteDeleted,
                 LastSyncTimestamp: syncTimestamp,
-                ChangedRows: merge.ChangedRows,
+                ChangedRows: merge.ChangedRows.Concat(uploadedRows).ToList(),
                 RemovedIds: accountBinding.PurgedIds
                     .Concat(deletedIds)
                     .Concat(merge.RemovedIds)
@@ -300,23 +288,26 @@ public sealed class CloudSyncService
             DiagnosticLog.Write("sync", "discarded stale result after account change");
             throw;
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
         {
             DiagnosticLog.Write("sync", "sync timed out");
             if (publishStatus)
-                PublishStatus(CloudSyncState.Error, "云同步超时");
+                PublishStatus(sessionGeneration, CloudSyncState.Error, "云同步超时", userInitiated);
             throw new TimeoutException("云同步超时，请稍后重试。");
         }
         catch (Exception ex)
         {
             DiagnosticLog.Write("sync", $"sync failed type={ex.GetType().Name}");
             if (publishStatus)
-                PublishStatus(CloudSyncState.Error, $"同步失败：{ex.Message}");
+                PublishStatus(sessionGeneration, CloudSyncState.Error, $"同步失败：{ex.Message}", userInitiated);
             throw;
         }
         finally
         {
-            _syncIsUserInitiated = false;
             Interlocked.Exchange(ref _isSyncing, 0);
         }
     }
@@ -416,8 +407,9 @@ public sealed class CloudSyncService
 
     public async Task UpdateCloudSyncSettingAsync(bool enabled, CancellationToken ct = default)
     {
+        var generation = _auth.SessionGeneration;
         var jwt = _auth.CurrentJwt;
-        if (string.IsNullOrWhiteSpace(jwt)) return;
+        if (string.IsNullOrWhiteSpace(jwt) || generation != _auth.SessionGeneration) return;
 
         await PostSyncAsync(jwt, new JsonObject
         {
@@ -426,7 +418,7 @@ public sealed class CloudSyncService
             ["value"] = enabled
         }, ct).ConfigureAwait(false);
 
-        PublishStatus(enabled ? CloudSyncState.Idle : CloudSyncState.Disabled,
+        PublishStatus(generation, enabled ? CloudSyncState.Idle : CloudSyncState.Disabled,
             enabled ? "云同步已开启" : "云同步已关闭");
     }
 
@@ -438,8 +430,9 @@ public sealed class CloudSyncService
     /// </summary>
     public async Task UpdateTracksSettingAsync(bool enabled, CancellationToken ct = default)
     {
+        var generation = _auth.SessionGeneration;
         var jwt = _auth.CurrentJwt;
-        if (string.IsNullOrWhiteSpace(jwt)) return;
+        if (string.IsNullOrWhiteSpace(jwt) || generation != _auth.SessionGeneration) return;
 
         await PostSyncAsync(jwt, new JsonObject
         {
@@ -498,31 +491,61 @@ public sealed class CloudSyncService
         var username = _auth.CurrentUsername;
         if (string.IsNullOrWhiteSpace(jwt) || !IsCurrentAccount(generation, username)) return false;
 
-        var accountBinding = await Task.Run(() =>
+        var eligible = await Task.Run(() =>
         {
-            if (!IsCurrentAccount(generation, username)) return AccountBindingResult.Empty;
-            return EnforceAccountBinding();
+            return _auth.TryCommitForSession(generation, () => EnforceAccountBinding().PurgedConversationCount == 0);
         }, ct).ConfigureAwait(false);
-        if (!IsCurrentAccount(generation, username) || accountBinding.PurgedConversationCount > 0) return false;
+        if (!eligible) return false;
+
+        var version = _conversations.GetCloudVersion(conversationId, ConversationSyncPrefix);
+        if (version is null || version.Row.DeletedAt is not null || !IsCloudSyncable(version.Row)
+            || version.Changes.HasFlag(CloudChanges.Messages))
+            return false;
+        var existing = version.Row;
 
         var refreshKey = DetailRefreshKey(conversationId);
         var needsRefresh = !string.IsNullOrWhiteSpace(_settings.Get(refreshKey));
-        var isSyncedConversation = HasConversationSyncTimestamp(conversationId);
+        var isSyncedConversation = !string.IsNullOrWhiteSpace(version.SyncTimestamp);
         var needsParserRefresh = isSyncedConversation
                                  && _settings.Get(DetailParserVersionKey(conversationId)) != DetailParserVersion;
-        var existingMessages = await Task.Run(() => _messages.List(conversationId), ct)
-            .ConfigureAwait(false);
-        if (existingMessages.Count > 0 && !needsRefresh && !needsParserRefresh) return false;
+        var hasMessages = _messages.HasActiveMessages(conversationId);
+        if (hasMessages && !needsRefresh && !needsParserRefresh) return false;
 
-        JsonObject? detail;
         using var detailCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         detailCts.CancelAfter(DetailFetchTimeout);
         try
         {
-            PublishStatus(CloudSyncState.Syncing, needsParserRefresh ? "正在修复对话显示..." : "正在拉取对话...");
-            detail = await FetchConversationAsync(jwt, conversationId, detailCts.Token).ConfigureAwait(false);
+            var detail = await FetchConversationAsync(jwt, conversationId, detailCts.Token).ConfigureAwait(false);
+            detailCts.Token.ThrowIfCancellationRequested();
+            if (detail is null || detail["messages"] is not JsonArray { Count: > 0 } messages) return false;
+
+            var changes = new Dictionary<string, string?>
+            {
+                [refreshKey] = null,
+                [DetailParserVersionKey(conversationId)] = DetailParserVersion
+            };
+            ConversationRow? row = null;
+            if (detail["metadata"] is JsonObject metadata)
+            {
+                if (metadata["id"]?.GetValue<string>() is { } remoteId && remoteId != conversationId)
+                    throw new InvalidDataException("云端详情的会话标识不匹配。");
+                var updated = ParseCloudTimestamp(metadata["updated_at"] ?? metadata["time"]);
+                if (hasMessages && updated > 0 && updated < existing.UpdatedAt) return false;
+                if (version.Changes == CloudChanges.None)
+                    row = ToLocalConversation(conversationId, metadata, existing);
+                changes[CloudMetadataKey(conversationId)] = metadata.ToJsonString(JsonOptions);
+                changes[ConversationSyncKey(conversationId)] = metadata["updated_at"]?.GetValue<string>()
+                    ?? metadata["time"]?.GetValue<string>() ?? DateTimeOffset.UtcNow.ToString("O");
+            }
+
+            var incoming = ToLocalMessages(conversationId, messages).ToArray();
+            if (!ApplyCloudSnapshot(generation, conversationId, version.Revision, row, incoming, changes, detailCts.Token, version.Changes))
+                return false;
+            if (!ct.IsCancellationRequested && IsCurrentAccount(generation, username))
+                PublishStatus(generation, CloudSyncState.Success, "对话已更新");
+            return true;
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested || !IsCurrentAccount(generation, username))
         {
             // Caller cancelled (e.g. switched to another conversation). Stay
             // quiet; the new load drives its own status.
@@ -534,46 +557,32 @@ public sealed class CloudSyncService
             // too slow. Surface a recoverable error instead of hanging on the
             // "正在修复对话显示..." spinner forever.
             DiagnosticLog.Write("sync", "conversation detail fetch timed out");
-            PublishStatus(CloudSyncState.Error, "网络不稳定，对话加载超时，请稍后重试。");
+            PublishStatus(generation, CloudSyncState.Error, "网络不稳定，对话加载超时，请稍后重试。");
             return false;
         }
         catch (Exception ex)
         {
+            if (ct.IsCancellationRequested || !IsCurrentAccount(generation, username)) return false;
             DiagnosticLog.Write("sync", $"conversation detail fetch failed type={ex.GetType().Name}");
-            PublishStatus(CloudSyncState.Error, $"拉取对话失败：{ex.Message}");
+            PublishStatus(generation, CloudSyncState.Error, $"拉取对话失败：{ex.Message}");
             return false;
         }
 
-        if (!IsCurrentAccount(generation, username)
-            || detail is null || detail["messages"] is not JsonArray messages || messages.Count == 0)
-            return false;
-
-        var metadata = detail["metadata"] as JsonObject;
-        if (metadata is not null)
-        {
-            var existing = _conversations.Get(conversationId);
-            _conversations.Upsert(ToLocalConversation(metadata, existing));
-            SaveCloudMetadata(conversationId, metadata);
-            var metadataUpdated = metadata["updated_at"]?.GetValue<string>()
-                                  ?? metadata["time"]?.GetValue<string>()
-                                  ?? DateTimeOffset.UtcNow.ToString("O");
-            SetConversationSyncTimestamp(conversationId, metadataUpdated);
-        }
-
-        if (!IsCurrentAccount(generation, username)) return false;
-        _messages.ReplaceConversationMessages(conversationId, ToLocalMessages(conversationId, messages));
-        _settings.Remove(refreshKey);
-        _settings.Set(DetailParserVersionKey(conversationId), DetailParserVersion);
-        PublishStatus(CloudSyncState.Success, "对话已更新");
-        return true;
     }
+
+    private bool ApplyCloudSnapshot(long generation, string id, string? revision, ConversationRow? row,
+        IEnumerable<MessageRow>? messages, IReadOnlyDictionary<string, string?> settings, CancellationToken ct,
+        CloudChanges? changes = null) =>
+        _auth.TryCommitForSession(generation, () => _conversations.TryApplyCloudSnapshot(id, revision, row, messages, settings, ct, changes));
 
     public async Task<string?> CompleteConversationTurnAsync(string conversationId, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(conversationId)) return null;
 
-        var accountBinding = await Task.Run(() => EnforceAccountBinding(), ct).ConfigureAwait(false);
-        if (accountBinding.PurgedConversationCount > 0) return null;
+        var session = _auth.ReadSession();
+        if (!session.IsLoggedIn || !await Task.Run(() => _auth.TryCommitForSession(session.Generation,
+                () => EnforceAccountBinding().PurgedConversationCount == 0), ct).ConfigureAwait(false))
+            return null;
 
         var row = await Task.Run(() => _conversations.Get(conversationId), ct)
             .ConfigureAwait(false);
@@ -586,6 +595,7 @@ public sealed class CloudSyncService
         string? generatedTitle = null;
         using var titleCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         titleCts.CancelAfter(TitleTimeout);
+        if (session.Generation != _auth.SessionGeneration) return null;
         try
         {
             generatedTitle = await TryGenerateAiTitleAsync(conversationId, titleCts.Token).ConfigureAwait(false);
@@ -612,7 +622,7 @@ public sealed class CloudSyncService
         if (string.IsNullOrWhiteSpace(conversationId)) return false;
         var generation = _auth.SessionGeneration;
         var username = _auth.CurrentUsername;
-        while (Interlocked.Exchange(ref _isSyncing, 1) == 1)
+        while (Interlocked.CompareExchange(ref _isSyncing, 1, 0) != 0)
             await Task.Delay(1000, ct).ConfigureAwait(false);
 
         try
@@ -621,57 +631,44 @@ public sealed class CloudSyncService
             if (string.IsNullOrWhiteSpace(jwt) || !IsCurrentAccount(generation, username)) return false;
             if (bool.TryParse(_settings.Get(SyncEnabledKey), out var enabled) && !enabled) return false;
 
-            var accountBinding = await Task.Run(() =>
-            {
-                ThrowIfAccountChanged(generation, username);
-                return EnforceAccountBinding();
-            }, ct).ConfigureAwait(false);
+            var accountBinding = await Task.Run(() => EnforceAccountBindingForSession(generation), ct).ConfigureAwait(false);
             if (!IsCurrentAccount(generation, username) || accountBinding.PurgedConversationCount > 0) return false;
 
-            var snapshot = await Task.Run(() =>
+            var upload = await Task.Run(() =>
             {
-                var conversation = _conversations.Get(conversationId);
-                var messages = conversation is null ? Array.Empty<MessageRow>() : _messages.List(conversationId);
-                return (conversation, messages);
+                var version = _conversations.GetCloudVersion(conversationId, ConversationSyncPrefix);
+                return version is not null && IsCloudSyncable(version.Row)
+                    ? BuildConversationUpload(version, includeMessages: true) : null;
             }, ct).ConfigureAwait(false);
 
+            if (upload?.Messages.Count is not > 0 || !IsCurrentAccount(generation, username)) return false;
+
+            PublishStatus(generation, CloudSyncState.Syncing, "正在同步当前对话...");
+            var (result, cursor) = await PostFullSyncAsync(jwt, _settings.Get(LastSyncKey) ?? EpochIso,
+                new JsonArray(upload.ToPayload()), ct).ConfigureAwait(false);
             if (!IsCurrentAccount(generation, username)) return false;
-            var row = snapshot.conversation;
-            if (row is null || row.DeletedAt is not null) return false;
-            if (!IsCloudSyncable(row)) return false;
 
-            var rows = snapshot.messages;
-            if (rows.Count == 0) return false;
-
-            PublishStatus(CloudSyncState.Syncing, "正在同步当前对话...");
-            var uploadRow = EnsureGeneratedTitle(row, rows);
-            var dirty = new JsonArray
+            if (result["full_metadata_list"] is JsonArray { Count: > 0 } serverList)
             {
-                new JsonObject
-                {
-                    ["metadata"] = ToCloudMetadata(uploadRow),
-                    ["messages"] = ToCloudMessages(rows)
-                }
-            };
+                var (confirmed, _, unconfirmed) = await ConfirmUploadsAsync(jwt, [upload], serverList, cursor, generation, ct)
+                    .ConfigureAwait(false);
+                if (unconfirmed > 0)
+                    throw new InvalidOperationException("云端未确认当前对话的更新，改动已保留。");
+                PublishStatus(generation, CloudSyncState.Idle, string.Empty);
+                return confirmed.Count > 0;
+            }
 
-            if (!IsCurrentAccount(generation, username)) return false;
-            var result = await PostSyncAsync(jwt, new JsonObject
-            {
-                ["action"] = "full_sync",
-                ["last_sync_timestamp"] = _settings.Get(LastSyncKey) ?? EpochIso,
-                ["dirty_conversations"] = dirty
-            }, ct).ConfigureAwait(false);
-            if (!IsCurrentAccount(generation, username)) return false;
-
-            var syncTimestamp = result["new_sync_timestamp"]?.GetValue<string>() ?? DateTimeOffset.UtcNow.ToString("O");
-            SetConversationSyncTimestamp(conversationId, syncTimestamp);
-            PublishStatus(CloudSyncState.Success, "当前对话已同步");
-            return true;
+            // The incremental path doesn't echo any rows. Keep the submitted
+            // version pending until the next normal list request can confirm it.
+            var submitted = ApplyCloudSnapshot(generation, conversationId, upload.Version.Revision, upload.UpdatedRow, null,
+                new Dictionary<string, string?>(), ct, upload.Version.Changes | CloudChanges.AwaitingConfirmation);
+            PublishStatus(generation, CloudSyncState.Idle, string.Empty);
+            return submitted;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             DiagnosticLog.Write("sync", $"conversation sync failed type={ex.GetType().Name}");
-            PublishStatus(CloudSyncState.Error, $"当前对话同步失败：{ex.Message}");
+            PublishStatus(generation, CloudSyncState.Error, $"当前对话同步失败：{ex.Message}");
             throw;
         }
         finally
@@ -685,57 +682,36 @@ public sealed class CloudSyncService
         if (conversationIds.Count == 0) return;
         var generation = _auth.SessionGeneration;
         var username = _auth.CurrentUsername;
-        if (string.IsNullOrWhiteSpace(_auth.CurrentJwt))
-        {
-            ForgetLoggedOutLocalDeletes(conversationIds);
-            return;
-        }
+        if (!IsCurrentAccount(generation, username)) return;
 
-        while (Interlocked.Exchange(ref _isSyncing, 1) == 1)
+        while (Interlocked.CompareExchange(ref _isSyncing, 1, 0) != 0)
             await Task.Delay(1000, ct).ConfigureAwait(false);
 
         try
         {
             var jwt = _auth.CurrentJwt;
-            if (string.IsNullOrWhiteSpace(jwt))
-            {
-                ForgetLoggedOutLocalDeletes(conversationIds);
-                return;
-            }
-            if (!IsCurrentAccount(generation, username)) return;
+            if (string.IsNullOrWhiteSpace(jwt) || !IsCurrentAccount(generation, username)) return;
             if (bool.TryParse(_settings.Get(SyncEnabledKey), out var enabled) && !enabled) return;
 
-            var accountBinding = await Task.Run(() =>
-            {
-                ThrowIfAccountChanged(generation, username);
-                return EnforceAccountBinding();
-            }, ct).ConfigureAwait(false);
+            var accountBinding = await Task.Run(() => EnforceAccountBindingForSession(generation), ct).ConfigureAwait(false);
             if (!IsCurrentAccount(generation, username) || accountBinding.PurgedConversationCount > 0) return;
 
-            var ids = conversationIds
-                .Where(id => !string.IsNullOrWhiteSpace(id))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-            if (ids.Length == 0) return;
+            var candidates = await Task.Run(() => conversationIds.Distinct(StringComparer.Ordinal)
+                .Select(id => _conversations.GetCloudVersion(id, ConversationSyncPrefix))
+                .OfType<CloudConversationVersion>()
+                .Where(version => version.Row.DeletedAt is not null && IsCloudSyncable(version.Row)
+                    && version.Changes != CloudChanges.None).ToArray(), ct).ConfigureAwait(false);
+            if (candidates.Length == 0 || !IsCurrentAccount(generation, username)) return;
 
-            PublishStatus(CloudSyncState.Syncing, "正在同步删除...");
-            if (!IsCurrentAccount(generation, username)) return;
-            await DeleteCloudConversationsAsync(jwt, ids, ct).ConfigureAwait(false);
-            if (!IsCurrentAccount(generation, username)) return;
-            foreach (var id in ids)
-            {
-                _settings.Remove(ConversationSyncKey(id));
-                _settings.Remove(CloudMetadataKey(id));
-                _settings.Remove(DetailRefreshKey(id));
-                _settings.Remove(DetailParserVersionKey(id));
-                _settings.Remove(TitleGeneratedKey(id));
-            }
-            PublishStatus(CloudSyncState.Success, "删除已同步");
+            PublishStatus(generation, CloudSyncState.Syncing, "正在同步删除...");
+            var deleted = await SyncDeletionsAsync(jwt, candidates, generation, ct).ConfigureAwait(false);
+            PublishStatus(generation, deleted.Count > 0 ? CloudSyncState.Success : CloudSyncState.Idle,
+                deleted.Count > 0 ? "删除已同步" : string.Empty);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             DiagnosticLog.Write("sync", $"delete sync failed type={ex.GetType().Name}");
-            PublishStatus(CloudSyncState.Error, $"删除同步失败：{ex.Message}");
+            PublishStatus(generation, CloudSyncState.Error, $"删除同步失败：{ex.Message}");
             throw;
         }
         finally
@@ -744,21 +720,11 @@ public sealed class CloudSyncService
         }
     }
 
-    private void ForgetLoggedOutLocalDeletes(IReadOnlyList<string> conversationIds)
-    {
-        var deletedIds = _conversations.HardDeleteDeletedByProvider(conversationIds, MolaGptProviderId);
-        foreach (var id in deletedIds)
-        {
-            _settings.Remove(ConversationSyncKey(id));
-            _settings.Remove(CloudMetadataKey(id));
-            _settings.Remove(DetailRefreshKey(id));
-            _settings.Remove(DetailParserVersionKey(id));
-            _settings.Remove(TitleGeneratedKey(id));
-        }
-    }
-
     private async Task<string?> TryGenerateAiTitleAsync(string conversationId, CancellationToken ct)
     {
+        var generation = _auth.SessionGeneration;
+        var revision = _conversations.GetCloudRevision(conversationId);
+        if (revision is null) return null;
         if (!string.IsNullOrWhiteSpace(_settings.Get(TitleGeneratedKey(conversationId)))) return null;
 
         var row = _conversations.Get(conversationId);
@@ -789,13 +755,9 @@ public sealed class CloudSyncService
         }
 
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        _conversations.Upsert(latest with
-        {
-            Title = title,
-            UpdatedAt = Math.Max(latest.UpdatedAt, now)
-        });
-        _settings.Set(TitleGeneratedKey(conversationId), "true");
-        return title;
+        return ApplyCloudSnapshot(generation, conversationId, revision,
+            latest with { Title = title, UpdatedAt = Math.Max(latest.UpdatedAt, now) }, null,
+            new Dictionary<string, string?> { [TitleGeneratedKey(conversationId)] = "true" }, ct) ? title : null;
     }
 
     /// <summary>Calls the authenticated MolaGPT title endpoint without changing
@@ -813,8 +775,8 @@ public sealed class CloudSyncService
             return null;
         }
 
-        userText = MessageViewModel.StripSystemHints(userText);
-        assistantText = MessageViewModel.StripSystemHints(assistantText);
+        userText = ChatMessageText.StripSystemHints(userText);
+        assistantText = ChatMessageText.StripSystemHints(assistantText);
         if (string.IsNullOrWhiteSpace(userText) || string.IsNullOrWhiteSpace(assistantText))
             return null;
 
@@ -865,7 +827,7 @@ public sealed class CloudSyncService
 
     public int CleanupLocalPlaceholdersForLogout()
     {
-        var deletedIds = _conversations.HardDeleteEmptyByProvider(MolaGptProviderId);
+        var deletedIds = _conversations.HardDeleteEmptyByProvider(MolaGptProviderIds.Proxy);
         foreach (var id in deletedIds)
         {
             _settings.Remove(ConversationSyncKey(id));
@@ -906,9 +868,21 @@ public sealed class CloudSyncService
         return new AccountBindingResult(purged.Count, purged);
     }
 
+    private AccountBindingResult EnforceAccountBindingForSession(long generation)
+    {
+        var result = AccountBindingResult.Empty;
+        if (!_auth.TryCommitForSession(generation, () =>
+            {
+                result = EnforceAccountBinding();
+                return true;
+            }))
+            ThrowIfAccountGenerationChanged(generation);
+        return result;
+    }
+
     private IReadOnlyList<string> PurgeLocalOfficialConversations()
     {
-        var purged = _conversations.PurgeAllByProvider(MolaGptProviderId);
+        var purged = _conversations.PurgeAllByProvider(MolaGptProviderIds.Proxy);
         foreach (var id in purged)
             ForgetPurgedConversation(id);
         if (purged.Count > 0)
@@ -916,38 +890,34 @@ public sealed class CloudSyncService
         return purged;
     }
 
-    private JsonArray BuildDirtyConversations(long lastSyncMs, bool isFirstSync)
+    private IReadOnlyList<ConversationUpload> BuildConversationUploads(IEnumerable<CloudConversationVersion> versions)
     {
-        var dirty = new JsonArray();
-        var conversationsWithMessages = _messages.ListConversationIdsWithMessages();
-        foreach (var row in _conversations.ListActive())
-        {
-            if (!IsCloudSyncable(row) || !conversationsWithMessages.Contains(row.Id)) continue;
-            if (!isFirstSync && row.UpdatedAt <= lastSyncMs && !NeedsGeneratedTitle(row)) continue;
+        return versions.Select(version => BuildConversationUpload(version, includeMessages: false))
+            .OfType<ConversationUpload>().ToList();
+    }
 
-            var rows = _messages.List(row.Id);
-            if (rows.Count == 0) continue;
+    private ConversationUpload? BuildConversationUpload(CloudConversationVersion version, bool includeMessages)
+    {
+        var row = version.Row;
+        if (row.DeletedAt is not null || version.Changes == CloudChanges.None) return null;
+        if (version.Changes.HasFlag(CloudChanges.AwaitingConfirmation))
+            return new ConversationUpload(version, row, ToCloudMetadata(row), new JsonArray());
 
-            var uploadRow = EnsureGeneratedTitle(row, rows);
-            if (!isFirstSync && uploadRow.UpdatedAt <= lastSyncMs) continue;
-
-            // Use metadata-first sync: after the first sync,
-            // manual/list sync only sends metadata for already-synced
-            // conversations. Brand-new local conversations still include their
-            // messages so sync.php can create the backing conversation file.
-            var shouldIncludeMessages = isFirstSync || !HasConversationSyncTimestamp(row.Id);
-            dirty.Add(new JsonObject
-            {
-                ["metadata"] = ToCloudMetadata(uploadRow),
-                ["messages"] = shouldIncludeMessages ? ToCloudMessages(rows) : new JsonArray()
-            });
-        }
-
-        return dirty;
+        // Existing rows with a title/pin edit still use metadata-only sync.
+        // New rows and changes to the active message path need a body.
+        var sendMessages = includeMessages || version.Changes.HasFlag(CloudChanges.Messages)
+            || string.IsNullOrWhiteSpace(version.SyncTimestamp);
+        var messages = sendMessages || NeedsGeneratedTitle(row) ? _messages.List(row.Id) : [];
+        if (sendMessages && (messages.Count == 0 || IsStreamingCheckpoint(messages[^1]))) return null;
+        if (_conversations.GetCloudRevision(row.Id) != version.Revision) return null;
+        var uploadRow = messages.Count > 0 ? EnsureGeneratedTitle(row, messages) : row;
+        return new ConversationUpload(version, uploadRow, ToCloudMetadata(uploadRow),
+            sendMessages ? ToCloudMessages(messages) : new JsonArray());
     }
 
     private CloudMetadataMergeResult MergeServerMetadata(
-        JsonObject syncResult, string syncTimestamp, long sessionGeneration, string? sessionAccount)
+        JsonObject syncResult, JsonArray serverList, string syncTimestamp, long sessionGeneration, string? sessionAccount,
+        IReadOnlyDictionary<string, CloudConversationVersion> versions, IReadOnlySet<string> superseded, CancellationToken ct)
     {
         ThrowIfAccountChanged(sessionGeneration, sessionAccount);
         var upserted = 0;
@@ -964,25 +934,25 @@ public sealed class CloudSyncService
                 var id = metadata["id"]?.GetValue<string>();
                 if (string.IsNullOrWhiteSpace(id)) continue;
 
-                var existing = _conversations.Get(id);
-                var row = ToLocalConversation(metadata, existing);
-                _conversations.Upsert(row);
-                SaveCloudMetadata(id, metadata);
-                SetConversationSyncTimestamp(id, syncTimestamp);
-                if (node["messages"] is JsonArray messages && messages.Count > 0)
-                    _messages.ReplaceConversationMessages(id, ToLocalMessages(id, messages));
+                var version = versions.GetValueOrDefault(id);
+                if (version is not null && version.Changes != CloudChanges.None) continue;
+                var existing = version?.Row;
+                var remoteUpdated = ParseCloudTimestamp(metadata["updated_at"] ?? metadata["time"]);
+                if (existing?.DeletedAt is { } deleted && deleted >= remoteUpdated
+                    || existing is not null && remoteUpdated > 0 && existing.UpdatedAt > remoteUpdated
+                    && _messages.HasActiveMessages(id))
+                    continue;
+                var row = ToLocalConversation(id, metadata, existing);
+                var rows = node["messages"] is JsonArray { Count: > 0 } messages
+                    ? ToLocalMessages(id, messages).ToArray() : null;
+                if (!ApplyCloudSnapshot(sessionGeneration, id, version?.Revision, row,
+                        rows, CloudMetadataChanges(id, metadata, syncTimestamp), ct, CloudChanges.None))
+                    continue;
                 changedRows.Add(row);
                 upserted++;
             }
         }
 
-        if (syncResult["full_metadata_list"] is not JsonArray serverList)
-            return new CloudMetadataMergeResult(upserted, remoteDeleted, changedRows, removedIds);
-
-        // Read the local rows and sync markers together. Only candidates for
-        // writes need a fresh point lookup while the response is being merged.
-        var local = _conversations.ListAllWithSetting(ConversationSyncPrefix)
-            .ToDictionary(item => item.Row.Id, StringComparer.Ordinal);
         var serverIds = new HashSet<string>(StringComparer.Ordinal);
         var merged = 0;
         foreach (var node in serverList)
@@ -993,40 +963,39 @@ public sealed class CloudSyncService
             if (string.IsNullOrWhiteSpace(id)) continue;
             serverIds.Add(id);
 
+            var version = versions.GetValueOrDefault(id);
+            if (version is not null && version.Changes != CloudChanges.None && !superseded.Contains(id)) continue;
+            var existing = version?.Row;
             var serverUpdatedAt = ParseCloudTimestamp(metadata["updated_at"] ?? metadata["time"]);
-            if (HasNewerLocalMetadata(local.GetValueOrDefault(id).Row, serverUpdatedAt)) continue;
-            var existing = _conversations.Get(id);
             if (HasNewerLocalMetadata(existing, serverUpdatedAt)) continue;
 
             var shouldRefreshDetail = existing is { DeletedAt: null }
                 && serverUpdatedAt > existing.UpdatedAt
                 && _messages.HasActiveMessages(id);
 
-            var row = ToLocalConversation(metadata, existing);
-            _conversations.Upsert(row);
-            SaveCloudMetadata(id, metadata);
-            SetConversationSyncTimestamp(id, syncTimestamp);
+            var row = ToLocalConversation(id, metadata, existing);
+            var changes = CloudMetadataChanges(id, metadata, syncTimestamp);
             if (shouldRefreshDetail)
-                _settings.Set(DetailRefreshKey(id), serverUpdatedAt.ToString(CultureInfo.InvariantCulture));
+                changes[DetailRefreshKey(id)] = serverUpdatedAt.ToString(CultureInfo.InvariantCulture);
+            if (!ApplyCloudSnapshot(sessionGeneration, id, version?.Revision, row, null, changes, ct, CloudChanges.None))
+                continue;
             changedRows.Add(row);
             merged++;
         }
 
-        foreach (var (row, syncTimestampValue) in local.Values)
+        foreach (var version in versions.Values)
         {
             ThrowIfAccountGenerationChanged(sessionGeneration);
-            if (row.DeletedAt is not null || !IsCloudSyncable(row)) continue;
-            if (string.IsNullOrWhiteSpace(syncTimestampValue) || serverIds.Contains(row.Id)) continue;
+            var row = version.Row;
+            if (row.DeletedAt is not null || version.Changes != CloudChanges.None) continue;
+            if (string.IsNullOrWhiteSpace(version.SyncTimestamp) || serverIds.Contains(row.Id)) continue;
 
-            // An outgoing update can finish while a full list is being merged.
-            // A sync marker changed since the snapshot cannot prove deletion.
-            if (_conversations.Get(row.Id) is not { DeletedAt: null } current || !IsCloudSyncable(current)
-                || !string.Equals(_settings.Get(ConversationSyncKey(row.Id)), syncTimestampValue, StringComparison.Ordinal))
+            if (!_auth.TryCommitForSession(sessionGeneration, () =>
+                string.Equals(_settings.Get(ConversationSyncKey(row.Id)), version.SyncTimestamp, StringComparison.Ordinal)
+                && _conversations.TryApplyCloudSnapshot(row.Id, version.Revision,
+                    row with { DeletedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() }, null,
+                    DeletedConversationChanges(row.Id), ct, CloudChanges.None)))
                 continue;
-
-            _conversations.SoftDelete(row.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            _settings.Remove(ConversationSyncKey(row.Id));
-            _settings.Remove(CloudMetadataKey(row.Id));
             removedIds.Add(row.Id);
             remoteDeleted++;
         }
@@ -1039,6 +1008,21 @@ public sealed class CloudSyncService
 
     private static bool HasServerMetadata(JsonObject syncResult) =>
         syncResult["full_metadata_list"] is JsonArray { Count: > 0 };
+
+    private async Task<(JsonObject Result, string Cursor)> PostFullSyncAsync(string jwt, string cursor, JsonArray dirty,
+        CancellationToken ct, IProgress<string>? progress = null)
+    {
+        var result = await PostSyncAsync(jwt, new JsonObject
+        {
+            ["action"] = "full_sync",
+            ["last_sync_timestamp"] = cursor,
+            ["dirty_conversations"] = dirty
+        }, ct, progress).ConfigureAwait(false);
+        var nextCursor = result["new_sync_timestamp"]?.GetValue<string>();
+        if (result["success"]?.GetValue<bool>() != true || nextCursor is null || ToUnixMilliseconds(nextCursor) <= 0)
+            throw new InvalidDataException("云同步返回缺少有效的确认时间。");
+        return (result, nextCursor);
+    }
 
     private static string DetailRefreshKey(string conversationId) => DetailRefreshPrefix + conversationId;
 
@@ -1076,6 +1060,30 @@ public sealed class CloudSyncService
         }, ct).ConfigureAwait(false);
         if (result["success"]?.GetValue<bool>() != true)
             throw new InvalidOperationException("云端没有确认对话删除。");
+    }
+
+    private async Task<IReadOnlySet<string>> SyncDeletionsAsync(string jwt,
+        IReadOnlyList<CloudConversationVersion> versions, long generation, CancellationToken ct)
+    {
+        var deletions = versions.Where(version => version.Row.DeletedAt is not null && IsCloudSyncable(version.Row)
+            && _conversations.GetCloudRevision(version.Row.Id) == version.Revision).ToArray();
+        var pending = deletions.Where(version => version.Changes != CloudChanges.None).ToArray();
+        ThrowIfAccountGenerationChanged(generation);
+        if (pending.Length > 0)
+            await DeleteCloudConversationsAsync(jwt, pending.Select(version => version.Row.Id).ToArray(), ct)
+                .ConfigureAwait(false);
+        ThrowIfAccountGenerationChanged(generation);
+
+        var confirmed = deletions.Where(version => version.Changes == CloudChanges.None)
+            .Select(version => version.Row.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var version in pending)
+        {
+            var id = version.Row.Id;
+            if (ApplyCloudSnapshot(generation, id, version.Revision, null, null, DeletedConversationChanges(id), ct,
+                    CloudChanges.None))
+                confirmed.Add(id);
+        }
+        return confirmed;
     }
 
     private async Task<JsonObject> PostSyncAsync(
@@ -1254,22 +1262,33 @@ public sealed class CloudSyncService
     private static bool NeedsGeneratedTitle(ConversationRow row) =>
         string.IsNullOrWhiteSpace(row.Title) || row.Title == "新对话";
 
-    private ConversationRow EnsureGeneratedTitle(ConversationRow row, IReadOnlyList<MessageRow> rows)
+    private static ConversationRow EnsureGeneratedTitle(ConversationRow row, IReadOnlyList<MessageRow> rows)
     {
         if (!NeedsGeneratedTitle(row)) return row;
 
         var firstUser = rows.FirstOrDefault(message => message.Role == "user");
-        var title = ChatViewModel.GenerateTitle(firstUser?.Content);
+        var title = ConversationTitleText.GenerateTitle(firstUser?.Content);
         if (title == row.Title) return row;
 
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var updated = row with
+        return row with
         {
             Title = title,
             UpdatedAt = Math.Max(row.UpdatedAt, now)
         };
-        _conversations.Upsert(updated);
-        return updated;
+    }
+
+    private static bool IsStreamingCheckpoint(MessageRow row)
+    {
+        if (row.Role != ChatMessage.RoleAssistant || string.IsNullOrWhiteSpace(row.Meta)) return false;
+        try
+        {
+            using var meta = JsonDocument.Parse(row.Meta);
+            return meta.RootElement.ValueKind == JsonValueKind.Object
+                && meta.RootElement.TryGetProperty("streaming", out var streaming)
+                && streaming.ValueKind == JsonValueKind.True;
+        }
+        catch (JsonException) { return false; }
     }
 
     private static JsonArray ToCloudMessages(IReadOnlyList<MessageRow> rows)
@@ -1277,7 +1296,7 @@ public sealed class CloudSyncService
         var array = new JsonArray();
         foreach (var row in rows)
         {
-            var splitThinking = ChatViewModel.SplitInlineThinking(row.Content);
+            var splitThinking = ChatMessageText.SplitInlineThinking(row.Content);
             var content = splitThinking.Visible;
             JsonArray? toolCalls = null;
             JsonArray? thinkingSegments = null;
@@ -1400,7 +1419,8 @@ public sealed class CloudSyncService
     {
         var thinking = source.Trim();
         if (string.IsNullOrWhiteSpace(thinking)) return string.Empty;
-        var firstTool = FindNextWebToolMarker(thinking, 0);
+        var literals = MarkdownSource.LiteralSpans(thinking);
+        var firstTool = FindNextWebToolMarker(thinking, 0, literals);
         if (firstTool < 0)
             return "\n\n<think>\n" + thinking + "\n</think>\n\n";
 
@@ -1416,7 +1436,7 @@ public sealed class CloudSyncService
 
         while (pos < thinking.Length)
         {
-            var next = FindNextWebToolMarker(thinking, pos);
+            var next = FindNextWebToolMarker(thinking, pos, literals);
             if (next < 0)
             {
                 AppendThinkingText(thinking[pos..]);
@@ -1461,8 +1481,9 @@ public sealed class CloudSyncService
             label = ReadableToolLabel(name, phase);
 
         var toolType = WebToolType(name);
+        var identity = WebToolIdentity(tool);
         if (toolType == "web_search")
-            return BuildWebSearchMarkup(SearchChipsFromTool(tool, label!), phase);
+            return BuildWebSearchMarkup(SearchChipsFromTool(tool, label!), phase, identity);
 
         var extraClass = toolType == "image-gen" ? " tool-image-blockquote" : string.Empty;
         var dsBody = new StringBuilder();
@@ -1476,13 +1497,18 @@ public sealed class CloudSyncService
             dsBody.Append(result);
         }
 
-        return "\n\n<blockquote class=\"tool-status " + phase + extraClass + "\"><p>" + EscapeHtml(label!) + "</p></blockquote>\n\n"
-               + "<DSanalysis data-tool-type=\"" + toolType + "\" data-analysis-phase=\"" + phase + "\">"
+        return "\n\n<blockquote" + identity + " class=\"tool-status " + phase + extraClass + "\"><p>" + EscapeHtml(label!) + "</p></blockquote>\n\n"
+               + "<DSanalysis" + identity + " data-tool-type=\"" + toolType + "\" data-analysis-phase=\"" + phase + "\">"
                + dsBody
                + "</DSanalysis>\n\n";
     }
 
-    private static string BuildWebSearchMarkup(IReadOnlyList<SearchChip> chips, string phase)
+    private static string WebToolIdentity(JsonObject tool) =>
+        ReadString(tool, "id") is { Length: > 0 } id
+            ? " data-tool-call=\"" + EscapeHtml(id) + "\" data-tool-name=\"" + EscapeHtml(ReadString(tool, "name") ?? "tool") + "\""
+            : string.Empty;
+
+    private static string BuildWebSearchMarkup(IReadOnlyList<SearchChip> chips, string phase, string identity)
     {
         var safePhase = phase is "completed" or "error" or "analyzing" ? phase : "completed";
         var chipHtml = new StringBuilder();
@@ -1504,9 +1530,9 @@ public sealed class CloudSyncService
             chipHtml.Append("</span>");
         }
 
-        return "\n\n<blockquote class=\"tool-status " + safePhase + " tool-search-blockquote\" data-search-phase=\"" + safePhase + "\">"
+        return "\n\n<blockquote" + identity + " class=\"tool-status " + safePhase + " tool-search-blockquote\" data-search-phase=\"" + safePhase + "\">"
                + "<p class=\"tool-search-title\">网络搜索</p><div class=\"tool-search-chip-wrap\">" + chipHtml + "</div></blockquote>\n\n"
-               + "<DSanalysis data-tool-type=\"web_search\" data-analysis-phase=\"" + safePhase + "\"></DSanalysis>\n\n";
+               + "<DSanalysis" + identity + " data-tool-type=\"web_search\" data-analysis-phase=\"" + safePhase + "\"></DSanalysis>\n\n";
     }
 
     private static IReadOnlyList<SearchChip> SearchChipsFromTool(JsonObject tool, string label)
@@ -1693,25 +1719,18 @@ public sealed class CloudSyncService
 
     private static LocalTimelineParse ParseWebTimelineForLocal(string source)
     {
-        source = Regex.Replace(source,
-            """(<DSanalysis\b[^>]*data-tool-type=["']mcp["'][^>]*>(?:(?!</DSanalysis>)[\s\S])*?</DSanalysis>)\s*<blockquote\b(?=[^>]*class=["']tool-status completed["'])(?![^>]*data-tool-call)[^>]*>\s*<p>处理中(?:\.\.\.|…)</p>\s*</blockquote>""",
-            "$1", RegexOptions.IgnoreCase);
         var visible = new StringBuilder();
         var thinkingSegments = new JsonArray();
         var toolCalls = new JsonArray();
         var thinking = new StringBuilder();
-        var pos = 0;
         var timeline = 0;
         var hasTimeline = false;
-        var lastTimelineItemWasTool = false;
 
         void AppendVisible(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
-            var clean = MessageViewModel.StripSystemHints(text);
+            var clean = ChatMessageText.RemoveSystemHints(text);
             visible.Append(clean);
-            if (!string.IsNullOrWhiteSpace(clean))
-                lastTimelineItemWasTool = false;
         }
 
         void AppendThinking(string text)
@@ -1729,15 +1748,15 @@ public sealed class CloudSyncService
             if (thinking.Length > 0) thinking.Append("\n\n");
             thinking.Append(clean);
             hasTimeline = true;
-            lastTimelineItemWasTool = false;
         }
 
         void AppendThinkingWithEmbeddedTools(string text)
         {
+            var literals = MarkdownSource.LiteralSpans(text);
             var posInThinking = 0;
             while (posInThinking < text.Length)
             {
-                var nextTool = FindNextWebToolMarker(text, posInThinking);
+                var nextTool = FindNextWebToolMarker(text, posInThinking, literals);
                 if (nextTool < 0)
                 {
                     AppendThinking(text[posInThinking..]);
@@ -1766,88 +1785,76 @@ public sealed class CloudSyncService
                 AppendVisible(unit);
                 return;
             }
-            if (StartsWithIgnoreCase(unit, 0, "<DSanalysis")
-                && lastTimelineItemWasTool
-                && TryMergeDsAnalysisWithPreviousTool(unit, toolCalls))
-            {
-                hasTimeline = true;
-                return;
-            }
-
             var tool = ParseWebToolUnitForLocal(unit, visible.Length, timeline);
             if (tool is null) return;
             toolCalls.Add(tool);
             timeline++;
             hasTimeline = true;
-            lastTimelineItemWasTool = true;
         }
 
-        while (pos < source.Length)
+        void ParseVisible(string source)
         {
-            var next = FindNextWebTimelineMarker(source, pos);
-            if (next < 0)
+            var pos = 0;
+            var literals = MarkdownSource.LiteralSpans(source);
+            while (pos < source.Length)
             {
-                AppendVisible(source[pos..]);
-                break;
-            }
-
-            if (next > pos)
-                AppendVisible(source[pos..next]);
-
-            if (StartsWithIgnoreCase(source, next, "<think"))
-            {
-                var openEnd = source.IndexOf('>', next);
-                if (openEnd < 0)
+                var next = FindNextWebToolMarker(source, pos, literals);
+                if (next < 0)
                 {
-                    AppendThinking(source[next..]);
+                    AppendVisible(source[pos..]);
                     break;
                 }
 
-                var close = IndexOfIgnoreCase(source, "</think>", openEnd + 1);
-                var body = close < 0
-                    ? source[(openEnd + 1)..]
-                    : source.Substring(openEnd + 1, close - openEnd - 1);
-                AppendThinkingWithEmbeddedTools(body);
-                pos = close < 0 ? source.Length : close + "</think>".Length;
-                continue;
-            }
+                if (next > pos)
+                    AppendVisible(source[pos..next]);
 
-            var end = FindWebTimelineMarkerEnd(source, next);
-            if (end < 0)
-            {
-                AppendVisible(source.Substring(next, 1));
-                pos = next + 1;
-                continue;
-            }
-
-            var unit = source[next..end];
-            if (StartsWithToolStatusBlockquote(source, next))
-            {
-                var afterStatus = SkipWhitespace(source, end);
-                if (StartsWithIgnoreCase(source, afterStatus, "<DSanalysis"))
+                var end = FindWebTimelineMarkerEnd(source, next);
+                if (end < 0)
                 {
-                    var dsEnd = FindWebTimelineMarkerEnd(source, afterStatus);
-                    if (dsEnd > afterStatus)
+                    AppendVisible(source.Substring(next, 1));
+                    pos = next + 1;
+                    continue;
+                }
+
+                var unit = source[next..end];
+                if (StartsWithToolStatusBlockquote(source, next))
+                {
+                    var afterStatus = SkipWhitespace(source, end);
+                    if (StartsWithIgnoreCase(source, afterStatus, "<DSanalysis"))
                     {
-                        var dsUnit = source[afterStatus..dsEnd];
-                        if (ShouldKeepDsAnalysisInVisibleContent(dsUnit))
+                        var dsEnd = FindWebTimelineMarkerEnd(source, afterStatus);
+                        if (dsEnd > afterStatus)
                         {
-                            AppendVisible(source[next..dsEnd]);
-                            pos = dsEnd;
-                            continue;
+                            var dsUnit = source[afterStatus..dsEnd];
+                            if (ShouldKeepDsAnalysisInVisibleContent(dsUnit))
+                            {
+                                AppendVisible(source[next..dsEnd]);
+                                pos = dsEnd;
+                                continue;
+                            }
                         }
                     }
                 }
-            }
 
-            if (unit.Contains("data-tool-call=", StringComparison.OrdinalIgnoreCase)
-                || unit.Contains("tool-subagent-blockquote", StringComparison.OrdinalIgnoreCase)
-                || ShouldKeepDsAnalysisInVisibleContent(unit))
-                AppendVisible(unit);
-            else
-                AppendTool(unit);
-            pos = end;
+                if (unit.Contains("data-tool-call=", StringComparison.OrdinalIgnoreCase)
+                    || unit.Contains("tool-subagent-blockquote", StringComparison.OrdinalIgnoreCase)
+                    || ShouldKeepDsAnalysisInVisibleContent(unit))
+                    AppendVisible(unit);
+                else
+                    AppendTool(unit);
+                pos = end;
+            }
         }
+
+        var splitter = new InlineThinkSplitter();
+        splitter.Feed(source, part =>
+        {
+            if (part.Thinking.Length > 0) AppendThinkingWithEmbeddedTools(part.Thinking);
+            if (part.Visible.Length > 0) ParseVisible(part.Visible);
+        });
+        var tail = splitter.Flush();
+        if (tail.Thinking.Length > 0) AppendThinkingWithEmbeddedTools(tail.Thinking);
+        if (tail.Visible.Length > 0) ParseVisible(tail.Visible);
 
         return new LocalTimelineParse(
             visible.ToString(),
@@ -1890,8 +1897,10 @@ public sealed class CloudSyncService
         var body = isDs ? StripTagPair(unit, "DSanalysis").Trim() : string.Empty;
         if (isDs && string.IsNullOrWhiteSpace(body)) return null;
 
-        var name = isDs ? DsToolName(unit) : ToolNameFromStatusMarkup(unit);
-        var phase = ExtractToolPhase(unit);
+        var parsed = MolaGptMarkupSplitter.Split(unit).FirstOrDefault(item => item.Kind != MarkupUnitKind.Markdown);
+        if (parsed is null) return null;
+        var name = MolaGptMarkupSplitter.ToolName(parsed);
+        var phase = MolaGptMarkupSplitter.ToolPhase(parsed, isFinal: true);
         var label = isDs
             ? ReadableToolLabel(name, phase)
             : ExtractSteelStepTitle(unit) ?? HtmlToText(unit);
@@ -1930,30 +1939,6 @@ public sealed class CloudSyncService
         return obj;
     }
 
-    private static bool TryMergeDsAnalysisWithPreviousTool(string unit, JsonArray toolCalls)
-    {
-        var body = StripTagPair(unit, "DSanalysis").Trim();
-        if (string.IsNullOrWhiteSpace(body)) return true;
-        if (toolCalls.Count == 0 || toolCalls[toolCalls.Count - 1] is not JsonObject previous) return false;
-
-        var name = DsToolName(unit);
-        var phase = ExtractToolPhase(unit);
-        previous["name"] = name;
-        previous["status"] = phase == "error" ? "error" : phase == "cancelled" ? "cancelled" : phase == "completed" ? "completed" : "running";
-        if (name == "web_fetch")
-        {
-            if (string.IsNullOrWhiteSpace(ReadString(previous, "label")))
-                previous["label"] = ReadableToolLabel(name, phase);
-            ApplyWebFetchResult(previous, body);
-        }
-        else
-        {
-            previous["label"] = ReadableToolLabel(name, phase);
-            previous["detail"] = body;
-        }
-        return true;
-    }
-
     private static void ApplyWebFetchResult(JsonObject tool, string body)
     {
         tool["provider"] = "Steel Browser";
@@ -1989,56 +1974,6 @@ public sealed class CloudSyncService
         return normalized.Length <= maxLength ? normalized : normalized[..Math.Max(0, maxLength - 1)] + "…";
     }
 
-    private static string ToolNameFromStatusMarkup(string unit)
-    {
-        if (unit.Contains("tool-search-blockquote", StringComparison.OrdinalIgnoreCase)) return "search_web";
-        if (unit.Contains("tool-steel-step", StringComparison.OrdinalIgnoreCase)) return SteelStepToolName(unit);
-        var text = HtmlToText(unit);
-        if (text.Contains("搜索", StringComparison.OrdinalIgnoreCase)) return "search_web";
-        if (text.Contains("查看图片", StringComparison.OrdinalIgnoreCase) || text.Contains("图片分析", StringComparison.OrdinalIgnoreCase)) return "image-analyze";
-        if (text.Contains("绘制", StringComparison.OrdinalIgnoreCase)) return "image-gen";
-        if (text.Contains("Python", StringComparison.OrdinalIgnoreCase)) return "python";
-        if (text.Contains("阅读网页", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("读取网页", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("查看网页", StringComparison.OrdinalIgnoreCase)) return "web_fetch";
-        return "tool";
-    }
-
-    private static string DsToolName(string unit)
-    {
-        var lower = unit.ToLowerInvariant();
-        if (lower.Contains("web_search") || lower.Contains("search_web")) return "search_web";
-        if (lower.Contains("image-analyze")) return "image-analyze";
-        if (lower.Contains("image-gen")) return "image-gen";
-        if (lower.Contains("image-action")) return "image-action";
-        if (lower.Contains("操作类型: screenshot_analyze")
-            || lower.Contains("**操作类型:** screenshot_analyze")
-            || lower.Contains("operation type: screenshot_analyze")
-            || lower.Contains("操作类型: scrape")
-            || lower.Contains("**操作类型:** scrape")
-            || lower.Contains("operation type: scrape")
-            || lower.Contains("steel browser截图")
-            || (lower.Contains("页面标题") && lower.Contains("内容长度")))
-            return "web_fetch";
-        if (lower.Contains("python")) return "python";
-        if (lower.Contains("mcp")) return "mcp";
-        return "tool";
-    }
-
-    private static string SteelStepToolName(string unit)
-    {
-        var title = ExtractSteelStepTitle(unit) ?? string.Empty;
-        if (unit.Contains("data-steel-action=\"scrape\"", StringComparison.OrdinalIgnoreCase)
-            || unit.Contains("data-steel-action='scrape'", StringComparison.OrdinalIgnoreCase)
-            || unit.Contains("data-steel-action=\"screenshot_analyze\"", StringComparison.OrdinalIgnoreCase)
-            || unit.Contains("data-steel-action='screenshot_analyze'", StringComparison.OrdinalIgnoreCase)
-            || title.Contains("阅读网页", StringComparison.OrdinalIgnoreCase)
-            || title.Contains("读取网页", StringComparison.OrdinalIgnoreCase)
-            || title.Contains("查看网页", StringComparison.OrdinalIgnoreCase))
-            return "web_fetch";
-        return "steel_browser";
-    }
-
     private static string? ExtractSteelStepTitle(string html)
     {
         var match = Regex.Match(
@@ -2060,14 +1995,6 @@ public sealed class CloudSyncService
             .Distinct()
             .ToArray();
         return items.Length == 0 ? null : string.Join("\n", items);
-    }
-
-    private static string ExtractToolPhase(string unit)
-    {
-        var lower = unit.ToLowerInvariant();
-        if (Regex.IsMatch(lower, """(?:class|data-analysis-phase)=["'][^"']*\bcancelled\b""")) return "cancelled";
-        if (lower.Contains("data-analysis-phase=\"error\"") || lower.Contains(" tool-status error") || lower.Contains(" error\"")) return "error";
-        return "completed";
     }
 
     private static IReadOnlyList<SearchChip> ExtractSearchChips(string html)
@@ -2154,16 +2081,22 @@ public sealed class CloudSyncService
             .Replace("&#39;", "'")
             .Trim();
 
-    private static int FindNextWebTimelineMarker(string source, int start) =>
-        MinPositive(
-            IndexOfIgnoreCase(source, "<think", start),
-            FindNextWebToolMarker(source, start));
-
-    private static int FindNextWebToolMarker(string source, int start) =>
-        MinPositive(
-            IndexOfIgnoreCase(source, "<steel-step", start),
-            IndexOfIgnoreCase(source, "<DSanalysis", start),
-            IndexOfNextToolStatusBlockquote(source, start));
+    private static int FindNextWebToolMarker(string source, int start, IReadOnlyList<Markdig.Syntax.SourceSpan> literals)
+    {
+        while (start < source.Length)
+        {
+            var next = MinPositive(
+                IndexOfIgnoreCase(source, "<steel-step", start),
+                IndexOfIgnoreCase(source, "<DSanalysis", start),
+                IndexOfNextToolStatusBlockquote(source, start));
+            if (next < 0) return -1;
+            var literalEnd = literals.Where(span => span.Start <= next && next <= span.End)
+                .Select(span => span.End).DefaultIfEmpty(-1).First();
+            if (literalEnd < 0) return next;
+            start = literalEnd + 1;
+        }
+        return -1;
+    }
 
     private static int FindWebTimelineMarkerEnd(string source, int start)
     {
@@ -2224,9 +2157,8 @@ public sealed class CloudSyncService
         JsonArray ThinkingSegments,
         bool HasTimeline);
 
-    private static ConversationRow ToLocalConversation(JsonObject metadata, ConversationRow? existing)
+    private static ConversationRow ToLocalConversation(string id, JsonObject metadata, ConversationRow? existing)
     {
-        var id = metadata["id"]?.GetValue<string>() ?? Guid.NewGuid().ToString("N");
         var created = ParseCloudTimestamp(metadata["time"]) is var time && time > 0
             ? time
             : existing?.CreatedAt ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -2237,7 +2169,7 @@ public sealed class CloudSyncService
             Id: id,
             Title: metadata["title"]?.GetValue<string>() ?? existing?.Title ?? "新对话",
             ModelId: metadata["model"]?.GetValue<string>() ?? existing?.ModelId,
-            ProviderId: existing?.ProviderId ?? MolaGptProviderId,
+            ProviderId: existing?.ProviderId ?? MolaGptProviderIds.Proxy,
             CreatedAt: created,
             UpdatedAt: updated,
             Pinned: metadata["pinned"]?.GetValue<bool>() ?? existing?.Pinned ?? false,
@@ -2248,35 +2180,104 @@ public sealed class CloudSyncService
         // Chat (molagpt-proxy) always syncs. Work (molagpt-local-tools) is gated
         // behind WorkCloudSyncEnabled — currently false, so Work conversations
         // stay local and no sync UI is exposed for them.
-        string.Equals(row.ProviderId, MolaGptProviderId, StringComparison.OrdinalIgnoreCase)
+        string.Equals(row.ProviderId, MolaGptProviderIds.Proxy, StringComparison.OrdinalIgnoreCase)
         || (WorkCloudSyncEnabled
-            && string.Equals(row.ProviderId, MolaGptLocalToolsProviderId, StringComparison.OrdinalIgnoreCase));
+            && string.Equals(row.ProviderId, MolaGptProviderIds.LocalTools, StringComparison.OrdinalIgnoreCase));
 
-    private bool HasConversationSyncTimestamp(string conversationId) =>
-        !string.IsNullOrWhiteSpace(_settings.Get(ConversationSyncKey(conversationId)));
-
-    private void SetConversationSyncTimestamp(string conversationId, string timestamp)
+    private async Task<(IReadOnlyList<ConversationRow> Confirmed, IReadOnlySet<string> Superseded, int Missing)> ConfirmUploadsAsync(
+        string jwt, IReadOnlyList<ConversationUpload> uploads, JsonArray serverList, string syncTimestamp,
+        long generation, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(conversationId) || string.IsNullOrWhiteSpace(timestamp)) return;
-        _settings.Set(ConversationSyncKey(conversationId), timestamp);
-    }
-
-    private IReadOnlyList<ConversationRow> MarkUploadedConversations(JsonArray dirty, string syncTimestamp)
-    {
-        var rows = new List<ConversationRow>();
-        foreach (var item in dirty.OfType<JsonObject>())
+        var confirmed = new List<ConversationRow>();
+        var superseded = new HashSet<string>(StringComparer.Ordinal);
+        if (uploads.Count == 0) return (confirmed, superseded, 0);
+        var returned = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        foreach (var metadata in serverList.OfType<JsonObject>())
         {
-            if (item["metadata"] is not JsonObject metadata) continue;
-            var id = metadata["id"]?.GetValue<string>();
-            if (string.IsNullOrWhiteSpace(id)) continue;
-            SetConversationSyncTimestamp(id, syncTimestamp);
-            SaveCloudMetadata(id, metadata);
-            if (_conversations.Get(id) is { } row)
-                rows.Add(row);
+            if (metadata["id"]?.GetValue<string>() is { } id)
+                returned[id] = metadata;
         }
 
-        return rows;
+        var missing = 0;
+        foreach (var upload in uploads)
+        {
+            ct.ThrowIfCancellationRequested();
+            ThrowIfAccountGenerationChanged(generation);
+            var version = upload.Version;
+            var id = version.Row.Id;
+            if (_conversations.GetCloudRevision(id) != version.Revision) continue;
+            var metadata = returned.GetValueOrDefault(id);
+            var serverUpdatedAt = ParseCloudTimestamp(metadata?["updated_at"]);
+            // The server compares whole seconds. A definitive newer winner may
+            // merge by CAS. Equal-second conflicts keep the local draft pending.
+            if (serverUpdatedAt / 1000 > upload.Row.UpdatedAt / 1000)
+            {
+                superseded.Add(id);
+                continue;
+            }
+            if (metadata is not null && serverUpdatedAt == upload.Row.UpdatedAt
+                && JsonNode.DeepEquals(metadata["title"], upload.Metadata["title"])
+                && JsonNode.DeepEquals(metadata["model"], upload.Metadata["model"])
+                && (metadata["pinned"]?.GetValue<bool>() ?? false) == upload.Row.Pinned
+                && await ConfirmMatchingContentAsync(jwt, upload, ct).ConfigureAwait(false))
+            {
+                if (ApplyCloudSnapshot(generation, id, version.Revision, upload.UpdatedRow, null,
+                        CloudMetadataChanges(id, metadata, syncTimestamp), ct, CloudChanges.None))
+                    confirmed.Add(upload.Row);
+            }
+            else if (_conversations.GetCloudRevision(id) == version.Revision)
+            {
+                var pending = version.Changes & ~CloudChanges.AwaitingConfirmation;
+                // A metadata-only push cannot recreate a missing remote file.
+                if (metadata is null) pending |= CloudChanges.Messages;
+                if (pending != version.Changes)
+                    ApplyCloudSnapshot(generation, id, version.Revision, null, null, new Dictionary<string, string?>(), ct,
+                        pending);
+                missing++;
+            }
+        }
+
+        return (confirmed, superseded, missing);
     }
+
+    private async Task<bool> ConfirmMatchingContentAsync(string jwt, ConversationUpload upload, CancellationToken ct)
+    {
+        if (upload.Messages.Count == 0 && !upload.AlreadySubmitted) return true;
+        var id = upload.Version.Row.Id;
+        // sync.php uses strtotime (seconds). An unchanged metadata echo can
+        // also describe an older message body when the timestamp is identical.
+        var cached = LoadCloudMetadata(id);
+        if (cached is not null
+            ? ParseCloudTimestamp(cached["updated_at"]) != upload.Row.UpdatedAt
+            : string.IsNullOrWhiteSpace(upload.Version.SyncTimestamp))
+            return true;
+        var expected = upload.AlreadySubmitted ? ToCloudMessages(_messages.List(id)) : upload.Messages;
+        var detail = await FetchConversationAsync(jwt, id, ct).ConfigureAwait(false);
+        return JsonNode.DeepEquals(detail?["messages"], expected);
+    }
+
+    private sealed record ConversationUpload(
+        CloudConversationVersion Version, ConversationRow Row, JsonObject Metadata, JsonArray Messages)
+    {
+        public bool AlreadySubmitted => Version.Changes.HasFlag(CloudChanges.AwaitingConfirmation);
+        public ConversationRow? UpdatedRow => Row == Version.Row ? null : Row;
+        public JsonObject ToPayload() => new() { ["metadata"] = Metadata, ["messages"] = Messages };
+    }
+
+    private static Dictionary<string, string?> DeletedConversationChanges(string id) => new()
+    {
+        [ConversationSyncKey(id)] = null,
+        [CloudMetadataKey(id)] = null,
+        [DetailRefreshKey(id)] = null,
+        [DetailParserVersionKey(id)] = null,
+        [TitleGeneratedKey(id)] = null
+    };
+
+    private static Dictionary<string, string?> CloudMetadataChanges(string id, JsonObject metadata, string syncTimestamp) => new()
+    {
+        [ConversationSyncKey(id)] = syncTimestamp,
+        [CloudMetadataKey(id)] = metadata.ToJsonString(JsonOptions)
+    };
 
     private JsonObject? LoadCloudMetadata(string conversationId)
     {
@@ -2284,12 +2285,6 @@ public sealed class CloudSyncService
         if (string.IsNullOrWhiteSpace(raw)) return null;
         try { return JsonNode.Parse(raw) as JsonObject; }
         catch (JsonException) { return null; }
-    }
-
-    private void SaveCloudMetadata(string conversationId, JsonObject metadata)
-    {
-        if (string.IsNullOrWhiteSpace(conversationId)) return;
-        _settings.Set(CloudMetadataKey(conversationId), metadata.ToJsonString(JsonOptions));
     }
 
     private static string ConversationSyncKey(string conversationId) => ConversationSyncPrefix + conversationId;
@@ -2309,7 +2304,7 @@ public sealed class CloudSyncService
                 : new LocalTimelineParse(content, null, new JsonArray(), new JsonArray(), false);
             var splitThinking = timeline.HasTimeline
                 ? new InlineThinkingParts(timeline.Visible, timeline.Thinking)
-                : ChatViewModel.SplitInlineThinking(content);
+                : ChatMessageText.SplitInlineThinking(content);
             content = splitThinking.Visible;
             if (string.IsNullOrWhiteSpace(content) && role != "assistant") continue;
 
@@ -2450,10 +2445,11 @@ public sealed class CloudSyncService
     private static string ToIso(long unixMs) =>
         DateTimeOffset.FromUnixTimeMilliseconds(unixMs).UtcDateTime.ToString("O", CultureInfo.InvariantCulture);
 
-    private void PublishStatus(CloudSyncState state, string message)
+    private void PublishStatus(long generation, CloudSyncState state, string message, bool userInitiated = false)
     {
+        if (generation != _auth.SessionGeneration) return;
         StatusChanged?.Invoke(this, new CloudSyncStatusChangedEventArgs(
-            state, message, DateTimeOffset.Now, _syncIsUserInitiated));
+            state, message, DateTimeOffset.Now, generation, userInitiated));
     }
 }
 
@@ -2492,4 +2488,5 @@ public sealed record CloudSyncStatusChangedEventArgs(
     CloudSyncState State,
     string Message,
     DateTimeOffset Timestamp,
+    long SessionGeneration,
     bool IsUserInitiated = false);

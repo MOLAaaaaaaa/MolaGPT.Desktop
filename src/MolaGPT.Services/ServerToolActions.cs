@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 using MolaGPT.Core.Auth;
+using MolaGPT.Core.Chat;
 
 namespace MolaGPT.Desktop.Services;
 
@@ -19,8 +20,10 @@ public sealed class ServerToolActions(HttpClient http, MolaGptAuthService auth)
         if (response.IsSuccessStatusCode) return response;
         using (response)
         {
-            var body = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
-            throw new HttpRequestException(body?["message"]?.GetValue<string>() ?? $"请求失败（{(int)response.StatusCode}）");
+            var detail = ChatApiErrorHelper.ExtractErrorMessage(await response.Content.ReadAsStringAsync(ct));
+            var message = $"请求失败（{(int)response.StatusCode}）";
+            if (!string.IsNullOrWhiteSpace(detail)) message += "：" + detail;
+            throw new HttpRequestException(message, inner: null, response.StatusCode);
         }
     }
 

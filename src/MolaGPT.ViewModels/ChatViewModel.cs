@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -237,7 +236,28 @@ public sealed partial class ChatViewModel : ObservableObject
     private readonly ConversationRepository? _conversationRepo;
     private readonly PersonaListViewModel? _personas;
     private readonly SettingsRepository? _settingsRepo;
-    private int _messageLoadVersion;
+    private CancellationTokenSource? _navigation;
+    internal CancellationToken NavigationToken => _navigation?.Token ?? CancellationToken.None;
+
+    internal CancellationToken BeginNavigation(bool loading = false)
+    {
+        _navigation?.Cancel();
+        _navigation?.Dispose();
+        _navigation = new CancellationTokenSource();
+        IsConversationLoading = loading;
+        return _navigation.Token;
+    }
+
+    internal void CompleteNavigation(CancellationToken navigation)
+    {
+        void Clear(object? _)
+        {
+            if (_navigation?.Token == navigation)
+                IsConversationLoading = false;
+        }
+        if (SynchronizationContext.Current is { } ui) ui.Post(Clear, null);
+        else Clear(null);
+    }
 
     /// <summary>
     /// Optional sink for timing traces, wired by the desktop layer to PerfLog.
@@ -374,8 +394,7 @@ public sealed partial class ChatViewModel : ObservableObject
         if (!ignoreConversationBoundary && !CanSwitchToProvider(resolved.Value.Provider))
             return false;
 
-        SetActive(resolved.Value.Provider, resolved.Value.Model);
-        RememberModeSelection(resolved.Value.Provider.ToAppMode(), providerId, modelId);
+        ApplyModelChoice(resolved.Value.Provider, resolved.Value.Model);
         return true;
     }
 
@@ -404,67 +423,43 @@ public sealed partial class ChatViewModel : ObservableObject
     private const string ModeLastProviderKeyPrefix = "mode_last_provider_";
     private const string ModeLastModelKeyPrefix = "mode_last_model_";
 
-    /// <summary>Switch to the representative provider of the given mode. Returns
-    /// false (and surfaces a login request via <paramref name="needsLogin"/>) when
-    /// the target MolaGPT-account provider isn't registered (user not signed in).</summary>
-    public bool SwitchToMode(AppMode mode, out bool needsLogin)
-    {
-        needsLogin = false;
-        var (providerId, modelId) = ResolveModeTarget(mode, out needsLogin);
-        if (providerId is null || modelId is null) return false;
+    internal (IChatProvider Provider, ProviderModel Model)? ResolveUserModel(string providerId, string modelId) =>
+        AccountProvidersAllowed || !MolaGptProviderIds.IsMolaGptAccount(providerId)
+            ? _providers.FindModel(providerId, modelId) : null;
 
-        if (SetActiveByIds(providerId, modelId, ignoreConversationBoundary: true))
-        {
-            RememberModeSelection(mode, providerId, modelId);
-            return true;
-        }
-        return false;
+    internal void ApplyModelChoice(IChatProvider provider, ProviderModel model)
+    {
+        SetActive(provider, model);
+        RememberModeSelection(provider.ToAppMode(), provider.Id, model.Id);
     }
 
-    private (string? ProviderId, string? ModelId) ResolveModeTarget(AppMode mode, out bool needsLogin)
-    {
-        needsLogin = false;
-        switch (mode)
-        {
-            case AppMode.Chat:
-            {
-                var p = _providers.GetById(MolaGptProviderIds.Proxy);
-                if (p is null) { needsLogin = true; return (null, null); }
-                return (p.Id, RecallModel(p) ?? p.Models.FirstOrDefault()?.Id);
-            }
-            case AppMode.Work:
-            {
-                // "MolaGPT Work" is the unified local-agent capability. Land on the
-                // agent provider the user last used (shared-quota Work or a BYOK
-                // provider); fall back to shared-quota Work, then the first BYOK.
-                var lastAgentId = _settingsRepo?.Get(ModeLastProviderKeyPrefix + "agent");
-                var provider = string.IsNullOrWhiteSpace(lastAgentId) ? null : _providers.GetById(lastAgentId!);
-                if (provider is null || provider.Kind == ProviderKind.MolaGptProxy)
-                    provider = _providers.GetById(MolaGptProviderIds.LocalTools)
-                               ?? _providers.Providers.FirstOrDefault(p => !MolaGptProviderIds.IsMolaGptAccount(p.Id));
-                if (provider is null) { needsLogin = true; return (null, null); }
-                return (provider.Id, RecallModel(provider) ?? provider.Models.FirstOrDefault()?.Id);
-            }
-            default:
-            {
-                // BYOK: last-chosen BYOK provider if still registered, else first BYOK.
-                // By id: BYOK runs through Pi too, so its Kind is MolaGptLocalTools.
-                var byok = _providers.Providers.Where(p => !MolaGptProviderIds.IsMolaGptAccount(p.Id)).ToList();
-                if (byok.Count == 0) return (null, null);
-                var lastId = _settingsRepo?.Get(ModeLastProviderKeyPrefix + "byok");
-                var chosen = byok.FirstOrDefault(p => p.Id == lastId) ?? byok[0];
-                return (chosen.Id, RecallModel(chosen) ?? chosen.Models.FirstOrDefault()?.Id);
-            }
-        }
-    }
+    internal bool HasAccountConversation =>
+        ConversationId is { } id && MolaGptProviderIds.IsMolaGptAccount(_conversationRepo?.Get(id)?.ProviderId);
 
-    private string? RecallModel(IChatProvider provider)
+    internal (IChatProvider Provider, ProviderModel Model)? ResolveModeTarget(AppMode mode)
     {
-        var key = ModeLastModelKeyPrefix + provider.Id;
-        var recalled = _settingsRepo?.Get(key);
-        return !string.IsNullOrWhiteSpace(recalled) && provider.Models.Any(m => m.Id == recalled)
-            ? recalled
-            : null;
+        var eligible = _providers.Providers
+            .Where(p => p.Models.Count > 0 && (AccountProvidersAllowed || !MolaGptProviderIds.IsMolaGptAccount(p.Id)))
+            .ToArray();
+        IChatProvider? provider;
+        if (mode == AppMode.Chat)
+            provider = eligible.FirstOrDefault(p => p.Id == MolaGptProviderIds.Proxy);
+        else if (mode == AppMode.Work)
+        {
+            var lastAgentId = _settingsRepo?.Get(ModeLastProviderKeyPrefix + "agent");
+            provider = eligible.FirstOrDefault(p => p.Id == lastAgentId && p.Kind != ProviderKind.MolaGptProxy)
+                ?? eligible.FirstOrDefault(p => p.Id == MolaGptProviderIds.LocalTools)
+                ?? eligible.FirstOrDefault(p => !MolaGptProviderIds.IsMolaGptAccount(p.Id));
+        }
+        else
+        {
+            var lastId = _settingsRepo?.Get(ModeLastProviderKeyPrefix + "byok");
+            provider = eligible.FirstOrDefault(p => p.Id == lastId && !MolaGptProviderIds.IsMolaGptAccount(p.Id))
+                ?? eligible.FirstOrDefault(p => !MolaGptProviderIds.IsMolaGptAccount(p.Id));
+        }
+        if (provider is null) return null;
+        var recalled = _settingsRepo?.Get(ModeLastModelKeyPrefix + provider.Id);
+        return (provider, provider.Models.FirstOrDefault(m => m.Id == recalled) ?? provider.Models[0]);
     }
 
     private void RememberModeSelection(AppMode mode, string providerId, string modelId)
@@ -545,7 +540,7 @@ public sealed partial class ChatViewModel : ObservableObject
 
     public void StartDraftConversation()
     {
-        _messageLoadVersion++;
+        BeginNavigation();
         foreach (var existing in Messages) existing.Dispose();
         Messages.Clear();
         _pendingOlderMessages.Clear();
@@ -574,7 +569,14 @@ public sealed partial class ChatViewModel : ObservableObject
 
     public async Task LoadConversationAsync(string conversationId, bool loadAllMessagesImmediately = false)
     {
-        IsConversationLoading = true;
+        var navigation = BeginNavigation(loading: true);
+        try { await LoadConversationAsync(conversationId, loadAllMessagesImmediately, navigation); }
+        finally { CompleteNavigation(navigation); }
+    }
+
+    internal async Task LoadConversationAsync(string conversationId, bool loadAllMessagesImmediately, CancellationToken navigation)
+    {
+        navigation.ThrowIfCancellationRequested();
         SetActiveLoreEntries([]);
         ConversationId = conversationId;
         // Cleared here and restored from the loaded messages below. Leaving it
@@ -582,143 +584,127 @@ public sealed partial class ChatViewModel : ObservableObject
         // made the gauge vanish until the user sent another turn, which reads as the
         // feature being broken rather than as "not measured yet".
         ContextGauge.Reset();
-        var loadVersion = ++_messageLoadVersion;
-        var loadUiContext = SynchronizationContext.Current;
+        // Dispose any existing message VMs (their elapsed timers etc.)
+        // before clearing the collection.
+        foreach (var existing in Messages) existing.Dispose();
+        Messages.Clear();
+        _pendingOlderMessages.Clear();
+        _storedTaskStates.Clear();
 
-        // Show the loading overlay for the whole load. The overlay's first
-        // paint is forced synchronously by the Desktop layer BEFORE this method
-        // runs its heavy work (see MainWindow.ConversationListBox_SelectionChanged),
-        // because a flag flipped here can't paint while the UI thread is busy
-        // building the FlowDocument. A fast (small) load finishes within a frame
-        // so the overlay barely registers; its fade-in smooths the rare flash.
-        IsConversationLoading = true;
-
-        void FinishLoadingIndicator()
+        ConversationRow? conversationRow = null;
+        if (_messageRepo is not null)
         {
-            // Defer the hide to the back of the dispatcher queue so the first
-            // batch of messages gets a layout/paint pass before the overlay
-            // clears — otherwise it could vanish a frame before content shows.
-            if (loadUiContext is not null)
-                loadUiContext.Post(_ => { if (loadVersion == _messageLoadVersion) IsConversationLoading = false; }, null);
-            else
-                IsConversationLoading = false;
-        }
-
-        try
-        {
-            // Dispose any existing message VMs (their elapsed timers etc.)
-            // before clearing the collection.
-            foreach (var existing in Messages) existing.Dispose();
-            Messages.Clear();
-            _pendingOlderMessages.Clear();
-            _storedTaskStates.Clear();
-
-            ConversationRow? conversationRow = null;
-            if (_messageRepo is not null)
+            var readSw = System.Diagnostics.Stopwatch.StartNew();
+            Task pendingWrites;
+            lock (_messageWriteGate) pendingWrites = _messageWrites.GetValueOrDefault(conversationId) ?? Task.CompletedTask;
+            await pendingWrites.WaitAsync(navigation).ConfigureAwait(
+                ConfigureAwaitOptions.ContinueOnCapturedContext | ConfigureAwaitOptions.SuppressThrowing);
+            if (navigation.IsCancellationRequested) return;
+            var snapshot = await Task.Run(() =>
             {
-                var readSw = System.Diagnostics.Stopwatch.StartNew();
-                Task pendingWrites;
-                lock (_messageWriteGate) pendingWrites = _messageWriteTask;
-                var snapshot = await Task.Run(async () =>
+                var conversation = _conversationRepo?.Get(conversationId);
+                RecoverInterruptedReply(conversationId, conversation);
+                var (allRows, activeLeafId) = _messageRepo.ReadConversationSnapshot(conversationId);
+            if (!_unsavedMessages.IsEmpty)
+            {
+                var pending = _unsavedMessages.ToArray().ToDictionary(pair => pair.Key, pair => pair.Value);
+                var withPending = allRows.Select(row => pending.Remove(row.Id, out var unsaved)
+                    ? row with { Content = unsaved.CurrentAttempt.Content, Meta = BuildMessageMeta(unsaved) }
+                    : row).ToList();
+                foreach (var attempt in pending.Values.Where(value => value.InitialRow?.ConversationId == conversationId)
+                    .OrderBy(value => value.InitialRow!.CreatedAt))
                 {
-                    await pendingWrites.ConfigureAwait(false);
-                    var conversation = _conversationRepo?.Get(conversationId);
-                    RecoverInterruptedReply(conversationId, conversation);
-                    var (allRows, activeLeafId) = _messageRepo.ReadConversationSnapshot(conversationId);
-                    var byId = allRows.ToDictionary(row => row.Id, StringComparer.Ordinal);
-                    var activeRows = new List<MessageRow>();
-                    var activeIds = new HashSet<string>(StringComparer.Ordinal);
-                    for (var id = activeLeafId; id is not null && byId.TryGetValue(id, out var row)
-                         && activeIds.Add(id); id = row.ParentId)
-                        activeRows.Add(row);
-                    activeRows.Reverse();
-
-                    var spend = new ConversationSpendCalculator.Accumulator();
-                    var messages = PrepareMessageSnapshot(activeRows, conversationId, spend);
-                    ApplyBranchMetadata(messages, allRows);
-                    foreach (var row in allRows)
-                        if (!activeIds.Contains(row.Id)) spend.Add(row.Meta);
-                    return (messages, conversation, spend: spend.Build());
-                }).ConfigureAwait(true);
-                PerfTrace?.Invoke("load.read+meta",
-                    $"{readSw.Elapsed.TotalMilliseconds:N0} ms  msgs={snapshot.messages.Count}");
-
-                if (loadVersion != _messageLoadVersion || ConversationId != conversationId)
-                    return;
-
-                conversationRow = snapshot.conversation;
-                var prepared = snapshot.messages;
-                RestoreTaskStates(prepared);
-                RestoreSubagents(conversationId, prepared, conversationRow?.ProviderId);
-                Spend = snapshot.spend;
-
-                // From the whole snapshot, not just the materialized tail: the
-                // reading belongs to the conversation, and only the newest turns are
-                // built up front.
-                RestoreContextGauge(prepared);
-
-                // Open at the END of the conversation. The newest messages are
-                // what the user clicked to see, and materializing only those
-                // keeps the cost of opening a 500-message conversation
-                // proportional to the viewport instead of to the history —
-                // every message we build here is a full markdown parse and
-                // FlowDocument, on the UI thread. The rest waits in
-                // _pendingOlderMessages until the user scrolls up.
-                var materialized = new List<MessageViewModel>();
-                if (loadAllMessagesImmediately)
-                {
-                    foreach (var message in prepared)
-                        materialized.Add(CreateMessageViewModel(message));
+                    var row = attempt.InitialRow!;
+                    withPending.Add(row with { Content = attempt.CurrentAttempt.Content, Meta = BuildMessageMeta(attempt) });
+                    if (row.ParentId == activeLeafId) activeLeafId = row.Id;
                 }
-                else
-                {
-                    var tailStart = Math.Max(0, prepared.Count - TailBatch);
-                    for (int i = tailStart; i < prepared.Count; i++)
-                        materialized.Add(CreateMessageViewModel(prepared[i]));
-                    if (tailStart > 0)
-                        _pendingOlderMessages.AddRange(prepared.GetRange(0, tailStart));
-                }
-                _messages.ReplaceAll(materialized);
-                OnPropertyChanged(nameof(HasOlderMessages));
-                UpdateLatestAssistantFlags();
-                PerfTrace?.Invoke("load.materialize",
-                    $"{Messages.Count} shown, {_pendingOlderMessages.Count} parked");
+                allRows = withPending;
             }
+                var byId = allRows.ToDictionary(row => row.Id, StringComparer.Ordinal);
+                var activeRows = new List<MessageRow>();
+                var activeIds = new HashSet<string>(StringComparer.Ordinal);
+                for (var id = activeLeafId; id is not null && byId.TryGetValue(id, out var row)
+                     && activeIds.Add(id); id = row.ParentId)
+                    activeRows.Add(row);
+                activeRows.Reverse();
 
-            conversationRow ??= _conversationRepo?.Get(conversationId);
-            if (conversationRow is { } row2)
+                var spend = new ConversationSpendCalculator.Accumulator();
+                var messages = PrepareMessageSnapshot(activeRows, conversationId, spend);
+                ApplyBranchMetadata(messages, allRows);
+                foreach (var row in allRows)
+                    if (!activeIds.Contains(row.Id)) spend.Add(row.Meta);
+                return (messages, conversation, spend: spend.Build());
+            }).ConfigureAwait(true);
+            if (navigation.IsCancellationRequested || ConversationId != conversationId)
+                return;
+            PerfTrace?.Invoke("load.read+meta",
+                $"{readSw.Elapsed.TotalMilliseconds:N0} ms  msgs={snapshot.messages.Count}");
+
+            conversationRow = snapshot.conversation;
+            var prepared = snapshot.messages;
+            RestoreTaskStates(prepared);
+            RestoreSubagents(conversationId, prepared, conversationRow?.ProviderId);
+            Spend = snapshot.spend;
+
+            // From the whole snapshot, not just the materialized tail: the
+            // reading belongs to the conversation, and only the newest turns are
+            // built up front.
+            RestoreContextGauge(prepared);
+
+            // Open at the END of the conversation. The newest messages are
+            // what the user clicked to see, and materializing only those
+            // keeps the cost of opening a 500-message conversation
+            // proportional to the viewport instead of to the history —
+            // every message we build here is a full markdown parse and
+            // FlowDocument, on the UI thread. The rest waits in
+            // _pendingOlderMessages until the user scrolls up.
+            var materialized = new List<MessageViewModel>();
+            if (loadAllMessagesImmediately)
             {
-                ConversationTitle = string.IsNullOrWhiteSpace(row2.Title) ? "新对话" : row2.Title;
-                ConversationSystemPrompt = row2.SystemPrompt;
-                RoleContext = RoleJson.Deserialize<ConversationRoleContext>(row2.RoleContextJson);
-                ActivePersonaId = row2.PersonaId;
-                SystemPromptMode = string.Equals(row2.SystemPromptMode, "append", StringComparison.OrdinalIgnoreCase)
-                    ? "append" : "override";
-                RestoreActiveModel(row2);
-                RoleOptionsRequested?.Invoke(true);
+                foreach (var message in prepared)
+                    materialized.Add(CreateMessageViewModel(message));
             }
             else
             {
-                ConversationTitle = "新对话";
-                ConversationSystemPrompt = null;
-                RoleContext = new();
-                ActivePersonaId = null;
-                SystemPromptMode = "override";
+                var tailStart = Math.Max(0, prepared.Count - TailBatch);
+                for (int i = tailStart; i < prepared.Count; i++)
+                    materialized.Add(CreateMessageViewModel(prepared[i]));
+                if (tailStart > 0)
+                    _pendingOlderMessages.AddRange(prepared.GetRange(0, tailStart));
             }
+            _messages.ReplaceAll(materialized);
+            OnPropertyChanged(nameof(HasOlderMessages));
+            UpdateLatestAssistantFlags();
+            PerfTrace?.Invoke("load.materialize",
+                $"{Messages.Count} shown, {_pendingOlderMessages.Count} parked");
+        }
 
-            RefreshInteractionMode();
-            // Surface any artifacts already sitting in this conversation's
-            // working directory (from earlier python runs / uploads).
-            RefreshArtifacts();
-            RefreshConversationTasks();
-        }
-        finally
+        conversationRow ??= _conversationRepo?.Get(conversationId);
+        if (conversationRow is { } row2)
         {
-            // Covers success, the stale-version early return, and exceptions.
-            // The deferred Post re-checks the load version, so a superseded
-            // load never hides a newer load's indicator.
-            FinishLoadingIndicator();
+            ConversationTitle = string.IsNullOrWhiteSpace(row2.Title) ? "新对话" : row2.Title;
+            ConversationSystemPrompt = row2.SystemPrompt;
+            RoleContext = RoleJson.Deserialize<ConversationRoleContext>(row2.RoleContextJson);
+            ActivePersonaId = row2.PersonaId;
+            SystemPromptMode = string.Equals(row2.SystemPromptMode, "append", StringComparison.OrdinalIgnoreCase)
+                ? "append" : "override";
+            RestoreActiveModel(row2);
+            RoleOptionsRequested?.Invoke(true);
         }
+        else
+        {
+            ConversationTitle = "新对话";
+            ConversationSystemPrompt = null;
+            RoleContext = new();
+            ActivePersonaId = null;
+            SystemPromptMode = "override";
+        }
+
+        RefreshInteractionMode();
+        // Surface any artifacts already sitting in this conversation's
+        // working directory (from earlier python runs / uploads).
+        RefreshArtifacts();
+        RefreshConversationTasks();
     }
 
     private void RecoverInterruptedReply(string conversationId, ConversationRow? conversation)
@@ -783,7 +769,7 @@ public sealed partial class ChatViewModel : ObservableObject
         for (var index = 0; index < rows.Count; index++)
         {
             var row = rows[index];
-            var split = SplitInlineThinking(row.Content);
+            var split = ChatMessageText.SplitInlineThinking(row.Content);
             string? modelLabel = null;
             string? providerLabel = null;
             string? personaId = null;
@@ -1065,7 +1051,7 @@ public sealed partial class ChatViewModel : ObservableObject
         if (CurrentMode.IsLocalAgent() && !Messages.Any(message => message.Role == ChatMessage.RoleUser)
             && !string.IsNullOrWhiteSpace(text) && _conversationRepo?.Get(ConversationId ?? "") is { Title: "无标题对话" } row)
         {
-            ConversationTitle = GenerateTitle(text);
+            ConversationTitle = ConversationTitleText.GenerateTitle(text);
             _conversationRepo.Rename(row.Id, ConversationTitle, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         }
         var vm = new MessageViewModel(ChatMessage.RoleUser, text, DateTimeOffset.UtcNow)
@@ -1075,9 +1061,9 @@ public sealed partial class ChatViewModel : ObservableObject
             ContentPartsJson = contentPartsJson,
             ParentMessageId = Messages.LastOrDefault()?.MessageId
         };
+        PersistMessage(vm);
         Messages.Add(vm);
         vm.VersionSelected += OnMessageVersionSelected;
-        PersistMessage(vm);
         TouchConversation();
         RefreshSpend(ConversationId);
     }
@@ -1099,43 +1085,28 @@ public sealed partial class ChatViewModel : ObservableObject
         vm.StartPending(IsRoutesModel(ActiveModel));
         vm.VersionSelected += OnMessageVersionSelected;
         Messages.Add(vm);
-        PersistMessage(vm);
         return vm;
     }
 
-    public void FinalizeAssistantMessage(MessageViewModel vm)
+    public async Task FinalizeAssistantMessageAsync(string conversationId, MessageViewModel vm, bool isRegeneration = false)
     {
         vm.StopPending();
         vm.CompleteStreaming();
         vm.IsStreaming = false;
         vm.StopThinking();
-        PersistMessage(vm);
-        TouchConversation();
-        RefreshSpend(ConversationId);
-    }
-
-    public void FinalizeAssistantMessage(string conversationId, MessageViewModel vm)
-    {
-        if (string.IsNullOrWhiteSpace(conversationId))
-        {
-            FinalizeAssistantMessage(vm);
-            return;
-        }
-
-        vm.StopPending();
-        vm.CompleteStreaming();
-        vm.IsStreaming = false;
-        vm.StopThinking();
-        PersistMessage(vm, conversationId);
+        if (!isRegeneration && ConversationId == conversationId) AttachTransientMessage(vm);
+        await SaveInProgressMessageAsync(conversationId, vm);
         TouchConversation(conversationId);
-        RefreshSpend(conversationId);
-
-        if (ConversationId == conversationId && !Messages.Contains(vm))
-        {
-            Messages.Add(vm);
-            UpdateLatestAssistantFlags();
-        }
+        if (!isRegeneration) RefreshSpend(conversationId);
     }
+
+    internal Task<bool> MarkCloudReplyStartedAsync(string conversationId) => TrySaveAsync(() =>
+    {
+        if (_conversationRepo is not null
+            && !_conversationRepo.TouchActive(conversationId, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()))
+            throw new InvalidOperationException("对话已不存在，无法重试。");
+        return Task.CompletedTask;
+    });
 
     public void DetachTransientMessage(MessageViewModel vm)
     {
@@ -1167,26 +1138,6 @@ public sealed partial class ChatViewModel : ObservableObject
 
         Messages.Add(vm);
         UpdateLatestAssistantFlags();
-    }
-
-    /// <summary>
-    /// Finish an assistant message that is already in the store — a retry.
-    ///
-    /// Touching the conversation still matters: cloud sync picks work up by
-    /// <c>updated_at</c>, and updating a
-    /// message row alone does not move it, so without this the server keeps serving
-    /// the attempt the user threw away.
-    /// </summary>
-    public void CompleteRetriedAssistantMessage(string conversationId, MessageViewModel vm)
-    {
-        vm.StopPending();
-        vm.CompleteStreaming();
-        vm.IsStreaming = false;
-        vm.StopThinking();
-        UpdatePersistedMessage(vm, conversationId);
-
-        if (string.IsNullOrWhiteSpace(conversationId)) TouchConversation();
-        else TouchConversation(conversationId);
     }
 
     public void ApplyExternalConversationTitle(string conversationId, string title)
@@ -1223,6 +1174,13 @@ public sealed partial class ChatViewModel : ObservableObject
             return;
         }
         SyncMessageTaskStates(vm, conversationId);
+        if (vm.ParentMessageId is { } parentId
+            && _unsavedMessages.GetValueOrDefault(parentId) is { InitialRow: not null })
+            QueueMessageWrite(conversationId, () =>
+            {
+                if (_unsavedMessages.GetValueOrDefault(parentId) is { InitialRow: not null } pending)
+                    WriteMessage(parentId, pending);
+            }).GetAwaiter().GetResult();
         var meta = BuildMessageMeta(vm);
         var id = Guid.NewGuid().ToString("N");
         vm.ParentMessageId = _messageRepo.Insert(new MessageRow(
@@ -1246,23 +1204,28 @@ public sealed partial class ChatViewModel : ObservableObject
     {
         if (_messageRepo is null || string.IsNullOrWhiteSpace(vm.MessageId)) return;
         var targetConversation = conversationId ?? ConversationId;
-        if (!string.IsNullOrEmpty(targetConversation)) SyncMessageTaskStates(vm, targetConversation);
-        QueueMessageWrite(vm.MessageId, CapturePersistenceSnapshot(vm)).GetAwaiter().GetResult();
+        if (string.IsNullOrEmpty(targetConversation)) return;
+        SyncMessageTaskStates(vm, targetConversation);
+        QueueMessageWrite(vm.MessageId, CapturePersistenceSnapshot(vm) with { ConversationId = targetConversation })
+            .GetAwaiter().GetResult();
     }
-
-    public void SaveInProgressMessage(string conversationId, MessageViewModel vm)
-        => SaveInProgressMessageAsync(conversationId, vm).GetAwaiter().GetResult();
 
     public Task SaveInProgressMessageAsync(string conversationId, MessageViewModel vm)
     {
         if (_messageRepo is null || string.IsNullOrEmpty(conversationId)) return Task.CompletedTask;
+        SyncMessageTaskStates(vm, conversationId);
+        var snapshot = CapturePersistenceSnapshot(vm) with { ConversationId = conversationId };
         if (string.IsNullOrWhiteSpace(vm.MessageId))
         {
-            PersistMessage(vm, conversationId);
-            return Task.CompletedTask;
+            var id = Guid.NewGuid().ToString("N");
+            vm.MessageId = id;
+            snapshot = snapshot with
+            {
+                InitialRow = new MessageRow(id, conversationId, vm.Role, string.Empty,
+                    null, vm.Timestamp.ToUnixTimeMilliseconds(), vm.ParentMessageId)
+            };
         }
-        SyncMessageTaskStates(vm, conversationId);
-        return QueueMessageWrite(vm.MessageId, CapturePersistenceSnapshot(vm));
+        return QueueMessageWrite(vm.MessageId, snapshot);
     }
 
     /// <summary>
@@ -1364,27 +1327,7 @@ public sealed partial class ChatViewModel : ObservableObject
         if (!string.IsNullOrWhiteSpace(attempt.Thinking))
             result["thinking"] = attempt.Thinking;
         if (attempt.ToolCalls is { Count: > 0 })
-        {
-            result["tool_calls"] = new JsonArray(attempt.ToolCalls
-                .Select(tool => new JsonObject
-                {
-                    ["id"] = tool.Id,
-                    ["name"] = tool.Name,
-                    ["status"] = tool.Status,
-                    ["label"] = tool.Label,
-                    ["summary"] = tool.Summary,
-                    ["detail"] = tool.Detail,
-                    ["arguments_json"] = tool.ArgumentsJson,
-                    ["result_preview_json"] = tool.ResultPreviewJson,
-                    ["provider"] = tool.Provider,
-                    ["content_offset"] = tool.ContentOffset,
-                    ["timeline_index"] = tool.TimelineIndex,
-                    ["background_task_id"] = tool.BackgroundTaskId,
-                    ["task_state"] = tool.TaskState
-                })
-                .Cast<JsonNode?>()
-                .ToArray());
-        }
+            result["tool_calls"] = BuildToolCallsJson(attempt.ToolCalls);
         if (attempt.ThinkingSegments is { Count: > 0 })
         {
             result["thinking_segments"] = new JsonArray(attempt.ThinkingSegments
@@ -1402,13 +1345,36 @@ public sealed partial class ChatViewModel : ObservableObject
         return result;
     }
 
+    private static JsonArray BuildToolCallsJson(IReadOnlyList<ToolCallDelta> tools) =>
+        new(tools.Select(tool =>
+        {
+            var json = new JsonObject
+            {
+                ["id"] = tool.Id,
+                ["name"] = tool.Name,
+                ["status"] = tool.Status,
+                ["label"] = tool.Label,
+                ["summary"] = tool.Summary,
+                ["detail"] = tool.Detail,
+                ["arguments_json"] = tool.ArgumentsJson,
+                ["result_preview_json"] = tool.ResultPreviewJson,
+                ["provider"] = tool.Provider,
+                ["content_offset"] = tool.ContentOffset,
+                ["timeline_index"] = tool.TimelineIndex,
+                ["background_task_id"] = tool.BackgroundTaskId,
+                ["task_state"] = tool.TaskState
+            };
+            if (tool.Origin == ToolCallOrigin.Arguments) json["origin"] = "arguments";
+            return (JsonNode)json;
+        }).ToArray());
+
     private void EnsureConversationExists(string? firstUserText = null)
     {
         if (_conversationRepo is null || string.IsNullOrEmpty(ConversationId)) return;
         if (_conversationRepo.Get(ConversationId!) is not null) return;
 
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var title = string.IsNullOrWhiteSpace(firstUserText) ? "无标题对话" : GenerateTitle(firstUserText);
+        var title = ConversationTitleText.GenerateTitle(firstUserText);
         _conversationRepo.Upsert(new ConversationRow(
             Id: ConversationId!,
             Title: title,
@@ -1438,7 +1404,7 @@ public sealed partial class ChatViewModel : ObservableObject
         var firstUser = Messages.FirstOrDefault(m => m.Role == ChatMessage.RoleUser);
         var title = !string.IsNullOrWhiteSpace(existing.Title) && existing.Title != "新对话"
             ? existing.Title
-            : (firstUser is null ? "无标题对话" : GenerateTitle(firstUser.Content));
+            : ConversationTitleText.GenerateTitle(firstUser?.Content);
         _conversationRepo.Upsert(existing with
         {
             Title = title,
@@ -1455,15 +1421,11 @@ public sealed partial class ChatViewModel : ObservableObject
     {
         if (_conversationRepo is null || string.IsNullOrEmpty(conversationId)) return;
         var existing = _conversationRepo.Get(conversationId);
-        if (existing is null) return;
+        if (existing is null || existing.DeletedAt is not null) return;
 
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var title = string.IsNullOrWhiteSpace(existing.Title) ? "无标题对话" : existing.Title;
-        _conversationRepo.Upsert(existing with
-        {
-            Title = title,
-            UpdatedAt = now
-        });
+        if (!_conversationRepo.TouchActive(conversationId, now)) return;
 
         if (ConversationId == conversationId)
             ConversationTitle = title;
@@ -1490,14 +1452,19 @@ public sealed partial class ChatViewModel : ObservableObject
 
     private void RefreshActiveModelAfterProviderChange()
     {
-        if (!IsActiveModelAvailable())
+        if (TryRestoreActiveModelForCurrentConversation()) return;
+
+        if (ActiveProvider is { } activeProvider && ActiveModel is { } activeModel
+            && _providers.FindModel(activeProvider.Id, activeModel.Id) is { } current
+            && CanSwitchToProvider(current.Provider))
         {
-            ActiveProvider = null;
-            ActiveModel = null;
+            SetActive(current.Provider, current.Model);
+            return;
         }
 
-        if (!TryRestoreActiveModelForCurrentConversation())
-            TryAutoPickActive();
+        ActiveProvider = null;
+        ActiveModel = null;
+        TryAutoPickActive();
     }
 
     private bool TryRestoreActiveModelForCurrentConversation()
@@ -1513,14 +1480,6 @@ public sealed partial class ChatViewModel : ObservableObject
         ActiveProvider = null;
         ActiveModel = null;
         return true;
-    }
-
-    private bool IsActiveModelAvailable()
-    {
-        if (ActiveProvider is null || ActiveModel is null) return false;
-        if (!CanSwitchToProvider(ActiveProvider)) return false;
-        var resolved = _providers.FindModel(ActiveProvider.Id, ActiveModel.Id);
-        return resolved is not null;
     }
 
     private static bool HasSavedModel(ConversationRow row) =>
@@ -1804,7 +1763,7 @@ public sealed partial class ChatViewModel : ObservableObject
         {
             if (item.ValueKind == JsonValueKind.String)
             {
-                var legacySplit = SplitInlineThinking(item.GetString());
+                var legacySplit = ChatMessageText.SplitInlineThinking(item.GetString());
                 attempts.Add(new MessageAttempt(
                     legacySplit.Visible,
                     null,
@@ -1820,7 +1779,7 @@ public sealed partial class ChatViewModel : ObservableObject
             var modelLabel = item.TryGetProperty("model_label", out var modelNode) && modelNode.ValueKind == JsonValueKind.String
                 ? modelNode.GetString()
                 : null;
-            var split = SplitInlineThinking(content);
+            var split = ChatMessageText.SplitInlineThinking(content);
             var thinking = ReadString(item, "thinking");
             if (!string.IsNullOrWhiteSpace(split.Thinking))
                 thinking = string.IsNullOrWhiteSpace(thinking) ? split.Thinking : MergeThinking(thinking, split.Thinking);
@@ -1904,7 +1863,8 @@ public sealed partial class ChatViewModel : ObservableObject
                 ReadInt(item, "content_offset") ?? ReadInt(item, "contentOffset"),
                 ReadInt(item, "timeline_index") ?? ReadInt(item, "timelineIndex"),
                 ReadString(item, "background_task_id"),
-                ReadString(item, "task_state")));
+                ReadString(item, "task_state"),
+                Origin: ReadString(item, "origin") == "arguments" ? ToolCallOrigin.Arguments : ToolCallOrigin.Execution));
             fallbackIndex++;
         }
 
@@ -2068,98 +2028,6 @@ public sealed partial class ChatViewModel : ObservableObject
         return value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     }
 
-    public static string GenerateTitle(string? content)
-    {
-        content = (content ?? string.Empty)
-            .Replace("\r", " ")
-            .Replace("\n", " ")
-            .Trim();
-        content = MessageViewModel.StripSystemHints(content);
-
-        var title = content.Length <= 25 ? content : content[..25].Trim() + "...";
-        return string.IsNullOrWhiteSpace(title) ? "无标题对话" : title;
-    }
-
-    public static InlineThinkingParts SplitInlineThinking(string? content)
-    {
-        if (string.IsNullOrEmpty(content))
-            return new InlineThinkingParts(string.Empty, null);
-
-        if (IndexOfIgnoreCase(content, "<think") >= 0)
-            return SplitInlineThinkTags(content);
-
-        // No inline <think> tag: return verbatim so HTML comments (such as
-        // <!--PY_OUTPUT_END--> or comments in code fences) are not stripped here,
-        // which would shift persisted thinking_segments / tool_calls content_offset
-        // indexes. Output markers are hidden at render time by MolaGptMarkupSplitter.
-        return new InlineThinkingParts(content, null);
-    }
-
-    private static InlineThinkingParts SplitInlineThinkTags(string content)
-    {
-        var visible = new StringBuilder();
-        var thinking = new StringBuilder();
-        var pos = 0;
-
-        while (pos < content.Length)
-        {
-            var nextThink = IndexOfIgnoreCase(content, "<think", pos);
-            if (nextThink < 0)
-            {
-                visible.Append(content, pos, content.Length - pos);
-                break;
-            }
-
-            if (nextThink > pos)
-                visible.Append(content, pos, nextThink - pos);
-
-            var openEnd = content.IndexOf('>', nextThink);
-            if (openEnd < 0)
-            {
-                AppendThinkingSegment(thinking, content[nextThink..]);
-                break;
-            }
-
-            var bodyStart = openEnd + 1;
-            var close = IndexOfIgnoreCase(content, "</think>", bodyStart);
-            if (close < 0)
-            {
-                AppendThinkingSegment(thinking, content[bodyStart..]);
-                break;
-            }
-
-            AppendThinkingSegment(thinking, content[bodyStart..close]);
-            pos = close + "</think>".Length;
-        }
-
-        var thinkingText = thinking.ToString().Trim();
-        return new InlineThinkingParts(
-            visible.ToString().TrimStart(),
-            string.IsNullOrWhiteSpace(thinkingText) ? null : thinkingText);
-    }
-
-    private static void AppendThinkingSegment(StringBuilder builder, string? segment)
-    {
-        if (string.IsNullOrWhiteSpace(segment)) return;
-        var text = segment.Trim();
-        if (builder.Length > 0 && !EndsWithBlankLine(builder))
-            builder.Append("\n\n");
-        builder.Append(text);
-    }
-
-    private static bool EndsWithBlankLine(StringBuilder builder)
-    {
-        if (builder.Length < 2) return false;
-        var last = builder[builder.Length - 1];
-        var prev = builder[builder.Length - 2];
-        return (last == '\n' && prev == '\n') || (last == '\n' && prev == '\r');
-    }
-
-    private static int IndexOfIgnoreCase(string source, string value, int start = 0)
-    {
-        return source.IndexOf(value, start, StringComparison.OrdinalIgnoreCase);
-    }
-
     private static string MergeThinking(string first, string? second)
     {
         if (string.IsNullOrWhiteSpace(second)) return first;
@@ -2195,8 +2063,6 @@ public sealed partial class ChatViewModel : ObservableObject
     }
 
 }
-
-public sealed record InlineThinkingParts(string Visible, string? Thinking);
 
 public sealed class ConversationTouchedEventArgs : EventArgs
 {

@@ -77,6 +77,16 @@ public sealed partial class ComposerViewModel
         return true;
     }
 
+    public void StopAccountTurns()
+    {
+        if (MolaGptProviderIds.IsMolaGptAccount(_activeTask?.ProviderId))
+            Stop();
+        if (_backgroundStreams is not { } streams) return;
+        foreach (var turn in streams.ActiveTasks)
+            if (MolaGptProviderIds.IsMolaGptAccount(turn.ProviderId))
+                StopConversation(turn.ConversationId);
+    }
+
     /// <summary>Read the composer's request-building members for <paramref name="stored"/>
     /// rather than the screen, unless it is the conversation on screen.</summary>
     private T ForSubject<T>(StoredConversation stored, bool attached, Func<T> read)
@@ -117,6 +127,8 @@ public sealed partial class ComposerViewModel
 
         if (StreamFor(conversationId) is { } running)
         {
+            if (!running.AcceptsMessages)
+                throw new RemoteSendRefusedException("busy", "当前轮次尚未结束，请稍后重试");
             if (attachments.Count > 0)
                 throw new RemoteSendRefusedException("busy", "正在回答，附件请在回答结束后发送");
             return SteerFromRemote(running, text);
@@ -127,8 +139,6 @@ public sealed partial class ComposerViewModel
         var attached = _chat.ConversationId == conversationId;
         if (attached && _chat.IsConversationLoading)
             throw new RemoteSendRefusedException("busy", "正在加载对话，请稍后重试");
-        // Sending from the desktop is under way but has not reached the model yet
-        // (attachments still uploading): there is no turn to join.
         if (attached && IsSending)
             throw new RemoteSendRefusedException("busy", "正在发送消息，请稍后重试");
         var provider = attached ? _chat.ActiveProvider : stored.Provider;
@@ -191,12 +201,12 @@ public sealed partial class ComposerViewModel
         if (!string.IsNullOrEmpty(effort) && ReasoningFor(draft.Model, context, draft.Persona).Levels.Contains(effort))
             context.ReasoningEffort = effort;
 
-        _chat.CreateStoredConversation(draft, text.Length > 0 ? ChatViewModel.GenerateTitle(text) : "无标题对话");
+        _chat.CreateStoredConversation(draft, ConversationTitleText.GenerateTitle(text));
         try
         {
             return SendFromRemote(conversationId, text, attachments, firstTurn: true);
         }
-        catch (RemoteSendRefusedException)
+        catch
         {
             _chat.DiscardStoredConversation(conversationId);
             throw;
@@ -216,7 +226,7 @@ public sealed partial class ComposerViewModel
         // Like a message typed on the desktop: a refusal means the turn is settling,
         // and what is still waiting when it ends goes out as the next message.
         agent.TryEnqueue(stream.ConversationId, text, followUp: false);
-        return new RemoteSendOutcome(RemoteSendStatus.Steered, null, stream.StreamTask);
+        return new RemoteSendOutcome(RemoteSendStatus.Steered, null, stream.Completion);
     }
 
     /// <summary>The request the conversation's next turn is sent with. On screen
@@ -294,7 +304,7 @@ public sealed partial class ComposerViewModel
     {
         var mandatory = model.ThinkingConfig?.Mandatory == true;
         var toggleVisible = model.SupportsThinking && !mandatory;
-        var kind = model.ThinkingConfig?.Kind ?? ThinkingParamKindInference.InferFromModelId(model.Id);
+        var kind = model.ResolveThinkingConfig()?.Kind ?? ThinkingParamKind.None;
         var budgetKind = kind is ThinkingParamKind.AnthropicBudget or ThinkingParamKind.GeminiBudget
             or ThinkingParamKind.QwenThinkingBudget;
         var wanted = context.EnableThinking ?? persona?.DefaultThinking ?? false;
@@ -339,14 +349,13 @@ public sealed partial class ComposerViewModel
 
         var summarizedTasks = new List<AgentTask>();
         var agentMessages = new List<AgentMessage>();
-        var outgoing = AppendTaskSummary(conversationId, text, summarizedTasks, agentMessages);
-
         var user = _chat.AppendMessageTo(
             conversationId,
             ChatMessage.RoleUser,
             text,
             attached ? _chat.Messages.LastOrDefault(m => m.MessageId is not null)?.MessageId : null,
             BuildAttachmentChips(attachments));
+        var outgoing = AppendTaskSummary(conversationId, text, summarizedTasks, agentMessages);
         var completion = RunRemoteTurnAsync(
             conversationId, user, outgoing, attachments, copyImages, template, seed, context.HistoryRevision,
             summarizedTasks, agentMessages, attached, firstTurn);
@@ -367,6 +376,7 @@ public sealed partial class ComposerViewModel
         bool attached,
         bool firstTurn)
     {
+        using var remoteTurnLease = _activity.Acquire("chat-turn-remote");
         var labels = template.Labels;
         var assistantMsg = _chat.BeginAssistantMessageFor(conversationId, user, labels);
         labels.Dispose();
@@ -383,7 +393,6 @@ public sealed partial class ComposerViewModel
             ProviderKind = template.Provider.Kind,
             AssistantMessage = assistantMsg,
             Cts = cts,
-            StreamTask = Task.CompletedTask,
             SessionId = generationId,
             IsRemoteTurn = true,
             IsDetached = !attached,
@@ -392,14 +401,8 @@ public sealed partial class ComposerViewModel
 
         if (attached)
         {
+            AttachTurn(streamContext);
             MessageSubmitted?.Invoke();
-            _cts = cts;
-            _activeAssistantMsg = assistantMsg;
-            _activeTask = streamContext;
-            _injectable = true;
-            IsSending = true;
-            _chat.IsStreaming = true;
-            NotifyInjectState();
         }
         else
         {
@@ -427,10 +430,7 @@ public sealed partial class ComposerViewModel
             };
             RememberTurnTemplate(conversationId, template.Provider, template.Model, request, assistantMsg);
 
-            var streamTask = RunStreamLoopAsync(template.Provider, request, assistantMsg, cts, streamContext);
-            streamContext.StreamTask = streamTask;
-            if (attached) _activeStreamTask = streamTask;
-            await streamTask;
+            await RunStreamLoopAsync(template.Provider, request, streamContext);
             if (streamContext.CompletedSuccessfully)
             {
                 foreach (var task in summarizedTasks) _chat.Tasks?.MarkDelivered(task);
@@ -453,23 +453,10 @@ public sealed partial class ComposerViewModel
         {
             _inflightTaskResults.ExceptWith(summarizedTasks);
             _inflightAgentMessages.ExceptWith(agentMessages);
-            FlushPendingInjections(streamContext, wasCancelled);
             // The phone that asked for this turn is told it finished; a desktop
             // notification on top of that would announce it twice.
-            CompleteStreamContext(streamContext, publishNotification: false, failureMessage);
+            await CompleteStreamContextAsync(streamContext, publishNotification: false, failureMessage, wasCancelled);
             if (!wasCancelled) _consolidator?.NoteTurnFinished();
-            if (ReferenceEquals(_activeTask, streamContext))
-            {
-                IsSending = false;
-                _chat.IsStreaming = false;
-                _activeStreamTask = null;
-                _activeAssistantMsg = null;
-                _activeTask = null;
-                _cts = null;
-                _injectable = false;
-                NotifyInjectState();
-            }
-            cts.Dispose();
         }
     }
 
@@ -497,7 +484,7 @@ public sealed partial class ComposerViewModel
             var prepared = await Task.Run(
                 () => PrepareByokFileAttachments(attachments, conversationId, copyImages, ct), ct);
             user.Attachments = BuildAttachmentChips(prepared);
-            _chat.UpdatePersistedMessage(user, conversationId);
+            await SaveMessageAsync(conversationId, user);
             if (attached) _chat.RefreshArtifacts();
             return prepared;
         }

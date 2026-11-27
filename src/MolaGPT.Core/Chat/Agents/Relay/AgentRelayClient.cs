@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Threading.Channels;
+using MolaGPT.Core.Runtime;
 
 namespace MolaGPT.Core.Chat.Agents.Relay;
 
@@ -91,7 +93,8 @@ public sealed class AgentRelayClient
     // (transcript still being written by an externally driven CLI process).
     private readonly Dictionary<string, bool> _projectedTailOpen = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TurnStreamState> _turnStreams = new(StringComparer.Ordinal);
-    private readonly ConcurrentQueue<string> _historyProjectionQueue = new();
+    private readonly Channel<string> _historyProjectionChannel =
+        Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = false });
     private readonly ConcurrentDictionary<string, byte> _queuedHistoryProjections = new(StringComparer.Ordinal);
     // conversationId -> the transcript mtime that projected to zero turns. See
     // RefreshHistoryAsync; keyed by mtime so a later write retries by itself.
@@ -115,18 +118,21 @@ public sealed class AgentRelayClient
     private const int EventPostRetryBurst = 5;
 
     private readonly Action<string>? _log;
+    private readonly IActivityTracker _activity;
 
     public AgentRelayClient(
         AgentBridgeService bridge,
         IRelayProducer producer,
         IAgentConfigProvider? config = null,
         Action<string>? log = null,
-        RelayCommandJournal? commandJournal = null)
+        RelayCommandJournal? commandJournal = null,
+        IActivityTracker? activity = null)
     {
         _commandJournal = commandJournal ?? new RelayCommandJournal();
         _bridge = bridge;
         _producer = producer;
         _log = log;
+        _activity = activity ?? NullActivityTracker.Instance;
         _machineId = (config?.MachineId ?? string.Empty).Trim();
         _machineName = string.IsNullOrWhiteSpace(config?.MachineName)
             ? Environment.MachineName
@@ -530,20 +536,19 @@ public sealed class AgentRelayClient
 
     private async Task RunHistoryProjectionLoopAsync(CancellationToken ct)
     {
+        var reader = _historyProjectionChannel.Reader;
         while (!ct.IsCancellationRequested)
         {
-            // Park the queue rather than drain it when there is no credential.
-            // A projection reads a transcript off disk and serializes its whole
-            // turn set before the post discovers it cannot be sent, so with the
-            // bridge enabled but signed out this loop spent its life parsing
-            // multi-megabyte transcripts into garbage. Queued ids stay queued and
-            // run as soon as sign-in lands.
-            if (_historyProjectionQueue.IsEmpty)
+            try
             {
-                try { await Task.Delay(TimeSpan.FromMilliseconds(250), ct).ConfigureAwait(false); }
-                catch (OperationCanceledException) { break; }
-                continue;
+                if (!await reader.WaitToReadAsync(ct).ConfigureAwait(false))
+                    break;
             }
+            catch (OperationCanceledException) { break; }
+
+            // Park the queue rather than drain it when there is no credential.
+            // WaitToReadAsync is level-triggered, so leaving items unread keeps
+            // them queued without busy-waiting until auth returns.
             if (!_producer.IsAuthAvailable)
             {
                 try { await Task.Delay(ProjectionAuthRecheckInterval, ct).ConfigureAwait(false); }
@@ -551,17 +556,23 @@ public sealed class AgentRelayClient
                 continue;
             }
 
-            if (!_historyProjectionQueue.TryDequeue(out var sessionId))
-            {
-                try { await Task.Delay(TimeSpan.FromMilliseconds(250), ct).ConfigureAwait(false); }
-                catch (OperationCanceledException) { break; }
+            if (!reader.TryRead(out var sessionId))
                 continue;
-            }
 
             _queuedHistoryProjections.TryRemove(sessionId, out _);
+            if (ct.IsCancellationRequested)
+            {
+                EnqueueHistoryProjection(sessionId);
+                break;
+            }
+
             Interlocked.Exchange(ref _activeHistoryProjection, 1);
             try { await RefreshHistoryAsync(sessionId, ct).ConfigureAwait(false); }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                EnqueueHistoryProjection(sessionId);
+                throw;
+            }
             catch { /* next snapshot can enqueue again */ }
             finally { Interlocked.Exchange(ref _activeHistoryProjection, 0); }
         }
@@ -625,9 +636,11 @@ public sealed class AgentRelayClient
         CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+        using var activityLease = _activity.Acquire("agent-history-proj");
 
         IReadOnlyList<AgentSessionStateDto> sessions;
         try { sessions = await _bridge.ListSessionsAsync(ct, PollScanStaleness, includeTranscript: false).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch { return; }
 
         var state = sessions.FirstOrDefault(s => string.Equals(s.ConversationId, sessionId, StringComparison.Ordinal));
@@ -701,7 +714,7 @@ public sealed class AgentRelayClient
     private void EnqueueHistoryProjection(string sessionId)
     {
         if (_queuedHistoryProjections.TryAdd(sessionId, 0))
-            _historyProjectionQueue.Enqueue(sessionId);
+            _historyProjectionChannel.Writer.TryWrite(sessionId);
     }
 
     private async Task PublishHistoryProjectionAsync(
@@ -1018,6 +1031,7 @@ public sealed class AgentRelayClient
 
     private async Task ExecuteLeasedCommandAsync(RelayCommand cmd, CancellationToken stopCt)
     {
+        using var activityLease = _activity.Acquire("agent-relay-cmd");
         // The renew loop is deliberately NOT linked to the relay lifetime: a Send
         // turn survives a relay reconnect (see DispatchAsync), and keeping its
         // lease renewed across that reconnect prevents the relay from offering

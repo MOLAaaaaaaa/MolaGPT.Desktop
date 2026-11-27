@@ -33,7 +33,9 @@ public sealed partial class SubagentViewModel : ObservableObject, IDisposable
     public string Id => _serverId ?? _agent!.Id;
     public string Label => _server is { } agent ? ServerSubagents.Text(agent, "label") : _agent!.Label;
     public string Model => IsServer ? string.Empty : _agent!.ModelId;
-    public string Subtitle => IsServer ? ElapsedText + (_server!["tools"]?.GetValue<int>() is > 0 ? $" · 工具调用 {_server["tools"]} 次" : "") : Model;
+    public string Subtitle => _server is { } agent
+        ? ElapsedText + (ReadInteger(agent, "tools") is > 0 and var calls ? $" · 工具调用 {calls} 次" : "")
+        : Model;
     public bool IsRunning => _server is { } agent ? ServerSubagents.Text(agent, "status") == "running" : _task?.IsRunning == true;
     public bool IsCompleted => _server is { } agent ? ServerSubagents.Text(agent, "status") == "completed" : _task?.Status == AgentTaskStatus.Completed;
     public bool IsFailed => _server is { } agent ? ServerSubagents.Text(agent, "status") is "failed" or "timeout" or "rejected" : _task?.Status == AgentTaskStatus.Failed;
@@ -43,10 +45,22 @@ public sealed partial class SubagentViewModel : ObservableObject, IDisposable
         AgentTaskStatus.Failed => "失败", AgentTaskStatus.Cancelled => "已停止",
         AgentTaskStatus.Interrupted => "已中断", _ => "等待中"
     };
-    public string ElapsedText => _server is { } agent
-        ? TaskTools.FormatElapsed(TimeSpan.FromMilliseconds(Math.Max(0,
-            (agent["ended_at"]?.GetValue<long>() ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) - agent["started_at"]!.GetValue<long>())))
-        : _task is null || _task.IsRestored ? string.Empty : TaskTools.FormatElapsed(_task.Elapsed);
+    public string ElapsedText
+    {
+        get
+        {
+            if (_server is not { } agent)
+                return _task is null || _task.IsRestored ? string.Empty : TaskTools.FormatElapsed(_task.Elapsed);
+            var start = ReadInteger(agent, "started_at");
+            if (start is null or < 0) return string.Empty;
+            var end = ReadInteger(agent, "ended_at") ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (end < 0 || end > DateTimeOffset.MaxValue.ToUnixTimeMilliseconds()) return string.Empty;
+            return TaskTools.FormatElapsed(TimeSpan.FromMilliseconds(Math.Max(0, end - start.Value)));
+        }
+    }
+
+    private static long? ReadInteger(JsonObject agent, string name) =>
+        agent[name] is JsonValue value && value.TryGetValue<long>(out var number) ? number : null;
     public string? FailureText => _server is { } agent ? ServerSubagents.Text(agent, "error") : _task?.Status == AgentTaskStatus.Failed ? _task.Report : null;
     public bool HasFailure => !string.IsNullOrWhiteSpace(FailureText);
     public string CurrentAction => !IsRunning ? string.Empty : _server is { } agent ? ServerSubagents.Text(agent, "step") : _agent!.RecentOutput.Replace('\n', ' ').Trim();

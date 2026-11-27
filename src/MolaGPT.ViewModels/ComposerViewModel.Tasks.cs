@@ -53,15 +53,8 @@ public sealed partial class ComposerViewModel
     public ObservableCollection<PendingInjectionViewModel> PendingInjections { get; } = new();
     public bool HasPendingInjections => PendingInjections.Count > 0;
 
-    /// <summary>Whether the stream on screen accepts messages mid-turn: a fresh
-    /// answer (not a retry or 续写, whose bubble is being rewritten), in a Work chat
-    /// that is not 氛围模式.</summary>
-    private bool _injectable;
-
     private bool CanInject =>
-        IsSending
-        && _injectable
-        && _activeTask is not null
+        _activeTask is { AcceptsMessages: true, IsRegeneration: false, IsContinuation: false }
         && _chat.ActiveProvider is PiWorkProvider
         && !_chat.IsAtmosphereMode
         && Attachments.Count == 0
@@ -169,7 +162,7 @@ public sealed partial class ComposerViewModel
     /// The agent took in a queued message: close the reply so far, write the message
     /// as a turn of its own, and carry on in a new reply to it.
     /// </summary>
-    private MessageViewModel SplitAtInjection(BackgroundStreamTask stream, MessageViewModel current, string text)
+    private async Task<MessageViewModel> SplitAtInjectionAsync(BackgroundStreamTask stream, MessageViewModel current, string text)
     {
         // A rewritten bubble cannot be split without losing its versions; nothing
         // is queued into those turns, so this only guards against the unexpected.
@@ -178,7 +171,7 @@ public sealed partial class ComposerViewModel
         var conversationId = stream.ConversationId;
         current.FlushPendingDelta();
         RewritePythonArtifactMarkdownLinks(current);
-        _chat.FinalizeAssistantMessage(conversationId, current);
+        await _chat.TrySaveAsync(() => _chat.FinalizeAssistantMessageAsync(conversationId, current));
 
         var injected = _chat.AppendMessageTo(conversationId, ChatMessage.RoleUser, text, current.MessageId);
         if (!IsUserText(text) && _chat.Tasks is { } tasks)
@@ -205,15 +198,13 @@ public sealed partial class ComposerViewModel
         var match = stream.Injections.FirstOrDefault(p => p.Text == text.Trim());
         if (match is not null) RemoveInjection(stream, match);
         if (ReferenceEquals(_activeTask, stream))
-        {
-            _activeAssistantMsg = next;
             MessageSubmitted?.Invoke();
-        }
         return next;
     }
 
     private static void TrackTool(BackgroundStreamTask stream, ToolCallDelta tool)
     {
+        if (tool.Origin == ToolCallOrigin.Arguments) return;
         if (tool.Status is "preparing" or "running") stream.RunningTools.Add(tool.Id);
         else stream.RunningTools.Remove(tool.Id);
     }
@@ -223,11 +214,11 @@ public sealed partial class ComposerViewModel
     /// box when the user stopped the turn, sent as the next message otherwise. A turn
     /// that ended in the background keeps it until its conversation is opened.
     /// </summary>
-    private void FlushPendingInjections(BackgroundStreamTask stream, bool cancelled)
+    private void FlushPendingInjections(BackgroundStreamTask stream, bool wasAttached, bool restoreOnly)
     {
         if (stream.Injections.Count == 0) return;
         var leftover = TakeInjections(stream);
-        if (!ReferenceEquals(stream, _activeTask))
+        if (!wasAttached || _chat.ConversationId != stream.ConversationId)
         {
             _unsentInjections[stream.ConversationId] =
                 _unsentInjections.TryGetValue(stream.ConversationId, out var earlier)
@@ -237,7 +228,7 @@ public sealed partial class ComposerViewModel
         }
         PendingInjections.Clear();
 
-        if (cancelled)
+        if (restoreOnly || !CanStartTurnHere)
         {
             RestoreToInput(leftover);
             return;
@@ -260,9 +251,7 @@ public sealed partial class ComposerViewModel
 
     private async Task SendLeftoverAsync(string text)
     {
-        // Let the finishing turn clear its sending state first.
-        await Task.Yield();
-        if (IsSending)
+        if (!CanStartTurnHere)
         {
             RestoreToInput(text);
             return;
@@ -299,7 +288,7 @@ public sealed partial class ComposerViewModel
     private readonly HashSet<AgentTask> _inflightTaskResults = [];
     private readonly HashSet<AgentMessage> _queuedAgentMessages = [];
     private readonly HashSet<AgentMessage> _inflightAgentMessages = [];
-    private readonly HashSet<string> _deliverAfterStream = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _deliverAfterNavigation = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<DateTimeOffset>> _wakeLog = new(StringComparer.Ordinal);
 
     /// <summary>A model that keeps starting tasks from its own wake-up turns would
@@ -358,7 +347,7 @@ public sealed partial class ComposerViewModel
     private void OnAgentMessageQueued(string conversationId)
     {
         var stream = StreamFor(conversationId);
-        if (stream is null || stream.StreamTask.IsCompleted || stream.IsRegeneration || stream.IsContinuation)
+        if (stream is not { AcceptsMessages: true, IsRegeneration: false, IsContinuation: false })
             return;
         var messages = PendingAgentMessages(conversationId);
         if (messages.Count > 0 && TemplateProvider(conversationId) is { } agent
@@ -372,6 +361,7 @@ public sealed partial class ComposerViewModel
         // A stopped task never wakes the model; whoever stopped it knows.
         if (task.Status is not (AgentTaskStatus.Completed or AgentTaskStatus.Failed)) return;
         if (_settings?.BackgroundTaskWakeEnabled == false) return;
+        if (StreamFor(task.ConversationId) is { AcceptsMessages: false }) return;
         ScheduleDelivery(task.ConversationId, TimeSpan.FromSeconds(1.5));
     }
 
@@ -387,7 +377,8 @@ public sealed partial class ComposerViewModel
     {
         try
         {
-            await Task.Delay(delay);
+            if (delay > TimeSpan.Zero) await Task.Delay(delay);
+            else await Task.Yield();
             _deliveryScheduled.Remove(conversationId);
             await DeliverAsync(conversationId);
         }
@@ -409,7 +400,7 @@ public sealed partial class ComposerViewModel
     /// </summary>
     private async Task DeliverAsync(string conversationId)
     {
-        if (_chat.Tasks is not { } tasks) return;
+        if (_settings?.BackgroundTaskWakeEnabled == false || _chat.Tasks is not { } tasks) return;
         var ended = tasks.Undelivered(conversationId)
             .Where(t => (t.Status is AgentTaskStatus.Completed or AgentTaskStatus.Failed)
                         && !_queuedTaskNotices.Contains(t)
@@ -420,21 +411,26 @@ public sealed partial class ComposerViewModel
         var notification = TaskTools.BuildTurnSummary(running, ended)!;
 
         var stream = StreamFor(conversationId);
-        if (stream is not null && !stream.StreamTask.IsCompleted)
+        if (stream is not null)
         {
-            if (!stream.IsRegeneration && !stream.IsContinuation && stream.RunningTools.Count > 0
+            if (stream.AcceptsMessages && !stream.IsRegeneration && !stream.IsContinuation && stream.RunningTools.Count > 0
                 && TemplateProvider(conversationId) is { } agent
                 && agent.TryEnqueue(conversationId, notification, followUp: false))
             {
                 foreach (var task in ended) _queuedTaskNotices.Add(task);
                 return;
             }
-            _deliverAfterStream.Add(conversationId);
             return;
         }
 
+        if (_chat.ConversationId == conversationId && _chat.IsConversationLoading)
+        {
+            _deliverAfterNavigation.Add(conversationId);
+            return;
+        }
         if (!_turnTemplates.TryGetValue(conversationId, out var template)) return;
         if (!_chat.ConversationIsLive(conversationId)) return;
+        if (_chat.HasUnsavedMessages(conversationId)) return;
         if (_chat.ConversationId == conversationId && (IsSending || _chat.RoleContext.NeedsHistorySync)) return;
         if (!TryConsumeWakeBudget(conversationId)) return;
 
@@ -443,8 +439,8 @@ public sealed partial class ComposerViewModel
 
     private BackgroundStreamTask? StreamFor(string conversationId)
     {
-        if (_activeTask is { } active && active.ConversationId == conversationId) return active;
-        return _backgroundStreams?.GetTask(conversationId) is { IsCompleted: false } background ? background : null;
+        if (_activeTask is { IsInFlight: true } active && active.ConversationId == conversationId) return active;
+        return _backgroundStreams?.GetTask(conversationId);
     }
 
     private bool TryConsumeWakeBudget(string conversationId)
@@ -458,18 +454,28 @@ public sealed partial class ComposerViewModel
         return true;
     }
 
-    /// <summary>A turn ended; if it held back a notification, deliver it now.</summary>
-    private void OnStreamCompletedForTasks(BackgroundStreamTask stream)
+    private void ClearTurnDeliveries(string conversationId)
     {
-        var conversationId = stream.ConversationId;
         _queuedTaskNotices.RemoveWhere(t => t.ConversationId == conversationId);
         _queuedAgentMessages.RemoveWhere(m => m.ConversationId == conversationId);
-        var held = _deliverAfterStream.Remove(conversationId);
-        if (stream.Cts.IsCancellationRequested || (stream.IsWakeTurn && !stream.CompletedSuccessfully)) return;
+    }
+
+    private void ScheduleTasksAfterTurn(BackgroundStreamTask stream)
+    {
+        if (stream.IsWakeTurn && !stream.CompletedSuccessfully) return;
+        var conversationId = stream.ConversationId;
         var waiting = _settings?.BackgroundTaskWakeEnabled != false
                       && _chat.Tasks?.Undelivered(conversationId)
                           .Any(t => t.Status is AgentTaskStatus.Completed or AgentTaskStatus.Failed) == true;
-        if (held || waiting) ScheduleDelivery(conversationId, TimeSpan.FromSeconds(0.8));
+        if (waiting) ScheduleDelivery(conversationId, TimeSpan.FromSeconds(0.8));
+    }
+
+    private void ScheduleTasksAfterNavigation()
+    {
+        var ids = _deliverAfterNavigation.ToArray();
+        _deliverAfterNavigation.Clear();
+        foreach (var id in ids)
+            ScheduleDelivery(id, TimeSpan.Zero);
     }
 
     /// <summary>
@@ -484,19 +490,20 @@ public sealed partial class ComposerViewModel
         IReadOnlyList<AgentTask> deliveredTasks)
     {
         var attached = _chat.ConversationId == conversationId;
-        if (attached && IsSending) return;
+        if (StreamFor(conversationId) is not null || (attached && !CanStartTurnHere)) return;
 
         var agentMessages = PendingAgentMessages(conversationId);
         if (agentMessages.Count > 0)
             notification = AppendHiddenSystemHint(notification, FormatAgentMessages(agentMessages));
-        _inflightAgentMessages.UnionWith(agentMessages);
-
-        var notice = _chat.AppendMessageTo(
-            conversationId,
-            ChatMessage.RoleUser,
-            notification,
-            attached ? _chat.Messages.LastOrDefault(m => m.MessageId is not null)?.MessageId : null);
-        var assistantMsg = _chat.BeginAssistantMessageFor(conversationId, notice, template.Labels);
+        MessageViewModel? notice = null;
+        if (!await _chat.TrySaveAsync(() =>
+        {
+            notice = _chat.AppendMessageTo(conversationId, ChatMessage.RoleUser, notification,
+                attached ? _chat.Messages.LastOrDefault(m => m.MessageId is not null)?.MessageId : null);
+            return Task.CompletedTask;
+        })) return;
+        var assistantMsg = _chat.BeginAssistantMessageFor(conversationId, notice!, template.Labels);
+        using var wakeTurnLease = _activity.Acquire("chat-turn-wake");
 
         var cts = new CancellationTokenSource();
         var generationId = Guid.NewGuid().ToString("N");
@@ -510,7 +517,6 @@ public sealed partial class ComposerViewModel
             ProviderKind = template.Provider.Kind,
             AssistantMessage = assistantMsg,
             Cts = cts,
-            StreamTask = Task.CompletedTask,
             SessionId = generationId,
             IsWakeTurn = true,
             IsDetached = !attached
@@ -518,14 +524,8 @@ public sealed partial class ComposerViewModel
 
         if (attached)
         {
+            AttachTurn(streamContext);
             MessageSubmitted?.Invoke();
-            _cts = cts;
-            _activeAssistantMsg = assistantMsg;
-            _activeTask = streamContext;
-            _injectable = true;
-            IsSending = true;
-            _chat.IsStreaming = true;
-            NotifyInjectState();
         }
         else
         {
@@ -548,14 +548,12 @@ public sealed partial class ComposerViewModel
         _turnTemplates[conversationId] = template with { Request = request };
 
         _inflightTaskResults.UnionWith(deliveredTasks);
+        _inflightAgentMessages.UnionWith(agentMessages);
         var wasCancelled = false;
         string? failureMessage = null;
         try
         {
-            var streamTask = RunStreamLoopAsync(template.Provider, request, assistantMsg, cts, streamContext);
-            streamContext.StreamTask = streamTask;
-            if (attached) _activeStreamTask = streamTask;
-            await streamTask;
+            await RunStreamLoopAsync(template.Provider, request, streamContext);
             if (streamContext.CompletedSuccessfully)
             {
                 foreach (var task in deliveredTasks) _chat.Tasks?.MarkDelivered(task);
@@ -576,20 +574,7 @@ public sealed partial class ComposerViewModel
         {
             _inflightTaskResults.ExceptWith(deliveredTasks);
             _inflightAgentMessages.ExceptWith(agentMessages);
-            FlushPendingInjections(streamContext, wasCancelled);
-            CompleteStreamContext(streamContext, publishNotification: !wasCancelled, failureMessage);
-            if (ReferenceEquals(_activeTask, streamContext))
-            {
-                IsSending = false;
-                _chat.IsStreaming = false;
-                _activeStreamTask = null;
-                _activeAssistantMsg = null;
-                _activeTask = null;
-                _cts = null;
-                _injectable = false;
-                NotifyInjectState();
-            }
-            cts.Dispose();
+            await CompleteStreamContextAsync(streamContext, publishNotification: !wasCancelled, failureMessage, wasCancelled);
         }
     }
 }

@@ -42,12 +42,17 @@ public sealed class AttachmentStore
         return relativeName;
     }
 
-    public byte[]? Load(string? relativeName)
+    public byte[]? Load(string? relativeName, int maxBytes = int.MaxValue)
     {
         if (!TryGetPath(relativeName, out var fullPath)) return null;
         try
         {
-            return File.ReadAllBytes(fullPath);
+            using var file = File.OpenRead(fullPath);
+            var length = file.Length;
+            if (length > maxBytes) return null;
+            var bytes = new byte[(int)length];
+            file.ReadExactly(bytes);
+            return bytes;
         }
         catch (IOException)
         {

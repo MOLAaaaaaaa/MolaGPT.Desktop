@@ -21,11 +21,12 @@ public static partial class ServerSubagents
         foreach (var item in frame["agents"]!.AsArray().OfType<JsonObject>())
         {
             var id = Text(item, "id");
+            if (id.Length == 0) continue;
             var existing = agents.OfType<JsonObject>().FirstOrDefault(a => Text(a, "id") == id);
             if (existing is null) agents.Add(item.DeepClone());
             else foreach (var field in item) existing[field.Key] = field.Value?.DeepClone();
         }
-        if (frame["waiting"] is JsonValue waiting)
+        if (frame["waiting"] is JsonValue waiting && waiting.TryGetValue<bool>(out _))
             foreach (var agent in agents.OfType<JsonObject>()) agent["batch_waiting"] = waiting.DeepClone();
         return merged;
     }
@@ -46,7 +47,8 @@ public static partial class ServerSubagents
         return result;
     }
 
-    public static string Text(JsonObject agent, string key) => agent[key]?.GetValue<string>() ?? string.Empty;
+    public static string Text(JsonObject agent, string key) =>
+        agent[key] is JsonValue value && value.TryGetValue<string>(out var text) ? text : string.Empty;
 
     public static string Status(JsonObject agent) => Text(agent, "status") switch
     {

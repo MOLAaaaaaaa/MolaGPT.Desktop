@@ -29,7 +29,8 @@ public sealed record ChatRequest(
     bool IsSubagent = false,
     ChatRequest? Parent = null,
     string? WorkResumeEntryId = null,
-    IProgress<PendingStatusDelta>? WorkStatus = null);
+    IProgress<PendingStatusDelta>? WorkStatus = null,
+    Action<string>? ResolvedEndpoint = null);
 
 /// <summary>
 /// Keys the app packs into <see cref="ChatRequest.ExtraBody"/> for its own

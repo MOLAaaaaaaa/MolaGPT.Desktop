@@ -373,7 +373,7 @@
 
   <Window.Styles>
     <!-- Settings-page primitives. SettingsWindow keeps its own copies in its
-         Window.Styles, as AboutWindow and ProviderDialog do for theirs; a class
+         Window.Styles, as AboutWindow does for its styles; a class
          with no rule in scope is silently ignored, which is exactly what this
          window shipped with — an unstyled toggle renders as an empty box. -->
     <Style Selector="TextBlock.section">

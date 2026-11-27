@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
+using Microsoft.Data.Sqlite;
 
 namespace MolaGPT.Storage.Repositories;
 
@@ -35,25 +36,31 @@ public sealed class MessageRepository
     public IReadOnlyList<MessageRow> List(string conversationId)
     {
         using var conn = _db.Open();
-        return conn.Query<MessageRow>(
-            @"WITH RECURSIVE path AS (
-                SELECT message.id, message.conversation_id, message.role, message.content,
-                       message.meta, message.created_at, message.parent_id, 0 AS depth
-                FROM messages AS message
-                JOIN conversation_timelines AS timeline ON timeline.leaf_message_id = message.id
-                JOIN conversations AS conversation ON conversation.active_timeline_id = timeline.id
-                WHERE conversation.id = @conversationId
-                UNION ALL
-                SELECT parent.id, parent.conversation_id, parent.role, parent.content,
-                       parent.meta, parent.created_at, parent.parent_id, path.depth + 1
-                FROM messages AS parent
-                JOIN path ON path.parent_id = parent.id
+        using var tx = conn.BeginTransaction(deferred: true);
+        var leaf = conn.ExecuteScalar<string?>("SELECT t.leaf_message_id" + ActiveTimelineJoin
+            + " WHERE c.id = @conversationId", new { conversationId }, tx);
+        if (leaf is null) return [];
+        var rows = conn.Query<MessageRow>(
+            @"WITH RECURSIVE path(id) AS (
+                SELECT id FROM messages WHERE id = @leaf AND conversation_id = @conversationId
+                UNION
+                SELECT parent.id FROM path
+                JOIN messages AS child ON child.id = path.id
+                JOIN messages AS parent ON parent.id = child.parent_id AND parent.conversation_id = @conversationId
               )
-              SELECT id AS Id, conversation_id AS ConversationId, role AS Role, content AS Content,
-                     meta AS Meta, created_at AS CreatedAt, parent_id AS ParentId
-              FROM path
-              ORDER BY depth DESC",
-            new { conversationId }).ToList();
+              SELECT m.id AS Id, m.conversation_id AS ConversationId, m.role AS Role, m.content AS Content,
+                     m.meta AS Meta, m.created_at AS CreatedAt, m.parent_id AS ParentId
+              FROM path JOIN messages AS m ON m.id = path.id",
+            new { leaf, conversationId }, tx).ToDictionary(row => row.Id, StringComparer.Ordinal);
+        tx.Commit();
+        var chain = new List<MessageRow>(rows.Count);
+        while (leaf is not null && rows.Remove(leaf, out var row))
+        {
+            chain.Add(row);
+            leaf = row.ParentId;
+        }
+        chain.Reverse();
+        return chain;
     }
 
     public HashSet<string> ListConversationIdsWithMessages()
@@ -66,9 +73,8 @@ public sealed class MessageRepository
     {
         using var conn = _db.Open();
         return conn.ExecuteScalar<bool>(@"SELECT EXISTS (
-            SELECT 1 FROM conversations AS c
-            JOIN conversation_timelines AS t ON t.id = c.active_timeline_id
-            JOIN messages AS m ON m.id = t.leaf_message_id
+            SELECT 1" + ActiveTimelineJoin + @"
+            JOIN messages AS m ON m.id = t.leaf_message_id AND m.conversation_id = c.id
             WHERE c.id = @conversationId
         )", new { conversationId });
     }
@@ -80,7 +86,7 @@ public sealed class MessageRepository
               ORDER BY created_at ASC, rowid ASC";
 
     private const string ActiveTimelineJoin = @" FROM conversations AS c
-             JOIN conversation_timelines AS t ON t.id = c.active_timeline_id";
+             JOIN conversation_timelines AS t ON t.id = c.active_timeline_id AND t.conversation_id = c.id";
 
     public IReadOnlyList<MessageRow> ListAll(string conversationId)
     {
@@ -93,7 +99,7 @@ public sealed class MessageRepository
         using var conn = _db.Open();
         return conn.QuerySingleOrDefault<MessageRow>(@"SELECT m.id AS Id, m.conversation_id AS ConversationId,
             m.role AS Role, m.content AS Content, '' AS Meta, m.created_at AS CreatedAt, m.parent_id AS ParentId" +
-            ActiveTimelineJoin + @" JOIN messages AS m ON m.id = t.leaf_message_id
+            ActiveTimelineJoin + @" JOIN messages AS m ON m.id = t.leaf_message_id AND m.conversation_id = c.id
             WHERE c.id = @conversationId", new { conversationId });
     }
 
@@ -109,7 +115,7 @@ public sealed class MessageRepository
         return (rows, leaf);
     }
 
-    public IReadOnlyList<string> ListSubagentSessionKeys(string? conversationId = null)
+    public IReadOnlyList<string>? ListSubagentSessionKeys(string? conversationId = null)
     {
         using var conn = _db.Open();
         using var command = conn.CreateCommand();
@@ -124,7 +130,7 @@ public sealed class MessageRepository
         while (reader.Read())
         {
             using var stream = reader.GetStream(1);
-            SubagentSessionMetadata.CollectKeys(stream, keys);
+            if (!SubagentSessionMetadata.TryCollectKeys(stream, keys)) return null;
         }
         return keys.ToArray();
     }
@@ -238,18 +244,30 @@ public sealed class MessageRepository
         return saved;
     }
 
-    public string? Insert(MessageRow row)
+    public string? Insert(MessageRow row) => Insert(row, null);
+
+    public void InsertImageWorkbenchRun(MessageRow row, string title, string? modelId) =>
+        Insert(row, (title, modelId));
+
+    private string? Insert(MessageRow row, (string Title, string? ModelId)? imageRun)
     {
         using var conn = _db.Open();
         using var tx = conn.BeginTransaction();
         var activeTimelineId = conn.ExecuteScalar<string?>(
-            "SELECT active_timeline_id FROM conversations WHERE id = @conversationId",
-            new { conversationId = row.ConversationId }, tx);
+            @"SELECT active_timeline_id FROM conversations
+              WHERE id = @conversationId AND (deleted_at IS NULL OR @imageResult = 1)",
+            new { conversationId = row.ConversationId, imageResult = imageRun.HasValue }, tx);
+        if (activeTimelineId is null)
+            throw new InvalidOperationException("对话已不存在，无法保存消息。");
         var parentId = row.ParentId;
         if (parentId is null && activeTimelineId is not null)
             parentId = conn.ExecuteScalar<string?>(
-                "SELECT leaf_message_id FROM conversation_timelines WHERE id = @activeTimelineId",
-                new { activeTimelineId }, tx);
+                "SELECT leaf_message_id FROM conversation_timelines WHERE id = @activeTimelineId AND conversation_id = @ConversationId",
+                new { activeTimelineId, row.ConversationId }, tx);
+        if (parentId is not null && !conn.ExecuteScalar<bool>(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE id = @parentId AND conversation_id = @ConversationId)",
+                new { parentId, row.ConversationId }, tx))
+            throw new InvalidDataException("父消息不存在或不属于当前会话。");
         var stored = row with { ParentId = parentId };
         conn.Execute(
             @"INSERT INTO messages (id, conversation_id, role, content, meta, created_at, parent_id)
@@ -269,19 +287,29 @@ public sealed class MessageRepository
                   SET leaf_message_id = @messageId, updated_at = @updatedAt
                   WHERE id = @timelineId",
                 new { messageId = row.Id, updatedAt = row.CreatedAt, timelineId }, tx);
+        if (imageRun is { } result)
+            conn.Execute(
+                @"UPDATE conversations
+                  SET title = CASE WHEN trim(title) = '' OR title IN ('图像工作台', '新对话') THEN @Title ELSE title END,
+                      model_id = COALESCE(@ModelId, model_id), updated_at = MAX(updated_at, @now)
+                  WHERE id = @ConversationId",
+                new { result.Title, result.ModelId, row.ConversationId, now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() }, tx);
         tx.Commit();
         MessageWritten?.Invoke(row.ConversationId, row.Id);
         return parentId;
     }
 
-    public void Update(string id, string content, string? meta)
+    public bool Update(string id, string content, string? meta)
     {
         using var conn = _db.Open();
-        conn.Execute("UPDATE messages SET content = @content, meta = @meta WHERE id = @id",
-            new { id, content, meta });
+        var updated = conn.Execute(@"UPDATE messages SET content = @content, meta = @meta WHERE id = @id
+            AND EXISTS (SELECT 1 FROM conversations WHERE id = messages.conversation_id AND deleted_at IS NULL)",
+            new { id, content, meta }) != 0;
+        if (!updated) return false;
         if (MessageWritten is { } written
             && conn.ExecuteScalar<string?>("SELECT conversation_id FROM messages WHERE id = @id", new { id }) is { } conversationId)
             written(conversationId, id);
+        return true;
     }
 
     public void UpdateBackgroundTaskState(string conversationId, string taskId, string state)
@@ -379,10 +407,9 @@ public sealed class MessageRepository
         MessageWritten?.Invoke(conversationId, id);
     }
 
-    public void ReplaceConversationMessages(string conversationId, IEnumerable<MessageRow> rows)
+    internal static void ReplaceConversationMessages(
+        SqliteConnection conn, SqliteTransaction tx, string conversationId, IEnumerable<MessageRow> rows)
     {
-        using var conn = _db.Open();
-        using var tx = conn.BeginTransaction();
         var roleContext = conn.ExecuteScalar<string?>(
             "SELECT role_context_json FROM conversations WHERE id = @conversationId",
             new { conversationId }, tx) ?? "{}";
@@ -396,15 +423,29 @@ public sealed class MessageRepository
             new { conversationId }, tx);
         conn.Execute("DELETE FROM messages WHERE conversation_id = @c", new { c = conversationId }, tx);
         string? parentId = null;
+        var parents = new Dictionary<string, string?>(StringComparer.Ordinal);
         foreach (var row in rows)
         {
             var stored = row with { ParentId = row.ParentId ?? parentId };
+            if (row.ConversationId != conversationId || !parents.TryAdd(row.Id, stored.ParentId))
+                throw new InvalidDataException("导入消息的会话或 ID 无效。");
             conn.Execute(
                 @"INSERT INTO messages (id, conversation_id, role, content, meta, created_at, parent_id)
                   VALUES (@Id, @ConversationId, @Role, @Content, @Meta, @CreatedAt, @ParentId)",
                 stored,
                 tx);
             parentId = stored.Id;
+        }
+        // Validate the batch, not the old database. A parent may follow its child on the wire.
+        var valid = new HashSet<string>(StringComparer.Ordinal);
+        var chain = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var id in parents.Keys)
+        {
+            chain.Clear();
+            for (string? current = id; current is not null && !valid.Contains(current);)
+                if (!chain.Add(current) || !parents.TryGetValue(current, out current))
+                    throw new InvalidDataException("导入消息的父子关系无效。");
+            valid.UnionWith(chain);
         }
         var timelineId = conversationId + ":main";
         conn.Execute(
@@ -414,6 +455,5 @@ public sealed class MessageRepository
             new { timelineId, conversationId, parentId, roleContext, createdAt, updatedAt }, tx);
         conn.Execute("UPDATE conversations SET active_timeline_id = @timelineId WHERE id = @conversationId",
             new { timelineId, conversationId }, tx);
-        tx.Commit();
     }
 }

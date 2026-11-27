@@ -176,45 +176,55 @@ public sealed partial class AgentHistoryReader
 
     private readonly object _scanGate = new();
     private readonly System.Diagnostics.Stopwatch _scanClock = System.Diagnostics.Stopwatch.StartNew();
-    private IReadOnlyList<AgentHistoryEntry>? _lastScan;
-    private TimeSpan _lastScanAt;
-    private int _scanDirty = 1;
+    private (IReadOnlyList<AgentHistoryEntry> Entries, TimeSpan CompletedAt, long Version)? _lastScan;
+    private long _scanVersion;
     private List<FileSystemWatcher>? _watchers;
     private bool _watchersUnavailable;
 
     private async Task<IReadOnlyList<AgentHistoryEntry>> ScanAsync(TimeSpan maxStaleness, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (maxStaleness > TimeSpan.Zero)
         {
             EnsureWatchers();
             lock (_scanGate)
             {
                 if (!_watchersUnavailable
-                    && Volatile.Read(ref _scanDirty) == 0
                     && _lastScan is { } cached
-                    && _scanClock.Elapsed - _lastScanAt <= maxStaleness)
+                    && cached.Version == Volatile.Read(ref _scanVersion)
+                    && _scanClock.Elapsed - cached.CompletedAt <= maxStaleness)
                 {
-                    return cached;
+                    ct.ThrowIfCancellationRequested();
+                    return cached.Entries;
                 }
             }
         }
 
-        // Cleared before the walk, not after: a write that lands mid-scan must
-        // leave the flag dirty so the next caller rescans, rather than being
-        // swallowed by the result we are about to publish.
-        Volatile.Write(ref _scanDirty, 0);
-
-        var entries = new List<AgentHistoryEntry>();
-        try { entries.AddRange(await Task.Run(() => ReadClaude(ct), ct).ConfigureAwait(false)); } catch { }
-        try { entries.AddRange(await Task.Run(() => ReadCodex(ct), ct).ConfigureAwait(false)); } catch { }
+        // A file change or read failure invalidates scans that were already in flight.
+        var version = Volatile.Read(ref _scanVersion);
+        var entries = await Task.Run(() =>
+        {
+            var result = new List<AgentHistoryEntry>();
+            try { result.AddRange(ReadClaude(ct)); }
+            catch (Exception ex) when (IsFileReadFailure(ex)) { InvalidateScan(); }
+            try { result.AddRange(ReadCodex(ct)); }
+            catch (Exception ex) when (IsFileReadFailure(ex)) { InvalidateScan(); }
+            ct.ThrowIfCancellationRequested();
+            return result;
+        }, ct).ConfigureAwait(false);
 
         lock (_scanGate)
         {
-            _lastScan = entries;
-            _lastScanAt = _scanClock.Elapsed;
+            ct.ThrowIfCancellationRequested();
+            if (version == Volatile.Read(ref _scanVersion))
+                _lastScan = (entries, _scanClock.Elapsed, version);
         }
         return entries;
     }
+
+    private static bool IsFileReadFailure(Exception ex) => ex is IOException or UnauthorizedAccessException;
+
+    private void InvalidateScan() => Interlocked.Increment(ref _scanVersion);
 
     /// <summary>Watch every history root that currently exists. A backend that
     /// is not installed must not disable scan reuse for the other backend.</summary>
@@ -245,16 +255,16 @@ public sealed partial class AgentHistoryReader
                         IncludeSubdirectories = recursive,
                         NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
                     };
-                    void MarkDirty(object? _, FileSystemEventArgs __) => Volatile.Write(ref _scanDirty, 1);
+                    void MarkDirty(object? _, FileSystemEventArgs __) => InvalidateScan();
                     watcher.Changed += MarkDirty;
                     watcher.Created += MarkDirty;
                     watcher.Deleted += MarkDirty;
-                    watcher.Renamed += (_, _) => Volatile.Write(ref _scanDirty, 1);
+                    watcher.Renamed += MarkDirty;
                     // A dropped event (buffer overflow, root removed) means we no
                     // longer know what changed — fall back to always scanning.
                     watcher.Error += (_, _) =>
                     {
-                        Volatile.Write(ref _scanDirty, 1);
+                        InvalidateScan();
                         lock (_scanGate) _watchersUnavailable = true;
                     };
                     watcher.EnableRaisingEvents = true;
@@ -329,7 +339,12 @@ public sealed partial class AgentHistoryReader
                     if (sessionId is not null && cwd is not null && aiTitle is not null) break;
                 }
             }
-            catch { return null; }
+            catch (Exception ex) when (IsFileReadFailure(ex))
+            {
+                InvalidateScan();
+                return null;
+            }
+            catch (InvalidOperationException) { return null; }
 
             facts = new ClaudeFacts(
                 sessionId ?? Path.GetFileNameWithoutExtension(fi.Name),
@@ -434,7 +449,12 @@ public sealed partial class AgentHistoryReader
                     if (id is not null && cwd is not null && title is not null) break;
                 }
             }
-            catch { return null; }
+            catch (Exception ex) when (IsFileReadFailure(ex))
+            {
+                InvalidateScan();
+                return null;
+            }
+            catch (InvalidOperationException) { return null; }
 
             facts = new CodexFacts(id, cwd, title);
             Store(_codexCache, fi, facts);
@@ -493,7 +513,7 @@ public sealed partial class AgentHistoryReader
                     info.LastWriteTimeUtc.Ticks, info.Length, map);
             }
         }
-        catch { }
+        catch (Exception ex) when (IsFileReadFailure(ex)) { InvalidateScan(); }
         return map;
     }
 

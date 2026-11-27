@@ -17,6 +17,7 @@ namespace MolaGPT.Core.Chat.Agents;
 internal sealed partial class CodexSession : IAgentSession
 {
     private readonly Process _process;
+    private readonly Action<string>? _log;
     private readonly AgentSessionOptions _options;
     private readonly CancellationTokenSource _lifetimeCts = new();
     private readonly SemaphoreSlim _turnGate = new(1, 1);
@@ -49,9 +50,10 @@ internal sealed partial class CodexSession : IAgentSession
     /// can keep tracking the same conversation.</summary>
     public string? CurrentSessionId => _threadId;
 
-    public CodexSession(Process process, AgentSessionOptions options)
+    public CodexSession(Process process, AgentSessionOptions options, Action<string>? log)
     {
         _process = process;
+        _log = log;
         _options = options;
         _currentModel = options.Model;
 
@@ -69,7 +71,7 @@ internal sealed partial class CodexSession : IAgentSession
         _process.BeginErrorReadLine();
     }
 
-    /// <summary>Run initialize → initialized → thread/start.</summary>
+    /// <summary>Initialize the app-server and open the requested thread.</summary>
     public async Task HandshakeAsync(CancellationToken ct)
     {
         _readerTask = Task.Run(() => ReadLoopAsync(_lifetimeCts.Token));
@@ -83,26 +85,16 @@ internal sealed partial class CodexSession : IAgentSession
 
         // Resume an existing thread when asked; otherwise start a fresh one. Both
         // carry the sandbox + approval posture and an optional model override.
-        if (!string.IsNullOrWhiteSpace(_options.ResumeSessionId))
+        var resumeId = string.IsNullOrWhiteSpace(_options.ResumeSessionId) ? null : _options.ResumeSessionId;
+        var method = resumeId is null ? "thread/start" : "thread/resume";
+        var result = await RequestAsync(method, WithModel(new Dictionary<string, object?>
         {
-            var resumeResult = await RequestAsync("thread/resume", WithModel(new Dictionary<string, object?>
-            {
-                ["threadId"] = _options.ResumeSessionId,
-                ["sandbox"] = CodexBackend.MapSandboxPolicy(_options.PermissionMode),
-                ["approvalPolicy"] = CodexBackend.MapApprovalPolicy(_options.ApprovalPolicy ?? CodexApprovalPolicy.OnRequest)
-            }), ct).ConfigureAwait(false);
-            _threadId = ExtractThreadId(resumeResult) ?? _options.ResumeSessionId;
-            return;
-        }
-
-        var startResult = await RequestAsync("thread/start", WithModel(new Dictionary<string, object?>
-        {
-            ["cwd"] = _options.WorkingDirectory,
+            [resumeId is null ? "cwd" : "threadId"] = resumeId ?? _options.WorkingDirectory,
             ["sandbox"] = CodexBackend.MapSandboxPolicy(_options.PermissionMode),
             ["approvalPolicy"] = CodexBackend.MapApprovalPolicy(_options.ApprovalPolicy ?? CodexApprovalPolicy.OnRequest)
         }), ct).ConfigureAwait(false);
 
-        _threadId = ExtractThreadId(startResult)
+        _threadId = ExtractThreadId(result) ?? resumeId
             ?? throw new InvalidOperationException("Codex thread/start did not return a thread id.");
 
         // Discover the real model catalog (model/list) in the background for the

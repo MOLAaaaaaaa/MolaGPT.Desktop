@@ -1,3 +1,5 @@
+using MolaGPT.Core.Models;
+
 namespace MolaGPT.Core.Chat.Agents.Pi;
 
 /// <summary>
@@ -33,9 +35,7 @@ public static class PiEndpointQuirks
     /// whatever Pi sends.</summary>
     public static IReadOnlyList<string>? DropBodyKeysFor(string? endpoint)
     {
-        if (string.IsNullOrWhiteSpace(endpoint)) return null;
-
-        return endpoint.Contains("generativelanguage.googleapis.com", StringComparison.OrdinalIgnoreCase)
+        return GeminiModelPolicy.IsOpenAiCompatEndpoint(endpoint)
             ? GoogleCompatDrops
             : null;
     }

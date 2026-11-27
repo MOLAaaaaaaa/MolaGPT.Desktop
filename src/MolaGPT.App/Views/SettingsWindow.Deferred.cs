@@ -54,11 +54,6 @@ public partial class SettingsWindow
         PART_CloseDetectedModels.Click += (_, _) => CloseDetectedModels();
         PART_CancelDetectedModels.Click += (_, _) => CloseDetectedModels();
         PART_AddDetectedModels.Click += OnAddDetectedModels;
-        PART_DetectProviderModels.IsEnabled = _byokHttpFactory is not null;
-        PART_FetchEditingProviderPricing.IsEnabled = _byokHttpFactory is not null;
-        PART_FetchAllPricing.IsEnabled = _byokHttpFactory is not null;
-        PART_TestProvider.IsEnabled = _byokHttpFactory is not null;
-        RefreshProviders();
     }
 
     private void InitializePersonaPage()
@@ -99,7 +94,6 @@ public partial class SettingsWindow
         PART_DeepSeekLinkedCombo.SelectionChanged += OnDeepSeekLinkedComboChanged;
         PART_OpenBuiltinSearchProviders.Click += (_, _) => OpenProvidersPage();
         PART_WebFetchMode.SelectionChanged += OnWebFetchModeChanged;
-        PART_TestSearch.IsEnabled = _byokHttpFactory is not null;
     }
 
     private void InitializeImageGenerationPage()
@@ -427,6 +421,7 @@ public partial class SettingsWindow
     private Border PART_NoUserSkills => PagePart<Border>(PAGE_Skills, nameof(PART_NoUserSkills));
 
     private Button PART_AccountSecurity => PagePart<Button>(PAGE_Account, nameof(PART_AccountSecurity));
+    private Button PART_AccountApiKeys => PagePart<Button>(PAGE_Account, nameof(PART_AccountApiKeys));
     private Border PART_AccountSecurityBanner => PagePart<Border>(PAGE_Account, nameof(PART_AccountSecurityBanner));
     private TextBlock PART_AccountSecurityMessage => PagePart<TextBlock>(PAGE_Account, nameof(PART_AccountSecurityMessage));
     private Button PART_AccountSecurityDetail => PagePart<Button>(PAGE_Account, nameof(PART_AccountSecurityDetail));

@@ -50,19 +50,22 @@ public sealed class PythonExecutionTool
     private readonly IToolGrantStore? _grants;
     private readonly AgentTaskRegistry? _tasks;
     private readonly IPythonAutoReviewer? _reviewer;
+    private readonly Action<string>? _log;
 
     public PythonExecutionTool(
         IPythonExecutionApprovalService? approval = null,
         IPythonSessionAllowList? sessionAllowList = null,
         IToolGrantStore? grants = null,
         AgentTaskRegistry? tasks = null,
-        IPythonAutoReviewer? reviewer = null)
+        IPythonAutoReviewer? reviewer = null,
+        Action<string>? log = null)
     {
         _approval = approval;
         _sessionAllowList = sessionAllowList;
         _grants = grants;
         _tasks = tasks;
         _reviewer = reviewer;
+        _log = log;
     }
 
     /// <param name="allowBackground">Offer <c>run_in_background</c>, describe the
@@ -635,7 +638,7 @@ public sealed class PythonExecutionTool
     /// the process, its output and its job object live on one disposable object
     /// instead of in the scope of a single await.
     /// </summary>
-    private static PythonProcessRun StartPython(
+    private PythonProcessRun StartPython(
         PythonCandidate candidate,
         string runnerScriptPath,
         string workingDirectory,
@@ -658,7 +661,7 @@ public sealed class PythonExecutionTool
         // Caps the whole process tree and guarantees its teardown. Disposed at the
         // end of the run, which is what kills anything still alive.
         var job = OperatingSystem.IsWindows()
-            ? WindowsJobObject.TryCreate(JobMemoryLimitBytes, JobActiveProcessLimit)
+            ? WindowsJobObject.TryCreate(JobMemoryLimitBytes, JobActiveProcessLimit, _log)
             : null;
 
         try
@@ -668,7 +671,7 @@ public sealed class PythonExecutionTool
         }
         catch
         {
-            job?.Dispose();
+            if (OperatingSystem.IsWindows()) job?.Dispose();
             stdout.Dispose();
             stderr.Dispose();
             process.Dispose();
@@ -679,7 +682,7 @@ public sealed class PythonExecutionTool
         // before this lands would escape the job; closing that window needs
         // CREATE_SUSPENDED, which Process.Start cannot do. Acceptable here because
         // the job is a resource guard, not a security boundary.
-        job?.TryAssign(process);
+        if (OperatingSystem.IsWindows()) job?.TryAssign(process, _log);
 
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
@@ -751,7 +754,7 @@ public sealed class PythonExecutionTool
         {
             _stdout.Dispose();
             _stderr.Dispose();
-            _job?.Dispose();
+            if (OperatingSystem.IsWindows()) _job?.Dispose();
             _process.Dispose();
         }
     }
@@ -1115,14 +1118,23 @@ public sealed class PythonExecutionTool
         _seen = set()
 
         def _norm(value):
+            path = os.fsdecode(value)
             try:
-                return os.path.normcase(os.path.abspath(os.fspath(value)))
-            except Exception:
-                return None
+                return os.path.normcase(os.path.realpath(path, strict=True))
+            except FileNotFoundError:
+                # Python 3.12: resolve the existing ancestor of a prospective file.
+                # Do not reinterpret a dangling link as a new file.
+                parent, leaf = os.path.split(path)
+                if not leaf or leaf in (".", "..") or os.path.lexists(path):
+                    raise
+                return os.path.join(_norm(parent or os.curdir), os.path.normcase(leaf))
+
+        _readable = tuple(map(_norm, _readable))
+        _writable = tuple(map(_norm, _writable))
+        _denied = tuple(map(_norm, _denied))
 
         def _under(path, roots):
-            for root in roots:
-                r = os.path.normcase(root)
+            for r in roots:
                 if path == r or path.startswith(r.rstrip("\\/") + os.sep):
                     return True
             return False
@@ -1142,55 +1154,71 @@ public sealed class PythonExecutionTool
             except Exception:
                 pass
 
-        # open() reports (path, mode, flags). A missing mode means a read path
-        # inside CPython internals; treat anything without a write intent as a
-        # read so the narrower list is never applied by accident.
         _WRITE_CHARS = ("w", "a", "x", "+")
+        _WRITE_FLAGS = (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC
+                        | os.O_APPEND | getattr(os, "O_TEMPORARY", 0))
 
-        def _check_path(target, writing, label):
-            path = _norm(target)
-            if path is None:
-                return
-            if _under(path, _denied):
-                _record(label, path, False)
-                raise PermissionError(
-                    "MolaGPT 沙盒：该文件受保护，不可访问\n  " + str(target))
+        def _check_path(target, writing, label, *, directory_entry=False):
+            try:
+                paths = [_norm(target)]
+                if directory_entry:
+                    # Removing or renaming a link changes its directory entry,
+                    # not the file it points to. Keep the resolved-target check
+                    # and also require permission for the entry itself.
+                    parent, leaf = os.path.split(os.fsdecode(target).rstrip(os.sep + (os.altsep or "")))
+                    if leaf and leaf not in (".", ".."):
+                        entry = os.path.join(_norm(parent or os.curdir), os.path.normcase(leaf))
+                        if entry != paths[0]:
+                            paths.insert(0, entry)
+            except (OSError, TypeError, ValueError, RecursionError) as err:
+                _record(label, str(target), False)
+                raise PermissionError("MolaGPT 沙盒：无法确认路径 " + str(target)) from err
+            for path in paths:
+                if _under(path, _denied):
+                    _record(label, path, False)
+                    raise PermissionError(
+                        "MolaGPT 沙盒：该文件受保护，不可访问\n  " + str(target))
             if not _enforce_scope:
                 return
             roots = _writable if writing else _readable
-            if _under(path, roots):
-                _record(label, path, True)
-                return
-            _record(label, path, False)
-            raise PermissionError(
-                "MolaGPT 沙盒：路径超出本次批准范围\n"
-                "  尝试" + ("写入" if writing else "读取") + "：" + str(target) + "\n"
-                "  已批准" + ("写入" if writing else "读取") + "：\n    "
-                + "\n    ".join(roots or ("（无）",))
-                + "\n请说明需要访问该位置的原因，由用户授权后重试。")
+            for path in paths:
+                if not _under(path, roots):
+                    _record(label, path, False)
+                    raise PermissionError(
+                        "MolaGPT 沙盒：路径超出本次批准范围\n"
+                        "  尝试" + ("写入" if writing else "读取") + "：" + str(target) + "\n"
+                        "  已批准" + ("写入" if writing else "读取") + "：\n    "
+                        + "\n    ".join(roots or ("（无）",))
+                        + "\n请说明需要访问该位置的原因，由用户授权后重试。")
+            _record(label, paths[0], True)
 
         def _hook(event, args):
             if not _enforce:
                 return
             if event == "open":
-                target, mode, _flags = args
-                writing = bool(mode) and any(c in mode for c in _WRITE_CHARS)
+                target, mode, flags = args
+                # fdopen wraps an already-open descriptor, not a new pathname.
+                if isinstance(target, int):
+                    return
+                writing = bool(flags & _WRITE_FLAGS) or (mode and any(c in mode for c in _WRITE_CHARS))
                 _check_path(target, writing, "write" if writing else "read")
-            elif event in ("os.remove", "os.rmdir", "os.unlink", "os.truncate"):
-                _check_path(args[0], True, "delete")
-            elif event == "os.rename" or event == "os.replace":
-                _check_path(args[0], True, "delete")
-                _check_path(args[1], True, "write")
-            elif event == "os.mkdir":
+            elif event in ("os.remove", "os.rmdir", "os.unlink"):
+                _check_path(args[0], True, "delete", directory_entry=True)
+            elif event == "os.truncate":
                 _check_path(args[0], True, "write")
+            elif event == "os.rename" or event == "os.replace":
+                _check_path(args[0], True, "delete", directory_entry=True)
+                _check_path(args[1], True, "write", directory_entry=True)
+            elif event == "os.mkdir":
+                _check_path(args[0], True, "write", directory_entry=True)
             elif event in ("shutil.copyfile", "shutil.copymode", "shutil.copystat"):
                 _check_path(args[0], False, "read")
                 _check_path(args[1], True, "write")
             elif event == "shutil.move":
-                _check_path(args[0], True, "delete")
-                _check_path(args[1], True, "write")
+                _check_path(args[0], True, "delete", directory_entry=True)
+                _check_path(args[1], True, "write", directory_entry=True)
             elif event == "shutil.rmtree":
-                _check_path(args[0], True, "delete")
+                _check_path(args[0], True, "delete", directory_entry=True)
             elif event in ("os.listdir", "os.scandir"):
                 if args and args[0] is not None:
                     _check_path(args[0], False, "read")

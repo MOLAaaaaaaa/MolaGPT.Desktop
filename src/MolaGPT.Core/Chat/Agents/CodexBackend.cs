@@ -11,7 +11,7 @@ namespace MolaGPT.Core.Chat.Agents;
 /// item/* and turn/completed notifications. Wire-format differences from Claude
 /// Code are fully contained in <see cref="CodexSession"/>.
 /// </summary>
-public sealed class CodexBackend : IAgentBackend
+public sealed class CodexBackend(Action<string>? log = null) : IAgentBackend
 {
     public const string BackendId = "codex";
     public string Id => BackendId;
@@ -32,7 +32,7 @@ public sealed class CodexBackend : IAgentBackend
             throw new InvalidOperationException("Failed to start the Codex app-server process.");
         }
 
-        var session = new CodexSession(process, options);
+        var session = new CodexSession(process, options, log);
         await session.HandshakeAsync(ct).ConfigureAwait(false);
         return session;
     }

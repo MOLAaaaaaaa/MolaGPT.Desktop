@@ -1,9 +1,8 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
-using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tasks;
+using MolaGPT.Core.Models;
 using MolaGPT.ViewModels.Services;
 
 namespace MolaGPT.ViewModels;
@@ -68,13 +67,9 @@ public sealed partial class MainViewModel : ObservableObject
     public Func<Task>? CloudSyncRequested { get; set; }
 
     /// <summary>Optional desktop hook: fetch cloud-only conversation details on demand.</summary>
-    public Func<string, Task<bool>>? EnsureConversationDetailAsync { get; set; }
+    public Func<string, CancellationToken, Task<bool>>? EnsureConversationDetailAsync { get; set; }
 
     private readonly BackgroundStreamService? _backgroundStreams;
-    private readonly MolaGptProxyProvider? _molaGptProxy;
-    private int _usageRefreshVersion;
-    private UsageSource _usageSource;
-    private (MolaGptStatus Status, DateTimeOffset ReadAt)? _molaGptStatus;
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasAccountSecurityStatus))]
     private string? _accountSecurityStatus;
@@ -86,8 +81,7 @@ public sealed partial class MainViewModel : ObservableObject
         ComposerViewModel composer,
         SettingsViewModel settings,
         PersonaListViewModel personas,
-        BackgroundStreamService? backgroundStreams = null,
-        MolaGptProxyProvider? molaGptProxy = null)
+        BackgroundStreamService? backgroundStreams = null)
     {
         _conversationList = conversationList;
         _chat = chat;
@@ -95,57 +89,29 @@ public sealed partial class MainViewModel : ObservableObject
         _settings = settings;
         _personas = personas;
         _backgroundStreams = backgroundStreams;
-        _molaGptProxy = molaGptProxy;
         _chat.AutoCollapseThinking = _settings.AutoCollapseThinking;
         _chat.CodeFenceKinds = _settings.CodeFenceKinds;
 
-        _conversationList.ConversationSelected += async (_, id) =>
-        {
-            if (_conversationList.FindItem(id)?.IsImageTask == true)
-            {
-                if (Composer.IsSending && Chat.ConversationId != id)
-                    Composer.DetachToBackground();
-                IsImageWorkbenchVisible = true;
-                ImageWorkbenchRequested?.Invoke(id);
-                return;
-            }
-
-            IsImageWorkbenchVisible = false;
-
-            // Draft → first send already bound Chat to this id; only sync sidebar.
-            if (string.Equals(Chat.ConversationId, id, StringComparison.Ordinal))
-                return;
-
-            if (Composer.IsSending && Chat.ConversationId != id)
-                Composer.DetachToBackground();
-
-            var hasBackgroundTask = _backgroundStreams?.HasTask(id) == true;
-            await Chat.LoadConversationAsync(id, loadAllMessagesImmediately: hasBackgroundTask);
-            if (EnsureConversationDetailAsync is not null && await EnsureConversationDetailAsync(id))
-            {
-                hasBackgroundTask = _backgroundStreams?.HasTask(id) == true;
-                await Chat.LoadConversationAsync(id, loadAllMessagesImmediately: hasBackgroundTask);
-            }
-
-            if (hasBackgroundTask)
-            {
-                _conversationList.SetGenerating(id, false);
-                await Composer.ReattachFromBackgroundAsync(id);
-            }
-            Composer.RestoreUnsentInjections(id);
-        };
+        _conversationList.ConversationSelected += async (_, id) => await SelectConversationAsync(id);
         _conversationList.ConversationsDeleted += (_, ids) =>
         {
             // A deleted conversation's tasks have nowhere to report to.
-            foreach (var id in ids) Chat.Tasks?.StopConversation(id);
+            foreach (var id in ids)
+            {
+                Composer.StopConversation(id);
+                Chat.Tasks?.StopConversation(id);
+            }
             if (!string.IsNullOrEmpty(Chat.ConversationId) && ids.Contains(Chat.ConversationId))
+            {
+                Composer.DetachToBackground();
                 Chat.StartDraftConversation();
+            }
         };
 
         Chat.ConversationTouched += (_, e) =>
         {
             _conversationList.UpsertItem(e.Id, e.Title, e.UpdatedAt, e.ProviderId, e.PersonaLabel);
-            if (string.Equals(Chat.ConversationId, e.Id, StringComparison.Ordinal)
+            if (!IsImageWorkbenchVisible && string.Equals(Chat.ConversationId, e.Id, StringComparison.Ordinal)
                 && !string.Equals(_conversationList.SelectedId, e.Id, StringComparison.Ordinal))
             {
                 _conversationList.SelectById(e.Id);
@@ -157,13 +123,15 @@ public sealed partial class MainViewModel : ObservableObject
             _backgroundStreams.TaskRegistered += (_, conversationId) =>
                 _conversationList.SetGenerating(conversationId, true);
             _backgroundStreams.TaskCompleted += (_, e) =>
-                _conversationList.SetGenerating(e.ConversationId, false);
+                RefreshGenerating(e.ConversationId);
             // A turn that died is just as over as one that answered. Without this
             // the row keeps spinning forever on the failure path.
             _backgroundStreams.TaskFailed += (_, e) =>
-                _conversationList.SetGenerating(e.ConversationId, false);
-            _backgroundStreams.TaskEnded += (_, conversationId) =>
-                _conversationList.SetGenerating(conversationId, false);
+                RefreshGenerating(e.ConversationId);
+            _backgroundStreams.TaskEnded += (_, conversationId) => RefreshGenerating(conversationId);
+
+            void RefreshGenerating(string id) =>
+                _conversationList.SetGenerating(id, _backgroundStreams.HasTask(id));
         }
 
         _chat.PropertyChanged += (_, e) =>
@@ -171,7 +139,6 @@ public sealed partial class MainViewModel : ObservableObject
             if (e.PropertyName is nameof(ChatViewModel.ActiveModel) or nameof(ChatViewModel.ActiveProvider))
                 RefreshActivePromptState();
         };
-        _settings.Providers.CollectionChanged += (_, _) => RefreshActivePromptState();
 
         WireArtifacts();
 
@@ -200,11 +167,13 @@ public sealed partial class MainViewModel : ObservableObject
                 _chat.AutoCollapseThinking = _settings.AutoCollapseThinking;
             if (e.PropertyName is nameof(SettingsViewModel.CodeFenceKinds))
                 _chat.CodeFenceKinds = _settings.CodeFenceKinds;
-            if (e.PropertyName is nameof(SettingsViewModel.IsLoggedIn))
+            if (e.PropertyName == nameof(SettingsViewModel.AccountSessionGeneration))
             {
-                _molaGptStatus = null;
+                UpdateCloudSyncStatus("Idle", "云同步待机", DateTimeOffset.Now);
                 _ = RefreshUsageAsync();
             }
+            if (e.PropertyName == nameof(SettingsViewModel.AccountStatus))
+                UpdateAccountUsage();
         };
         // A turn may spend MolaGPT credits.
         _composer.PropertyChanged += (_, e) =>
@@ -267,23 +236,6 @@ public sealed partial class MainViewModel : ObservableObject
         if (!string.IsNullOrWhiteSpace(branch.Draft)) Composer.Text = branch.Draft!;
     }
 
-    /// <summary>Which plan the active model draws on.</summary>
-    private enum UsageSource { None, MolaGpt }
-
-    /// <summary>Re-reading sooner than this only repeats what is on screen.</summary>
-    private static readonly TimeSpan UsageFreshFor = TimeSpan.FromSeconds(30);
-
-    private UsageSource ActiveUsageSource
-    {
-        get
-        {
-            // Chat has no context gauge to sit under, so only the agent modes.
-            if (Chat.CurrentMode == AppMode.Work)
-                return Settings.IsLoggedIn && _molaGptProxy is not null ? UsageSource.MolaGpt : UsageSource.None;
-            return UsageSource.None;
-        }
-    }
-
     /// <summary>
     /// Brings the plan usage under the context gauge up to date with the active
     /// model. A failed read keeps the last figures rather than blanking them; a
@@ -293,48 +245,25 @@ public sealed partial class MainViewModel : ObservableObject
     /// something has just been spent.</param>
     public async Task RefreshUsageAsync(bool force = false, CancellationToken ct = default)
     {
-        var version = ++_usageRefreshVersion;
-        var source = ActiveUsageSource;
-        var usage = Chat.ContextGauge.Usage;
-        if (source != _usageSource)
-        {
-            _usageSource = source;
-            usage.Clear();
-        }
-
-        var official = MolaGptProviderIds.IsMolaGptAccount(Chat.ActiveProvider?.Id);
-        var desktopWork = Chat.ActiveProvider?.Id == MolaGptProviderIds.LocalTools;
-        var cached = _molaGptStatus?.Status;
-        AccountSecurityStatus = official ? (desktopWork ? cached?.WorkSecurityStatus : cached?.SecurityStatus) : null;
-        Composer.CanResumeRestrictedWork = false;
-        if (!Settings.IsLoggedIn || _molaGptProxy is null || (!official && source == UsageSource.None)) return;
-
-        try
-        {
-            if (force || _molaGptStatus is not { } last || DateTimeOffset.UtcNow - last.ReadAt >= UsageFreshFor)
-            {
-                cached = await _molaGptProxy.FetchStatusAsync(ct);
-                if (version != _usageRefreshVersion) return;
-                if (cached is null)
-                {
-                    Settings.IsLoggedIn = false;
-                    AccountSecurityStatus = null;
-                    return;
-                }
-                _molaGptStatus = (cached, DateTimeOffset.UtcNow);
-                Settings.IsDonor = cached.IsDonor;
-            }
-            AccountSecurityStatus = official ? (desktopWork ? cached!.WorkSecurityStatus : cached!.SecurityStatus) : null;
-            Composer.CanResumeRestrictedWork = desktopWork && cached!.CanResumeWork;
-            if (source == UsageSource.MolaGpt)
-                usage.ShowCredits(cached!, Chat.ActiveModel?.Id ?? string.Empty);
-        }
-        catch (OperationCanceledException) { throw; }
-        catch (MolaGptAuthExpiredException)
-        {
-            if (version == _usageRefreshVersion) Settings.IsLoggedIn = false;
-        }
+        UpdateAccountUsage();
+        if (!Settings.IsLoggedIn || !MolaGptProviderIds.IsMolaGptAccount(Chat.ActiveProvider?.Id)) return;
+        try { await Settings.RefreshAccountStatusAsync(force, ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception) { }
+    }
+
+    private void UpdateAccountUsage()
+    {
+        var status = Settings.AccountStatus;
+        var providerId = Chat.ActiveProvider?.Id;
+        var work = providerId == MolaGptProviderIds.LocalTools;
+        AccountSecurityStatus = MolaGptProviderIds.IsMolaGptAccount(providerId)
+            ? (work ? status?.WorkSecurityStatus : status?.SecurityStatus) : null;
+        Composer.CanResumeRestrictedWork = work && status?.CanResumeWork == true;
+        if (Chat.CurrentMode == AppMode.Work && status is not null)
+            Chat.ContextGauge.Usage.ShowCredits(status, Chat.ActiveModel?.Id ?? string.Empty);
+        else
+            Chat.ContextGauge.Usage.Clear();
     }
 
     /// <summary>The drawer is offered whenever the conversation has anything in
@@ -729,54 +658,90 @@ public sealed partial class MainViewModel : ObservableObject
         Chat.StartDraftConversation();
     }
 
-    /// <summary>Switch the sidebar mode slider to BYOK / Chat / Work. Routes to each
-    /// mode's representative provider. When the target MolaGPT-account provider
-    /// isn't registered (user not signed in) it opens the login dialog instead.</summary>
-    [RelayCommand]
-    private void SwitchMode(string? mode)
+    private async Task SelectConversationAsync(string id)
     {
-        var target = mode?.ToLowerInvariant() == "chat" ? AppMode.Chat : AppMode.Work;
-        var fromMode = Chat.CurrentMode;
-
-        // "MolaGPT Work" is the unified local-agent capability. Clicking it while
-        // already in an agent mode (Work or BYOK) is a no-op — the specific wallet
-        // (MolaGPT account vs custom API key) is chosen in the model selector.
-        if (target == AppMode.Work && fromMode.IsLocalAgent())
+        var needsReload = IsImageWorkbenchVisible || Chat.IsConversationLoading
+            || _backgroundStreams?.HasTask(id) == true;
+        if (Composer.IsSending && Chat.ConversationId != id)
+            Composer.DetachToBackground();
+        if (ConversationList.FindItem(id)?.IsImageTask == true)
         {
-            // …unless the workbench is up, in which case leaving it is the whole
-            // point of the click. Neither segment is lit there, so both have to
-            // be a real exit; otherwise the one that happens to match
-            // Chat.CurrentMode silently does nothing, and which one that is
-            // depends on what was loaded before the workbench opened.
-            IsImageWorkbenchVisible = false;
+            Chat.BeginNavigation();
+            IsImageWorkbenchVisible = true;
+            ImageWorkbenchRequested?.Invoke(id);
             return;
         }
+        IsImageWorkbenchVisible = false;
+        // The first send in a draft only synchronizes the sidebar selection.
+        if (Chat.ConversationId == id && (!needsReload || Composer.IsSending)) return;
 
-        if (Chat.SwitchToMode(target, out var needsLogin))
+        var navigation = Chat.BeginNavigation(loading: true);
+        var background = _backgroundStreams?.GetTask(id);
+        try
         {
-            // Outside the boundary check for the same reason: clicking 「Chat」
-            // from the workbench while the chat behind it was already in Chat
-            // crosses nothing, and used to leave the user staring at the
-            // workbench wondering why the button was dead.
-            IsImageWorkbenchVisible = false;
-            if (fromMode.CrossesChatBoundary(target))
-            {
-                ConversationList.ClearSelection();
-                Chat.StartDraftConversation();
-            }
-            return;
+            Task Load() => Chat.LoadConversationAsync(id, _backgroundStreams?.HasTask(id) == true, navigation);
+            await Load();
+            if (navigation.IsCancellationRequested) return;
+            if (background is { IsInFlight: false })
+                await Load();
+            else if (background is null && _backgroundStreams?.HasTask(id) != true
+                && EnsureConversationDetailAsync is { } fetch
+                && await fetch(id, navigation))
+                await Load();
+            if (navigation.IsCancellationRequested) return;
+            Composer.ReattachFromBackground(id, navigation);
+            if (!navigation.IsCancellationRequested) Composer.RestoreUnsentInjections(id);
         }
+        catch (OperationCanceledException) when (navigation.IsCancellationRequested) { }
+        finally
+        {
+            Chat.CompleteNavigation(navigation);
+        }
+    }
 
-        // Falls through to login / settings without closing the workbench: a
-        // click that ends in a dialog did not switch anything, so it should not
-        // throw away where the user was.
+    public bool TrySwitchMode(AppMode mode)
+    {
+        // The Work segment represents the local agent, independent of its billing provider.
+        if (mode == AppMode.Work && Chat.ActiveProvider is not null && Chat.CurrentMode.IsLocalAgent())
+        {
+            CloseImageWorkbench();
+            return true;
+        }
+        if (Chat.ResolveModeTarget(mode) is not { } target) return false;
+        ApplyChatSelection(target.Provider, target.Model);
+        return true;
+    }
 
-        // Target not ready: surface login when that's the gap (Chat / shared Work
-        // need a signed-in account), otherwise open Settings to add a provider.
-        if (needsLogin)
-            LoginRequested?.Invoke();
+    public bool TrySelectChatModel(string providerId, string modelId, out bool startedDraft)
+    {
+        startedDraft = false;
+        if (Chat.ResolveUserModel(providerId, modelId) is not { } target) return false;
+        startedDraft = ApplyChatSelection(target.Provider, target.Model);
+        return true;
+    }
+
+    private bool ApplyChatSelection(IChatProvider provider, ProviderModel model)
+    {
+        var crossing = Chat.CurrentMode.CrossesChatBoundary(provider.ToAppMode()) || !Chat.CanSwitchToProvider(provider);
+        if (crossing) NewConversation();
+        Chat.ApplyModelChoice(provider, model);
+        CloseImageWorkbench();
+        return crossing;
+    }
+
+    public void LeaveHiddenAccountProviders()
+    {
+        if (!MolaGptProviderIds.IsMolaGptAccount(Chat.ActiveProvider?.Id) && !Chat.HasAccountConversation) return;
+        // Hiding account entries also leaves a stored Work conversation, even
+        // though a normal Work ↔ BYOK model change stays in that conversation.
+        if (Chat.HasAccountConversation) NewConversation();
+        if (Chat.ResolveModeTarget(AppMode.Byok) is { } target)
+            Chat.ApplyModelChoice(target.Provider, target.Model);
         else
-            SettingsRequested?.Invoke();
+        {
+            Chat.ActiveProvider = null;
+            Chat.ActiveModel = null;
+        }
     }
 
     /// <summary>
@@ -788,6 +753,7 @@ public sealed partial class MainViewModel : ObservableObject
     /// </summary>
     public void OpenImageWorkbenchTask()
     {
+        Chat.BeginNavigation();
         if (Composer.IsSending)
             Composer.DetachToBackground();
 
@@ -796,7 +762,13 @@ public sealed partial class MainViewModel : ObservableObject
         ImageWorkbenchRequested?.Invoke(null);
     }
 
-    public void CloseImageWorkbench() => IsImageWorkbenchVisible = false;
+    public void CloseImageWorkbench()
+    {
+        if (!IsImageWorkbenchVisible) return;
+        if (Chat.ConversationId is { } id) ConversationList.SelectById(id);
+        else ConversationList.ClearSelection();
+        IsImageWorkbenchVisible = false;
+    }
 
     [RelayCommand]
     private void OpenLogin() => LoginRequested?.Invoke();

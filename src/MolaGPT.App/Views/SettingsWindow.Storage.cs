@@ -12,14 +12,13 @@ namespace MolaGPT.App.Views;
 public partial class SettingsWindow
 {
     private const string StorageNotificationKey = "storage-cleanup";
-    internal StorageService? Storage { get; set; }
+    private readonly StorageService _storage;
     private StorageSnapshot? _storageSnapshot;
     private bool _showAllWorkspaces;
     private int _storageGeneration;
 
     private async Task RefreshStorageAsync()
     {
-        if (Storage is null) return;
         var generation = ++_storageGeneration;
         PART_StorageStatus.Text = "正在计算…";
         PART_StorageProgress.IsVisible = true;
@@ -28,7 +27,7 @@ public partial class SettingsWindow
         PART_RefreshStorage.IsEnabled = false;
         try
         {
-            var snapshot = await Task.Run(Storage.Scan);
+            var snapshot = await Task.Run(_storage.Scan);
             if (generation != _storageGeneration) return;
             _storageSnapshot = snapshot;
             _storageScan = Task.FromResult(snapshot.PythonUsage);
@@ -80,7 +79,7 @@ public partial class SettingsWindow
         runtime.Click += (_, _) => PART_Nav.SelectedItem = PART_SandboxNav;
         AddStorageRow(PART_StorageOtherRows, "运行环境", FormatBytes(snapshot.RuntimeBytes), runtime);
         var compact = StorageButton("整理");
-        compact.Click += async (_, _) => await RunStorageActionAsync(() => Storage!.CompactDatabase());
+        compact.Click += async (_, _) => await RunStorageActionAsync(() => _storage.CompactDatabase());
         AddStorageRow(PART_StorageOtherRows, "对话数据库", FormatBytes(snapshot.DatabaseBytes), compact);
         AddStorageRow(PART_StorageOtherRows, "附件与角色素材", FormatBytes(snapshot.MediaBytes));
         AddStorageRow(PART_StorageOtherRows, "其他文件", FormatBytes(snapshot.OtherBytes));
@@ -163,7 +162,6 @@ public partial class SettingsWindow
 
     private async Task DeleteWorkspaceAsync(ConversationWorkspace workspace)
     {
-        if (Storage is null) return;
         var confirmed = false;
         var viewRequested = false;
         var dialog = new MolaDialogWindow("删除对话文件？");
@@ -224,7 +222,7 @@ public partial class SettingsWindow
             return;
         }
         if (!confirmed) return;
-        await RunStorageActionAsync(() => Storage.DeleteWorkspace(workspace),
+        await RunStorageActionAsync(() => _storage.DeleteWorkspace(workspace),
             deleteConversation.IsChecked == true ? workspace.ConversationId : null);
     }
 
@@ -265,8 +263,7 @@ public partial class SettingsWindow
 
     private async Task CleanStorageAsync(IReadOnlyList<StorageCategory> categories)
     {
-        if (Storage is null) return;
-        await RunStorageActionAsync(() => Storage.Clean(categories));
+        await RunStorageActionAsync(() => _storage.Clean(categories));
     }
 
     private async Task RunStorageActionAsync(Func<DiskDeleteResult> action, string? deleteConversationId = null)
@@ -295,13 +292,13 @@ public partial class SettingsWindow
 
     private async void OnPurgeDeleted(object? sender, RoutedEventArgs e)
     {
-        if (Storage is null || !await Confirm.AskAsync(this, "彻底清除已删除的对话？",
+        if (!await Confirm.AskAsync(this, "彻底清除已删除的对话？",
                 "清除后无法恢复，对话生成的文件也会被删除。", "彻底清除")) return;
         PAGE_Storage.IsEnabled = false;
         _notifications?.Progress(StorageNotificationKey, "正在清除已删除的对话");
         try
         {
-            var result = await Task.Run(() => Storage.PurgeDeletedAsync(TimeSpan.FromSeconds(10), compact: true));
+            var result = await Task.Run(() => _storage.PurgeDeletedAsync(TimeSpan.FromSeconds(10), compact: true));
             var detail = $"已清除 {result.Removed} 个对话";
             if (result.Skipped > 0) detail += $"，{result.Skipped} 个暂未清除";
             if (result.Files.FilesSkipped > 0) detail += $"，{result.Files.FilesSkipped} 项文件未能删除";
@@ -327,7 +324,7 @@ public partial class SettingsWindow
     }
     private void OnOpenStorageFolder(object? sender, RoutedEventArgs e)
     {
-        if (Storage is not null) OpenStoragePath(Storage.DataDirectory);
+        OpenStoragePath(_storage.DataDirectory);
     }
     private void OpenStoragePath(string path)
     {

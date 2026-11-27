@@ -1,7 +1,7 @@
 using System.Text.Json.Nodes;
 using MolaGPT.Core.Chat.Tasks;
 
-namespace MolaGPT.Desktop.Services.Remote;
+namespace MolaGPT.App.Remote;
 
 public sealed partial class RemoteControlHost
 {

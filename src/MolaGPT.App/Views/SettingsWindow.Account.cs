@@ -4,6 +4,7 @@ using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
 using MolaGPT.Core.Auth;
+using MolaGPT.Core.Chat;
 
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Desktop.Services;
@@ -18,18 +19,13 @@ namespace MolaGPT.App.Views;
 /// </summary>
 public partial class SettingsWindow
 {
-    /// <summary>Usage is read from the server; re-opening the page within this
-    /// window shows what was fetched rather than asking again.</summary>
-    private static readonly TimeSpan UsageFreshFor = TimeSpan.FromSeconds(30);
-
     private readonly ObservableCollection<AccountModelRow> _accountModels = [];
-    private MolaGptProxyProvider? _proxy;
-    private DateTime? _usageFetchedAt;
     private int _usageRequest;
     private long _usageSessionGeneration = -1;
     private readonly DispatcherTimer _creditsRefreshTimer = new();
     private MolaGptCredits? _displayedCredits;
     private long? _expiredCreditsRefreshAt;
+    private bool _apiKeysEntryVisible;
 
     private void InitializeAccountPage()
     {
@@ -40,49 +36,45 @@ public partial class SettingsWindow
         PART_Logout.Click += OnLogoutClick;
         PART_AccountSecurity.Click += async (_, _) => await OpenAccountSecurityAsync();
         PART_AccountSecurityDetail.Click += async (_, _) => await OpenAccountSecurityAsync();
+        PART_AccountApiKeys.Click += async (_, _) => await OpenApiKeysAsync();
         PART_RefreshUsage.Click += (_, _) => _ = RefreshUsageAsync(force: true);
         PART_OpenSupport.Click += (_, _) => SupportRequested?.Invoke(this, EventArgs.Empty);
         _creditsRefreshTimer.Tick += (_, _) => UpdateCreditsRefresh();
         Closed += (_, _) => _creditsRefreshTimer.Stop();
-        Activated += (_, _) => RefreshAccountUi();
+        Activated += (_, _) =>
+        {
+            if (PART_AccountNav.IsSelected) RefreshAccountUi();
+        };
         PART_OpenGitHubStar.Click += (_, _) =>
         {
             _settings.GitHubStarPromptShown = true;
             CommunityLinks.TryOpenBrowser(CommunityLinks.GitHubUrl);
         };
-        RefreshAccountUi();
     }
 
-    internal void OpenAccountPage()
-    {
-        PART_Nav.SelectedItem = PART_AccountNav;
-        ShowSelectedPage();
-    }
+    internal void OpenAccountPage() => SelectSettingsPage(PART_AccountNav);
 
     internal void RefreshAccountUi()
     {
-        var loggedIn = _auth is null ? _settings.IsLoggedIn : !string.IsNullOrEmpty(_auth.CurrentJwt);
-        var username = _auth?.CurrentUsername ?? _settings.MolaGptUsername;
-        var generation = _auth?.SessionGeneration ?? 0;
+        var loggedIn = _settings.IsLoggedIn;
+        var username = _settings.MolaGptUsername;
+        var generation = _settings.AccountSessionGeneration;
         if (_usageSessionGeneration != generation)
         {
             _usageSessionGeneration = generation;
-            _usageFetchedAt = null;
             _usageRequest++;
             _accountModels.Clear();
             _displayedCredits = null;
             _expiredCreditsRefreshAt = null;
+            _apiKeysEntryVisible = false;
             _creditsRefreshTimer.Stop();
-            _settings.IsDonor = false;
             if (HasPageContent(PAGE_Account))
             {
                 PART_RefreshUsage.IsEnabled = true;
+                PART_CloudSyncStatus.Text = string.Empty;
                 UpdateAccountSecurityBanner(null);
             }
         }
-
-        _settings.IsLoggedIn = loggedIn;
-        _settings.MolaGptUsername = loggedIn ? username : null;
 
         var name = string.IsNullOrWhiteSpace(username) ? "MolaGPT 用户" : username;
         PART_AccountNavName.Text = loggedIn ? name : "登录 MolaGPT";
@@ -91,24 +83,23 @@ public partial class SettingsWindow
         PART_AccountStatus.Text = loggedIn ? name : "MolaGPT 账号";
         PART_AccountAction.IsVisible = !loggedIn;
         PART_AccountSecurity.IsVisible = loggedIn;
+        PART_AccountApiKeys.IsVisible = loggedIn && _apiKeysEntryVisible;
         PART_AccountBadgeDot.IsVisible = loggedIn;
-        PART_UsageSection.IsVisible = loggedIn && _proxy is not null;
+        PART_UsageSection.IsVisible = loggedIn && _settings.CanReadAccountStatus;
         PART_Logout.IsVisible = loggedIn && _auth is not null;
 
         if (loggedIn)
         {
             // The badge is filled in by the usage fetch; until then it only says
             // the session is live.
-            if (_usageFetchedAt is null) PART_AccountDetail.Text = "已登录";
+            if (_settings.AccountStatus is null) PART_AccountDetail.Text = "已登录";
             if (PART_AccountNav.IsSelected) _ = RefreshUsageAsync(force: false);
             return;
         }
 
         PART_AccountDetail.Text = "登录后可在桌面端使用 MolaGPT 的模型、对话同步与个性化记忆。";
         UpdateAccountSecurityBanner(null);
-        _settings.IsDonor = false;
         PART_CloudSyncStatus.Text = string.Empty;
-        _usageFetchedAt = null;
         _usageRequest++;
         _displayedCredits = null;
         _creditsRefreshTimer.Stop();
@@ -117,31 +108,30 @@ public partial class SettingsWindow
 
     private async Task RefreshUsageAsync(bool force)
     {
-        if (_proxy is null || !_settings.IsLoggedIn) return;
-        if (!force && _usageFetchedAt is { } at && DateTime.UtcNow - at < UsageFreshFor) return;
+        if (!_settings.CanReadAccountStatus || !_settings.IsLoggedIn || !HasPageContent(PAGE_Account)) return;
+        if (!force && !PART_RefreshUsage.IsEnabled) return;
 
         var request = ++_usageRequest;
-        var generation = _auth?.SessionGeneration ?? 0;
-        _usageFetchedAt = DateTime.UtcNow;
+        var generation = _settings.AccountSessionGeneration;
         PART_RefreshUsage.IsEnabled = false;
         if (_accountModels.Count == 0) ShowUsageStatus("正在加载用量…");
 
         MolaGptStatus? status;
         try
         {
-            status = await _proxy.FetchStatusAsync();
+            status = await _settings.RefreshAccountStatusAsync(force);
         }
-        catch (MolaGptAuthExpiredException)
+        catch (OperationCanceledException) { return; }
+        catch (Exception ex) when (ex is MolaGptAuthExpiredException
+            or ChatRequestException { Error.InvalidatesAccountSession: true })
         {
-            if (request != _usageRequest || generation != (_auth?.SessionGeneration ?? 0)) return;
+            if (request != _usageRequest || generation != _settings.AccountSessionGeneration) return;
             ShowUsageEmpty("登录已过期，请重新登录。");
             return;
         }
         catch (Exception ex)
         {
-            if (request != _usageRequest || generation != (_auth?.SessionGeneration ?? 0)) return;
-            // Let the next visit try again instead of holding a failure for 30s.
-            _usageFetchedAt = null;
+            if (request != _usageRequest || generation != _settings.AccountSessionGeneration) return;
             ShowUsageEmpty($"无法获取用量：{ex.Message}");
             return;
         }
@@ -150,22 +140,11 @@ public partial class SettingsWindow
             if (request == _usageRequest) PART_RefreshUsage.IsEnabled = true;
         }
 
-        if (request != _usageRequest || generation != (_auth?.SessionGeneration ?? 0)) return;
-        if (status is null)
-        {
-            ShowUsageEmpty("尚未登录。");
-            return;
-        }
-
-        if (!string.IsNullOrEmpty(status.Username))
-        {
-            PART_AccountStatus.Text = status.Username;
-            PART_AccountNavName.Text = status.Username;
-        }
-
-        _settings.IsDonor = status.IsDonor;
+        if (status is null || request != _usageRequest || generation != _settings.AccountSessionGeneration) return;
         PART_AccountDetail.Text = status.Unlimited ? "无限制账户" : status.IsDonor ? "支持者" : "已注册用户";
         UpdateAccountSecurityBanner(status.WorkSecurityStatus);
+        _apiKeysEntryVisible = status.ApiAccessState is not null;
+        PART_AccountApiKeys.IsVisible = _settings.IsLoggedIn && _apiKeysEntryVisible;
         if (status.Membership is { } membership && !status.Unlimited)
             PART_AccountDetail.Text = membership.TierLabel
                 + (membership.ExpiryLabel.Length == 0 ? string.Empty : " · " + membership.ExpiryLabel);
@@ -356,6 +335,16 @@ public partial class SettingsWindow
         catch (Exception) { PART_AccountDetail.Text = "暂时无法打开账户安全，请稍后重试。"; }
     }
 
+    private async Task OpenApiKeysAsync()
+    {
+        if (_auth is null) return;
+        // The key manager needs a full web session, which the handoff ticket mints.
+        // Where the endpoint is not deployed yet the plain page still works after a
+        // normal web sign-in, so it is the fallback rather than an error.
+        try { CommunityLinks.TryOpenBrowser(await _auth.CreateApiKeysLinkAsync()); }
+        catch (Exception) { CommunityLinks.TryOpenBrowser(MolaGptAuthService.ApiKeysUrl); }
+    }
+
     private void UpdateAccountSecurityBanner(string? securityStatus)
     {
         var hasRestriction = !string.IsNullOrWhiteSpace(securityStatus);
@@ -395,6 +384,7 @@ public partial class SettingsWindow
     private async void OnLogoutClick(object? sender, RoutedEventArgs e)
     {
         if (_auth is null) return;
+        var generation = _auth.SessionGeneration;
         var cloudSyncEnabled = _settings.SyncConversations;
         var confirmed = await Confirm.AskAsync(
             this,
@@ -403,19 +393,17 @@ public partial class SettingsWindow
                 ? "退出后将清除本机缓存的 MolaGPT Chat 聊天记录。"
                 : "退出后将无法使用 MolaGPT 模型，本地聊天记录仍会保留。",
             "退出登录");
-        if (!confirmed) return;
+        if (!confirmed || generation != _auth.SessionGeneration) return;
 
-        // LoggedOut reaches MainWindow, which refreshes the title bar and calls
-        // back into RefreshAccountUi; calling it here too keeps this page right
-        // even when nothing is listening.
         PART_Logout.IsEnabled = false;
         try
         {
-            if (!await _auth.LogoutRemoteAsync())
-                _notifications?.Warning("会话撤销未确认", "撤销失败。");
-            if (cloudSyncEnabled && string.IsNullOrWhiteSpace(_auth.CurrentJwt))
+            var revoked = await _auth.LogoutRemoteAsync();
+            var session = _auth.ReadSession();
+            if (session.IsLoggedIn) return;
+            if (!revoked) _notifications?.Warning("会话撤销未确认", "撤销失败。");
+            if (cloudSyncEnabled)
                 _cloudSync?.CleanupLocalOfficialHistoryForLogout();
-            RefreshAccountUi();
         }
         finally
         {

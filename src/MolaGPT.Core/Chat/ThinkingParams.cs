@@ -54,6 +54,10 @@ internal static class ThinkingParams
                 body["thinking"] = new { type = "enabled" };
                 body["reasoning_effort"] = request.ReasoningEffort ?? "high";
             }
+            else if (request.ThinkingParamKind == ThinkingParamKind.KimiToggle)
+            {
+                body["thinking"] = new { type = "enabled" };
+            }
             else if (request.ThinkingParamKind == ThinkingParamKind.QwenThinkingBudget)
             {
                 body["enable_thinking"] = true;
@@ -107,11 +111,11 @@ internal static class ThinkingParams
 
         if (responses)
         {
-            if (AcceptsNoneEffort(config)) body["reasoning"] = new { effort = "none" };
+            if (AcceptsNoneEffort(config) || SupportsNativeResponsesOff(request.ModelId, endpoint)) body["reasoning"] = new { effort = "none" };
             return;
         }
 
-        if (request.ThinkingParamKind == ThinkingParamKind.DeepSeekV4)
+        if (request.ThinkingParamKind is ThinkingParamKind.DeepSeekV4 or ThinkingParamKind.KimiToggle)
             body["thinking"] = new { type = "disabled" };
         else if (request.ThinkingParamKind is ThinkingParamKind.QwenThinkingBudget or ThinkingParamKind.QwenReasoningEffort)
             body["enable_thinking"] = false;
@@ -122,6 +126,10 @@ internal static class ThinkingParams
             if (AcceptsNoneEffort(config)) body["reasoning_effort"] = "none";
         }
     }
+
+    internal static bool SupportsNativeResponsesOff(string modelId, string? endpoint) =>
+        ThinkingParamKindInference.OfficialPresetFor(modelId, endpoint, null) is
+            { Mandatory: false, Kind: ThinkingParamKind.DeepSeekV4 or ThinkingParamKind.QwenReasoningEffort };
 
     /// <summary>
     /// Whether <c>none</c> is in this model's effort vocabulary.

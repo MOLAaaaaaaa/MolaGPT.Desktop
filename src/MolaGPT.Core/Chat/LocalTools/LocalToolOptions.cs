@@ -555,13 +555,8 @@ public static class ImageApiFormat
     public static bool IsChatImage(string? format) =>
         string.Equals(format, OpenAiChatImage, StringComparison.OrdinalIgnoreCase);
 
-    public static bool IsOpenRouter(string? baseUrl) =>
-        Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)
-        && (uri.Host.Equals("openrouter.ai", StringComparison.OrdinalIgnoreCase)
-            || uri.Host.EndsWith(".openrouter.ai", StringComparison.OrdinalIgnoreCase));
-
-    public static string DefaultImagesPath(string? providerType, string? baseUrl) =>
-        IsOpenRouter(baseUrl) ? "v1/images" : "v1/images/generations";
+    public static string DefaultImagesPath(string? baseUrl) =>
+        OpenRouterAttribution.IsOpenRouterHost(baseUrl) ? "v1/images" : "v1/images/generations";
 
     public static string DefaultChatPath(string? providerType) =>
         providerType == "gemini" ? "models/{model}:generateContent" : "v1/chat/completions";

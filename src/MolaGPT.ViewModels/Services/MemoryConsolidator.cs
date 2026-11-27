@@ -203,7 +203,7 @@ public sealed class MemoryConsolidator
 
     private async Task<(int Added, int Candidates, bool Failed, bool Looked)> ConsolidateConversationAsync(
         string conversationId,
-        (OneShotTarget Target, string ModelId, ThinkingParamKind? Thinking) resolved,
+        (OneShotTarget Target, ProviderModel Model) resolved,
         long resetAt,
         CancellationToken ct)
     {
@@ -227,12 +227,13 @@ public sealed class MemoryConsolidator
         try
         {
             gateReply = await client.CompleteAsync(
-                resolved.Target, resolved.ModelId,
+                resolved.Target, resolved.Model,
                 [
                     new ChatMessage(ChatMessage.RoleSystem, GatePrompt),
                     new ChatMessage(ChatMessage.RoleUser, transcript)
                 ],
-                maxTokens: 32, useThinking: false, thinkingKind: resolved.Thinking, ct: ct)
+                // Mandatory reasoning shares the output budget with the short gate result.
+                maxTokens: resolved.Model.ThinkingConfig?.Mandatory == true ? 1024 : 32, useThinking: false, ct: ct)
                 .ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -255,12 +256,12 @@ public sealed class MemoryConsolidator
         try
         {
             extractReply = await client.CompleteAsync(
-                resolved.Target, resolved.ModelId,
+                resolved.Target, resolved.Model,
                 [
                     new ChatMessage(ChatMessage.RoleSystem, ExtractPrompt(_memory.Entries(), _memory.Topics())),
                     new ChatMessage(ChatMessage.RoleUser, transcript)
                 ],
-                maxTokens: 1024, useThinking: false, thinkingKind: resolved.Thinking, ct: ct)
+                maxTokens: 1024, useThinking: false, ct: ct)
                 .ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -384,7 +385,7 @@ public sealed class MemoryConsolidator
         return matches.Length == 1 ? matches[0] : null;
     }
 
-    private (OneShotTarget Target, string ModelId, ThinkingParamKind? Thinking)? ResolveTarget()
+    private (OneShotTarget Target, ProviderModel Model)? ResolveTarget()
     {
         var key = _settings.MemoryModelKey;
         if (string.IsNullOrWhiteSpace(key)) return null;
@@ -394,7 +395,7 @@ public sealed class MemoryConsolidator
         if (_providers.FindModel(parts[0], parts[1]) is not { } found) return null;
         if (found.Provider is not IOneShotTarget oneShot) return null;
         if (oneShot.DescribeOneShot(found.Model.Id) is not { } target) return null;
-        return (target, found.Model.Id, found.Model.ThinkingConfig?.Kind);
+        return (target, found.Model);
     }
 
     private static string Render(MemoryWindow window)
@@ -447,7 +448,7 @@ public sealed class MemoryConsolidator
     }
 
     private async Task<int> OrganizeTopicsAsync(
-        (OneShotTarget Target, string ModelId, ThinkingParamKind? Thinking) resolved, CancellationToken ct)
+        (OneShotTarget Target, ProviderModel Model) resolved, CancellationToken ct)
     {
         var entries = _memory.Entries().Where(entry => entry.TopicId is null).ToArray();
         if (entries.Length == 0) return 0;
@@ -458,10 +459,10 @@ public sealed class MemoryConsolidator
         string reply;
         try
         {
-            reply = await _clientFactory().CompleteAsync(resolved.Target, resolved.ModelId,
+            reply = await _clientFactory().CompleteAsync(resolved.Target, resolved.Model,
                 [new ChatMessage(ChatMessage.RoleSystem, prompt),
                  new ChatMessage(ChatMessage.RoleUser, string.Join('\n', entries.Select(entry => $"[{entry.Id}] {entry.Text}")))],
-                maxTokens: 4096, useThinking: false, thinkingKind: resolved.Thinking, ct: ct).ConfigureAwait(false);
+                maxTokens: 4096, useThinking: false, ct: ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { return -1; }
         var assignments = MemoryTopicParser.Parse(reply);

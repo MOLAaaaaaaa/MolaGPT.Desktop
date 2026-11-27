@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using MolaGPT.Core.Memory;
+using MolaGPT.Core.Models;
 
 namespace MolaGPT.ViewModels;
 
@@ -80,7 +81,7 @@ public sealed partial class SettingsViewModel
         try
         {
             MemoryProviderModels.Clear();
-            foreach (var provider in Providers.Where(p => p.Enabled && !IsImagePurpose(p.Purpose)))
+            foreach (var provider in Providers.Where(p => p.Enabled && !ProviderPurpose.IsImage(p.Purpose)))
             {
                 foreach (var model in provider.Models)
                 {

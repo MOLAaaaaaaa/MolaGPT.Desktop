@@ -38,9 +38,9 @@ public static class StorySummaryService
             previousSummary = current.Summary,
             messages = window.Select(row => new { id = row.Id, role = row.Role, content = row.Content })
         });
-        var response = await client.CompleteAsync(target, model.Id,
+        var response = await client.CompleteAsync(target, model,
             [new ChatMessage(ChatMessage.RoleSystem, prompt), new ChatMessage(ChatMessage.RoleUser, payload)],
-            maxTokens: 2048, useThinking: false, thinkingKind: model.ThinkingConfig?.Kind, ct: ct);
+            maxTokens: 2048, useThinking: false, ct: ct);
         response = response.Trim();
         if (response.StartsWith("```", StringComparison.Ordinal) && response.EndsWith("```", StringComparison.Ordinal))
             response = response[(response.IndexOf('\n') + 1)..^3].Trim();

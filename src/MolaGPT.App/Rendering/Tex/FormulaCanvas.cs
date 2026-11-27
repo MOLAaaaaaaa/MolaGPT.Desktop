@@ -140,8 +140,6 @@ public sealed class FormulaCanvas : Control
             return;
         }
 
-        latex = LatexNormalizer.ForAvaloniaMath(latex);
-
         if (_formula is not null
             && string.Equals(_builtFrom, latex, StringComparison.Ordinal)
             && System.Math.Abs(_builtSize - size) < 0.01)

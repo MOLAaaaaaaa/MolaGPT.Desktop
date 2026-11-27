@@ -57,10 +57,9 @@ public sealed class AttachmentThumbnail : Image
 
         try
         {
-            using var stream = new MemoryStream(bytes);
             // Decoded to the chip size, not the source size: a 12MP photo behind
             // a 32px square is 48MB of surface for 1024 visible pixels.
-            _owned = Bitmap.DecodeToWidth(stream, 96, BitmapInterpolationMode.HighQuality);
+            _owned = ImageSourceLoader.Decode(bytes, 96);
             Source = _owned;
         }
         catch

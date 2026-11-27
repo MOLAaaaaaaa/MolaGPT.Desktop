@@ -70,42 +70,21 @@ internal static class WebToolPresentation
         IDictionary<string, ToolCallViewModel> tools, string id, bool done, bool pending)
     {
         var unit = markup.Unit;
-        var name = unit.ToolName ?? (unit.Kind switch
-        {
-            MarkupUnitKind.ToolStatus when unit.Tag?.Contains("tool-search-blockquote", StringComparison.OrdinalIgnoreCase) == true => "search_web",
-            MarkupUnitKind.DsAnalysis when unit.Tag == "python" => "execute_python_code",
-            MarkupUnitKind.SteelStep => "steel_browser",
-            MarkupUnitKind.ImagePendingSkeleton or MarkupUnitKind.ImageErrorCard => "generate_image",
-            _ => unit.Tag ?? "tool"
-        });
-        if (!tools.TryGetValue(id, out var tool)) tools[id] = tool = new ToolCallViewModel(id, name);
-        tool.Name = name;
         var structured = unit.ToolCallId is { } originalId
             ? message.ToolCalls.FirstOrDefault(item => item.Id == originalId) : null;
-        tool.ArgumentsJson = structured?.ArgumentsJson;
-        tool.ResultPreviewJson = structured?.ResultPreviewJson;
-        tool.Provider = structured?.Provider;
+        if (structured is not null)
+        {
+            tools[id] = structured;
+            return structured;
+        }
+        var name = MolaGptMarkupSplitter.ToolName(unit);
+        if (!tools.TryGetValue(id, out var tool)) tools[id] = tool = new ToolCallViewModel(id, name);
+        tool.Name = name;
         var label = pending ? unit.RunningText : unit.StatusText;
         tool.Label = label ?? (unit.Kind == MarkupUnitKind.ImageErrorCard ? unit.Tag : unit.Kind == MarkupUnitKind.DsAnalysis ? null : unit.Inner)
             ?? (unit.Kind == MarkupUnitKind.ImagePendingSkeleton ? "正在生成图片" : "工具调用");
-        tool.Detail = unit.ErrorText ?? (unit.Kind == MarkupUnitKind.ImageErrorCard ? unit.Inner : unit.Metadata) ?? structured?.Detail;
-        var phase = unit.ToolCallId is null && unit.Kind == MarkupUnitKind.DsAnalysis
-            ? unit.AnalysisPhase switch
-            {
-                "error" => "error",
-                "cancelled" => "cancelled",
-                _ => unit.IsClosed ? "completed" : done ? "cancelled" : "running"
-            }
-            : unit.ToolVariant switch
-            {
-                MolaGptMarkupSplitter.Variant.Completed or MolaGptMarkupSplitter.Variant.Success => "completed",
-                MolaGptMarkupSplitter.Variant.Error => "error",
-                MolaGptMarkupSplitter.Variant.Cancelled => "cancelled",
-                MolaGptMarkupSplitter.Variant.Info => "info",
-                MolaGptMarkupSplitter.Variant.None => done ? "completed" : "running",
-                _ => done ? "cancelled" : "running"
-            };
-        tool.Status = pending ? "running" : phase;
+        tool.Detail = unit.ErrorText ?? (unit.Kind == MarkupUnitKind.ImageErrorCard ? unit.Inner : unit.Metadata);
+        tool.Status = pending ? "running" : MolaGptMarkupSplitter.ToolPhase(unit, done);
         return tool;
     }
 }

@@ -18,11 +18,15 @@ using MolaGPT.Core.Chat.Agents.Relay;
 using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Remote;
+using MolaGPT.Core.Runtime;
+using MolaGPT.Desktop.Services;
+using MolaGPT.Desktop.Services.Remote;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels;
+using MolaGPT.ViewModels.Services;
 
-namespace MolaGPT.Desktop.Services.Remote;
+namespace MolaGPT.App.Remote;
 
 public enum RemoteControlState
 {
@@ -83,6 +87,19 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
     private readonly RelayCommandJournal _journal;
     private readonly AnonApiClient? _anonApi;
     private readonly IToolGrantStore? _grantStore;
+    private readonly BackgroundStreamService? _backgroundStreams;
+    private readonly IActivityTracker _activity;
+    private static readonly TimeSpan RemoteInteractiveCooldown = TimeSpan.FromSeconds(15);
+    private readonly Action<string, string> _onMessageWritten;
+    private readonly System.ComponentModel.PropertyChangedEventHandler _onComposerPropertyChanged;
+    private readonly System.ComponentModel.PropertyChangedEventHandler _onChatPropertyChanged;
+    private readonly EventHandler<string>? _onStreamRegisteredOrEnded;
+    private readonly EventHandler<BackgroundStreamCompletedEventArgs>? _onStreamCompleted;
+    private readonly EventHandler<BackgroundStreamFailedEventArgs>? _onStreamFailed;
+    private readonly Action<MolaGPT.Core.Chat.Tasks.AgentTask>? _onAgentTaskChanged;
+    private volatile bool _composerSending;
+    private int _stateSyncDirty = 1;
+    private bool _disposed;
 
     private readonly object _gate = new();
     // peer -> conversation -> subscription
@@ -141,11 +158,14 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
         Func<Func<Task>, Task> onUi,
         string machineId,
         string machineName,
+        string dataRoot,
         Action<string>? log = null,
         string? baseUrl = null,
         IWebProxy? proxy = null,
         AnonApiClient? anonApi = null,
-        IToolGrantStore? grantStore = null)
+        IToolGrantStore? grantStore = null,
+        BackgroundStreamService? backgroundStreams = null,
+        IActivityTracker? activity = null)
     {
         _http = http;
         _proxy = proxy;
@@ -164,36 +184,63 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
         _base = baseUrl ?? "https://chatgpt.wljay.cn/v2";
         _anonApi = anonApi;
         _grantStore = grantStore;
+        _backgroundStreams = backgroundStreams;
+        _activity = activity ?? NullActivityTracker.Instance;
+        _composerSending = composer.IsSending;
         _appVersion = typeof(RemoteControlHost).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion?.Split('+')[0] ?? "0";
-        var dataRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MolaGPT");
         var journalDirectory = Path.Combine(dataRoot, "remote-command-journal");
         PruneJournal(journalDirectory);
         _journal = new RelayCommandJournal(journalDirectory);
         _uploadDirectory = Path.Combine(dataRoot, "remote-uploads");
         ClearUploadDirectory();
 
-        _messages.MessageWritten += (conversationId, messageId) =>
+        _onMessageWritten = (conversationId, messageId) =>
         {
             if (HasSubscribers(conversationId)) _writes.Writer.TryWrite((conversationId, messageId));
         };
+        _messages.MessageWritten += _onMessageWritten;
         _messages.ConversationRewritten += OnConversationRewritten;
         _conversations.TimelineChanged += OnConversationRewritten;
         _conversations.ConversationChanged += OnConversationChanged;
         // Switches flipped on the desktop reach a phone watching the same conversation.
-        _composer.PropertyChanged += (_, e) =>
+        _onComposerPropertyChanged = (_, e) =>
         {
+            if (e.PropertyName == nameof(ComposerViewModel.IsSending))
+            {
+                _composerSending = _composer.IsSending;
+                MarkStateSyncNeeded();
+            }
             if (e.PropertyName is nameof(ComposerViewModel.EnableNetwork) or nameof(ComposerViewModel.EnableThinking)
                 or nameof(ComposerViewModel.ReasoningEffort))
                 PushSettingsOnScreen();
             // The approval mode is one for the whole app, so every watched conversation hears it.
             if (e.PropertyName == nameof(ComposerViewModel.ApprovalMode)) PushSettingsToAll();
         };
-        _chat.PropertyChanged += (_, e) =>
+        _composer.PropertyChanged += _onComposerPropertyChanged;
+        _onChatPropertyChanged = (_, e) =>
         {
             if (e.PropertyName == nameof(ChatViewModel.ActiveModel)) PushSettingsOnScreen();
         };
+        _chat.PropertyChanged += _onChatPropertyChanged;
+        if (_backgroundStreams is not null)
+        {
+            _onStreamRegisteredOrEnded = (_, _) => MarkStateSyncNeeded();
+            _onStreamCompleted = (_, _) => MarkStateSyncNeeded();
+            _onStreamFailed = (_, _) => MarkStateSyncNeeded();
+            _backgroundStreams.TaskRegistered += _onStreamRegisteredOrEnded;
+            _backgroundStreams.TaskEnded += _onStreamRegisteredOrEnded;
+            _backgroundStreams.TaskCompleted += _onStreamCompleted;
+            _backgroundStreams.TaskFailed += _onStreamFailed;
+        }
+        if (_chat.Tasks is { } tasks)
+        {
+            _onAgentTaskChanged = _ => MarkStateSyncNeeded();
+            tasks.Changed += _onAgentTaskChanged;
+        }
     }
+
+    private void MarkStateSyncNeeded() => Interlocked.Exchange(ref _stateSyncDirty, 1);
 
     /// <summary>The better of the two links: online if either is.</summary>
     public RemoteControlState State
@@ -243,7 +290,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
     {
         lock (_gate)
         {
-            if (link.Run is not null) return;
+            if (_disposed || link.Run is not null) return;
             link.Cts = new CancellationTokenSource();
             var token = link.Cts.Token;
             link.Run = Task.Run(() => SocketLoopAsync(link, token));
@@ -253,15 +300,9 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
                 var core = _coreCts.Token;
                 _coreRun = Task.Run(() => RunCoreAsync(core));
             }
+            _approvalRelay.Attach(this);
         }
-        _approvalRelay.Attach(this);
         SetLinkState(link, RemoteControlState.Connecting);
-    }
-
-    public async Task StopAsync()
-    {
-        await StopAccountAsync().ConfigureAwait(false);
-        await StopAnonymousAsync().ConfigureAwait(false);
     }
 
     public async Task StopAccountAsync()
@@ -318,7 +359,34 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
         return true;
     }
 
-    public async ValueTask DisposeAsync() => await StopAsync().ConfigureAwait(false);
+    public async ValueTask DisposeAsync()
+    {
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+        }
+        _messages.MessageWritten -= _onMessageWritten;
+        _messages.ConversationRewritten -= OnConversationRewritten;
+        _conversations.TimelineChanged -= OnConversationRewritten;
+        _conversations.ConversationChanged -= OnConversationChanged;
+        _composer.PropertyChanged -= _onComposerPropertyChanged;
+        _chat.PropertyChanged -= _onChatPropertyChanged;
+        if (_backgroundStreams is not null)
+        {
+            if (_onStreamRegisteredOrEnded is not null)
+            {
+                _backgroundStreams.TaskRegistered -= _onStreamRegisteredOrEnded;
+                _backgroundStreams.TaskEnded -= _onStreamRegisteredOrEnded;
+            }
+            if (_onStreamCompleted is not null) _backgroundStreams.TaskCompleted -= _onStreamCompleted;
+            if (_onStreamFailed is not null) _backgroundStreams.TaskFailed -= _onStreamFailed;
+        }
+        if (_chat.Tasks is { } tasks && _onAgentTaskChanged is not null)
+            tasks.Changed -= _onAgentTaskChanged;
+        await StopAccountAsync().ConfigureAwait(false);
+        await StopAnonymousAsync().ConfigureAwait(false);
+    }
 
     private async Task RunCoreAsync(CancellationToken ct)
     {
@@ -333,6 +401,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
     {
         lock (_gate)
         {
+            if (_disposed && state != RemoteControlState.Off) return;
             if (link.State == state) return;
             var before = CombinedState();
             link.State = state;
@@ -423,6 +492,8 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
                     _outboxDroppedPeers.RemoveWhere(peer => IsOn(link, peer));
                 }
                 SetLinkState(link, RemoteControlState.Online);
+                MarkStateSyncNeeded();
+                ScheduleList(TimeSpan.Zero);
                 Log(link.Anonymous ? "anon connected" : "connected");
                 var writer = WriteLoopAsync(link, socket, outbox.Reader, connection.Token);
                 renewed = await ReadLoopAsync(link, socket, ct).ConfigureAwait(false);
@@ -640,6 +711,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
         if (firstPeer) ConnectedPhonesChanged?.Invoke();
         await queue.WaitAsync().ConfigureAwait(false);
         string? opened = null;
+        IDisposable? rpcLease = null;
         try
         {
             JsonNode? data;
@@ -649,6 +721,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             if (sessionPairId is null && op == "pair_account")
             {
                 // The relay only forwards terminal requests from this desktop's account.
+                rpcLease = _activity.Acquire("remote-pair-account");
                 data = await HandleAccountPairAsync(args).ConfigureAwait(false);
             }
             else if (sessionPairId is null && op == "pair")
@@ -659,6 +732,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             else
             {
                 var pairId = sessionPairId ?? Authenticate(body, id, op);
+                rpcLease = _activity.Acquire("remote-rpc");
                 (data, opened) = op switch
                 {
                     "hello" => (Hello(), null),
@@ -687,6 +761,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             SendToPeer(peer, new JsonObject { ["v"] = Protocol, ["re"] = id, ["ok"] = true, ["data"] = data });
             if (opened is not null) FinishOpening(peer, opened);
             if (op == "agent_open") FinishAgentOpen(peer);
+            _activity.Pulse("remote-interactive", RemoteInteractiveCooldown);
         }
         catch (RemoteError error)
         {
@@ -706,6 +781,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
         }
         finally
         {
+            rpcLease?.Dispose();
             queue.Release();
         }
     }
@@ -771,6 +847,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             if (_agentWatches.TryGetValue(peer, out var watch) && watch.ConversationId == conversationId)
                 _agentWatches.Remove(peer);
         }
+        MarkStateSyncNeeded();
         try
         {
             var info = await DescribeAsync(conversationId).ConfigureAwait(false);
@@ -991,9 +1068,39 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             PushAgentActivity();
 
             HashSet<string> watched;
+            bool hasSubscriptions;
+            bool anyTrackedBusy = false;
+            bool hasRemoteTurns;
             lock (_gate)
+            {
+                hasSubscriptions = _subscriptions.Values.Any(mine => mine.Count > 0);
+                hasRemoteTurns = _remoteTurns.Count > 0;
                 watched = _subscriptions.Values.SelectMany(mine => mine.Keys).Concat(_listed).ToHashSet(StringComparer.Ordinal);
+                if (_busy.Count > 0)
+                {
+                    List<string>? stale = null;
+                    foreach (var id in _busy.Keys)
+                    {
+                        if (!watched.Contains(id)) (stale ??= []).Add(id);
+                    }
+                    if (stale is not null)
+                        foreach (var id in stale) _busy.Remove(id);
+                }
+                foreach (var id in watched)
+                {
+                    if (_busy.TryGetValue(id, out var isBusy) && isBusy)
+                    {
+                        anyTrackedBusy = true;
+                        break;
+                    }
+                }
+            }
             if (watched.Count == 0) continue;
+
+            var dirty = Interlocked.Exchange(ref _stateSyncDirty, 0) != 0;
+            var hasBackgroundStreams = _backgroundStreams is null || _backgroundStreams.ActiveTaskCount > 0;
+            if (!dirty && !hasSubscriptions && !anyTrackedBusy && !hasRemoteTurns && !_composerSending && !hasBackgroundStreams)
+                continue;
 
             var now = new Dictionary<string, bool>(StringComparer.Ordinal);
             try
@@ -1006,6 +1113,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             }
             catch (Exception ex)
             {
+                MarkStateSyncNeeded();
                 Log($"state: {ex.Message}");
                 continue;
             }
@@ -1150,6 +1258,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
     private void TrackRemoteTurn(string conversationId, Task completion)
     {
         lock (_gate) _remoteTurns[conversationId] = _remoteTurns.GetValueOrDefault(conversationId) + 1;
+        MarkStateSyncNeeded();
         completion.ContinueWith(_ =>
         {
             lock (_gate)
@@ -1158,6 +1267,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
                 if (left <= 0) _remoteTurns.Remove(conversationId);
                 else _remoteTurns[conversationId] = left;
             }
+            MarkStateSyncNeeded();
         }, TaskScheduler.Default);
     }
 
@@ -1810,6 +1920,7 @@ public sealed partial class RemoteControlHost : IRemoteApprovalChannel, IAsyncDi
             return Task.CompletedTask;
         }).ConfigureAwait(false);
         lock (_gate) _listed = listed;
+        MarkStateSyncNeeded();
 
         if (anonymous)
         {

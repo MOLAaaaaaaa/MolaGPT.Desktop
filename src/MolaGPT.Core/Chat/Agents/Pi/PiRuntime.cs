@@ -1,3 +1,5 @@
+using MolaGPT.Core.Runtime;
+
 namespace MolaGPT.Core.Chat.Agents.Pi;
 
 /// <summary>
@@ -37,6 +39,7 @@ public sealed class PiRuntime : IAsyncDisposable
 
     private readonly PiWorkLlmShim _shim;
     private readonly PiWorkToolBridge _bridge;
+    private readonly IActivityTracker _activity;
     private readonly Action<string>? _log;
     private readonly int _maxSidecars;
 
@@ -64,9 +67,13 @@ public sealed class PiRuntime : IAsyncDisposable
         get { lock (_gate) return _entries.Count; }
     }
 
-    public PiRuntime(Action<string>? log = null, int maxSidecars = DefaultMaxSidecars)
+    public PiRuntime(
+        Action<string>? log = null,
+        int maxSidecars = DefaultMaxSidecars,
+        IActivityTracker? activity = null)
     {
         _log = log;
+        _activity = activity ?? NullActivityTracker.Instance;
         _maxSidecars = Math.Max(1, maxSidecars);
         _slots = new SemaphoreSlim(_maxSidecars, _maxSidecars);
         var subagentSlots = Math.Min(
@@ -75,7 +82,7 @@ public sealed class PiRuntime : IAsyncDisposable
         var turnSlots = _maxSidecars - subagentSlots;
         _turnSlots = new SemaphoreSlim(turnSlots, turnSlots);
         _subagentSlots = subagentSlots == 0 ? null : new SemaphoreSlim(subagentSlots, subagentSlots);
-        _shim = new PiWorkLlmShim(log);
+        _shim = new PiWorkLlmShim(log, _maxSidecars);
         _bridge = new PiWorkToolBridge(log);
         _idleSweep = new Timer(_ => SweepIdle(), null, IdleSweepInterval, IdleSweepInterval);
     }
@@ -143,81 +150,91 @@ public sealed class PiRuntime : IAsyncDisposable
             ? _subagentSlots ?? throw new InvalidOperationException("当前 Pi 运行时没有可用的子 Agent 槽位。")
             : _turnSlots;
 
-        Task? prewarm = null;
-        if (!subagent)
-        {
-            lock (_gate)
-            {
-                if (_prewarms.TryGetValue(spec.Key, out var operation))
-                    prewarm = operation.Completion.Task;
-            }
-        }
-
-        if (prewarm is not null)
-        {
-            try
-            {
-                await prewarm.WaitAsync(ct).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _log?.Invoke("[pi-runtime] 预热失败，改由当前请求启动 sidecar：" + ex.Message);
-            }
-        }
-
-        await WaitForSlotAsync(classSlots, ct).ConfigureAwait(false);
-        Entry entry;
+        var activityLease = _activity.Acquire("pi-sidecar");
         try
         {
-            entry = Claim(spec);
-        }
-        catch
-        {
-            ReleaseSlots(classSlots);
-            throw;
-        }
+            Task? prewarm = null;
+            if (!subagent)
+            {
+                lock (_gate)
+                {
+                    if (_prewarms.TryGetValue(spec.Key, out var operation))
+                        prewarm = operation.Completion.Task;
+                }
+            }
 
-        var sessionPath = ResolveSessionPath(spec.SessionRoot, conversationKey);
-        try
-        {
-            _shim.SetTarget(entry.Token, target);
-            _bridge.SetBinding(entry.Token, binding);
+            if (prewarm is not null)
+            {
+                try
+                {
+                    await prewarm.WaitAsync(ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _log?.Invoke("[pi-runtime] 预热失败，改由当前请求启动 sidecar：" + ex.Message);
+                }
+            }
 
-            // Always switch, even when this process served the same conversation
-            // last time: a turn that was cancelled mid-flight, or a transcript
-            // rewritten underneath us by a retry, leaves the in-memory session and
-            // the file disagreeing. 60ms is not worth the class of bug that
-            // "optimising" it away would open.
-            var wasWarm = await entry.Session.SwitchSessionAsync(sessionPath, ct).ConfigureAwait(false);
-
-            // The switch just reset the sidecar's auto-compaction to Pi's default,
-            // so the preference is re-sent here rather than anywhere the caller has
-            // to remember. Sent every time and in both directions on purpose: it
-            // costs one line on a live process, and skipping the "on" case would
-            // make this silently wrong the day Pi's default changes.
-            //
-            // Best-effort: a runtime too old to know the command must not take the
-            // turn down with it. Losing the preference means summarizing stays on,
-            // which is the default and costs the user nothing they did not already
-            // have; failing the lease would cost them the answer.
+            await WaitForSlotAsync(classSlots, ct).ConfigureAwait(false);
+            Entry entry;
             try
             {
-                await entry.Session
-                    .SetAutoCompactionAsync(AutoCompactionEnabled, ct)
-                    .ConfigureAwait(false);
+                entry = Claim(spec);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch
             {
-                _log?.Invoke("[pi-runtime] 自动压缩偏好未生效：" + ex.Message);
+                ReleaseSlots(classSlots);
+                throw;
             }
 
-            entry.ConversationKey = conversationKey;
-            return new PiTurnLease(this, entry, classSlots, wasWarm);
+            var sessionPath = ResolveSessionPath(spec.SessionRoot, conversationKey);
+            try
+            {
+                _shim.SetTarget(entry.Token, target);
+                _bridge.SetBinding(entry.Token, binding);
+
+                // Always switch, even when this process served the same conversation
+                // last time: a turn that was cancelled mid-flight, or a transcript
+                // rewritten underneath us by a retry, leaves the in-memory session and
+                // the file disagreeing. 60ms is not worth the class of bug that
+                // "optimising" it away would open.
+                var wasWarm = await entry.Session.SwitchSessionAsync(sessionPath, ct).ConfigureAwait(false);
+
+                // The switch just reset the sidecar's auto-compaction to Pi's default,
+                // so the preference is re-sent here rather than anywhere the caller has
+                // to remember. Sent every time and in both directions on purpose: it
+                // costs one line on a live process, and skipping the "on" case would
+                // make this silently wrong the day Pi's default changes.
+                //
+                // Best-effort: a runtime too old to know the command must not take the
+                // turn down with it. Losing the preference means summarizing stays on,
+                // which is the default and costs the user nothing they did not already
+                // have; failing the lease would cost them the answer.
+                try
+                {
+                    await entry.Session
+                        .SetAutoCompactionAsync(AutoCompactionEnabled, ct)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _log?.Invoke("[pi-runtime] 自动压缩偏好未生效：" + ex.Message);
+                }
+
+                entry.ConversationKey = conversationKey;
+                var lease = new PiTurnLease(this, entry, classSlots, wasWarm, activityLease);
+                activityLease = null;
+                return lease;
+            }
+            catch
+            {
+                Release(entry, classSlots);
+                throw;
+            }
         }
-        catch
+        finally
         {
-            Release(entry, classSlots);
-            throw;
+            activityLease?.Dispose();
         }
     }
 
@@ -245,7 +262,7 @@ public sealed class PiRuntime : IAsyncDisposable
     /// <paramref name="conversationKey"/>'s transcript, so the file on disk can be
     /// rewritten without a live session writing over the edit. Used by the retry
     /// path; a no-op when nothing is holding it.</summary>
-    public async Task EvictConversationAsync(string? conversationKey)
+    public Task EvictConversationAsync(string? conversationKey)
     {
         var key = conversationKey ?? DraftKey;
         List<Entry> victims;
@@ -257,45 +274,33 @@ public sealed class PiRuntime : IAsyncDisposable
             foreach (var victim in victims) _entries.Remove(victim);
         }
 
-        foreach (var victim in victims)
-        {
-            _shim.SetTarget(victim.Token, null);
-            _bridge.SetBinding(victim.Token, null);
-            try { await victim.Session.DisposeAsync().ConfigureAwait(false); }
-            catch (Exception ex) { _log?.Invoke("[pi-runtime] 释放 sidecar 失败：" + ex.Message); }
-        }
+        return Task.WhenAll(victims.Select(RetireDetachedAsync));
     }
 
     public const string DraftKey = "draft";
 
-    /// <summary>Drop every idle sidecar shaped for <paramref name="spec"/>. Called
-    /// when a provider is re-registered or removed, so a stale endpoint or key
-    /// cannot survive in a warm process.</summary>
-    public async Task RetireSpecAsync(PiSidecarSpec spec)
+    /// <summary>Detach idle processes for this spec and retire active ones on release.
+    /// Process teardown runs off the thread that updated the provider registry.</summary>
+    public Task RetireSpecAsync(PiSidecarSpec spec)
     {
+        var key = spec.Key;
         List<Entry> victims;
-        PrewarmOperation? prewarm = null;
         lock (_gate)
         {
-            if (_prewarms.Remove(spec.Key, out prewarm)) prewarm.Cancellation.Cancel();
+            if (_prewarms.Remove(key, out var prewarm)) prewarm.Cancellation.Cancel();
 
-            victims = _entries.Where(e => !e.InUse && e.SpecKey == spec.Key).ToList();
+            victims = _entries.Where(e => !e.InUse && e.SpecKey == key).ToList();
             foreach (var victim in victims) _entries.Remove(victim);
-            foreach (var active in _entries.Where(e => e.InUse && e.SpecKey == spec.Key))
+            foreach (var active in _entries.Where(e => e.InUse && e.SpecKey == key))
                 active.RetireOnRelease = true;
         }
 
-        foreach (var victim in victims)
-        {
-            _shim.SetTarget(victim.Token, null);
-            _bridge.SetBinding(victim.Token, null);
-            try { await victim.Session.DisposeAsync().ConfigureAwait(false); }
-            catch (Exception ex) { _log?.Invoke("[pi-runtime] 释放 sidecar 失败：" + ex.Message); }
-        }
+        return Task.WhenAll(victims.Select(RetireDetachedAsync));
     }
 
     private async Task RunPrewarmAsync(PiSidecarSpec spec, PrewarmOperation operation)
     {
+        using var activityLease = _activity.Acquire("pi-prewarm");
         try
         {
             await WaitForSlotAsync(_turnSlots, operation.Cancellation.Token).ConfigureAwait(false);
@@ -421,7 +426,7 @@ public sealed class PiRuntime : IAsyncDisposable
                     ?? throw new InvalidOperationException("Pi 运行时没有可用的 sidecar 槽位。");
 
                 _entries.Remove(evictable);
-                RetireDetached(evictable);
+                _ = RetireDetachedAsync(evictable);
             }
 
             var token = PiWorkLlmShim.NewSidecarToken();
@@ -458,7 +463,7 @@ public sealed class PiRuntime : IAsyncDisposable
             if (victim is not null) _entries.Remove(victim);
         }
         ReleaseSlots(classSlots);
-        if (victim is not null) RetireDetached(victim);
+        if (victim is not null) _ = RetireDetachedAsync(victim);
     }
 
     internal void ReleaseLease(Entry entry, SemaphoreSlim classSlots) => Release(entry, classSlots);
@@ -478,7 +483,7 @@ public sealed class PiRuntime : IAsyncDisposable
         foreach (var victim in victims)
         {
             _log?.Invoke($"[pi-runtime] 后台回收空闲 sidecar（{victim.ConversationKey ?? "未使用"}）");
-            RetireDetached(victim);
+            _ = RetireDetachedAsync(victim);
         }
     }
 
@@ -495,17 +500,17 @@ public sealed class PiRuntime : IAsyncDisposable
         foreach (var victim in victims)
         {
             _log?.Invoke($"[pi-runtime] 回收空闲 sidecar（{victim.ConversationKey ?? "未使用"}）");
-            RetireDetached(victim);
+            _ = RetireDetachedAsync(victim);
         }
     }
 
     /// <summary>Tear a sidecar down without blocking the caller. Teardown must never
     /// hold up the turn that displaced it.</summary>
-    private void RetireDetached(Entry entry)
+    private Task RetireDetachedAsync(Entry entry)
     {
         _shim.SetTarget(entry.Token, null);
         _bridge.SetBinding(entry.Token, null);
-        _ = Task.Run(async () =>
+        return Task.Run(async () =>
         {
             try { await entry.Session.DisposeAsync().ConfigureAwait(false); }
             catch (Exception ex) { _log?.Invoke("[pi-runtime] 回收失败：" + ex.Message); }
@@ -575,14 +580,21 @@ public sealed class PiTurnLease : IAsyncDisposable
     private readonly PiRuntime _runtime;
     private readonly PiRuntime.Entry _entry;
     private readonly SemaphoreSlim _classSlots;
+    private readonly IDisposable? _activityLease;
     private int _released;
 
-    internal PiTurnLease(PiRuntime runtime, PiRuntime.Entry entry, SemaphoreSlim classSlots, bool wasWarm)
+    internal PiTurnLease(
+        PiRuntime runtime,
+        PiRuntime.Entry entry,
+        SemaphoreSlim classSlots,
+        bool wasWarm,
+        IDisposable? activityLease = null)
     {
         _runtime = runtime;
         _entry = entry;
         _classSlots = classSlots;
         WasWarm = wasWarm;
+        _activityLease = activityLease;
     }
 
     public PiSidecarSession Session => _entry.Session;
@@ -595,7 +607,10 @@ public sealed class PiTurnLease : IAsyncDisposable
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _released, 1) == 0)
-            _runtime.ReleaseLease(_entry, _classSlots);
+        {
+            try { _runtime.ReleaseLease(_entry, _classSlots); }
+            finally { _activityLease?.Dispose(); }
+        }
         return ValueTask.CompletedTask;
     }
 }

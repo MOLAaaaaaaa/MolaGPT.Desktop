@@ -499,7 +499,7 @@ public sealed class ThinkBlockView : TemplatedControl
                 }
                 if (message.ServerToolResults.TryGetValue(unit.ToolCallId ?? markup.Key, out var retry))
                     markup = markup with { Unit = unit = retry };
-                var id = unit.ToolCallId is { } identity ? $"think:{identity}" : $"think:{markup.SourceStart}";
+                var id = unit.ToolCallId is { } identity ? identity : $"think:{markup.SourceStart}";
                 var tool = WebToolPresentation.Update(message, markup, _webTools, id, done,
                     !done && unit.PresentationPending);
                 markups[id] = markup;

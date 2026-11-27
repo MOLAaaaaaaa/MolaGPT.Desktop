@@ -140,7 +140,7 @@ public sealed class MathView : TemplatedControl
         {
             var canvas = new FormulaCanvas
             {
-                Latex = latex,
+                Latex = LatexNormalizer.ForAvaloniaMath(latex),
                 FormulaSize = FormulaSize,
                 Foreground = Foreground,
                 HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,

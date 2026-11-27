@@ -65,7 +65,7 @@ internal sealed class VisionBackend
             var client = new OneShotCompletionClient(_httpFactory());
             var text = await client.CompleteAsync(
                 target,
-                model.Id,
+                model,
                 [
                     new ChatMessage(ChatMessage.RoleSystem, systemPrompt),
                     new ChatMessage(ChatMessage.RoleUser, userPrompt, Attachments: [image])
@@ -74,7 +74,6 @@ internal sealed class VisionBackend
                 // pass, and the caller shows this answer inside a tool card where a
                 // thinking preamble has nowhere to go.
                 useThinking: false,
-                thinkingKind: ResolveThinkingKind(model),
                 ct: ct).ConfigureAwait(false);
             return new VisionAnswer(text, model.Id, null);
         }
@@ -93,9 +92,4 @@ internal sealed class VisionBackend
         return resolved is null ? null : (resolved.Value.Provider, resolved.Value.Model);
     }
 
-    private static ThinkingParamKind? ResolveThinkingKind(ProviderModel model)
-    {
-        var kind = model.ThinkingConfig?.Kind ?? ThinkingParamKindInference.InferFromModelId(model.Id);
-        return kind == ThinkingParamKind.None ? null : kind;
-    }
 }

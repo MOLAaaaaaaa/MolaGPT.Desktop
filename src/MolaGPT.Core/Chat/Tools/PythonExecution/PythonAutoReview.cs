@@ -87,7 +87,7 @@ public interface IPythonAutoReviewer
     Task<PythonReviewVerdict> ReviewAsync(PythonReviewRequest request, CancellationToken ct);
 }
 
-public sealed record PythonReviewTarget(OneShotTarget Target, string ModelId, string Label);
+public sealed record PythonReviewTarget(OneShotTarget Target, ProviderModel Model, string Label);
 
 /// <summary>
 /// Asks a model the user picked whether a piece of Python may run without a
@@ -144,7 +144,7 @@ public sealed class PythonAutoReviewer : IPythonAutoReviewer
         if (registry.FindModel(providerId, modelId) is not { } found) return null;
         if (found.Provider is not IOneShotTarget describable
             || describable.DescribeOneShot(found.Model.Id) is not { } target) return null;
-        return new PythonReviewTarget(target, found.Model.Id, $"{found.Provider.DisplayName} / {found.Model.DisplayName}");
+        return new PythonReviewTarget(target, found.Model, $"{found.Provider.DisplayName} / {found.Model.DisplayName}");
     }
 
     public async Task<PythonReviewVerdict> ReviewAsync(PythonReviewRequest request, CancellationToken ct)
@@ -164,7 +164,7 @@ public sealed class PythonAutoReviewer : IPythonAutoReviewer
         {
             answer = await _client().CompleteAsync(
                 target.Target,
-                target.ModelId,
+                target.Model,
                 [
                     new ChatMessage(ChatMessage.RoleSystem, Instructions),
                     new ChatMessage(ChatMessage.RoleUser, BuildInput(request))

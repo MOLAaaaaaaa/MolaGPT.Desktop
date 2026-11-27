@@ -1,3 +1,4 @@
+using MolaGPT.App.Rendering;
 using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Desktop.Services;
 using SkiaSharp;
@@ -29,6 +30,12 @@ internal static class SkiaImageNormalizer
         // The bytes decide the format. A .png that is really a JPEG, or a camera
         // .jpg that is really HEIC, would otherwise be announced wrongly.
         var mime = AttachmentMime.SniffImageMime(bytes) ?? declaredMime ?? "application/octet-stream";
+        if (bytes.Length > ImageSourceLoader.MaxEncodedBytes)
+            return ProcessedImage.Failed("图片超过 32 MiB。");
+        using var probe = new MemoryStream(bytes, writable: false);
+        using var codec = SKCodec.Create(probe);
+        if (codec is not null && !ImageSourceLoader.ValidSize(codec.Info.Width, codec.Info.Height))
+            return ProcessedImage.Failed("图片尺寸过大。");
 
         // Animated GIFs cannot survive a re-encode through a single frame, and
         // they are already an accepted inline format.
@@ -37,7 +44,7 @@ internal static class SkiaImageNormalizer
         SKBitmap? bitmap = null;
         try
         {
-            bitmap = SKBitmap.Decode(bytes);
+            bitmap = codec is null ? null : SKBitmap.Decode(codec);
         }
         catch
         {

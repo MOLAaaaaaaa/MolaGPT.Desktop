@@ -50,8 +50,7 @@ public partial class ChatHeader : UserControl
 
     public event EventHandler? NewConversationRequested;
 
-    /// <summary>Raised after a model is chosen, so the shell can start a new
-    /// conversation when the pick crosses the Chat ↔ local-agent boundary.</summary>
+    /// <summary>Raised when choosing a model opened a new conversation.</summary>
     public event EventHandler<AppMode>? ModeBoundaryCrossed;
 
     /// <summary>Supplied by the shell; the header does not resolve services itself.</summary>
@@ -140,7 +139,7 @@ public partial class ChatHeader : UserControl
 
     private void OnModelPicked(object? sender, SelectionChangedEventArgs e)
     {
-        if (Chat is not { } chat) return;
+        if (_main is not { } main) return;
         if (PART_ModelList.SelectedItem is not ModelSelectorRow row) return;
         if (row.Provider is null || row.Model is null)
         {
@@ -150,13 +149,8 @@ public partial class ChatHeader : UserControl
             return;
         }
 
-        // Only crossing the Chat ↔ local-agent boundary needs a new conversation;
-        // Work ↔ BYOK share the local agent thread and continue the current one.
-        var target = row.Provider.ToAppMode();
-        if (chat.CurrentMode.CrossesChatBoundary(target))
-            ModeBoundaryCrossed?.Invoke(this, target);
-
-        chat.SetActiveByIds(row.Provider.Id, row.Model.Id, ignoreConversationBoundary: true);
+        if (!main.TrySelectChatModel(row.Provider.Id, row.Model.Id, out var startedDraft)) return;
+        if (startedDraft) ModeBoundaryCrossed?.Invoke(this, row.Provider.ToAppMode());
         PART_ModelSelector.Flyout?.Hide();
     }
 
@@ -170,7 +164,6 @@ public partial class ChatHeader : UserControl
             return;
         }
 
-        _main.Settings.RefreshImageGenerationProviderModels();
         var query = PART_WorkbenchSearch.Text?.Trim();
         PART_WorkbenchModels.SelectedItem = null;
         PART_WorkbenchModels.ItemsSource = _main.Settings.ImageGenerationProviderModels

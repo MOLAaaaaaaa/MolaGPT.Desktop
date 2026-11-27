@@ -13,6 +13,7 @@ public enum ThinkingParamKind
     GeminiBudget,
     QwenThinkingBudget,
     QwenReasoningEffort,
+    KimiToggle,
 }
 
 /// <param name="Mandatory">The provider says this model always reasons. Nothing may be
@@ -29,9 +30,13 @@ public sealed record ThinkingConfig(
 
 public static class ThinkingEffortLevels
 {
+    public static IReadOnlyList<string> KnownLevels { get; } =
+        ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
     public static string[] ForKind(ThinkingParamKind kind) => kind switch
     {
         ThinkingParamKind.OpenAiReasoningEffort => ["minimal", "low", "medium", "high", "xhigh"],
+        ThinkingParamKind.KimiToggle => [],
         ThinkingParamKind.AnthropicAdaptive => ["low", "medium", "high", "xhigh", "max"],
         ThinkingParamKind.DeepSeekV4 => ["high", "max"],
         ThinkingParamKind.GeminiThinkingLevel => ["low", "medium", "high"],
@@ -59,48 +64,101 @@ public static class ThinkingEffortLevels
         }
         return list.ToArray();
     }
+
+    public static string? MinimumEnabled(IEnumerable<string>? levels)
+    {
+        var enabled = Normalize(levels).Where(level => level is not ("off" or "none")).ToArray();
+        return KnownLevels.FirstOrDefault(level => enabled.Contains(level, StringComparer.Ordinal))
+               ?? enabled.FirstOrDefault();
+    }
 }
 
 public static class ThinkingParamKindInference
 {
-    public static ThinkingParamKind InferFromModelId(string? modelId)
+    public static ThinkingParamKind InferFromModelId(string? modelId, ThinkingParamKind fallback = ThinkingParamKind.None)
     {
-        if (string.IsNullOrWhiteSpace(modelId)) return ThinkingParamKind.None;
+        if (string.IsNullOrWhiteSpace(modelId)) return fallback;
+        var raw = modelId.Trim().ToLowerInvariant();
+        if (raw.Contains("-non-reasoning", StringComparison.Ordinal)) return fallback;
+        var known = ModelCapabilityCatalog.Find(modelId);
+        if (known is { Reasoning: false }) return fallback;
+        var leaf = (known?.CanonicalId ?? raw).Split('/')[^1];
+        var reasoning = known?.Reasoning == true ||
+            System.Text.RegularExpressions.Regex.IsMatch(leaf, @"^(?:o[134](?:-|$)|gpt-[56](?:[.\-]|$)|gpt-oss|deepseek-(?:v(?:3\.\d|[4-9])|flash|reasoner|r1|chat)|kimi-k(?:2-thinking|2\.[5-9]|[3-9])|qwen[34](?:[.\-]|$)|qwq|gemini-(?:2\.5|[34])|claude-(?:3-7|3\.7|(?:sonnet|opus|haiku|fable|mythos)-[45])|grok-(?:3-mini|4)|glm-(?:5|4\.\d)|minimax-m[23]|mimo-v2|hunyuan-t1|magistral|seed-oss|gemma-4|pangu-pro-moe)") ||
+            System.Text.RegularExpressions.Regex.IsMatch(leaf, @"(?:^|[-_])(?:reasoning|reasoner|thinking)(?:[-_]|$)");
+        if (!reasoning) return fallback;
 
-        var lower = modelId.ToLowerInvariant();
-        // Gateways prefix the vendor ("openai/gpt-5.6-luna"), so the family checks below
-        // have to run on the leaf. Matching the whole id sent every OpenRouter-hosted
-        // OpenAI model down the None path, where turning reasoning off wrote nothing at
-        // all and the model quietly kept thinking.
-        var leaf = lower.Contains('/', StringComparison.Ordinal)
-            ? lower[(lower.LastIndexOf('/') + 1)..]
-            : lower;
-        if (lower.Contains("deepseek-v4", StringComparison.Ordinal)
-            || lower.Contains("deepseek-reasoner", StringComparison.Ordinal)
-            || lower.Contains("deepseek-r1", StringComparison.Ordinal))
-            return ThinkingParamKind.DeepSeekV4;
+        if (leaf.StartsWith("deepseek-")) return ThinkingParamKind.DeepSeekV4;
+        if (QwenEffortFor(leaf) is not null) return ThinkingParamKind.QwenReasoningEffort;
+        if (leaf.StartsWith("qwen") || leaf.StartsWith("qwq")) return ThinkingParamKind.QwenThinkingBudget;
+        if (leaf.StartsWith("gemini-"))
+            return GeminiModelPolicy.ThinkingFor(modelId)?.Kind ?? ThinkingParamKind.GeminiBudget;
+        if (leaf.StartsWith("claude-"))
+            return known?.NativeEfforts.Length > 0 ||
+                System.Text.RegularExpressions.Regex.IsMatch(leaf, @"claude-(?:sonnet|opus|haiku|fable|mythos)-(?:[5-9]|4-[6-9])")
+                ? ThinkingParamKind.AnthropicAdaptive : ThinkingParamKind.AnthropicBudget;
+        if (leaf.StartsWith("kimi-k2") || leaf.StartsWith("moonshot-"))
+            return ThinkingParamKind.KimiToggle;
+        return ThinkingParamKind.OpenAiReasoningEffort;
+    }
 
-        if (lower.Contains("qwen3", StringComparison.Ordinal)
-            || lower.Contains("qwq", StringComparison.Ordinal))
-            return ThinkingParamKind.QwenThinkingBudget;
+    private static ThinkingConfig? QwenEffortFor(string leaf)
+    {
+        if (leaf == "qwen4-max" || leaf.StartsWith("qwen4-max-", StringComparison.Ordinal))
+            return new(ThinkingParamKind.QwenReasoningEffort, ["low", "high", "xhigh"], DefaultEffort: "high");
+        if (new[] { "qwen3.8-flash", "qwen3.8-max", "qwen3.8-omni-flash", "qwen3.8-2.4t-a95b", "qwen3.8-27b" }
+            .Any(id => leaf == id || leaf.StartsWith(id + "-", StringComparison.Ordinal)))
+            return new(ThinkingParamKind.QwenReasoningEffort, ["low", "medium", "xhigh"], DefaultEffort: "xhigh");
+        return null;
+    }
 
-        if (lower.Contains("gemini", StringComparison.Ordinal))
-        {
-            var geminiConfig = GeminiModelPolicy.ThinkingFor(modelId);
-            if (geminiConfig is not null) return geminiConfig.Kind;
-            if (lower.Contains("gemini-2.5", StringComparison.Ordinal))
-                return ThinkingParamKind.GeminiBudget;
-        }
+    // Only official endpoints may constrain saved native model configurations.
+    public static ThinkingConfig? OfficialPresetFor(string modelId, string? baseUrl, string? apiPath)
+    {
+        if (!Uri.TryCreate(baseUrl?.TrimEnd('/') + "/", UriKind.Absolute, out var root)
+            || !Uri.TryCreate(root, apiPath?.Trim() ?? "", out var uri)
+            || uri.Scheme != "https" || uri.Port != 443 || uri.UserInfo.Length != 0)
+            return null;
+        if (modelId.Contains("-non-reasoning", StringComparison.OrdinalIgnoreCase)) return null;
+        var leaf = (ModelCapabilityCatalog.Find(modelId)?.CanonicalId ?? modelId).ToLowerInvariant().Split('/')[^1];
+        if (uri.Host == "api.deepseek.com" && (modelId.Equals("deepseek-flash", StringComparison.OrdinalIgnoreCase)
+                || leaf.StartsWith("deepseek-v4.1-flash", StringComparison.Ordinal)))
+            return new(ThinkingParamKind.DeepSeekV4, ["low", "high", "max"], DefaultEffort: "high");
+        if (uri.Host == "api.moonshot.cn" || uri.Host == "api.moonshot.ai" || uri.Host == "api.kimi.ai")
+            return leaf.StartsWith("kimi-k3", StringComparison.Ordinal)
+                ? new(ThinkingParamKind.OpenAiReasoningEffort, ["low", "high", "max"], DefaultEffort: "max", Mandatory: true)
+                : null;
+        if (uri.Host == "dashscope.aliyuncs.com" || uri.Host == "dashscope-intl.aliyuncs.com"
+            || uri.Host.EndsWith(".dashscope.aliyuncs.com", StringComparison.Ordinal)
+            || uri.Host.EndsWith(".dashscope-intl.aliyuncs.com", StringComparison.Ordinal))
+            return QwenEffortFor(leaf);
+        return null;
+    }
 
-        if (leaf.StartsWith("o1", StringComparison.Ordinal)
-            || leaf.StartsWith("o3", StringComparison.Ordinal)
-            || leaf.StartsWith("o4", StringComparison.Ordinal)
-            || leaf.StartsWith("gpt-5", StringComparison.Ordinal)
-            || leaf.StartsWith("gpt-6", StringComparison.Ordinal)
-            || lower.Contains("reasoning", StringComparison.Ordinal))
-            return ThinkingParamKind.OpenAiReasoningEffort;
-
-        return ThinkingParamKind.None;
+    /// <summary>Defaults for a newly detected model, never for a manually saved configuration.</summary>
+    public static ThinkingConfig? DefaultConfigFor(string? modelId, string? baseUrl = null)
+    {
+        var kind = InferFromModelId(modelId);
+        if (kind == ThinkingParamKind.None) return null;
+        var known = ModelCapabilityCatalog.Find(modelId);
+        var leaf = (known?.CanonicalId ?? modelId ?? "").ToLowerInvariant().Split('/')[^1];
+        var host = Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) ? uri.Host : "";
+        if (QwenEffortFor(leaf) is { } qwen) return qwen;
+        if (kind is ThinkingParamKind.GeminiThinkingLevel or ThinkingParamKind.GeminiBudget)
+            return GeminiModelPolicy.DefaultThinkingFor(modelId) ?? new(kind);
+        var nativeLevels = kind is ThinkingParamKind.OpenAiReasoningEffort or ThinkingParamKind.AnthropicAdaptive
+            or ThinkingParamKind.DeepSeekV4 ? known?.NativeEfforts : null;
+        var levels = nativeLevels is { Length: > 0 } ? nativeLevels : null;
+        var kimiK3 = leaf.StartsWith("kimi-k3");
+        var mandatory = kimiK3 ||
+            (host.Equals("api.openai.com", StringComparison.OrdinalIgnoreCase)
+                && known?.CanonicalId.StartsWith("openai/") == true
+                && levels is { Length: > 0 } && !levels.Contains("none", StringComparer.Ordinal)) ||
+            leaf.StartsWith("claude-fable-") || leaf.StartsWith("claude-mythos-") ||
+            leaf.StartsWith("claude-opus-5-5") || leaf.StartsWith("claude-sonnet-5-5");
+        var defaultEffort = kimiK3 ? "max" : levels?.Contains("high") == true ? "high" : ThinkingEffortLevels.MinimumEnabled(levels);
+        if (kimiK3 && levels is null) levels = ["low", "high", "max"];
+        return new(kind, levels, DefaultEffort: defaultEffort, Mandatory: mandatory);
     }
 }
 
@@ -153,4 +211,15 @@ public sealed record ProviderModel(
     bool SupportsTemperature = true,
     bool SupportsTopP = true,
     ModelPricing? Pricing = null,
-    bool SupportsBuiltinSearch = false);
+    bool SupportsBuiltinSearch = false)
+{
+    public ThinkingConfig? ResolveThinkingConfig(bool googleRoute = false)
+    {
+        if (ThinkingConfig is not null) return ThinkingConfig;
+        if (googleRoute && GeminiModelPolicy.DefaultThinkingFor(Id) is { } google) return google;
+        if (ThinkingParamKindInference.DefaultConfigFor(Id) is { } preset) return preset;
+        var kind = ThinkingParamKindInference.InferFromModelId(
+            Id, SupportsReasoningEffort ? ThinkingParamKind.OpenAiReasoningEffort : ThinkingParamKind.None);
+        return !SupportsThinking && kind == ThinkingParamKind.None ? null : new ThinkingConfig(kind);
+    }
+}

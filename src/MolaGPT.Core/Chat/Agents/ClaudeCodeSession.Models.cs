@@ -43,7 +43,7 @@ internal sealed partial class ClaudeCodeSession
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Non-fatal: the phone just falls back to observed model ids.
-            _channel.Writer.TryWrite(AgentEvent.Failure($"Claude model discovery failed: {ex.Message}"));
+            _log?.Invoke($"Claude model discovery failed: {ex.Message}");
         }
     }
 
@@ -69,7 +69,10 @@ internal sealed partial class ClaudeCodeSession
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(timeout);
         await using var reg = timeoutCts.Token.Register(() =>
-            tcs.TrySetException(new TimeoutException($"Claude control request timed out: {DescribeSubtype(request)}")));
+        {
+            if (ct.IsCancellationRequested) tcs.TrySetCanceled(ct);
+            else tcs.TrySetException(new TimeoutException($"Claude control request timed out: {DescribeSubtype(request)}"));
+        });
 
         try
         {

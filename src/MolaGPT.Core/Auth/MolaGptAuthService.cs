@@ -32,7 +32,9 @@ public sealed class MolaGptAuthService
     public const string DefaultWarmupUrl = "https://chatgpt.wljay.cn/v2/";
     public const string DefaultLogoutUrl = "https://chatgpt.wljay.cn/v2/api/auth/logout.php";
     public const string AccountSecurityUrl = "https://chatgpt.wljay.cn/v2/account/security/";
+    public const string ApiKeysUrl = "https://chatgpt.wljay.cn/v2/account/api-keys/";
     private const string AccountSecurityApiPath = "/v2/api/auth/risk_appeal.php";
+    private const string ApiKeysApiPath = "/v2/api/auth/api_keys.php";
     public const string DefaultRefreshUrl = "https://chatgpt.wljay.cn/v2/api/auth/session_refresh.php";
 
     private readonly HttpClient _http;
@@ -46,11 +48,11 @@ public sealed class MolaGptAuthService
     private long _sessionGeneration;
     private long _loginAttemptGeneration;
     private OAuthAttempt? _pendingOAuth;
-    private bool _warmedUp;
+    private volatile bool _warmedUp;
 
     private sealed record OAuthAttempt(string State, string Verifier, DateTimeOffset ExpiresAt);
 
-    public event EventHandler? LoggedOut;
+    public event EventHandler? SessionChanged;
 
     public MolaGptAuthService(
         HttpClient http,
@@ -74,6 +76,22 @@ public sealed class MolaGptAuthService
     public string? StoredUaHash => _store.LoadSecret(UaHashKey);
     public long SessionGeneration { get { lock (_sessionGate) return _sessionGeneration; } }
 
+    public (long Generation, bool IsLoggedIn, string? Username) ReadSession()
+    {
+        lock (_sessionGate)
+        {
+            var signedIn = !string.IsNullOrEmpty(CurrentJwt);
+            return (_sessionGeneration, signedIn, signedIn ? CurrentUsername : null);
+        }
+    }
+
+    /// <summary>Commit a local update for the same session that started the request.</summary>
+    public bool TryCommitForSession(long generation, Func<bool> commit)
+    {
+        lock (_sessionGate)
+            return generation == _sessionGeneration && commit();
+    }
+
     public static string ComputeUaHash(string ua) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ua ?? string.Empty))).ToLowerInvariant();
 
@@ -92,21 +110,20 @@ public sealed class MolaGptAuthService
 
     public async Task WarmupAsync(CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         if (_warmedUp) return;
         try
         {
             using var req = new HttpRequestMessage(HttpMethod.Get, _warmupUrl);
             using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
-            _ = resp.IsSuccessStatusCode;
+            ct.ThrowIfCancellationRequested();
+            if (resp.IsSuccessStatusCode) _warmedUp = true;
         }
-        catch
+        catch (HttpRequestException) when (!ct.IsCancellationRequested)
         {
-            // Non-fatal.
+            // Login can still work. A later attempt will retry the warmup.
         }
-        finally
-        {
-            _warmedUp = true;
-        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { /* HTTP timeout */ }
     }
 
     public async Task<string> CreateAccountSecurityLinkAsync(string? appealToken = null, CancellationToken ct = default)
@@ -124,6 +141,29 @@ public sealed class MolaGptAuthService
         var path = doc.RootElement.GetProperty("path").GetString();
         if (path is null || !path.StartsWith(AccountSecurityApiPath + "?handoff=", StringComparison.Ordinal))
             throw new InvalidOperationException("暂时无法打开账户安全。");
+        return new Uri(origin, path).AbsoluteUri;
+    }
+
+    /// <summary>
+    /// Browser handoff for the Web API-key page. Unlike the security center the key
+    /// manager needs a full account session, so the server-side ticket mints one; when
+    /// the backend predates the endpoint the caller falls back to the plain page URL.
+    /// </summary>
+    public async Task<string> CreateApiKeysLinkAsync(CancellationToken ct = default)
+    {
+        var jwt = CurrentJwt;
+        if (string.IsNullOrEmpty(jwt)) return ApiKeysUrl;
+        jwt = await GetAccessTokenAsync(jwt, ct).ConfigureAwait(false);
+        var origin = new Uri(DefaultWarmupUrl);
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(origin, ApiKeysApiPath));
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+        request.Content = JsonContent.Create(new { operation = "handoff" });
+        using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+        await ChatApiErrorHelper.EnsureSuccessAsync(response, "API 密钥", ct).ConfigureAwait(false);
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+        var path = doc.RootElement.GetProperty("path").GetString();
+        if (path is null || !path.StartsWith(ApiKeysApiPath + "?handoff=", StringComparison.Ordinal))
+            throw new InvalidOperationException("暂时无法打开 API 密钥管理。");
         return new Uri(origin, path).AbsoluteUri;
     }
 
@@ -184,6 +224,7 @@ public sealed class MolaGptAuthService
             _sessionGeneration++;
         }
 
+        SessionChanged?.Invoke(this, EventArgs.Empty);
         return new LoginResult(true, payload.UserInfo, null);
     }
 
@@ -199,7 +240,7 @@ public sealed class MolaGptAuthService
         }
 
         if (hadAuthState)
-            LoggedOut?.Invoke(this, EventArgs.Empty);
+            SessionChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public async Task<bool> LogoutRemoteAsync(CancellationToken ct = default)
@@ -242,23 +283,24 @@ public sealed class MolaGptAuthService
                 hadAuthState = ClearAuthLocked();
             }
         }
-        if (hadAuthState) LoggedOut?.Invoke(this, EventArgs.Empty);
+        if (hadAuthState) SessionChanged?.Invoke(this, EventArgs.Empty);
         return revoked;
     }
 
-    public bool LogoutIfCurrent(string? expectedJwt)
+    public bool LogoutIfCurrent(string? expectedJwt, long? generation = null)
     {
         bool hadAuthState;
         lock (_sessionGate)
         {
-            if (string.IsNullOrEmpty(expectedJwt) ||
+            if ((generation.HasValue && generation.Value != _sessionGeneration)
+                || string.IsNullOrEmpty(expectedJwt) ||
                 !string.Equals(CurrentJwt, expectedJwt, StringComparison.Ordinal)) return false;
             _sessionGeneration++;
             _loginAttemptGeneration++;
             _pendingOAuth = null;
             hadAuthState = ClearAuthLocked();
         }
-        if (hadAuthState) LoggedOut?.Invoke(this, EventArgs.Empty);
+        if (hadAuthState) SessionChanged?.Invoke(this, EventArgs.Empty);
         return hadAuthState;
     }
 
@@ -353,6 +395,7 @@ public sealed class MolaGptAuthService
             _sessionGeneration++;
         }
 
+        SessionChanged?.Invoke(this, EventArgs.Empty);
         return new LoginResult(true, payload.UserInfo, null);
     }
 
@@ -414,7 +457,10 @@ public sealed class MolaGptAuthService
             }
             if (response.StatusCode == HttpStatusCode.Unauthorized)
             {
-                var cleared = LogoutIfCurrent(currentToken);
+                var rejection = await ChatApiErrorHelper.ReadAccountHttpErrorAsync(response, CancellationToken.None).ConfigureAwait(false);
+                if (rejection is { InvalidatesAccountSession: false })
+                    throw new ChatRequestException(rejection);
+                var cleared = LogoutIfCurrent(currentToken, generation);
                 _log?.Invoke($"refresh unauthorized session_cleared={cleared}");
                 throw new MolaGptAuthExpiredException();
             }

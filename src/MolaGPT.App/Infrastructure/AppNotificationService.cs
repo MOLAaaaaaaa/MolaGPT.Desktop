@@ -15,11 +15,13 @@ namespace MolaGPT.App.Infrastructure;
 public sealed class AppNotificationService : IDisposable
 {
     private readonly Action<string> _navigateToConversation;
+    private readonly Action? _onWake;
     private readonly OnActivated _toastActivated;
 
-    public AppNotificationService(Action<string> navigateToConversation)
+    public AppNotificationService(Action<string> navigateToConversation, Action? onWake = null)
     {
         _navigateToConversation = navigateToConversation;
+        _onWake = onWake;
         _toastActivated = e => OnToastActivated(e.Argument);
         ToastNotificationManagerCompat.OnActivated += _toastActivated;
     }
@@ -39,6 +41,7 @@ public sealed class AppNotificationService : IDisposable
     {
         if (string.IsNullOrWhiteSpace(conversationId)) return;
 
+        _onWake?.Invoke();
         Dispatcher.UIThread.Post(() =>
         {
             var mainWindow = (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.MainWindow;

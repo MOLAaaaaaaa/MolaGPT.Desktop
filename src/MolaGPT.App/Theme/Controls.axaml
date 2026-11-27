@@ -948,7 +948,7 @@
   <Style Selector="TextBlock.muted">
     <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}" />
   </Style>
-  <!-- Field caption. SettingsWindow and ProviderDialog each carried a private
+  <!-- Field caption. SettingsWindow previously carried a private
        copy of this and everyone else who wrote Classes="label" — the image
        workbench, SystemPromptWindow — got nothing at all, because a class with
        no rule in scope is silently ignored. Margins stay with the callers:

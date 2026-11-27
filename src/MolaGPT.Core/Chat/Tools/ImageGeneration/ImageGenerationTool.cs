@@ -255,7 +255,7 @@ public sealed class ImageGenerationTool
         var editing = inputImage is { Length: > 0 };
         var path = editing && ImagesDialectFor(options) == ImagesDialect.Xai
             ? DefaultPath(options.EditPath, "v1/images/edits")
-            : DefaultPath(options.GenerationPath, ImageApiFormat.DefaultImagesPath(options.ProviderType, options.BaseUrl));
+            : DefaultPath(options.GenerationPath, ImageApiFormat.DefaultImagesPath(options.BaseUrl));
         var endpoint = NetworkSecurity.CombineEndpoint(options.BaseUrl!, path, "图像服务接入地址");
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {
@@ -338,7 +338,7 @@ public sealed class ImageGenerationTool
         var host = Uri.TryCreate(options.BaseUrl, UriKind.Absolute, out var uri) ? uri.Host.ToLowerInvariant() : string.Empty;
         var model = options.Model ?? string.Empty;
         var id = model[(model.LastIndexOf('/') + 1)..].ToLowerInvariant();
-        if (ImageApiFormat.IsOpenRouter(options.BaseUrl)) return ImagesDialect.OpenRouter;
+        if (OpenRouterAttribution.IsOpenRouterHost(options.BaseUrl)) return ImagesDialect.OpenRouter;
         if (host.EndsWith("siliconflow.cn") || host.EndsWith("siliconflow.com")) return ImagesDialect.SiliconFlow;
         if (host == "api.x.ai" || id.StartsWith("grok-imagine") || id.StartsWith("grok-2-image")) return ImagesDialect.Xai;
         if (host.EndsWith("bigmodel.cn") || id.StartsWith("cogview") || id.StartsWith("glm-image")) return ImagesDialect.Zhipu;
@@ -456,10 +456,11 @@ public sealed class ImageGenerationTool
         };
         var imageConfig = new Dictionary<string, object>();
         if (ImagePromptComposer.AspectRatio(options.Size) is { } ratio) imageConfig["aspect_ratio"] = ratio;
-        if (ImageApiFormat.IsOpenRouter(options.BaseUrl) || options.Model?.Contains("gemini-2.5", StringComparison.OrdinalIgnoreCase) != true)
+        var openRouter = OpenRouterAttribution.IsOpenRouterHost(options.BaseUrl);
+        if (openRouter || options.Model?.Contains("gemini-2.5", StringComparison.OrdinalIgnoreCase) != true)
             imageConfig["image_size"] = Resolution(options.Size);
         body["image_config"] = imageConfig;
-        if (!ImageApiFormat.IsOpenRouter(options.BaseUrl))
+        if (!openRouter)
             body["extra_body"] = new { google = new { image_config = imageConfig } };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)

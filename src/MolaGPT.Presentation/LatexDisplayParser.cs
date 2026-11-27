@@ -136,7 +136,7 @@ public static class LatexDisplayParser
         return environment.Length > 0;
     }
 
-    private static int FindEnvironmentEnd(string source, string environment, int start)
+    public static int FindEnvironmentEnd(string source, string environment, int start)
     {
         var opening = $@"\begin{{{environment}}}";
         var closing = $@"\end{{{environment}}}";
@@ -166,11 +166,16 @@ public static class LatexDisplayParser
 
     private static int FindUnescaped(string source, string token, int start)
     {
-        for (var index = source.IndexOf(token, start, StringComparison.Ordinal);
-             index >= 0;
-             index = source.IndexOf(token, index + token.Length, StringComparison.Ordinal))
+        for (var index = start; index <= source.Length - token.Length; index++)
         {
-            if (!IsEscaped(source, index)) return index;
+            if (IsEscaped(source, index)) continue;
+            if (source[index] == '%')
+            {
+                var end = source.IndexOf('\n', index);
+                if (end < 0) return -1;
+                index = end;
+            }
+            else if (StartsWith(source, index, token)) return index;
         }
 
         return -1;

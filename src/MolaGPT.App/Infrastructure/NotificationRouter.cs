@@ -27,6 +27,7 @@ internal sealed class NotificationRouter : IDisposable
     private MolaWindow _hostWindow;
     private readonly Func<string?> _currentConversationId;
     private readonly List<AppNotification> _queued = new();
+    private bool _disposed;
 
     public NotificationRouter(
         NotificationCenter center,
@@ -56,11 +57,14 @@ internal sealed class NotificationRouter : IDisposable
     private void OnPublished(object? sender, AppNotification notification) =>
         Dispatcher.UIThread.Post(() => Route(notification));
 
-    private void OnDismissed(object? sender, string key) =>
-        Dispatcher.UIThread.Post(() => _host.Dismiss(key));
+    private void OnDismissed(object? sender, string key) => Dispatcher.UIThread.Post(() =>
+    {
+        if (!_disposed) _host.Dismiss(key);
+    });
 
     private void Route(AppNotification notification)
     {
+        if (_disposed) return;
         if (notification.IsAnswerCompleted && !_settings.EnableCompletionNotification)
         {
             Retire(notification);
@@ -259,6 +263,8 @@ internal sealed class NotificationRouter : IDisposable
 
     public void Dispose()
     {
+        _disposed = true;
+        _queued.Clear();
         _center.Published -= OnPublished;
         _center.Dismissed -= OnDismissed;
         _backgroundStreams.TaskCompleted -= OnStreamCompleted;

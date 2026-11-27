@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Runtime;
 
 namespace MolaGPT.Core.Chat.Tasks;
 
@@ -89,7 +90,11 @@ public sealed class AgentTask
     }
 
     private readonly Func<string>? _tail;
+    private IDisposable? _activityLease;
     internal readonly CancellationTokenSource Cts = new();
+
+    internal void SetActivityLease(IDisposable? lease) => _activityLease = lease;
+    internal IDisposable? TakeActivityLease() => Interlocked.Exchange(ref _activityLease, null);
 
     public string Id { get; }
     public string ConversationId { get; }
@@ -147,10 +152,14 @@ public sealed class AgentTaskRegistry
     private readonly Dictionary<string, List<AgentMessage>> _parentMessages = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<AgentMessage>> _agentMessages = new(StringComparer.Ordinal);
     private readonly Func<SubagentRuntimeOptions> _options;
+    private readonly IActivityTracker _activity;
     private TaskCompletionSource _changeSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    public AgentTaskRegistry(Func<SubagentRuntimeOptions>? options = null) =>
+    public AgentTaskRegistry(Func<SubagentRuntimeOptions>? options = null, IActivityTracker? activity = null)
+    {
         _options = options ?? (() => new SubagentRuntimeOptions());
+        _activity = activity ?? NullActivityTracker.Instance;
+    }
 
     public event Action<string>? ParentMessageQueued;
     public event Action<string>? AgentMessageQueued;
@@ -187,8 +196,9 @@ public sealed class AgentTaskRegistry
 
             reservation = new AgentTaskReservation(this, owner, kind);
             _reservations.Add(reservation);
-            return true;
         }
+        reservation.SetActivityLease(_activity.Acquire("agent-task"));
+        return true;
     }
 
     public bool TryReserveAgentTurn(
@@ -214,8 +224,9 @@ public sealed class AgentTaskRegistry
             reservation = new AgentTaskReservation(this, owner, AgentTaskKinds.Agent, agentId);
             _reservations.Add(reservation);
             _agentReservations.Add(Key(owner.ConversationId, agentId));
-            return true;
         }
+        reservation.SetActivityLease(_activity.Acquire("agent-task"));
+        return true;
     }
 
     /// <summary>
@@ -249,6 +260,7 @@ public sealed class AgentTaskRegistry
                 tail,
                 alreadyRunning,
                 agentId);
+            task.SetActivityLease(reservation.TakeActivityLease());
             _tasks[Key(task.ConversationId, task.Id)] = task;
             if (agentId is not null && _agents.TryGetValue(Key(task.ConversationId, agentId), out var agent))
             {
@@ -271,6 +283,7 @@ public sealed class AgentTaskRegistry
             if (reservation.AgentId is { } agentId)
                 _agentReservations.Remove(Key(reservation.Owner.ConversationId, agentId));
         }
+        reservation.TakeActivityLease()?.Dispose();
     }
 
     private string? CapacityErrorLocked(string conversationId, string kind)
@@ -338,6 +351,7 @@ public sealed class AgentTaskRegistry
                 agent.Version++;
             SignalLocked();
         }
+        task.TakeActivityLease()?.Dispose();
         Changed?.Invoke(task);
     }
 
@@ -652,6 +666,7 @@ public sealed class AgentTaskRegistry
 public sealed class AgentTaskReservation : IDisposable
 {
     private AgentTaskRegistry? _registry;
+    private IDisposable? _activityLease;
 
     internal AgentTaskReservation(AgentTaskRegistry registry, AgentTaskOwner owner, string kind, string? agentId = null)
     {
@@ -665,8 +680,17 @@ public sealed class AgentTaskReservation : IDisposable
     internal string Kind { get; }
     internal string? AgentId { get; }
 
+    internal void SetActivityLease(IDisposable? lease) => _activityLease = lease;
+    internal IDisposable? TakeActivityLease() => Interlocked.Exchange(ref _activityLease, null);
+
     internal bool TryConsume(AgentTaskRegistry registry) =>
         ReferenceEquals(Interlocked.CompareExchange(ref _registry, null, registry), registry);
 
-    public void Dispose() => Interlocked.Exchange(ref _registry, null)?.ReleaseReservation(this);
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _registry, null) is { } registry)
+            registry.ReleaseReservation(this);
+        else
+            TakeActivityLease()?.Dispose();
+    }
 }

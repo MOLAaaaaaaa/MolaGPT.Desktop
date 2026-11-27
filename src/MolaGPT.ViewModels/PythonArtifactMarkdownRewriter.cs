@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Tools.Browser;
 using MolaGPT.Core.Chat.Tools.PythonExecution;
+using MolaGPT.Presentation;
 
 namespace MolaGPT.ViewModels;
 
@@ -31,6 +32,7 @@ internal static partial class PythonArtifactMarkdownRewriter
         {
             using var doc = JsonDocument.Parse(resultJson);
             var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return null;
             AddWorkingDirectory(root, workingDirectories);
             if (root.TryGetProperty("artifacts", out var artifacts) && artifacts.ValueKind == JsonValueKind.Array)
             {
@@ -157,35 +159,30 @@ internal static partial class PythonArtifactMarkdownRewriter
             : new ArtifactContext(byRelativePath, Array.Empty<string>());
     }
 
-    public static string Rewrite(string content, IReadOnlyList<ArtifactContext>? contexts)
+    public static string Rewrite(string content, IReadOnlyList<ArtifactContext>? contexts, IList<int>? positions = null)
     {
         if (string.IsNullOrWhiteSpace(content) || contexts is not { Count: > 0 }
             || !content.Contains("![", StringComparison.Ordinal))
             return content;
 
-        return MarkdownImageRegex().Replace(content, match =>
+        return MarkdownSource.RewriteImages(content, url =>
         {
-            var urlGroup = match.Groups["url"];
-            if (!urlGroup.Success)
-                return match.Value;
-
-            var originalUrl = urlGroup.Value.Trim();
+            var originalUrl = url.Trim();
             if (string.IsNullOrWhiteSpace(originalUrl) || !IsRelativeMarkdownImageUrl(originalUrl))
-                return match.Value;
+                return null;
 
             var resolved = ResolveRelativePath(originalUrl, contexts);
             if (string.IsNullOrWhiteSpace(resolved))
-                return match.Value;
+                return null;
 
-            var replacementUrl = new Uri(resolved!).AbsoluteUri;
-            var relativeIndex = urlGroup.Index - match.Index;
-            return match.Value[..relativeIndex] + replacementUrl + match.Value[(relativeIndex + urlGroup.Length)..];
-        });
+            return new Uri(resolved!).AbsoluteUri;
+        }, positions);
     }
 
     private static string? ResolveRelativePath(string url, IReadOnlyList<ArtifactContext> contexts)
     {
         var normalized = NormalizeRelativeKey(url);
+        if (normalized.IndexOfAny(Path.GetInvalidPathChars()) >= 0) return null;
         foreach (var context in contexts)
         {
             if (context.ByRelativePath.TryGetValue(normalized, out var explicitPath))
@@ -299,9 +296,6 @@ internal static partial class PythonArtifactMarkdownRewriter
         obj.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
-
-    [GeneratedRegex(@"!\[(?:\\.|[^\]\\])*\]\((?<url>[^)\r\n]+)\)", RegexOptions.CultureInvariant)]
-    private static partial Regex MarkdownImageRegex();
 
     [GeneratedRegex(@"""working_directory""\s*:\s*""(?<value>(?:\\.|[^""\\])*)""", RegexOptions.CultureInvariant)]
     private static partial Regex WorkingDirectoryRegex();

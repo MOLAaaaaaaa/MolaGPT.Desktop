@@ -71,6 +71,7 @@ public static class CrashReporterApplication
         var version = options.GetValueOrDefault("--app-version") ?? "unknown";
         var logPath = options.GetValueOrDefault("--log-directory");
 
+        using var efficiency = new WatchEfficiencyScope();
         var pipeName = options.GetValueOrDefault("--pipe");
         using var dumpPipe = string.IsNullOrWhiteSpace(pipeName)
             ? null
@@ -79,7 +80,7 @@ public static class CrashReporterApplication
         var dumpPath = Path.Combine(store.GetPendingDirectory(), sessionId + ".dmp");
         var dumpTask = dumpPipe is null
             ? Task.FromResult<(bool Requested, string? DumpError)>((false, null))
-            : ServeDumpRequestAsync(dumpPipe, processId, dumpPath);
+            : ServeDumpRequestAsync(dumpPipe, processId, dumpPath, efficiency);
 
         int? exitCode = null;
         Task? recoverTask = null;
@@ -89,6 +90,8 @@ public static class CrashReporterApplication
             _ = process.SafeHandle; // Retain a query handle so ExitCode works after WaitForExit().
             // Defer orphan recovery/cleanup until after the pipe is listening and the process handle is held.
             recoverTask = Task.Run(() => store.RecoverPending(sessionId));
+            if (!process.HasExited)
+                efficiency.Enter();
             process.WaitForExit();
             try { exitCode = process.ExitCode; }
             catch (InvalidOperationException) { }
@@ -97,6 +100,10 @@ public static class CrashReporterApplication
         {
             // The app may have exited before this monitor was scheduled.
             recoverTask = Task.Run(() => store.RecoverPending(sessionId));
+        }
+        finally
+        {
+            efficiency.Restore();
         }
 
         if (recoverTask is not null)
@@ -192,11 +199,13 @@ public static class CrashReporterApplication
     private static async Task<(bool Requested, string? DumpError)> ServeDumpRequestAsync(
         NamedPipeServerStream pipe,
         int processId,
-        string dumpPath)
+        string dumpPath,
+        WatchEfficiencyScope efficiency)
     {
         try
         {
             await pipe.WaitForConnectionAsync().ConfigureAwait(false);
+            efficiency.Restore();
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
             var line = await ReadBoundedLineAsync(pipe, 8192, deadline.Token).ConfigureAwait(false);

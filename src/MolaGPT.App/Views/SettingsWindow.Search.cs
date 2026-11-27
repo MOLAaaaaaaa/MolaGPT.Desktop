@@ -283,8 +283,7 @@ public partial class SettingsWindow
         var entry = result.Entry;
         PART_SettingsSearch.Text = string.Empty;
 
-        if (PART_Nav.SelectedItem == entry.Nav) ShowSelectedPage();
-        else PART_Nav.SelectedItem = entry.Nav;
+        SelectSettingsPage(entry.Nav);
         entry.Nav.Focus();
         if (entry.IsPage || Reachable(entry) is not ({ } target, var name)) return;
 

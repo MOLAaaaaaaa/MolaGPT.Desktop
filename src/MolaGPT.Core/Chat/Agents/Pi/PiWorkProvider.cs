@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MolaGPT.Core.Chat.Attachments;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
 
@@ -85,6 +86,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         _config = config;
         return true;
     }
+
+    public bool SharesSidecarSpec(PiWorkProvider other) => _config.Spec.Key == other._config.Spec.Key;
 
     public async IAsyncEnumerable<ChatChunk> StreamChatAsync(
         ChatRequest request,
@@ -187,9 +190,10 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
         //    endpoint from its compatibility detection, so it would fall back to
         //    plain reasoning_effort and a model configured for Qwen's
         //    enable_thinking + budget would quietly stop honouring the setting.
-        var thinkingLevel = ResolveThinkingLevel(request, creds.Api);
-        if (ThinkingParams.Owns(creds.Api))
-            creds = creds with { ExtraBody = MergeThinking(creds.ExtraBody, request, creds) };
+        var geminiThinking = ResolveGeminiThinking(activeModel, creds);
+        var thinkingLevel = ResolveThinkingLevel(request, creds.Api, geminiThinking);
+        if (geminiThinking is null && ThinkingParams.Owns(creds.Api))
+            creds = creds with { ExtraBody = MergeThinking(creds.ExtraBody, request, creds, activeModel?.ThinkingConfig) };
 
         if (builtinVendor is { } activeBuiltin)
         {
@@ -289,7 +293,9 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             {
                 if (value is not null) Interlocked.CompareExchange(ref workError, value, null);
             },
-            ReadWorkError: () => Volatile.Read(ref workError));
+            ReadWorkError: () => Volatile.Read(ref workError),
+            GeminiThinking: geminiThinking,
+            ProviderId: Id);
 
         var turnKey = request.ConversationId ?? PiRuntime.DraftKey;
         if (request.WorkResumeEntryId is { } entryId
@@ -518,7 +524,9 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             creds.PathMode,
             AdaptBody: creds.AdaptBody,
             ResponseReceived: creds.ResponseReceived,
-            ModelId: creds.Model);
+            ModelId: creds.Model,
+            GeminiThinking: ResolveGeminiThinking(Models.FirstOrDefault(model => model.Id == modelId), creds),
+            ProviderId: Id);
 
         return await _runtime.AcquireAsync(
             _config.Spec,
@@ -645,6 +653,8 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             ? creds.Endpoint.Replace("{model}", Uri.EscapeDataString(modelId), StringComparison.Ordinal)
                 .Replace(":streamGenerateContent", ":generateContent", StringComparison.Ordinal)
             : creds.Endpoint;
+        if (string.Equals(Id, MolaGptProviderIds.LocalTools, StringComparison.OrdinalIgnoreCase))
+            MolaGptProxyProvider.RequireLocalToolsChatEndpoint(new Uri(endpoint, UriKind.Absolute));
         return new OneShotTarget(
             endpoint,
             creds.TokenProvider,
@@ -1176,13 +1186,13 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     /// reasoning off is decided per model, not per dialect: whether the provider
     /// allows it at all, and which vocabulary its refusal is spelled in.
     /// </summary>
-    private IReadOnlyDictionary<string, JsonElement>? MergeThinking(
+    private static IReadOnlyDictionary<string, JsonElement>? MergeThinking(
         IReadOnlyDictionary<string, JsonElement>? custom,
         ChatRequest request,
-        PiProviderCreds creds)
+        PiProviderCreds creds,
+        ThinkingConfig? config)
     {
         var thinking = new Dictionary<string, object?>(StringComparer.Ordinal);
-        var config = Models.FirstOrDefault(m => m.Id == request.ModelId)?.ThinkingConfig;
         ThinkingParams.Apply(thinking, request, creds.Endpoint, config, creds.Api);
         if (thinking.Count == 0) return custom;
 
@@ -1201,15 +1211,14 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
     ///
     /// Responses models declare their higher levels in <c>thinkingLevelMap</c>,
     /// so Pi can send them unchanged. Other dialects keep their existing mapping.
-    /// Google's level-only Gemini models reject Pi's <c>off</c>/<c>minimal</c>
-    /// value, so <c>low</c> is their supported floor.
+    /// Gemini level models use the same model capabilities as the request shim.
     /// </summary>
-    internal static string ResolveThinkingLevel(ChatRequest request, string api)
+    internal static string ResolveThinkingLevel(ChatRequest request, string api, ThinkingConfig? geminiThinking)
     {
         var google = api == "google-generative-ai";
-        if (google && GeminiModelPolicy.ThinkingFor(request.ModelId) is { } config)
-            return GeminiModelPolicy.NormalizeEffort(request.ModelId,
-                request.UseThinking == false ? "off" : request.ReasoningEffort ?? config.DefaultEffort!);
+        if (geminiThinking is not null)
+            return GeminiModelPolicy.NormalizeEffort(geminiThinking,
+                request.UseThinking == false ? "off" : request.ReasoningEffort ?? geminiThinking.DefaultEffort);
         if (request.UseThinking == false) return google ? "low" : "off";
 
         var effort = request.ReasoningEffort?.Trim().ToLowerInvariant();
@@ -1223,6 +1232,19 @@ public sealed class PiWorkProvider : IChatProvider, IStatefulHistoryProvider, IO
             // does not share: take its middle rather than guessing at an extreme.
             _ => request.UseThinking == true ? "medium" : "off",
         };
+    }
+
+    private static ThinkingConfig? ResolveGeminiThinking(ProviderModel? model, PiProviderCreds creds)
+    {
+        var google = creds.Api switch
+        {
+            "google-generative-ai" => GeminiModelPolicy.IsRoute("gemini", creds.Endpoint),
+            "openai-completions" => GeminiModelPolicy.IsOpenAiCompatEndpoint(creds.Endpoint),
+            _ => false
+        };
+        if (!google) return null;
+        var config = model is null ? GeminiModelPolicy.DefaultThinkingFor(creds.Model) : model.ResolveThinkingConfig(googleRoute: true);
+        return config?.Kind == ThinkingParamKind.GeminiThinkingLevel ? config : null;
     }
 
     /// <summary>

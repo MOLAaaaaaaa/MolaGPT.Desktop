@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
+using MolaGPT.Core.Net;
 
 namespace MolaGPT.App.Rendering.Canvas;
 
@@ -37,18 +38,18 @@ internal static class CdnProxy
         "fonts.googleapis.com", "fonts.gstatic.com",
     ];
 
-    private const long MaxBody = 24 * 1024 * 1024;
+    private const int MaxBody = 24 * 1024 * 1024;
     private const long CacheBudget = 256L * 1024 * 1024;
 
     private static readonly SocketsHttpHandler Handler = new()
     {
         AutomaticDecompression = DecompressionMethods.All,
-        AllowAutoRedirect = true,
+        AllowAutoRedirect = false,
         ConnectTimeout = TimeSpan.FromSeconds(8),
         PooledConnectionLifetime = TimeSpan.FromMinutes(5),
     };
     private static readonly HttpClient Http = CreateClient();
-    private static int _trimmed;
+    private static readonly Lock CacheGate = new();
 
     public static string CacheDirectory { get; } = Path.Combine(CanvasEnvironment.Root, "cdn-cache");
 
@@ -57,24 +58,26 @@ internal static class CdnProxy
         if (!Directory.Exists(CacheDirectory)) return [];
         return Directory.EnumerateFiles(CacheDirectory)
             .Where(path => System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(path),
-                @"^[0-9a-f]{32}\.(bin|type)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                @"^[0-9a-f]{32}\.(entry|bin|type)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             .ToArray();
     }
 
     public static void ConfigureProxy(IWebProxy proxy) => Handler.Proxy = proxy;
 
-    public static bool IsAllowed(string host) =>
-        AllowedHosts.Contains(host.ToLowerInvariant(), StringComparer.Ordinal);
+    public static bool IsAllowed(Uri uri) => uri.IsAbsoluteUri && uri.Scheme == Uri.UriSchemeHttps
+        && uri.IsDefaultPort && AllowedHosts.Contains(uri.IdnHost, StringComparer.OrdinalIgnoreCase);
 
     public static async Task<CdnResponse?> FetchAsync(Uri uri, CancellationToken ct)
     {
-        var key = Hash(uri.AbsoluteUri);
-        if (ReadCache(key) is { } cached) return cached;
+        ct.ThrowIfCancellationRequested();
+        if (!IsAllowed(uri)) return null;
+        var key = Hash("v2:" + uri.AbsoluteUri);
+        if (await Task.Run(() => ReadCache(key), ct).ConfigureAwait(false) is { } cached) return cached;
 
         var candidates = Candidates(uri).ToList();
         using var race = CancellationTokenSource.CreateLinkedTokenSource(ct);
         race.CancelAfter(TimeSpan.FromSeconds(40));
-        var pending = candidates.Select(candidate => FetchOneAsync(candidate, race.Token)).ToList();
+        var pending = candidates.Select(candidate => FetchOneAsync(Http, candidate, race.Token)).ToList();
 
         while (pending.Count > 0)
         {
@@ -83,10 +86,12 @@ internal static class CdnProxy
             if (await finished.ConfigureAwait(false) is not { } response) continue;
 
             await race.CancelAsync().ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
             WriteCache(key, response);
             return response;
         }
 
+        ct.ThrowIfCancellationRequested();
         return null;
     }
 
@@ -146,20 +151,27 @@ internal static class CdnProxy
         return (name, version, file);
     }
 
-    private static async Task<CdnResponse?> FetchOneAsync(Uri uri, CancellationToken ct)
+    private static async Task<CdnResponse?> FetchOneAsync(HttpClient http, Uri uri, CancellationToken ct)
     {
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-            using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-            if (response.StatusCode != HttpStatusCode.OK) return null;
-            if (response.Content.Headers.ContentLength is > MaxBody) return null;
-            var body = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-            if (body.Length > MaxBody) return null;
-            var type = response.Content.Headers.ContentType?.ToString();
-            return new CdnResponse(body, string.IsNullOrWhiteSpace(type) ? GuessType(uri.AbsolutePath) : type!);
+            for (var hops = 0; hops <= 5 && IsAllowed(uri); hops++)
+            {
+                using var response = await http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+                if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
+                {
+                    if (response.Headers.Location is not { } location || !Uri.TryCreate(uri, location, out var next)) return null;
+                    uri = next;
+                    continue;
+                }
+                if (response.StatusCode != HttpStatusCode.OK || response.Content.Headers.ContentLength > MaxBody) return null;
+                using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+                var body = await BoundedRead.ReadAsync(stream, MaxBody, ct).ConfigureAwait(false);
+                return new CdnResponse(body, response.Content.Headers.ContentType?.ToString() ?? GuessType(uri.AbsolutePath));
+            }
+            return null;
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException or IOException)
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException or InvalidDataException)
         {
             return null;
         }
@@ -185,11 +197,21 @@ internal static class CdnProxy
     {
         try
         {
-            var body = Path.Combine(CacheDirectory, key + ".bin");
-            var type = Path.Combine(CacheDirectory, key + ".type");
-            if (!File.Exists(body) || !File.Exists(type)) return null;
-            File.SetLastAccessTimeUtc(body, DateTime.UtcNow);
-            return new CdnResponse(File.ReadAllBytes(body), File.ReadAllText(type));
+            var path = Path.Combine(CacheDirectory, key + ".entry");
+            lock (CacheGate)
+            {
+                if (!File.Exists(path)) return null;
+                using var file = File.OpenRead(path);
+                using var reader = new BinaryReader(file);
+                var typeLength = reader.ReadInt32();
+                var length = file.Length - sizeof(int) - typeLength;
+                if (typeLength is < 1 or > 4096 || length is < 0 or > MaxBody) return null;
+                var type = Encoding.UTF8.GetString(reader.ReadBytes(typeLength));
+                var body = reader.ReadBytes((int)length);
+                file.Close();
+                File.SetLastAccessTimeUtc(path, DateTime.UtcNow);
+                return new CdnResponse(body, type);
+            }
         }
         catch (IOException)
         {
@@ -203,15 +225,24 @@ internal static class CdnProxy
 
     private static void WriteCache(string key, CdnResponse response)
     {
+        var path = Path.Combine(CacheDirectory, key + ".entry");
+        var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
+            var type = Encoding.UTF8.GetBytes(response.ContentType);
+            if (type.Length is < 1 or > 4096) return;
             Directory.CreateDirectory(CacheDirectory);
-            var body = Path.Combine(CacheDirectory, key + ".bin");
-            var temp = body + ".tmp";
-            File.WriteAllBytes(temp, response.Body);
-            File.Move(temp, body, overwrite: true);
-            File.WriteAllText(Path.Combine(CacheDirectory, key + ".type"), response.ContentType);
-            if (Interlocked.Exchange(ref _trimmed, 1) == 0) _ = Task.Run(Trim);
+            using (var writer = new BinaryWriter(File.Create(temp)))
+            {
+                writer.Write(type.Length);
+                writer.Write(type);
+                writer.Write(response.Body);
+            }
+            lock (CacheGate)
+            {
+                File.Move(temp, path, overwrite: true);
+                Trim();
+            }
         }
         catch (IOException)
         {
@@ -219,23 +250,26 @@ internal static class CdnProxy
         catch (UnauthorizedAccessException)
         {
         }
+        finally
+        {
+            try { File.Delete(temp); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 
-    /// <summary>Once per run: drop least-recently-used entries past the budget.</summary>
+    /// <summary>Evict cold entries, including files from the previous two-file format.</summary>
     private static void Trim()
     {
         try
         {
-            var files = new DirectoryInfo(CacheDirectory).GetFiles("*.bin")
-                .OrderByDescending(f => f.LastAccessTimeUtc)
-                .ToList();
-            long total = 0;
+            var files = ListCachePaths().Select(path => new FileInfo(path)).OrderBy(f => f.LastAccessTimeUtc).ToList();
+            long total = files.Sum(file => file.Length);
             foreach (var file in files)
             {
-                total += file.Length;
-                if (total <= CacheBudget) continue;
+                if (total <= CacheBudget) break;
+                total -= file.Length;
                 file.Delete();
-                File.Delete(Path.ChangeExtension(file.FullName, ".type"));
             }
         }
         catch (IOException)

@@ -1,5 +1,4 @@
 using Avalonia;
-using System.Text.Json;
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
@@ -80,51 +79,52 @@ public partial class SettingsWindow
                 FileTypeFilter = [ModelConfigurationFileType]
             });
             if (files.Count == 0) return;
-            IReadOnlyList<ProviderRow>? rows;
+            (IReadOnlyList<ProviderRow> Rows, int Rejected)? read;
             do
             {
                 var password = await RequestTransferPasswordAsync(exporting: false);
                 if (password is null) return;
                 await using (var stream = await files[0].OpenReadAsync())
-                    rows = await Task.Run(() =>
-                        _personalData!.TryReadModelConfigurations(stream, password, out var configurations)
-                            ? configurations : null);
-                if (rows is null)
+                    read = await Task.Run(() => _personalData!.ReadModelConfigurations(stream, password));
+                if (read is null)
                     _notifications?.Error("模型配置导入失败", "密码不正确，或模型配置文件已损坏。", PersonalDataNotificationKey);
-            } while (rows is null);
+            } while (read is null);
+            var (rows, rejected) = read.Value;
             if (rows.Count == 0)
             {
-                _notifications?.Info("文件中没有模型配置", key: PersonalDataNotificationKey);
+                if (rejected > 0)
+                    _notifications?.Error("模型配置导入失败", $"{rejected} 个服务无法导入。", PersonalDataNotificationKey);
+                else
+                    _notifications?.Info("文件中没有模型配置", key: PersonalDataNotificationKey);
                 return;
             }
             var selectedRows = await ResolveModelConfigurationConflictsAsync(rows);
             if (selectedRows is null) return;
             if (selectedRows.Count == 0)
             {
-                _notifications?.Info("已保留现有配置", key: PersonalDataNotificationKey);
+                if (rejected > 0)
+                    _notifications?.Warning("已保留现有配置", $"{rejected} 个服务无法导入。", PersonalDataNotificationKey);
+                else
+                    _notifications?.Info("已保留现有配置", key: PersonalDataNotificationKey);
                 return;
             }
 
             _notifications?.Progress(PersonalDataNotificationKey, "正在导入模型配置");
-            await Task.Run(() => _personalData!.ImportModelConfigurations(selectedRows));
-            _settings.Reload();
-            var importedIds = selectedRows.Select(row => row.Id).ToHashSet(StringComparer.Ordinal);
-            var unavailable = 0;
-            if (_providerRegistry is not null && _byokHttpFactory is not null)
-                foreach (var entry in _settings.Providers.Where(provider => importedIds.Contains(provider.Id)))
-                {
-                    var outcome = ProviderRestorer.ApplyEntry(entry, _providerRegistry, _byokHttpFactory,
-                        _toolHost, _piByokProviderFactory);
-                    if (outcome is ProviderApplyOutcome.RuntimeUnavailable or ProviderApplyOutcome.Unsupported)
-                        unavailable++;
-                }
-            RefreshProviders();
-            RefreshSpecializedModelChoices();
-            if (unavailable > 0)
+            var summary = _providerRestorer.Import(selectedRows);
+            var imported = selectedRows.Count - summary.Failed;
+            var failed = rejected + summary.Failed;
+            if (imported == 0)
+                _notifications?.Error("模型配置导入失败", $"{failed} 个服务无法导入。", PersonalDataNotificationKey);
+            else if (failed > 0 || summary.Unavailable > 0)
+            {
+                var detail = $"已导入 {imported} 个模型服务。";
+                if (failed > 0) detail += $"{failed} 个服务导入失败。";
+                if (summary.Unavailable > 0) detail += $"{summary.Unavailable} 个已导入服务暂无法运行。";
                 _notifications?.Warning("模型配置已导入",
-                    $"{unavailable} 个服务暂时无法运行，请在模型服务中检查配置和 Agent 运行环境。", PersonalDataNotificationKey);
+                    detail, PersonalDataNotificationKey);
+            }
             else
-                _notifications?.Success("模型配置已导入", $"{selectedRows.Count} 个模型服务", PersonalDataNotificationKey);
+                _notifications?.Success("模型配置已导入", $"{imported} 个模型服务", PersonalDataNotificationKey);
         });
 
     private async Task<IReadOnlyList<ProviderRow>?> ResolveModelConfigurationConflictsAsync(IReadOnlyList<ProviderRow> rows)
@@ -153,7 +153,7 @@ public partial class SettingsWindow
             var comparison = new Grid { ColumnDefinitions = new ColumnDefinitions("*,16,*") };
             comparison.Children.Add(Option(keep, current.Name, current.BaseUrl, current.Models.Select(model => model.Id)));
             var imported = Option(replace, incoming.Name, incoming.BaseUrl,
-                JsonSerializer.Deserialize<List<ProviderModelEntry>>(incoming.Models)!.Select(model => model.Id));
+                ProviderRowCodec.ReadModels(incoming.Models).Select(model => model.Id));
             Grid.SetColumn(imported, 2);
             comparison.Children.Add(imported);
             list.Children.Add(comparison);

@@ -2,8 +2,6 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
 using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
@@ -14,6 +12,7 @@ using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using Avalonia.VisualTree;
 using MolaGPT.App.Infrastructure;
+using MolaGPT.App.Remote;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Providers;
@@ -51,16 +50,15 @@ public partial class SettingsWindow : MolaContentWindow
     private readonly NotificationCenter? _notifications;
 
     private const string PythonRuntimeNotificationKey = "python-runtime";
-    private const string PiSidecarNotificationKey = "pi-sidecar";
     private readonly SkillsViewModel _skills;
     private readonly BrowserActivityLog? _browserActivity;
-    private readonly Func<HttpClient>? _byokHttpFactory;
+    private readonly Func<HttpClient> _byokHttpFactory;
+    private readonly ProviderConnection _providerConnection;
     private readonly ProviderRegistry? _providerRegistry;
-    private readonly IChatToolHost? _toolHost;
-    private readonly MolaAccountSearchClient? _accountSearch;
+    private readonly ProviderRestorer _providerRestorer;
+    private readonly MolaAccountSearchClient _accountSearch;
     private readonly PiByokProviderFactory? _piByokProviderFactory;
-    private readonly Func<Task>? _agentRuntimeInstalled;
-    private readonly Action? _agentRuntimeRemoving;
+    private readonly AgentRuntimeSetup _agentRuntime;
     private readonly BrowserBridgeStatusViewModel _browserBridge;
     /// <summary>Nav item → page, read from each item's <c>Tag</c> (the page's
     /// name). Group headings carry no tag and so never resolve to a page.</summary>
@@ -74,8 +72,7 @@ public partial class SettingsWindow : MolaContentWindow
     private ModelsDevCatalog? _modelsDevCatalog;
     /// <summary>The last lookup and the providers it covered, held so the per-model
     /// picker can be opened without re-matching everything against the catalogue.</summary>
-    private PricingMatch? _pricingMatch;
-    private IReadOnlyList<ProviderEntry> _pricingTargets = [];
+    private (PricingMatch Match, HashSet<string> ProviderIds)? _pendingPricing;
     private readonly List<DetectedModelRow> _detectedModels = [];
     private ProviderEntry? _editingProvider;
     private PersonaItemViewModel? _editingPersona;
@@ -106,42 +103,36 @@ public partial class SettingsWindow : MolaContentWindow
 
     private static readonly ProviderPresetRow[] ProviderPresets =
     [
-        new("openrouter", "OpenRouter", "openai-compat", "https://openrouter.ai/api/", "v1/models",
-            ThinkingParamKind.OpenAiReasoningEffort),
+        new("openrouter", "OpenRouter", "openai-compat", "https://openrouter.ai/api/", "v1/models"),
         // DeepSeek 的对话走 Responses 协议：服务端搜索 (deepseek_web_search) 只在
         // 根路径 /responses 上生效，/v1/responses 这个别名会把工具悄悄丢掉。
         new("deepseek", "DeepSeek", "openai-response", "https://api.deepseek.com/", "v1/models",
-            ThinkingParamKind.DeepSeekV4, ApiPath: "responses"),
-        new("bailian", "阿里云百炼", "openai-compat", "https://dashscope.aliyuncs.com/compatible-mode/", "v1/models",
-            ThinkingParamKind.QwenThinkingBudget),
+            ApiPath: "responses"),
+        new("bailian", "阿里云百炼", "openai-compat", "https://dashscope.aliyuncs.com/compatible-mode/", "v1/models"),
         new("bailian-response", "阿里云百炼 (Responses API)", "openai-response", "https://dashscope.aliyuncs.com/compatible-mode/",
-            "v1/models", ThinkingParamKind.OpenAiReasoningEffort, ApiPath: "v1/responses"),
-        new("moonshot", "Moonshot (Kimi)", "openai-compat", "https://api.moonshot.cn/", "v1/models",
-            ThinkingParamKind.None),
-        new("openai", "OpenAI", "openai-compat", OpenAiBaseUrl, "v1/models",
-            ThinkingParamKind.OpenAiReasoningEffort),
+            "v1/models", ApiPath: "v1/responses"),
+        new("moonshot", "Moonshot (Kimi)", "openai-compat", "https://api.moonshot.cn/", "v1/models"),
+        new("openai", "OpenAI", "openai-compat", OpenAiBaseUrl, "v1/models"),
         new("openai-response", "OpenAI (Responses API)", "openai-response", OpenAiBaseUrl,
-            "v1/models", ThinkingParamKind.OpenAiReasoningEffort, ApiPath: "v1/responses"),
-        new("anthropic", "Anthropic (Claude)", "anthropic", AnthropicBaseUrl, "v1/models",
-            ThinkingParamKind.AnthropicAdaptive),
+            "v1/models", ApiPath: "v1/responses"),
+        new("anthropic", "Anthropic (Claude)", "anthropic", AnthropicBaseUrl, "v1/models"),
         new("gemini-compat", "Google Gemini（OpenAI 兼容）", "openai-compat", GeminiCompatBaseUrl, "models",
-            ThinkingParamKind.GeminiThinkingLevel, ApiPath: "chat/completions"),
+            ApiPath: "chat/completions"),
         new("gemini", "Google Gemini（原生）", "gemini", GeminiNativeBaseUrl, "models",
-            ThinkingParamKind.GeminiThinkingLevel, ApiPath: "models/{model}:streamGenerateContent"),
-        new("custom-openai", "自定义（OpenAI 兼容）", "openai-compat", "https://api.openai.com/", "v1/models",
-            ThinkingParamKind.OpenAiReasoningEffort),
+            ApiPath: "models/{model}:streamGenerateContent"),
+        new("custom-openai", "自定义（OpenAI 兼容）", "openai-compat", OpenAiBaseUrl, "v1/models"),
         new("openrouter-images", "OpenRouter 图像", "openai-compat", "https://openrouter.ai/api/", "v1/images/models",
-            ThinkingParamKind.None, "image", "v1/images", ImageFormat: "openai-images", ImageChatPath: "v1/chat/completions"),
+            "image", "v1/images", ImageFormat: "openai-images", ImageChatPath: "v1/chat/completions"),
         new("openai-images", "OpenAI 图像", "openai-compat", OpenAiBaseUrl, "v1/models",
-            ThinkingParamKind.None, "image", "v1/images/generations", "v1/images/edits", "openai-images"),
+            "image", "v1/images/generations", "v1/images/edits", "openai-images"),
         new("volcengine-images", "火山方舟图像", "openai-compat", "https://ark.cn-beijing.volces.com/api/v3/", "models",
-            ThinkingParamKind.None, "image", "images/generations", ImageFormat: "openai-images", ImageChatPath: "chat/completions"),
+            "image", "images/generations", ImageFormat: "openai-images", ImageChatPath: "chat/completions"),
         new("siliconflow-images", "SiliconFlow 图像", "openai-compat", "https://api.siliconflow.cn/", "v1/models",
-            ThinkingParamKind.None, "image", "v1/images/generations", ImageFormat: "openai-images"),
+            "image", "v1/images/generations", ImageFormat: "openai-images"),
         new("xai-images", "xAI 图像", "openai-compat", "https://api.x.ai/", "v1/models",
-            ThinkingParamKind.None, "image", "v1/images/generations", "v1/images/edits", "openai-images"),
+            "image", "v1/images/generations", "v1/images/edits", "openai-images"),
         new("gemini-images", "Google Gemini 图像", "gemini", GeminiNativeBaseUrl, "models",
-            ThinkingParamKind.None, "image", ImageFormat: "openai-chat-image", ImageChatPath: "models/{model}:generateContent")
+            "image", ImageFormat: "openai-chat-image", ImageChatPath: "models/{model}:generateContent")
     ];
 
     // Endpoint defaults for the provider presets and the connection test. These
@@ -149,87 +140,75 @@ public partial class SettingsWindow : MolaContentWindow
     // only engine, the settings page is the last thing that needs them.
     private const string OpenAiBaseUrl = "https://api.openai.com/";
     private const string AnthropicBaseUrl = "https://api.anthropic.com/";
-    private const string AnthropicVersion = "2023-06-01";
 
     /// <summary>Google's two API roots. The compatible API uses OpenAI request and
     /// response shapes; the native API carries Gemini-specific tool-call fields.</summary>
-    private const string GeminiCompatBaseUrl = "https://generativelanguage.googleapis.com/v1beta/openai/";
-    private const string GeminiNativeBaseUrl = "https://generativelanguage.googleapis.com/v1beta/";
+    private const string GeminiCompatBaseUrl = GeminiModelPolicy.OpenAiBaseUrl;
+    private const string GeminiNativeBaseUrl = GeminiModelPolicy.NativeBaseUrl;
 
-    /// <summary>Show the card for controlling MolaGPT conversations from a phone.</summary>
-    private MolaGPT.Desktop.Services.Remote.RemoteWorkSettingsViewModel? _remoteWork;
-    private StackPanel? _remoteWorkSection;
+    private readonly RemoteWorkSettingsViewModel _remoteWork;
 
-    public void AttachRemoteWork(MolaGPT.Desktop.Services.Remote.RemoteWorkSettingsViewModel remoteWork)
-    {
-        _remoteWork = remoteWork;
-        BindRemoteWorkSection();
-    }
-
-    private void BindRemoteWorkSection()
-    {
-        if (_remoteWorkSection is not { } section || _remoteWork is null) return;
-        section.DataContext = _remoteWork;
-        section.IsVisible = true;
-    }
-
-    public SettingsWindow(
+    internal SettingsWindow(
         SettingsViewModel settings,
-        MolaGptAuthService? auth = null,
-        CloudSyncService? cloudSync = null,
-        ConversationListViewModel? conversations = null,
-        AgentBridgeStatusViewModel? agentStatus = null,
-        PersonaListViewModel? personas = null,
-        McpClientManager? mcp = null,
-        ImageGenerationTool? imageGenerationTool = null,
-        PythonRuntimeManager? pythonRuntime = null,
-        PiSidecarRuntimeManager? piSidecar = null,
-        NotificationCenter? notifications = null,
-        SkillsViewModel? skills = null,
-        BrowserActivityLog? browserActivity = null,
-        Func<HttpClient>? byokHttpFactory = null,
-        ProviderRegistry? providerRegistry = null,
-        IChatToolHost? toolHost = null,
-        PiByokProviderFactory? piByokProviderFactory = null,
-        Func<Task>? agentRuntimeInstalled = null,
-        Action? agentRuntimeRemoving = null,
-        PersonalizationViewModel? personalization = null,
-        MemoryPageViewModel? memoryPage = null,
-        MolaGptProxyProvider? proxy = null,
-        PythonRuntimeSetup? pythonSetup = null,
-        PersonalDataService? personalData = null,
-        MolaAccountSearchClient? accountSearch = null)
+        MolaGptAuthService auth,
+        CloudSyncService cloudSync,
+        ConversationListViewModel conversations,
+        AgentBridgeStatusViewModel agentStatus,
+        PersonaListViewModel personas,
+        McpClientManager mcp,
+        ImageGenerationTool imageGenerationTool,
+        PythonRuntimeManager pythonRuntime,
+        PythonRuntimeSetup pythonSetup,
+        PiSidecarRuntimeManager piSidecar,
+        AgentRuntimeSetup agentRuntime,
+        NotificationCenter notifications,
+        SkillsViewModel skills,
+        BrowserActivityLog browserActivity,
+        WebBridgeClient webBridge,
+        Func<HttpClient> byokHttpFactory,
+        ProviderConnection providerConnection,
+        ProviderRegistry providerRegistry,
+        ProviderRestorer providerRestorer,
+        PiByokProviderFactory piByokProviderFactory,
+        PersonalizationViewModel personalization,
+        MemoryPageViewModel memoryPage,
+        PersonalDataService personalData,
+        MolaAccountSearchClient accountSearch,
+        RemoteWorkSettingsViewModel remoteWork,
+        StorageService storage)
     {
         _accountSearch = accountSearch;
         _settings = settings;
+        // Re-read settings and grants once, before any deferred page uses them.
+        _settings.Reload();
         _accountEntryWasNew = !settings.AccountEntrySeen;
         _auth = auth;
         _cloudSync = cloudSync;
         _conversations = conversations;
         _agentStatus = agentStatus;
-        _personas = personas ?? new PersonaListViewModel();
+        _personas = personas;
         _mcp = mcp;
         _imageGenerationTool = imageGenerationTool;
         _pythonRuntime = pythonRuntime;
-        _pythonSetup = pythonSetup
-                       ?? (pythonRuntime is not null && notifications is not null
-                           ? new PythonRuntimeSetup(pythonRuntime, settings, notifications)
-                           : null);
+        _pythonSetup = pythonSetup;
         _piSidecar = piSidecar;
+        _agentRuntime = agentRuntime;
         _notifications = notifications;
-        _skills = skills ?? new SkillsViewModel();
+        _skills = skills;
         _browserActivity = browserActivity;
         _byokHttpFactory = byokHttpFactory;
+        _providerConnection = providerConnection;
         _providerRegistry = providerRegistry;
-        _toolHost = toolHost;
+        _providerRestorer = providerRestorer;
         _piByokProviderFactory = piByokProviderFactory;
-        _agentRuntimeInstalled = agentRuntimeInstalled;
-        _agentRuntimeRemoving = agentRuntimeRemoving;
         _personalization = personalization;
         _personalData = personalData;
+        _remoteWork = remoteWork;
+        _memoryPage = memoryPage;
+        _storage = storage;
+        _browserBridge = new BrowserBridgeStatusViewModel(webBridge);
 
         InitializeComponent();
-        PAGE_PersonalData.IsEnabled = personalData is not null;
         InitializeSearch();
 
         foreach (var item in PART_Nav.Items.OfType<ListBoxItem>())
@@ -238,29 +217,15 @@ public partial class SettingsWindow : MolaContentWindow
                 _navPages[item] = page;
         }
 
-        _memoryPage = memoryPage;
         PAGE_Agent.DataContext = _agentStatus;
         PAGE_Network.DataContext = _settings.NetworkProxy;
         PAGE_Personas.DataContext = _personas;
 
-        // Only the connection card watches the bridge; the rest of the page edits
-        // settings, so it keeps the window's SettingsViewModel context.
-        _browserBridge = new BrowserBridgeStatusViewModel(
-            new WebBridgeClient(_byokHttpFactory?.Invoke() ?? new HttpClient()));
-
         DataContext = _settings;
-        _proxy = proxy;
 
         PART_Nav.SelectedItem = _settings.ShowAccountFeatures ? PART_AccountNav : PART_AppearanceNav;
         PART_Nav.SelectionChanged += (_, _) => ShowSelectedPage();
-        ShowSelectedPage();
-
-
-        RefreshProviders();
         RefreshAccountUi();
-        RefreshMcpServers();
-        RefreshSpecializedModelChoices();
-        RefreshSkills();
 
         Closing += (_, _) =>
         {
@@ -271,24 +236,12 @@ public partial class SettingsWindow : MolaContentWindow
 
         Opened += (_, _) =>
         {
-            // The registry can change while the window is closed — a provider
-            // added from the model picker's empty state, a grant taken during a
-            // tool run — so the lists are re-read on every open.
-            _settings.Reload();
-            _settings.ReloadToolGrants();
-            RefreshProviders();
-            RefreshAccountUi();
-            RefreshMcpServers();
-            RefreshSpecializedModelChoices();
-            RefreshSkills();
-            UpdateSearchStatusHint();
-            _ = RefreshRuntimeStatusAsync();
+            // A contextual route can select and build its page before Show.
+            if (_deferredPageNames.Count == 0) ShowSelectedPage();
         };
         Activated += (_, _) =>
         {
             MarkAccountEntrySeen();
-            _settings.RefreshSubagentProviderModels();
-            _settings.RefreshReviewProviderModels();
             _ = RefreshRuntimeStatusAsync();
         };
 
@@ -305,17 +258,25 @@ public partial class SettingsWindow : MolaContentWindow
             }
             else if (args.PropertyName == nameof(SettingsViewModel.PythonToolExecutablePath))
                 RefreshPythonBrowseButton();
-            else if (args.PropertyName is nameof(SettingsViewModel.WebSearchProvider)
-                     or nameof(SettingsViewModel.IsLoggedIn))
+            else if (args.PropertyName == nameof(SettingsViewModel.AccountSessionGeneration))
+                RefreshAccountUi();
+            else if (args.PropertyName == nameof(SettingsViewModel.WebSearchProvider))
                 UpdateSearchStatusHint();
         };
         EventHandler searchChanged = (_, _) => UpdateSearchStatusHint();
+        EventHandler providersChanged = (_, _) =>
+        {
+            RefreshProviders();
+            RefreshSpecializedModelChoices();
+        };
         _settings.PropertyChanged += settingsChanged;
         _settings.SearchConfigurationChanged += searchChanged;
+        _settings.ProviderConfigurationsChanged += providersChanged;
         Closed += (_, _) =>
         {
             _settings.PropertyChanged -= settingsChanged;
             _settings.SearchConfigurationChanged -= searchChanged;
+            _settings.ProviderConfigurationsChanged -= providersChanged;
         };
         KeyDown += OnSettingsKeyDown;
         AddHandler(Button.ClickEvent, OnSectionHeaderClicked, RoutingStrategies.Bubble);
@@ -369,27 +330,17 @@ public partial class SettingsWindow : MolaContentWindow
             _settings.AccountEntrySeen = true;
     }
 
-    internal void OpenAgentPage()
+    private void SelectSettingsPage(ListBoxItem item)
     {
-        if (ReferenceEquals(PART_Nav.SelectedItem, PART_AgentNav))
-        {
-            if (_agentStatus is not null) _ = _agentStatus.LoadAsync();
-            return;
-        }
-        PART_Nav.SelectedItem = PART_AgentNav;
+        if (ReferenceEquals(PART_Nav.SelectedItem, item)) ShowSelectedPage();
+        else PART_Nav.SelectedItem = item;
     }
 
-    internal void OpenSandboxPage()
-    {
-        PART_Nav.SelectedItem = PART_SandboxNav;
-    }
+    internal void OpenAgentPage() => SelectSettingsPage(PART_AgentNav);
 
-    /// <summary>Where the「浏览器未连接」banner lands: the connection card, already re-checking.</summary>
-    internal void OpenBrowserPage()
-    {
-        PART_Nav.SelectedItem = PART_BrowserNav;
-        ShowSelectedPage();
-    }
+    internal void OpenSandboxPage() => SelectSettingsPage(PART_SandboxNav);
+
+    internal void OpenBrowserPage() => SelectSettingsPage(PART_BrowserNav);
 
     private void RefreshBrowserActivity()
     {
@@ -417,25 +368,11 @@ public partial class SettingsWindow : MolaContentWindow
         RefreshBrowserActivity();
     }
 
-    internal void OpenApprovalPage()
-    {
-        PART_Nav.SelectedItem = PART_ApprovalNav;
-        ShowSelectedPage();
-    }
+    internal void OpenApprovalPage() => SelectSettingsPage(PART_ApprovalNav);
 
-    /// <summary>Where image services are added, which is what every 「去设置」
-    /// in the app is actually asking for.</summary>
-    internal void OpenProvidersPage()
-    {
-        PART_Nav.SelectedItem = PART_ProvidersNav;
-        ShowSelectedPage();
-    }
+    internal void OpenProvidersPage() => SelectSettingsPage(PART_ProvidersNav);
 
-    internal void OpenSearchPage()
-    {
-        PART_Nav.SelectedItem = PART_SearchNav;
-        ShowSelectedPage();
-    }
+    internal void OpenSearchPage() => SelectSettingsPage(PART_SearchNav);
 
     internal void OpenProviderTools(string? providerId)
     {
@@ -450,8 +387,7 @@ public partial class SettingsWindow : MolaContentWindow
 
     internal void OpenPersonaPage(bool startNew, string? personaId = null)
     {
-        PART_Nav.SelectedItem = PART_PersonasNav;
-        ShowSelectedPage();
+        SelectSettingsPage(PART_PersonasNav);
         if (startNew) OnNewPersona(this, new RoutedEventArgs());
         else if (_personas.Find(personaId) is { } persona)
         {
@@ -470,19 +406,25 @@ public partial class SettingsWindow : MolaContentWindow
             return;
         }
 
+        var generation = _settings.AccountSessionGeneration;
         PART_SyncNow.IsEnabled = false;
         PART_SyncNow.Content = "同步中...";
         PART_CloudSyncStatus.Text = "正在同步对话...";
         try
         {
-            var progress = new Progress<string>(message => PART_CloudSyncStatus.Text = message);
+            var progress = new Progress<string>(message =>
+            {
+                if (generation == _settings.AccountSessionGeneration) PART_CloudSyncStatus.Text = message;
+            });
             var result = await _cloudSync.SyncAsync(progress);
             if (_conversations is not null) await _conversations.ReloadAsync();
-            PART_CloudSyncStatus.Text = $"已同步：上传 {result.Uploaded} · 更新 {result.Downloaded} · 删除 {result.Deleted}";
+            if (generation == _settings.AccountSessionGeneration)
+                PART_CloudSyncStatus.Text = $"已同步：上传 {result.Uploaded} · 更新 {result.Downloaded} · 删除 {result.Deleted}";
         }
         catch (Exception ex)
         {
-            PART_CloudSyncStatus.Text = $"同步失败：{ex.Message}";
+            if (generation == _settings.AccountSessionGeneration)
+                PART_CloudSyncStatus.Text = $"同步失败：{ex.Message}";
         }
         finally
         {
@@ -494,16 +436,19 @@ public partial class SettingsWindow : MolaContentWindow
     private async void OnSyncConversationsClick(object? sender, RoutedEventArgs e)
     {
         if (_cloudSync is null || !_settings.IsLoggedIn) return;
+        var generation = _settings.AccountSessionGeneration;
         try
         {
             await _cloudSync.UpdateCloudSyncSettingAsync(_settings.SyncConversations);
+            if (generation != _settings.AccountSessionGeneration) return;
             PART_CloudSyncStatus.Text = _settings.SyncConversations
                 ? "已开启对话云同步"
                 : "已关闭对话云同步";
         }
         catch (Exception ex)
         {
-            PART_CloudSyncStatus.Text = $"同步设置更新失败：{ex.Message}";
+            if (generation == _settings.AccountSessionGeneration)
+                PART_CloudSyncStatus.Text = $"同步设置更新失败：{ex.Message}";
         }
     }
 
@@ -532,10 +477,10 @@ public partial class SettingsWindow : MolaContentWindow
             || resource is not IControlTemplate template) return;
 
         if (template.Build(this) is not { } content) return;
-        if (page == PAGE_Agent)
+        if (page == PAGE_Agent && content.NameScope.Find("PART_RemoteWorkSection") is StackPanel remoteSection)
         {
-            _remoteWorkSection = content.NameScope.Find("PART_RemoteWorkSection") as StackPanel;
-            BindRemoteWorkSection();
+            remoteSection.DataContext = _remoteWork;
+            remoteSection.IsVisible = true;
         }
         _deferredPageNames.Add(page, content.NameScope);
         page.Children.Add(content.Result);
@@ -571,7 +516,7 @@ public partial class SettingsWindow : MolaContentWindow
         if (page != PAGE_Providers) CloseProviderEditor();
         if (page == PAGE_Providers) RefreshProviders();
         if (page == PAGE_Search) UpdateSearchStatusHint();
-        if (page == PAGE_Account) _ = RefreshUsageAsync(force: false);
+        if (page == PAGE_Account) RefreshAccountUi();
         if (page == PAGE_Storage) _ = RefreshStorageAsync();
         if (page == PAGE_Sandbox) _ = RefreshRuntimeStatusAsync();
         if (page == PAGE_Agent && _agentStatus is not null) _ = _agentStatus.LoadAsync();
@@ -698,13 +643,10 @@ public partial class SettingsWindow : MolaContentWindow
         _updatingSpecializedModels = true;
         try
         {
-            _settings.RefreshImageGenerationProviderModels();
-            _settings.RefreshVisionProviderModels();
-
             if (HasPageContent(PAGE_ImageGeneration))
             {
-                PART_ImageGenerationModel.ItemsSource = null;
-                PART_ImageGenerationModel.ItemsSource = _settings.ImageGenerationProviderModels;
+                if (!ReferenceEquals(PART_ImageGenerationModel.ItemsSource, _settings.ImageGenerationProviderModels))
+                    PART_ImageGenerationModel.ItemsSource = _settings.ImageGenerationProviderModels;
                 PART_ImageGenerationModel.SelectedItem = _settings.ImageGenerationProviderModels.FirstOrDefault(option =>
                     string.Equals(option.ProviderId, _settings.ImageGenerationProviderId, StringComparison.Ordinal)
                     && string.Equals(option.ModelId, _settings.ImageGenerationModelId, StringComparison.Ordinal));
@@ -713,8 +655,8 @@ public partial class SettingsWindow : MolaContentWindow
 
             if (HasPageContent(PAGE_Vision))
             {
-                PART_VisionModel.ItemsSource = null;
-                PART_VisionModel.ItemsSource = _settings.VisionProviderModels;
+                if (!ReferenceEquals(PART_VisionModel.ItemsSource, _settings.VisionProviderModels))
+                    PART_VisionModel.ItemsSource = _settings.VisionProviderModels;
                 PART_VisionModel.SelectedItem = _settings.VisionProviderModels.FirstOrDefault(option =>
                     string.Equals(option.ProviderId, _settings.VisionProxyProviderId, StringComparison.Ordinal)
                     && string.Equals(option.ModelId, _settings.VisionProxyModelId, StringComparison.Ordinal));
@@ -857,7 +799,7 @@ public partial class SettingsWindow : MolaContentWindow
             }
 
             var chatProviders = _settings.Providers
-                .Where(entry => !SettingsViewModel.IsImagePurpose(entry.Purpose))
+                .Where(entry => !ProviderPurpose.IsImage(entry.Purpose))
                 .ToArray();
             var hasBuiltinSearchVendor = chatProviders.Any(entry =>
                 BuiltinWebSearch.DetectVendor(entry.BaseUrl) is not null);
@@ -950,7 +892,7 @@ public partial class SettingsWindow : MolaContentWindow
 
     private async Task TestMolaSearchAsync()
     {
-        if (_accountSearch is null || !_accountSearch.IsSignedIn)
+        if (!_accountSearch.IsSignedIn)
         {
             PART_SearchStatus.Text = "请登录 MolaGPT 账号。";
             return;
@@ -972,7 +914,6 @@ public partial class SettingsWindow : MolaContentWindow
     {
         var provider = SettingsViewModel.NormalizeWebSearchProvider(_settings.WebSearchProvider);
         var molaSearch = provider == "molagpt";
-        if (!molaSearch && _byokHttpFactory is null) return;
 
         PART_TestSearch.IsEnabled = false;
         PART_TestSearch.Content = "测试中…";
@@ -993,7 +934,7 @@ public partial class SettingsWindow : MolaContentWindow
                 SearchBaseUrl: _settings.WebSearchBaseUrlFor(provider),
                 SearchMaxResults: Math.Clamp(_settings.WebSearchMaxResults, 1, 10),
                 WebPageMaxCharacters: Math.Clamp(_settings.WebPageMaxCharacters, 1000, 30000));
-            using var http = _byokHttpFactory!();
+            using var http = _byokHttpFactory();
             var result = await LocalToolRegistry.ExecuteAsync(
                 "search_web", "{\"query\":\"MolaGPT\"}", options, http, CancellationToken.None);
             using var document = JsonDocument.Parse(result);
@@ -1028,13 +969,13 @@ public partial class SettingsWindow : MolaContentWindow
     {
         if (!HasPageContent(PAGE_Providers)) return;
         var chatProviders = _settings.Providers
-            .Where(provider => !SettingsViewModel.IsImagePurpose(provider.Purpose))
+            .Where(provider => !ProviderPurpose.IsImage(provider.Purpose))
             .Select(provider => new ProviderCardRow(provider, ChatProviderInactiveReason(provider)))
             .ToArray();
         // Image rows never go through the agent runtime, so they have no registry
         // state to disagree with and are listed as they always were.
         var imageProviders = _settings.Providers
-            .Where(provider => SettingsViewModel.IsImagePurpose(provider.Purpose))
+            .Where(provider => ProviderPurpose.IsImage(provider.Purpose))
             .Select(provider => new ProviderCardRow(provider, null))
             .ToArray();
 
@@ -1052,8 +993,7 @@ public partial class SettingsWindow : MolaContentWindow
         if (_providerRegistry is null) return null;
         if (!entry.Enabled) return "已停用";
         if (entry.Type == ChatGptType && ChatGpt is { IsSignedIn: false }) return "未登录";
-        if (_providerRegistry.Providers.Any(provider =>
-                string.Equals(provider.Id, entry.Id, StringComparison.Ordinal)))
+        if (_providerRegistry.GetById(entry.Id) is not null)
             return null;
 
         return _piByokProviderFactory?.IsRuntimeAvailable == false ? "待更新运行环境" : "未生效";
@@ -1069,7 +1009,7 @@ public partial class SettingsWindow : MolaContentWindow
     private void EditProvider(ProviderEntry? existing, string purpose)
     {
         _editingProvider = existing;
-        _editingProviderPurpose = SettingsViewModel.IsImagePurpose(existing?.Purpose ?? purpose) ? "image" : "chat";
+        _editingProviderPurpose = ProviderPurpose.IsImage(existing?.Purpose ?? purpose) ? "image" : "chat";
         _editingProviderBuiltinSearch = existing?.BuiltinSearch == true;
         _providerModels.Clear();
         _providerHeaders.Clear();
@@ -1090,13 +1030,13 @@ public partial class SettingsWindow : MolaContentWindow
                 SelectProviderPreset(FindProviderPreset(existing));
                 PART_ProviderType.SelectedIndex = ProviderTypeIndex(existing.Type);
                 PART_ProviderName.Text = existing.Name;
-                var legacyGemini = IsLegacyGeminiCompatPreset(existing);
+                var legacyGemini = GeminiModelPolicy.IsLegacyNativePreset(existing.Type, existing.BaseUrl, existing.ApiPath);
                 PART_ProviderBaseUrl.Text = legacyGemini ? GeminiNativeBaseUrl : existing.BaseUrl ?? string.Empty;
                 PART_ProviderHttps.IsChecked = !PART_ProviderBaseUrl.Text.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
                 PART_ProviderApiPath.Text = legacyGemini
                     ? "models/{model}:streamGenerateContent"
                     : string.IsNullOrWhiteSpace(existing.ApiPath)
-                    ? DefaultProviderApiPath(existing.Purpose, existing.ImageFormat, existing.Type, existing.BaseUrl)
+                    ? ProviderConnection.DefaultApiPath(existing.Purpose, existing.Type, existing.BaseUrl)
                     : existing.ApiPath;
                 PART_ProviderImageFormat.SelectedIndex = ImageApiFormat.IsChatImage(existing.ImageFormat) ? 1 : 0;
                 PART_ProviderImageEditPath.Text = string.IsNullOrWhiteSpace(existing.ImageEditPath)
@@ -1257,34 +1197,17 @@ public partial class SettingsWindow : MolaContentWindow
             return;
         }
 
-        _settings.Save(result);
-        var current = _settings.Providers.FirstOrDefault(provider => provider.Id == result.Id);
-        if (current is null)
-            _settings.Providers.Add(result);
-        else
-            _settings.Providers[_settings.Providers.IndexOf(current)] = result;
-
-        var outcome = ProviderApplyOutcome.NotApplicable;
+        ProviderApplyOutcome outcome;
         try
         {
-            if (_providerRegistry is not null && _byokHttpFactory is not null)
-                outcome = ProviderRestorer.ApplyEntry(
-                    result, _providerRegistry, _byokHttpFactory, _toolHost, _piByokProviderFactory);
+            outcome = _providerRestorer.Save(result);
         }
         catch (Exception ex)
         {
-            FailProviderEdit("设置已保存，但运行时更新失败：" + ex.Message);
+            FailProviderEdit("更新服务失败：" + ex.Message);
             return;
         }
 
-        _settings.RefreshTitleProviderModels();
-        _settings.RefreshSubagentProviderModels();
-        _settings.RefreshReviewProviderModels();
-        _settings.RefreshMemoryProviderModels();
-        _settings.RefreshVisionProviderModels();
-        _settings.RefreshImageGenerationProviderModels();
-        RefreshProviders();
-        RefreshSpecializedModelChoices();
         _editingProvider = result;
         PART_ProviderEditorTitle.Text = $"编辑「{result.Name}」";
         PART_DeleteEditingProvider.IsVisible = true;
@@ -1323,8 +1246,11 @@ public partial class SettingsWindow : MolaContentWindow
         var id = row.Id.Trim();
         var displayName = string.IsNullOrWhiteSpace(row.DisplayName) ? id : row.DisplayName.Trim();
 
-        var thinkingKind = row.Thinking ? ModelRow.ThinkingKindForIndex(row.ThinkingKindIndex) : null;
-        var effortLevels = row.Thinking
+        var source = row.Source ?? new ProviderModelEntry(id, displayName);
+        var hasReasoning = row.Thinking || row.ReasoningEffort;
+        var thinkingKind = hasReasoning ? ModelRow.ThinkingKindForIndex(row.ThinkingKindIndex)
+            : source.Thinking || source.ThinkingParamKind == nameof(ThinkingParamKind.None) ? nameof(ThinkingParamKind.None) : null;
+        var effortLevels = hasReasoning
             ? ThinkingEffortLevels.Normalize(row.EffortLevelsText.Split([',', '，', ';', '；', ' '], StringSplitOptions.RemoveEmptyEntries)).ToList()
             : [];
         var customBody = row.CustomBodyRows
@@ -1332,37 +1258,22 @@ public partial class SettingsWindow : MolaContentWindow
             .Select(item => new CustomBodyEntry(item.Key.Trim(), item.Type, item.Value ?? string.Empty))
             .ToList();
 
-        var source = row.Source ?? new ProviderModelEntry(id, displayName);
-        var googleGemini = IsGoogleGeminiRoute(EditingProviderType, PART_ProviderBaseUrl.Text);
-        var geminiPolicy = googleGemini ? GeminiModelPolicy.ThinkingFor(id) : null;
-        string[]? resolvedGeminiLevels = null;
-        string? resolvedGeminiDefault = null;
-        if (geminiPolicy is not null)
-        {
-            var resolved = GeminiModelPolicy.ResolveEfforts(geminiPolicy, effortLevels, row.DefaultEffort);
-            thinkingKind = nameof(ThinkingParamKind.GeminiThinkingLevel);
-            resolvedGeminiLevels = resolved.Levels;
-            resolvedGeminiDefault = resolved.DefaultEffort;
-            effortLevels = resolved.Levels.ToList();
-        }
-
-        return source with
+        var model = source with
         {
             Id = id,
             DisplayName = displayName,
             Vision = row.Vision,
-            Thinking = geminiPolicy is not null || row.Thinking,
-            ReasoningEffort = geminiPolicy is not null || row.ReasoningEffort,
+            Thinking = row.Thinking,
+            ReasoningEffort = row.ReasoningEffort,
             Tools = row.Tools,
-            SupportsTemperature = geminiPolicy is null && row.SupportsTemperature,
-            SupportsTopP = geminiPolicy is null && row.SupportsTopP,
+            SupportsTemperature = row.SupportsTemperature,
+            SupportsTopP = row.SupportsTopP,
             ContextWindow = ParseNullableInt(row.ContextWindowText),
             ThinkingParamKind = thinkingKind,
-            ThinkingBudgetMin = geminiPolicy is null && row.Thinking ? ParseNullableInt(row.BudgetMinText) : null,
-            ThinkingBudgetMax = geminiPolicy is null && row.Thinking ? ParseNullableInt(row.BudgetMaxText) : null,
-            ThinkingBudgetDefault = geminiPolicy is null && row.Thinking ? ParseNullableInt(row.BudgetDefaultText) : null,
-            DefaultEffort = resolvedGeminiDefault
-                ?? (row.Thinking && !string.IsNullOrWhiteSpace(row.DefaultEffort) ? row.DefaultEffort.Trim().ToLowerInvariant() : null),
+            ThinkingBudgetMin = hasReasoning && row.IsBudgetThinkingKind ? ParseNullableInt(row.BudgetMinText) : null,
+            ThinkingBudgetMax = hasReasoning && row.IsBudgetThinkingKind ? ParseNullableInt(row.BudgetMaxText) : null,
+            ThinkingBudgetDefault = hasReasoning && row.IsBudgetThinkingKind ? ParseNullableInt(row.BudgetDefaultText) : null,
+            DefaultEffort = hasReasoning && !string.IsNullOrWhiteSpace(row.DefaultEffort) ? row.DefaultEffort.Trim().ToLowerInvariant() : null,
             ImageEdit = row.IsImageProvider && row.ImageEdit,
             ImageFormat = row.IsImageProvider && row.CanChooseImageFormat ? row.ImageFormatIndex switch
             {
@@ -1371,10 +1282,12 @@ public partial class SettingsWindow : MolaContentWindow
                 _ => null
             } : null,
             CustomBody = customBody.Count > 0 ? customBody : null,
-            EffortLevels = resolvedGeminiLevels?.ToList() ?? (effortLevels.Count > 0 ? effortLevels : null),
+            EffortLevels = effortLevels.Count > 0 ? effortLevels : null,
             Pricing = row.Pricing(),
             BuiltinSearch = row.IsBuiltinSearchVendor ? row.BuiltinSearchOverride : row.Source?.BuiltinSearch
         };
+        return row.IsImageProvider ? model : ProviderModelResolver.ResolveModelCapabilities(
+            model, EditingProviderType, PART_ProviderBaseUrl.Text, PART_ProviderApiPath.Text);
     }
 
     private bool TryCollectProvider(out ProviderEntry entry)
@@ -1430,7 +1343,7 @@ public partial class SettingsWindow : MolaContentWindow
             : PART_ProviderApiPath.Text.Trim();
         if (!image && !chatGpt && string.Equals(EditingProviderType, "gemini", StringComparison.OrdinalIgnoreCase))
         {
-            apiPath = (apiPath ?? DefaultProviderApiPath("chat", null, "gemini"))
+            apiPath = (apiPath ?? ProviderConnection.DefaultApiPath(ProviderPurpose.Chat, "gemini"))
                 .Replace(":generateContent", ":streamGenerateContent", StringComparison.Ordinal);
             if (!apiPath.Contains("{model}", StringComparison.Ordinal)
                 || !apiPath.Split('?', 2)[0].EndsWith(":streamGenerateContent", StringComparison.Ordinal))
@@ -1499,82 +1412,62 @@ public partial class SettingsWindow : MolaContentWindow
         if (!await Confirm.AskAsync(this, $"删除「{entry.Name}」？", "该服务的 API Key 和模型列表会一并移除。", "删除"))
             return;
 
-        DeleteProvider(entry);
-        CloseProviderEditor();
+        if (DeleteProvider(entry)) CloseProviderEditor();
     }
 
-    private void DeleteProvider(ProviderEntry entry)
+    private bool DeleteProvider(ProviderEntry entry)
     {
-        _settings.Delete(entry.Id);
-        if (_providerRegistry is not null)
-            ProviderRestorer.RemoveEntry(entry.Id, _providerRegistry, _piByokProviderFactory);
-        _settings.RefreshSubagentProviderModels();
-        _settings.RefreshReviewProviderModels();
-        RefreshProviders();
-        RefreshSpecializedModelChoices();
+        try
+        {
+            _providerRestorer.Delete(entry.Id);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _notifications?.Error("删除模型服务失败", ex.Message);
+            return false;
+        }
     }
 
     private ModelRow CreateModelRow(ProviderModelEntry model)
     {
-        var googleGemini = IsGoogleGeminiRoute(EditingProviderType, PART_ProviderBaseUrl.Text);
-        var geminiPolicy = googleGemini ? GeminiModelPolicy.ThinkingFor(model.Id) : null;
-        string[]? resolvedGeminiLevels = null;
-        string? resolvedGeminiDefault = null;
-        if (geminiPolicy is not null)
-        {
-            var resolved = GeminiModelPolicy.ResolveEfforts(geminiPolicy, model.EffortLevels, model.DefaultEffort);
-            resolvedGeminiLevels = resolved.Levels;
-            resolvedGeminiDefault = resolved.DefaultEffort;
-            model = model with
-            {
-                Thinking = true,
-                ReasoningEffort = true,
-                ThinkingParamKind = nameof(ThinkingParamKind.GeminiThinkingLevel),
-                ThinkingBudgetMin = null,
-                ThinkingBudgetMax = null,
-                ThinkingBudgetDefault = null,
-                EffortLevels = resolved.Levels.ToList(),
-                DefaultEffort = resolved.DefaultEffort,
-                ReasoningMandatory = geminiPolicy.Mandatory,
-                SupportsTemperature = false,
-                SupportsTopP = false
-            };
-        }
+        var image = _editingProviderPurpose == "image";
+        if (!image)
+            model = ProviderModelResolver.ResolveModelCapabilities(
+                model, EditingProviderType, PART_ProviderBaseUrl.Text, PART_ProviderApiPath.Text);
+        var geminiLevel = !image && model.ThinkingParamKind == nameof(ThinkingParamKind.GeminiThinkingLevel)
+            && GeminiModelPolicy.IsRoute(EditingProviderType, PART_ProviderBaseUrl.Text, PART_ProviderApiPath.Text);
 
         var row = new ModelRow
         {
             Id = model.Id,
-            DisplayName = string.IsNullOrWhiteSpace(model.DisplayName) ? BeautifyModelName(model.Id) : model.DisplayName,
+            DisplayName = string.IsNullOrWhiteSpace(model.DisplayName) ? ProviderModelResolver.BeautifyModelName(model.Id) : model.DisplayName,
             Vision = model.Vision,
             Thinking = model.Thinking,
             ReasoningEffort = model.ReasoningEffort,
             Tools = model.Tools,
             SupportsTemperature = model.SupportsTemperature,
             SupportsTopP = model.SupportsTopP,
-            CanEditGenerationParameters = geminiPolicy is null,
+            CanEditGenerationParameters = !geminiLevel,
             ContextWindowText = model.ContextWindow?.ToString() ?? string.Empty,
-            ThinkingKindIndex = ModelRow.ThinkingKindIndexFor(model.ThinkingParamKind ?? DefaultThinkingKindForProvider()),
+            ThinkingKindIndex = ModelRow.ThinkingKindIndexFor(model.Thinking || model.ReasoningEffort
+                ? model.ThinkingParamKind ?? DefaultThinkingKindForProvider() : DefaultThinkingKindForProvider()),
             BudgetMinText = model.ThinkingBudgetMin?.ToString() ?? string.Empty,
             BudgetMaxText = model.ThinkingBudgetMax?.ToString() ?? string.Empty,
             BudgetDefaultText = model.ThinkingBudgetDefault?.ToString() ?? string.Empty,
-            DefaultEffort = resolvedGeminiDefault
-                ?? (string.IsNullOrWhiteSpace(model.DefaultEffort) ? "high" : model.DefaultEffort),
+            DefaultEffort = string.IsNullOrWhiteSpace(model.DefaultEffort) ? "high" : model.DefaultEffort,
             ImageEdit = model.ImageEdit,
             ImageFormatIndex = model.ImageFormat is null ? 0 : ImageApiFormat.IsChatImage(model.ImageFormat) ? 2 : 1,
-            IsImageProvider = _editingProviderPurpose == "image",
+            IsImageProvider = image,
             CanChooseImageFormat = EditingProviderType != "gemini",
-            EffortLevelsText = string.Join(", ", resolvedGeminiLevels ?? model.EffortLevels?.ToArray() ?? []),
+            EffortLevelsText = string.Join(", ", model.EffortLevels ?? []),
             Source = model,
             LoadedPricing = model.Pricing
         };
-        row.RefreshEffortLevelOptions();
-        if (geminiPolicy?.EffortLevels is { } supportedLevels)
-        {
-            var supported = supportedLevels.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var option in row.EffortLevelOptions.Where(option => !supported.Contains(option.Name)).ToArray())
-                row.EffortLevelOptions.Remove(option);
-            row.SyncEffortLevelsFromOptions();
-        }
+        var allowedLevels = geminiLevel
+            ? GeminiModelPolicy.OfficialLevelPolicy(model.Id, EditingProviderType, PART_ProviderBaseUrl.Text,
+                PART_ProviderApiPath.Text)?.EffortLevels : null;
+        row.RefreshEffortLevelOptions(allowedLevels);
         row.LoadPricing(model.Pricing);
         foreach (var item in model.CustomBody ?? [])
             row.CustomBodyRows.Add(new BodyRow(row, item.Key, item.Type, item.Value));
@@ -1593,11 +1486,7 @@ public partial class SettingsWindow : MolaContentWindow
         return row;
     }
 
-    /// <summary>Entries saved before ThinkingParamKind existed load with a null
-    /// kind, which used to display as "OpenAI Effort" (index 0) — wrong for
-    /// e.g. Claude Opus 5, which must use Anthropic Adaptive. Default by
-    /// provider type instead, matching the preset a new provider of the same
-    /// type would get.</summary>
+    /// <summary>Initial format when enabling reasoning on a model without capability metadata.</summary>
     private string DefaultThinkingKindForProvider() =>
         EditingProviderType switch
         {
@@ -1609,7 +1498,7 @@ public partial class SettingsWindow : MolaContentWindow
     private void SetProviderPresetItems()
     {
         var items = ProviderPresets
-            .Where(preset => SettingsViewModel.IsImagePurpose(preset.Purpose) == (_editingProviderPurpose == "image"))
+            .Where(preset => ProviderPurpose.IsImage(preset.Purpose) == (_editingProviderPurpose == "image"))
             .ToArray();
         _applyingProviderPreset = true;
         try
@@ -1638,20 +1527,14 @@ public partial class SettingsWindow : MolaContentWindow
 
     private static ProviderPresetRow? FindProviderPreset(ProviderEntry entry) =>
         ProviderPresets.FirstOrDefault(preset =>
-            SettingsViewModel.IsImagePurpose(preset.Purpose) == SettingsViewModel.IsImagePurpose(entry.Purpose)
+            ProviderPurpose.IsImage(preset.Purpose) == ProviderPurpose.IsImage(entry.Purpose)
             && string.Equals(preset.Type, entry.Type, StringComparison.OrdinalIgnoreCase)
             && string.Equals(NormalizeUrl(preset.BaseUrl), NormalizeUrl(entry.BaseUrl), StringComparison.OrdinalIgnoreCase))
-        ?? (IsLegacyGeminiCompatPreset(entry)
+        ?? (GeminiModelPolicy.IsLegacyNativePreset(entry.Type, entry.BaseUrl, entry.ApiPath)
             ? ProviderPresets.FirstOrDefault(preset => preset.Id == "gemini")
             : null);
 
     private static string NormalizeUrl(string? value) => (value ?? string.Empty).Trim().TrimEnd('/');
-
-    private static bool IsLegacyGeminiCompatPreset(ProviderEntry entry) =>
-        string.Equals(entry.Type, "gemini", StringComparison.OrdinalIgnoreCase)
-        && string.Equals(NormalizeUrl(entry.BaseUrl), NormalizeUrl(GeminiCompatBaseUrl), StringComparison.OrdinalIgnoreCase)
-        && (string.IsNullOrWhiteSpace(entry.ApiPath)
-            || string.Equals(entry.ApiPath.Trim(), "v1/chat/completions", StringComparison.OrdinalIgnoreCase));
 
     private void OnProviderPresetChanged(object? sender, SelectionChangedEventArgs e)
     {
@@ -1682,7 +1565,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_ProviderBaseUrl.Text = preset.BaseUrl;
         PART_ProviderHttps.IsChecked = !preset.BaseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
         PART_ProviderApiPath.Text = string.IsNullOrWhiteSpace(preset.ApiPath)
-            ? DefaultProviderApiPath(preset.Purpose, preset.ImageFormat, preset.Type)
+            ? ProviderConnection.DefaultApiPath(preset.Purpose, preset.Type)
             : preset.ApiPath;
         PART_ProviderImageFormat.SelectedIndex = ImageApiFormat.IsChatImage(preset.ImageFormat) ? 1 : 0;
         PART_ProviderImageEditPath.Text = string.IsNullOrWhiteSpace(preset.ImageEditPath)
@@ -1750,7 +1633,7 @@ public partial class SettingsWindow : MolaContentWindow
         PART_ProviderImageFormatHint.Text = PART_ProviderImageFormat.SelectedIndex == 1
             ? "适用于 Nano Banana 等可输出图像的多模态模型"
             : "适用于 gpt-image、Seedream、Qwen-Image 等图像模型";
-        PART_ProviderImageEditPathField.IsVisible = image && !geminiImage && !IsOpenRouterBaseUrl(PART_ProviderBaseUrl.Text);
+        PART_ProviderImageEditPathField.IsVisible = image && !geminiImage && !OpenRouterAttribution.IsOpenRouterHost(PART_ProviderBaseUrl.Text);
         PART_FetchEditingProviderPricing.IsVisible = !image && !EditingChatGpt;
         PART_AddDetectedModels.Content = image || EditingChatGpt ? "添加选中模型" : "添加并获取价格";
         foreach (var model in _providerModels)
@@ -1802,19 +1685,6 @@ public partial class SettingsWindow : MolaContentWindow
             model.SetBuiltinSearchContext(vendor, EditingProviderType, providerActive);
     }
 
-    private static string DefaultProviderApiPath(string? purpose, string? imageFormat, string? type, string? baseUrl = null)
-    {
-        if (SettingsViewModel.IsImagePurpose(purpose))
-            return ImageApiFormat.DefaultImagesPath(type, baseUrl);
-        return type?.Trim().ToLowerInvariant() switch
-        {
-            "anthropic" => "v1/messages",
-            "gemini" => "models/{model}:streamGenerateContent",
-            "openai-response" => "v1/responses",
-            _ => "v1/chat/completions"
-        };
-    }
-
     private void OnProviderTypeChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (_loadingProviderForm) return;
@@ -1825,10 +1695,7 @@ public partial class SettingsWindow : MolaContentWindow
         };
         var current = PART_ProviderApiPath.Text?.Trim() ?? string.Empty;
         if (current.Length == 0 || known.Contains(current, StringComparer.OrdinalIgnoreCase))
-            PART_ProviderApiPath.Text = DefaultProviderApiPath(
-                _editingProviderPurpose,
-                PART_ProviderImageFormat.SelectedIndex == 1 ? ImageApiFormat.OpenAiChatImage : ImageApiFormat.OpenAiImages,
-                EditingProviderType, PART_ProviderBaseUrl.Text);
+            PART_ProviderApiPath.Text = ProviderConnection.DefaultApiPath(_editingProviderPurpose, EditingProviderType, PART_ProviderBaseUrl.Text);
         var chatPath = PART_ProviderImageChatPath.Text?.Trim() ?? string.Empty;
         if (chatPath.Length == 0 || chatPath is "v1/chat/completions" or "models/{model}:generateContent")
             PART_ProviderImageChatPath.Text = ImageApiFormat.DefaultChatPath(EditingProviderType);
@@ -1882,24 +1749,23 @@ public partial class SettingsWindow : MolaContentWindow
 
         if (_editingProviderPurpose != "image")
         {
-            var fallback = DefaultProviderApiPath(
-                "chat", null, EditingProviderType);
+            var fallback = ProviderConnection.DefaultApiPath(ProviderPurpose.Chat, EditingProviderType);
             var endpoint = Join(PART_ProviderApiPath.Text, fallback);
             PART_ProviderEndpointPreview.Text = string.Equals(EditingProviderType, "gemini", StringComparison.OrdinalIgnoreCase)
-                ? "实际请求地址：" + AppendAltSse(endpoint)
+                ? "实际请求地址：" + ProviderConnection.AppendAltSse(endpoint)
                 : "实际请求地址：" + endpoint;
             return;
         }
 
         var chat = Join(PART_ProviderImageChatPath.Text, ImageApiFormat.DefaultChatPath(EditingProviderType));
         if (EditingProviderType == "gemini") PART_ProviderEndpointPreview.Text = "请求地址：" + chat;
-        else PART_ProviderEndpointPreview.Text = "图像地址：" + Join(PART_ProviderApiPath.Text, ImageApiFormat.DefaultImagesPath(EditingProviderType, baseUrl))
+        else PART_ProviderEndpointPreview.Text = "图像地址：" + Join(PART_ProviderApiPath.Text, ImageApiFormat.DefaultImagesPath(baseUrl))
             + "\n对话地址：" + chat;
     }
 
     private async void OnDetectProviderModels(object? sender, RoutedEventArgs e)
     {
-        if (_byokHttpFactory is null || !TryCollectProvider(out var entry)) return;
+        if (!TryCollectProvider(out var entry)) return;
 
         PART_DetectProviderModels.IsEnabled = false;
         PART_ProviderSourceField.IsEnabled = false;
@@ -1910,7 +1776,7 @@ public partial class SettingsWindow : MolaContentWindow
             var models = await FetchProviderModelsAsync(entry);
             _detectedModels.Clear();
             var existing = _providerModels.Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var detectedVendor = !SettingsViewModel.IsImagePurpose(entry.Purpose) && entry.Type != ChatGptType
+            var detectedVendor = !ProviderPurpose.IsImage(entry.Purpose) && entry.Type != ChatGptType
                 ? BuiltinWebSearch.DetectVendor(entry.BaseUrl)
                 : null;
             foreach (var model in models)
@@ -1921,7 +1787,7 @@ public partial class SettingsWindow : MolaContentWindow
                     row.EffortLevelsText = string.Join(", ", model.EffortLevels);
                     row.RefreshEffortLevelOptions();
                 }
-                if (SettingsViewModel.IsImagePurpose(entry.Purpose)
+                if (ProviderPurpose.IsImage(entry.Purpose)
                     && _providerModels.FirstOrDefault(row => row.Id.Equals(model.Id, StringComparison.OrdinalIgnoreCase)) is { } imageRow
                     && imageRow.ImageFormatIndex == 0 && model.ImageFormat is not null)
                     imageRow.ImageFormatIndex = ImageApiFormat.IsChatImage(model.ImageFormat) ? 2 : 1;
@@ -2009,7 +1875,6 @@ public partial class SettingsWindow : MolaContentWindow
 
     private async Task<int> FetchPricingForRowsAsync(IReadOnlyCollection<ModelRow> rows)
     {
-        if (_byokHttpFactory is null) return 0;
         var catalog = _modelsDevCatalog ??= new ModelsDevCatalog(_byokHttpFactory);
         var providers = await catalog.LoadAsync(forceRefresh: false);
         var guessedProvider = ModelsDevCatalog.GuessProviderKey(PART_ProviderBaseUrl.Text);
@@ -2070,7 +1935,6 @@ public partial class SettingsWindow : MolaContentWindow
     /// </summary>
     private async void OnFetchAllPricing(object? sender, RoutedEventArgs e)
     {
-        if (_byokHttpFactory is null) return;
         var catalog = _modelsDevCatalog ??= new ModelsDevCatalog(_byokHttpFactory);
 
         PART_FetchAllPricing.IsEnabled = false;
@@ -2085,21 +1949,23 @@ public partial class SettingsWindow : MolaContentWindow
             }
 
             var targets = _settings.Providers
-                .Where(provider => !SettingsViewModel.IsImagePurpose(provider.Purpose) && provider.Type != ChatGptType)
+                .Where(provider => !ProviderPurpose.IsImage(provider.Purpose) && provider.Type != ChatGptType)
                 .ToList();
             var match = ModelsDevCatalog.Match(catalogProviders,
                 targets.SelectMany(provider => provider.Models).Select(model => model.Id));
 
             var outcome = ApplyPricing(targets, _ => match.Agreed);
-            _pricingMatch = match;
-            _pricingTargets = targets;
-            var pendingRows = BuildPricingRows(match, targets);
+            var targetIds = targets.Select(provider => provider.Id).ToHashSet(StringComparer.Ordinal);
+            _pendingPricing = (match, targetIds);
+            var pendingRows = BuildPricingRows(match,
+                _settings.Providers.Where(provider => targetIds.Contains(provider.Id)));
             var missing = pendingRows.Count(row => row.Candidates.Count == 0);
             var conflicts = pendingRows.Count - missing;
 
             var parts = new List<string>();
             if (outcome.Written > 0) parts.Add($"已自动保存 {outcome.Written} 个模型的价格");
             if (outcome.Kept > 0) parts.Add($"{outcome.Kept} 项保留手动价格");
+            if (outcome.Unavailable > 0) parts.Add($"{outcome.Unavailable} 个服务暂不可用");
             if (missing > 0) parts.Add($"{missing} 项价格需手动填写");
             if (conflicts > 0) parts.Add($"还有 {conflicts} 项在多个来源之间的价格不一致");
             if (parts.Count == 0) parts.Add("模型价格已是最新");
@@ -2132,6 +1998,7 @@ public partial class SettingsWindow : MolaContentWindow
     {
         var written = 0;
         var kept = 0;
+        var updates = new List<ProviderEntry>();
         foreach (var provider in targets)
         {
             var prices = pricesFor(provider);
@@ -2152,37 +2019,14 @@ public partial class SettingsWindow : MolaContentWindow
                 written++;
                 touched = true;
             }
-            if (!touched) continue;
-
-            var updated = provider with { Models = models };
-            _settings.Save(updated);
-            var index = _settings.Providers.IndexOf(provider);
-            if (index >= 0) _settings.Providers[index] = updated;
-
-            // Saving is not enough for the price to bill anything: Pi is handed its
-            // rates at registerProvider time, so the running sidecar keeps the old
-            // ones until the entry is re-applied to the registry.
-            try
-            {
-                if (_providerRegistry is not null && _byokHttpFactory is not null)
-                    ProviderRestorer.ApplyEntry(
-                        updated, _providerRegistry, _byokHttpFactory, _toolHost, _piByokProviderFactory);
-            }
-            catch (Exception)
-            {
-                // The price is stored either way; it starts billing on next launch.
-            }
+            if (touched) updates.Add(provider with { Models = models });
         }
 
-        if (written > 0)
-        {
-            RefreshProviders();
-            RefreshSpecializedModelChoices();
-        }
-        return new PricingOutcome(written, kept);
+        var unavailable = updates.Count == 0 ? 0 : _providerRestorer.Save(updates).Unavailable;
+        return new PricingOutcome(written, kept, unavailable);
     }
 
-    private readonly record struct PricingOutcome(int Written, int Kept);
+    private readonly record struct PricingOutcome(int Written, int Kept, int Unavailable);
 
     private void ShowPricingResult(string text, int conflicts)
     {
@@ -2199,26 +2043,34 @@ public partial class SettingsWindow : MolaContentWindow
     /// </summary>
     private async void OnResolvePricingConflicts(object? sender, RoutedEventArgs e)
     {
-        if (_pricingMatch is not { } match) return;
+        if (_pendingPricing is not { } pending) return;
 
-        var rows = BuildPricingRows(match, _pricingTargets);
+        var rows = BuildPricingRows(pending.Match,
+            _settings.Providers.Where(provider => pending.ProviderIds.Contains(provider.Id)));
         if (rows.Count == 0) return;
 
         var window = new ModelPricingWindow(rows);
         await window.ShowDialog(this);
         if (window.Result is not { } picks) return;
 
-        var outcome = ApplyPricing(_pricingTargets,
-            provider => picks.TryGetValue(provider.Id, out var models)
-                ? models
-                : new Dictionary<string, ModelPricing>());
-        _pricingMatch = null;
-        ShowPricingResult($"已按所选来源写入 {outcome.Written} 个模型的价格。", conflicts: 0);
+        try
+        {
+            var outcome = ApplyPricing(_settings.Providers.Where(provider => picks.ContainsKey(provider.Id)).ToArray(),
+                provider => picks[provider.Id]);
+            _pendingPricing = null;
+            var message = $"已按所选来源写入 {outcome.Written} 个模型的价格。";
+            if (outcome.Unavailable > 0) message += $"其中 {outcome.Unavailable} 个服务暂不可用。";
+            ShowPricingResult(message, conflicts: 0);
+        }
+        catch (Exception ex)
+        {
+            ShowPricingResult("保存定价失败：" + ex.Message, rows.Count);
+        }
     }
 
     private static List<PricingConflictRow> BuildPricingRows(
         PricingMatch match,
-        IReadOnlyList<ProviderEntry> providers)
+        IEnumerable<ProviderEntry> providers)
     {
         var rows = new List<PricingConflictRow>();
         var unmatched = match.Unmatched.ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -2331,13 +2183,13 @@ public partial class SettingsWindow : MolaContentWindow
 
     private async void OnTestProvider(object? sender, RoutedEventArgs e)
     {
-        if (_byokHttpFactory is null || !TryCollectProvider(out var entry)) return;
+        if (!TryCollectProvider(out var entry)) return;
         PART_TestProvider.IsEnabled = false;
         PART_TestProvider.Content = "测试中...";
         ShowProviderStatus("正在测试连接...");
         try
         {
-            if (SettingsViewModel.IsImagePurpose(entry.Purpose))
+            if (ProviderPurpose.IsImage(entry.Purpose))
             {
                 var options = new ImageGenerationOptions(
                     Enabled: true,
@@ -2360,40 +2212,12 @@ public partial class SettingsWindow : MolaContentWindow
                 return;
             }
 
-            using var http = _byokHttpFactory();
-            var baseUrl = NetworkSecurity.RequireHttpOrHttpsBaseUrl(entry.BaseUrl ?? DefaultProviderBaseUrl(entry.Type), $"{entry.Name} 接入地址");
-            var path = string.IsNullOrWhiteSpace(entry.ApiPath)
-                ? DefaultProviderApiPath(entry.Purpose, entry.ImageFormat, entry.Type)
-                : entry.ApiPath;
-            var model = entry.Models.FirstOrDefault()?.Id ?? DefaultTestModel(entry.Type);
-            var nativeGemini = string.Equals(entry.Type, "gemini", StringComparison.OrdinalIgnoreCase);
-            var requestPath = nativeGemini ? path.Replace("{model}", Uri.EscapeDataString(model), StringComparison.Ordinal) : path;
-            var url = NetworkSecurity.CombineEndpoint(baseUrl, requestPath, $"{entry.Name} 接入地址");
-            if (nativeGemini) url = new Uri(AppendAltSse(url.ToString()));
-
-            using var request = new HttpRequestMessage(HttpMethod.Post, url);
-            object body;
-            if (nativeGemini)
-                body = new { contents = new[] { new { parts = new[] { new { text = "ping" } } } } };
-            else if (IsGeminiOpenAiCompat(entry))
-                body = new { model, messages = new[] { new { role = "user", content = "ping" } }, max_tokens = 4, stream = true };
-            else
-                body = entry.Type switch
-            {
-                "anthropic" => new { model, max_tokens = 8, messages = new[] { new { role = "user", content = "ping" } } },
-                "openai-response" => new { model, input = "ping", max_output_tokens = 16 },
-                _ => new { model, messages = new[] { new { role = "user", content = "ping" } }, max_tokens = 4 }
-            };
-            request.Content = JsonContent.Create(body);
-            if (nativeGemini || IsGeminiOpenAiCompat(entry))
-                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
-            ApplyProviderAuthentication(request, entry);
-            ApplyProviderCustomHeaders(request, entry);
-            using var response = await http.SendAsync(request);
-            if (response.IsSuccessStatusCode)
-                ShowProviderStatus("连接正常。");
-            else
-                FailProviderEdit($"HTTP {(int)response.StatusCode}：{await response.Content.ReadAsStringAsync()}");
+            await _providerConnection.TestChatAsync(entry);
+            ShowProviderStatus("连接正常。");
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode is not null)
+        {
+            FailProviderEdit(ex.Message);
         }
         catch (Exception ex)
         {
@@ -2406,509 +2230,10 @@ public partial class SettingsWindow : MolaContentWindow
         }
     }
 
-    private async Task<List<ProviderModelEntry>> FetchProviderModelsAsync(ProviderEntry entry)
-    {
-        if (entry.Type == ChatGptType) return await FetchChatGptModelsAsync();
-        var preset = FindProviderPreset(entry);
-        var baseUrl = NetworkSecurity.RequireHttpOrHttpsBaseUrl(entry.BaseUrl ?? DefaultProviderBaseUrl(entry.Type), $"{entry.Name} 接入地址");
-        var image = SettingsViewModel.IsImagePurpose(entry.Purpose);
-        if (image && IsOpenRouter(entry)) return await FetchOpenRouterImageModelsAsync(entry, baseUrl);
-        var modelsPath = preset?.ModelsPath ?? (entry.Type == "gemini" || IsGeminiOpenAiCompat(entry) ? "models" : "v1/models");
-
-        using var document = await FetchModelsDocumentAsync(entry, baseUrl, modelsPath);
-        var models = image
-            ? ParseImageModels(document.RootElement, entry)
-            : entry.Type == "gemini"
-                ? ParseGeminiModels(document.RootElement)
-                : IsOpenRouter(entry)
-                    ? ParseOpenRouterModels(document.RootElement)
-                    : ParseCompatibleModels(document.RootElement);
-        if (image) return models;
-
-        if (IsGoogleGeminiRoute(entry.Type, entry.BaseUrl))
-            models = models.Select(ApplyGeminiModelPolicy).ToList();
-
-        var thinkingKind = preset?.DefaultThinkingKind ?? InferProviderThinkingKind(entry.Type);
-        if (thinkingKind == ThinkingParamKind.None) return models;
-        var kindName = thinkingKind.ToString();
-        return models.Select(model => model.Thinking && string.IsNullOrWhiteSpace(model.ThinkingParamKind)
-            ? model with { ThinkingParamKind = kindName }
-            : model).ToList();
-    }
-
-    private async Task<JsonDocument> FetchModelsDocumentAsync(ProviderEntry entry, string baseUrl, string path)
-    {
-        var url = NetworkSecurity.CombineEndpoint(baseUrl, path, $"{entry.Name} 接入地址");
-        using var http = _byokHttpFactory!();
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        ApplyProviderAuthentication(request, entry);
-        ApplyProviderCustomHeaders(request, entry);
-        // Anthropic relays may use Bearer authentication for their model catalog.
-        if (entry.Type == "anthropic" && !string.IsNullOrWhiteSpace(entry.ApiKey)
-            && !request.Headers.Contains("Authorization"))
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", entry.ApiKey);
-        using var response = await http.SendAsync(request);
-        var body = await response.Content.ReadAsStringAsync();
-        if (!response.IsSuccessStatusCode)
-            throw new HttpRequestException($"HTTP {(int)response.StatusCode}：{body}");
-        return JsonDocument.Parse(body);
-    }
-
-    /// <summary>OpenRouter lists its image API models and its image-output chat models in
-    /// two catalogs. A model in both can use either API, so it follows the provider default.</summary>
-    private async Task<List<ProviderModelEntry>> FetchOpenRouterImageModelsAsync(ProviderEntry entry, string baseUrl)
-    {
-        using var imagesDoc = await FetchModelsDocumentAsync(entry, baseUrl, "v1/images/models");
-        using var chatDoc = await FetchModelsDocumentAsync(entry, baseUrl, "v1/models?output_modalities=image");
-        var images = ParseImageModels(imagesDoc.RootElement, entry, ImageApiFormat.OpenAiImages)
-            .ToDictionary(model => model.Id, StringComparer.OrdinalIgnoreCase);
-        var chat = ParseImageModels(chatDoc.RootElement, entry, ImageApiFormat.OpenAiChatImage)
-            .Where(model => !model.Id.StartsWith("openrouter/", StringComparison.OrdinalIgnoreCase))
-            .ToDictionary(model => model.Id, StringComparer.OrdinalIgnoreCase);
-        // The general catalog also lists image-only models; only those that also output
-        // text can really use both APIs.
-        var multimodal = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (chatDoc.RootElement.TryGetProperty("data", out var chatData) && chatData.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in chatData.EnumerateArray())
-            {
-                if (item.TryGetProperty("id", out var idNode) && idNode.ValueKind == JsonValueKind.String
-                    && ReadStringArray(item, "architecture", "output_modalities").Contains("text"))
-                    multimodal.Add(idNode.GetString()!);
-            }
-        }
-        var models = new List<ProviderModelEntry>();
-        foreach (var id in images.Keys.Union(chat.Keys, StringComparer.OrdinalIgnoreCase))
-        {
-            images.TryGetValue(id, out var viaImages);
-            chat.TryGetValue(id, out var viaChat);
-            models.Add(viaImages is not null && viaChat is not null && multimodal.Contains(id)
-                ? viaImages with { ImageFormat = null, ImageEdit = viaImages.ImageEdit || viaChat.ImageEdit }
-                : viaImages is not null
-                    ? viaImages with { ImageFormat = string.Equals(entry.ImageFormat, ImageApiFormat.OpenAiImages, StringComparison.OrdinalIgnoreCase) ? null : ImageApiFormat.OpenAiImages }
-                    : viaChat!);
-        }
-        return models.OrderBy(model => model.Id, StringComparer.OrdinalIgnoreCase).ToList();
-    }
-
-    private static void ApplyProviderAuthentication(HttpRequestMessage request, ProviderEntry entry)
-    {
-        if (entry.Type == "anthropic")
-        {
-            request.Headers.TryAddWithoutValidation("x-api-key", entry.ApiKey ?? string.Empty);
-            request.Headers.TryAddWithoutValidation("anthropic-version", AnthropicVersion);
-        }
-        else if (entry.Type == "gemini")
-        {
-            request.Headers.TryAddWithoutValidation("x-goog-api-key", entry.ApiKey ?? string.Empty);
-        }
-        else if (!string.IsNullOrWhiteSpace(entry.ApiKey))
-        {
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", entry.ApiKey);
-        }
-    }
-
-    private static void ApplyProviderCustomHeaders(HttpRequestMessage request, ProviderEntry entry)
-    {
-        var headers = CustomParamConverter.ToHeaderList(entry.CustomHeaders);
-        OpenRouterAttribution.Apply(request, entry.BaseUrl, headers);
-        if (headers is null) return;
-        foreach (var (name, value) in headers)
-            if (!string.IsNullOrWhiteSpace(name)) request.Headers.TryAddWithoutValidation(name, value);
-    }
-
-    private static bool IsGeminiOpenAiCompat(ProviderEntry entry)
-    {
-        if (!string.Equals(entry.Type, "openai-compat", StringComparison.OrdinalIgnoreCase)
-            || !Uri.TryCreate(entry.BaseUrl, UriKind.Absolute, out var baseUri))
-            return false;
-
-        return baseUri.AbsolutePath.TrimEnd('/').EndsWith("/v1beta/openai", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsGoogleGeminiRoute(string? providerType, string? baseUrl)
-    {
-        if (string.Equals(providerType, "gemini", StringComparison.OrdinalIgnoreCase))
-            return !IsOpenRouterBaseUrl(baseUrl);
-        if (!string.Equals(providerType, "openai-compat", StringComparison.OrdinalIgnoreCase)
-            || !Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)) return false;
-        if (uri.Host.Equals("openrouter.ai", StringComparison.OrdinalIgnoreCase)
-            || uri.Host.EndsWith(".openrouter.ai", StringComparison.OrdinalIgnoreCase)) return false;
-
-        return uri.AbsolutePath.TrimEnd('/').EndsWith("/v1beta/openai", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsOpenRouterBaseUrl(string? baseUrl) =>
-        Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)
-        && (uri.Host.Equals("openrouter.ai", StringComparison.OrdinalIgnoreCase)
-            || uri.Host.EndsWith(".openrouter.ai", StringComparison.OrdinalIgnoreCase));
-
-    private static ProviderModelEntry ApplyGeminiModelPolicy(ProviderModelEntry model)
-    {
-        var policy = GeminiModelPolicy.ThinkingFor(model.Id);
-        if (policy is null) return model;
-        var resolved = GeminiModelPolicy.ResolveEfforts(policy, model.EffortLevels, model.DefaultEffort);
-
-        return model with
-        {
-            Thinking = true,
-            ReasoningEffort = true,
-            ThinkingParamKind = nameof(ThinkingParamKind.GeminiThinkingLevel),
-            ThinkingBudgetMin = null,
-            ThinkingBudgetMax = null,
-            ThinkingBudgetDefault = null,
-            EffortLevels = resolved.Levels.ToList(),
-            DefaultEffort = resolved.DefaultEffort,
-            ReasoningMandatory = policy.Mandatory,
-            SupportsTemperature = false,
-            SupportsTopP = false
-        };
-    }
-
-    private static string AppendAltSse(string endpoint) =>
-        endpoint.Contains("alt=sse", StringComparison.OrdinalIgnoreCase)
-            ? endpoint
-            : endpoint + (endpoint.Contains('?') ? "&" : "?") + "alt=sse";
-
-    private static string DefaultProviderBaseUrl(string type) => type switch
-    {
-        "anthropic" => AnthropicBaseUrl,
-        "gemini" => GeminiNativeBaseUrl,
-        _ => OpenAiBaseUrl
-    };
-
-    private static string DefaultTestModel(string type) => type switch
-    {
-        "anthropic" => "claude-3-5-haiku-20241022",
-        "gemini" => "gemini-2.5-flash",
-        _ => "gpt-4o-mini"
-    };
-
-    private static ThinkingParamKind InferProviderThinkingKind(string type) => type switch
-    {
-        "openai" or "openai-response" => ThinkingParamKind.OpenAiReasoningEffort,
-        "anthropic" => ThinkingParamKind.AnthropicAdaptive,
-        "gemini" => ThinkingParamKind.GeminiThinkingLevel,
-        _ => ThinkingParamKind.None
-    };
-
-    private static List<ProviderModelEntry> ParseCompatibleModels(JsonElement root)
-    {
-        if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array) return [];
-        var models = new List<ProviderModelEntry>();
-        foreach (var item in data.EnumerateArray())
-        {
-            if (!item.TryGetProperty("id", out var idNode) || idNode.ValueKind != JsonValueKind.String) continue;
-            var id = idNode.GetString();
-            if (string.IsNullOrWhiteSpace(id) || !LooksLikeChatModel(id)) continue;
-            var display = item.TryGetProperty("display_name", out var displayNode) && displayNode.ValueKind == JsonValueKind.String
-                ? displayNode.GetString()
-                : null;
-            var kind = ThinkingParamKindInference.InferFromModelId(id);
-            models.Add(new ProviderModelEntry(
-                id,
-                string.IsNullOrWhiteSpace(display) ? BeautifyModelName(id) : display!,
-                Vision: LooksLikeVisionModel(id),
-                Thinking: LooksLikeReasoningModel(id),
-                ReasoningEffort: LooksLikeReasoningModel(id),
-                Tools: LooksLikeToolModel(id),
-                ThinkingParamKind: kind == ThinkingParamKind.None ? null : kind.ToString()));
-        }
-        return models.OrderByDescending(model => model.Tools).ThenBy(model => model.Id, StringComparer.OrdinalIgnoreCase).ToList();
-    }
-
-    private static List<ProviderModelEntry> ParseOpenRouterModels(JsonElement root)
-    {
-        if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array) return [];
-        var models = new List<ProviderModelEntry>();
-        foreach (var item in data.EnumerateArray())
-        {
-            var id = item.TryGetProperty("id", out var idNode) && idNode.ValueKind == JsonValueKind.String
-                ? idNode.GetString()
-                : null;
-            if (string.IsNullOrWhiteSpace(id)) continue;
-            var name = item.TryGetProperty("name", out var nameNode) && nameNode.ValueKind == JsonValueKind.String
-                ? nameNode.GetString()
-                : BeautifyModelName(id);
-            var parameters = ReadStringArray(item, "supported_parameters");
-            var modalities = ReadStringArray(item, "architecture", "input_modalities");
-            var context = item.TryGetProperty("context_length", out var contextNode) && contextNode.ValueKind == JsonValueKind.Number
-                ? contextNode.GetInt32()
-                : (int?)null;
-            var reasoning = parameters.Any(value => IsAny(value, "reasoning", "reasoning_effort", "reasoning_effort_max"))
-                            || LooksLikeReasoningModel(id);
-            var capability = ReadReasoningCapability(item);
-            models.Add(new ProviderModelEntry(
-                id,
-                string.IsNullOrWhiteSpace(name) ? id : name!,
-                Vision: modalities.Any(value => IsAny(value, "image", "vision")) || LooksLikeVisionModel(id),
-                ContextWindow: context,
-                Thinking: reasoning,
-                ReasoningEffort: reasoning && parameters.Any(value => value.Contains("effort", StringComparison.OrdinalIgnoreCase)),
-                Tools: parameters.Any(value => IsAny(value, "tools", "tool_choice")),
-                EffortLevels: capability.Efforts.Count > 0 ? capability.Efforts.ToList() : null,
-                ReasoningMandatory: capability.Mandatory,
-                DefaultEffort: capability.DefaultEffort,
-                SupportsTemperature: SupportsSampling(parameters, "temperature"),
-                SupportsTopP: SupportsSampling(parameters, "top_p", "topP"),
-                Pricing: ReadEndpointPricing(item)));
-        }
-        return models.OrderByDescending(model => model.Tools)
-            .ThenByDescending(model => model.Thinking)
-            .ThenBy(model => model.Id, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-    }
-
-    private static List<ProviderModelEntry> ParseGeminiModels(JsonElement root)
-    {
-        if (!root.TryGetProperty("models", out var data) || data.ValueKind != JsonValueKind.Array) return [];
-        var models = new List<ProviderModelEntry>();
-        foreach (var item in data.EnumerateArray())
-        {
-            var name = item.TryGetProperty("name", out var nameNode) && nameNode.ValueKind == JsonValueKind.String
-                ? nameNode.GetString()
-                : null;
-            if (string.IsNullOrWhiteSpace(name)) continue;
-            var id = name.StartsWith("models/", StringComparison.OrdinalIgnoreCase) ? name[7..] : name;
-            var methods = ReadStringArray(item, "supportedGenerationMethods");
-            if (methods.Count > 0 && !methods.Any(method =>
-                    method.Equals("generateContent", StringComparison.OrdinalIgnoreCase)
-                    || method.Equals("streamGenerateContent", StringComparison.OrdinalIgnoreCase)))
-                continue;
-            var display = item.TryGetProperty("displayName", out var displayNode) && displayNode.ValueKind == JsonValueKind.String
-                ? displayNode.GetString()
-                : BeautifyModelName(id);
-            var reasoning = LooksLikeReasoningModel(id);
-            var kind = ThinkingParamKindInference.InferFromModelId(id);
-            models.Add(new ProviderModelEntry(
-                id,
-                string.IsNullOrWhiteSpace(display) ? BeautifyModelName(id) : display!,
-                Vision: LooksLikeVisionModel(id),
-                Thinking: reasoning,
-                ReasoningEffort: reasoning,
-                Tools: LooksLikeToolModel(id),
-                ThinkingParamKind: reasoning && kind != ThinkingParamKind.None ? kind.ToString() : null));
-        }
-        return models.OrderBy(model => model.Id, StringComparer.OrdinalIgnoreCase).ToList();
-    }
-
-    /// <summary>
-    /// Image models from a model list. <paramref name="catalogFormat"/> is set when the list
-    /// itself says which API its models use; otherwise relays' <c>supported_endpoint_types</c>
-    /// and the model name decide. A format equal to the provider default is stored as null
-    /// (follow the provider). Gemini always uses generateContent and has no per-model choice.
-    /// </summary>
-    private static List<ProviderModelEntry> ParseImageModels(JsonElement root, ProviderEntry entry, string? catalogFormat = null)
-    {
-        if ((!root.TryGetProperty("data", out var data) && !root.TryGetProperty("models", out data))
-            || data.ValueKind != JsonValueKind.Array) return [];
-        var gemini = entry.Type == "gemini";
-        var providerFormat = entry.ImageFormat ?? ImageApiFormat.OpenAiImages;
-        var models = new List<ProviderModelEntry>();
-        foreach (var item in data.EnumerateArray())
-        {
-            var hasId = item.TryGetProperty("id", out var idNode) && idNode.ValueKind == JsonValueKind.String;
-            var raw = hasId
-                ? idNode.GetString()
-                : item.TryGetProperty("name", out var nameNode) && nameNode.ValueKind == JsonValueKind.String
-                    ? nameNode.GetString()
-                    : null;
-            if (string.IsNullOrWhiteSpace(raw)) continue;
-            var id = raw.StartsWith("models/", StringComparison.OrdinalIgnoreCase) ? raw[7..] : raw;
-            // Imagen is no longer served by the Gemini API.
-            if (gemini && id.StartsWith("imagen", StringComparison.OrdinalIgnoreCase)) continue;
-            var declaredImagesApi = ReadStringArray(item, "supported_endpoint_types").Contains("image-generation");
-            if (catalogFormat is null && !declaredImagesApi && !LooksLikeImageModel(id)) continue;
-
-            string? format = null;
-            if (!gemini)
-            {
-                var inferred = catalogFormat
-                    ?? (declaredImagesApi ? ImageApiFormat.OpenAiImages
-                        : ImageApiFormat.LooksLikeChatImageModel(id) ? ImageApiFormat.OpenAiChatImage : null);
-                format = inferred is not null && !string.Equals(inferred, providerFormat, StringComparison.OrdinalIgnoreCase)
-                    ? inferred : null;
-            }
-            var edit = catalogFormat == ImageApiFormat.OpenAiImages
-                ? item.TryGetProperty("supported_parameters", out var parameters)
-                  && parameters.ValueKind == JsonValueKind.Object
-                  && parameters.TryGetProperty("input_references", out _)
-                : LooksLikeImageEditModel(id);
-            var display = item.TryGetProperty("displayName", out var displayNode) && displayNode.ValueKind == JsonValueKind.String
-                ? displayNode.GetString()
-                : hasId && item.TryGetProperty("name", out var labelNode) && labelNode.ValueKind == JsonValueKind.String
-                    ? labelNode.GetString()
-                    : null;
-            models.Add(new ProviderModelEntry(id, string.IsNullOrWhiteSpace(display) ? BeautifyModelName(id) : display!,
-                ImageEdit: edit, ImageFormat: format));
-        }
-        return models.OrderBy(model => model.Id, StringComparer.OrdinalIgnoreCase).ToList();
-    }
-
-    /// <summary>
-    /// The per-model <c>reasoning</c> block an OpenRouter-style model list carries:
-    /// <c>{ mandatory, default_enabled, supported_efforts, default_effort }</c>.
-    ///
-    /// Worth reading rather than guessing from the name: it is the only authoritative
-    /// answer to "which efforts does this model actually take" and "can reasoning be
-    /// switched off at all". Non-reasoning and dynamic-router models omit the block,
-    /// which leaves the defaults here and the old name-based inference in charge.
-    /// </summary>
-    private static (bool Mandatory, IReadOnlyList<string> Efforts, string? DefaultEffort) ReadReasoningCapability(
-        JsonElement item)
-    {
-        if (!item.TryGetProperty("reasoning", out var node) || node.ValueKind != JsonValueKind.Object)
-            return (false, [], null);
-
-        var mandatory = node.TryGetProperty("mandatory", out var m) && m.ValueKind == JsonValueKind.True;
-        var efforts = ReadStringArray(node, "supported_efforts");
-        var defaultEffort = node.TryGetProperty("default_effort", out var d) && d.ValueKind == JsonValueKind.String
-            ? d.GetString()
-            : null;
-        return (mandatory, efforts, string.IsNullOrWhiteSpace(defaultEffort) ? null : defaultEffort);
-    }
-
-    private static IReadOnlyList<string> ReadStringArray(JsonElement element, params string[] path)
-    {
-        var current = element;
-        foreach (var segment in path)
-            if (!current.TryGetProperty(segment, out current)) return [];
-        if (current.ValueKind != JsonValueKind.Array) return [];
-        return current.EnumerateArray()
-            .Where(item => item.ValueKind == JsonValueKind.String)
-            .Select(item => item.GetString()!)
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .ToArray();
-    }
-
-    private static bool LooksLikeChatModel(string id)
-    {
-        var value = id.ToLowerInvariant();
-        if (value.Contains("embedding") || value.Contains("moderation") || value.Contains("tts")
-            || value.Contains("transcribe") || value.Contains("whisper") || value.Contains("dall-e")
-            || value.Contains("image") || value.Contains("audio") || value.Contains("realtime")) return false;
-        return value.StartsWith("gpt-") || value.StartsWith("o1") || value.StartsWith("o3")
-               || value.StartsWith("o4") || value.StartsWith("deepseek") || value.StartsWith("moonshot")
-               || value.StartsWith("qwen") || value.StartsWith("gemini") || value.StartsWith("claude")
-               || value.Contains("chat");
-    }
-
-    private static bool LooksLikeReasoningModel(string id)
-    {
-        var value = id.ToLowerInvariant();
-        if (value.Contains("-non-reasoning", StringComparison.Ordinal)) return false;
-        return value.StartsWith("o1") || value.StartsWith("o3") || value.StartsWith("o4")
-               || value.StartsWith("gpt-5") || value.Contains("reasoning") || value.Contains("deepseek-r1")
-               || value.Contains("deepseek-reasoner") || value.Contains("qwq") || value.Contains("qwen3")
-               || value.Contains("gemini-2.5") || value.Contains("gemini-3");
-    }
-
-    private static bool LooksLikeVisionModel(string id)
-    {
-        var value = id.ToLowerInvariant();
-        return value.Contains("vision") || value.Contains("gpt-4o") || value.Contains("gpt-4.1")
-               || value.Contains("gpt-5") || value.Contains("gemini") || value.Contains("claude-3")
-               || value.Contains("claude-sonnet-4") || value.Contains("claude-opus-4")
-               || value.Contains("claude-haiku-4") || value.Contains("deepseek-chat") || value.Contains("qwen-vl");
-    }
-
-    // Same rules as the mobile client's looksLikeByokImageModel / looksLikeByokImageEditModel.
-    private static bool LooksLikeImageModel(string id)
-    {
-        var value = id.ToLowerInvariant();
-        if (value.Contains("video")) return false;
-        string[] markers =
-        [
-            "dall-e", "image", "imagen", "flux", "midjourney", "sdxl", "stable-diffusion", "recraft",
-            "seedream", "seededit", "nano-banana", "cogview", "kolors", "grok-imagine", "riverflow",
-            "ideogram", "jimeng", "hidream", "z-image", "wanx"
-        ];
-        return markers.Any(value.Contains)
-               || System.Text.RegularExpressions.Regex.IsMatch(value[(value.LastIndexOf('/') + 1)..], @"^wan\d.*(?:t2i|image)");
-    }
-
-    private static bool LooksLikeImageEditModel(string id)
-    {
-        var value = id.ToLowerInvariant();
-        return value.Contains("gpt-image") || value.Contains("gpt image") || value.Contains("edit")
-               || value.Contains("inpaint") || value.Contains("kontext") || value.Contains("seededit")
-               || value.Contains("nano-banana") || value.Contains("grok-imagine")
-               || value.Contains("seedream") && !value.Contains("t2i")
-               || System.Text.RegularExpressions.Regex.IsMatch(value, @"qwen-image-(?:edit|[23])|sora[-_]image|gemini-.*image");
-    }
-
-    private static bool LooksLikeToolModel(string id)
-    {
-        var value = id.ToLowerInvariant();
-        return LooksLikeChatModel(id) && !value.Contains("instruct") && !value.Contains("base");
-    }
-
-    private static string BeautifyModelName(string id)
-    {
-        var name = id.Contains('/') ? id[(id.LastIndexOf('/') + 1)..] : id;
-        return name.Replace('_', ' ');
-    }
-
-    private static bool IsOpenRouter(ProviderEntry entry) =>
-        (entry.BaseUrl ?? string.Empty).Contains("openrouter.ai", StringComparison.OrdinalIgnoreCase)
-        || entry.Name.Contains("OpenRouter", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsAny(string value, params string[] candidates) =>
-        candidates.Any(candidate => string.Equals(value, candidate, StringComparison.OrdinalIgnoreCase));
-
-    /// <summary>
-    /// Pricing straight out of the model list an OpenRouter-style endpoint already
-    /// returned, so it costs no extra request and the ids line up by construction.
-    ///
-    /// The wire unit is USD per single token, written as a string
-    /// (<c>"prompt": "0.0000025"</c>); <see cref="ModelPricing"/> is per million, so
-    /// everything is scaled by 1e6 on the way in. Getting that scale wrong is a
-    /// six-orders-of-magnitude error that still renders as a plausible-looking price.
-    /// </summary>
-    private static ModelPricing? ReadEndpointPricing(JsonElement item)
-    {
-        if (!item.TryGetProperty("pricing", out var pricing) || pricing.ValueKind != JsonValueKind.Object)
-            return null;
-        var input = ReadPerTokenPrice(pricing, "prompt", "input");
-        var output = ReadPerTokenPrice(pricing, "completion", "output");
-        // Free models are listed with "0" across the board. That is a real price,
-        // but a provider that reports nothing usable should stay unpriced rather
-        // than claim everything it serves is free.
-        if (input is null || output is null) return null;
-        return new ModelPricing(
-            input.Value,
-            output.Value,
-            ReadPerTokenPrice(pricing, "input_cache_read", "cache_read"),
-            ReadPerTokenPrice(pricing, "input_cache_write", "cache_write"),
-            ModelPricing.SourceEndpoint);
-    }
-
-    private static double? ReadPerTokenPrice(JsonElement pricing, params string[] names)
-    {
-        foreach (var name in names)
-        {
-            if (!pricing.TryGetProperty(name, out var node)) continue;
-            double perToken;
-            switch (node.ValueKind)
-            {
-                case JsonValueKind.Number when node.TryGetDouble(out var number):
-                    perToken = number;
-                    break;
-                case JsonValueKind.String when double.TryParse(
-                    node.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed):
-                    perToken = parsed;
-                    break;
-                default:
-                    continue;
-            }
-            if (perToken < 0) continue;
-            return perToken * 1_000_000d;
-        }
-        return null;
-    }
-
-    private static bool SupportsSampling(IReadOnlyList<string> parameters, params string[] names) =>
-        parameters.Any(value => IsAny(value, names));
+    private Task<List<ProviderModelEntry>> FetchProviderModelsAsync(ProviderEntry entry) =>
+        entry.Type == ChatGptType
+            ? FetchChatGptModelsAsync()
+            : _providerConnection.FetchModelsAsync(entry, FindProviderPreset(entry)?.ModelsPath);
 
     private void OnSettingsKeyDown(object? sender, KeyEventArgs e)
     {
@@ -3326,36 +2651,14 @@ public partial class SettingsWindow : MolaContentWindow
 
     private async Task ConfigurePiSidecarAsync()
     {
-        if (_piSidecar is null) return;
-
-        _notifications?.Progress(PiSidecarNotificationKey, "正在下载 Agent 运行环境");
-        try
-        {
-            var progress = new Progress<SandboxProgress>(item =>
-            {
-                PART_PiSidecarStatus.Text = string.IsNullOrWhiteSpace(item.Message)
-                    ? $"正在配置 Agent 运行环境 {item.Fraction:P0}"
-                    : item.Message;
-                _notifications?.Progress(
-                    PiSidecarNotificationKey,
-                    string.IsNullOrWhiteSpace(item.Message) ? "正在下载 Agent 运行环境" : item.Message,
-                    progress: item.Fraction > 0 ? item.Fraction : null);
-            });
-            var installed = await _piSidecar.DownloadAndInstallAsync(progress, CancellationToken.None);
-            if (_agentRuntimeInstalled is not null)
-                await _agentRuntimeInstalled();
-            // The activation above is what puts the saved rows back in the registry,
-            // so the list two sections up is stale the moment it returns — repaint it
-            // rather than leaving "待更新运行环境" on services that just came back.
-            RefreshProviders();
-            PART_PiSidecarStatus.Text = $"Agent 运行环境 · {installed.Version}";
-            _notifications?.Success("Agent 运行环境已就绪", installed.Version, PiSidecarNotificationKey);
-        }
-        catch (Exception ex)
-        {
-            PART_PiSidecarStatus.Text = "配置失败：" + ex.Message;
-            _notifications?.Error("Agent 运行环境配置失败", ex.Message, PiSidecarNotificationKey);
-        }
+        var progress = new Progress<SandboxProgress>(item =>
+            PART_PiSidecarStatus.Text = string.IsNullOrWhiteSpace(item.Message)
+                ? $"正在配置 Agent 运行环境 {item.Fraction:P0}"
+                : item.Message);
+        var (installed, error) = await _agentRuntime.InstallAsync(progress);
+        PART_PiSidecarStatus.Text = installed is not null
+            ? $"Agent 运行环境 · {installed.Version}"
+            : "配置失败：" + error;
     }
 
     private async void OnBrowsePython(object? sender, RoutedEventArgs e)
@@ -3453,13 +2756,13 @@ public partial class SettingsWindow : MolaContentWindow
         BeginSandboxOperation();
         try
         {
-            _agentRuntimeRemoving?.Invoke();
-            _piSidecar.Delete();
-            _notifications?.Success("Agent 运行环境已移除", key: PiSidecarNotificationKey);
+            _agentRuntime.Remove();
+            _notifications?.Success("Agent 运行环境已移除", key: AgentRuntimeSetup.NotificationKey);
         }
         catch (Exception ex)
         {
             PART_PiSidecarStatus.Text = "移除失败：" + ex.Message;
+            _notifications?.Error("Agent 运行环境移除失败", ex.Message, AgentRuntimeSetup.NotificationKey);
         }
         EndSandboxOperation();
         await RefreshRuntimeStatusAsync();
@@ -3531,8 +2834,8 @@ public partial class SettingsWindow : MolaContentWindow
 
     private void RefreshSkills()
     {
-        _skills.Reload();
         if (!HasPageContent(PAGE_Skills)) return;
+        _skills.Reload();
         // Two flat lists under two section headings, the way 模型服务 splits
         // 对话服务 from 图像服务 — it replaces the per-row 内置 / 自定义 badge,
         // and 删除 only ever appears in the half where it applies.
@@ -3853,7 +3156,7 @@ public partial class SettingsWindow : MolaContentWindow
 
     private async void OnOpenBrowserSetupGuide(object? sender, RoutedEventArgs e)
     {
-        var guide = new BrowserSetupWindow(_browserBridge);
+        var guide = new BrowserSetupWindow { DataContext = _browserBridge };
         await guide.ShowDialog(this);
         // Closing with 「装好了，去检测」 means the answer they came for is the
         // detection result, so run it for them rather than leaving a stale card.
@@ -3893,7 +3196,7 @@ public sealed record ProviderCardRow(ProviderEntry Entry, string? InactiveReason
     public int ModelCount => Entry.Models.Count;
     public bool IsInactive => InactiveReason is not null;
     public bool HasBuiltinSearch =>
-        !SettingsViewModel.IsImagePurpose(Entry.Purpose)
+        !ProviderPurpose.IsImage(Entry.Purpose)
         && BuiltinWebSearch.IsEnabledOnProvider(Entry.Type, Entry.BaseUrl, Entry.BuiltinSearch);
 }
 
@@ -3903,7 +3206,6 @@ public sealed record ProviderPresetRow(
     string Type,
     string BaseUrl,
     string ModelsPath,
-    ThinkingParamKind DefaultThinkingKind,
     string Purpose = "chat",
     string? ApiPath = null,
     string? ImageEditPath = null,

@@ -57,7 +57,7 @@ public sealed class ToolAutoReviewer : IToolAutoReviewer
         {
             answer = await _client().CompleteAsync(
                 target.Target,
-                target.ModelId,
+                target.Model,
                 [
                     new ChatMessage(ChatMessage.RoleSystem, Instructions),
                     new ChatMessage(ChatMessage.RoleUser, BuildInput(request))

@@ -1,4 +1,5 @@
 using System.Text;
+using MolaGPT.Core.Chat;
 using MolaGPT.Core.Models;
 
 namespace MolaGPT.ViewModels;
@@ -93,7 +94,7 @@ public sealed partial class ChatViewModel
     {
         var text = content ?? string.Empty;
         if (text.Length > TurnPreviewScan) text = text[..TurnPreviewScan];
-        text = MessageViewModel.StripSystemHints(text);
+        text = ChatMessageText.StripSystemHints(text);
 
         var builder = new StringBuilder(text.Length);
         var space = false;

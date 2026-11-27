@@ -1,12 +1,13 @@
 using System.Collections.Concurrent;
 using MolaGPT.Core.Chat;
-using MolaGPT.Core.Chat.Providers;
 
 namespace MolaGPT.ViewModels.Services;
 
 public sealed class BackgroundStreamTask
 {
     private int _titleGenerationStarted;
+    private readonly TaskCompletionSource _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _finalizerClaimed;
 
     public string ConversationId { get; init; } = default!;
     public string ConversationTitle { get; init; } = "新对话";
@@ -33,10 +34,15 @@ public sealed class BackgroundStreamTask
 
     /// <summary>Started by a message sent from a paired phone.</summary>
     public bool IsRemoteTurn { get; init; }
-    public CancellationTokenSource Cts { get; set; } = default!;
-    public Task StreamTask { get; set; } = default!;
+    public CancellationTokenSource Cts { get; init; } = default!;
     public bool IsDetached { get; set; }
-    public bool IsCompleted { get; set; }
+    public Task Completion => _completion.Task;
+    public bool IsInFlight => !Completion.IsCompleted;
+    internal bool IsFinalizing => Volatile.Read(ref _finalizerClaimed) != 0 && IsInFlight;
+    internal bool IsReadingStream { get; set; }
+    internal bool AcceptsMessages => IsReadingStream && !IsFinalizing && IsInFlight && !Cts.IsCancellationRequested;
+    internal bool TryBeginFinalization() => Interlocked.CompareExchange(ref _finalizerClaimed, 1, 0) == 0;
+    internal void Finish() => _completion.SetResult();
     public bool GenerateTitleOnCompletion { get; init; }
     public bool CompletedSuccessfully { get; set; }
     internal bool HasUnsavedChanges { get; set; } = true;
@@ -55,26 +61,6 @@ public sealed class BackgroundStreamTask
     public string? RoleRevision { get; set; }
 
     public string? SessionId { get; init; }
-    public string? ApiUrl { get; set; }
-    public int ReceivedChunkCount { get; set; }
-    public int MissedStatusPolls { get; set; }
-    internal CancellationTokenSource? PollCts { get; set; }
-
-    internal void ApplyCompletedStream(CompletedStreamData? data)
-    {
-        var error = data is null
-            ? new ChatRequestError("stream_unavailable", "暂时无法读取原有回答。")
-            : data.Error;
-        if (data is not null)
-        {
-            AssistantMessage.ReplaceContent(data.Text);
-            AssistantMessage.ServerSubagents = data.Subagents;
-            if (data.Sources is { Count: > 0 }) AssistantMessage.Sources = data.Sources;
-        }
-        AssistantMessage.SetRequestError(error);
-        CompletedSuccessfully = error is null;
-    }
-
     public bool TryBeginTitleGeneration() =>
         Interlocked.Exchange(ref _titleGenerationStarted, 1) == 0;
 }
@@ -104,9 +90,6 @@ public sealed class BackgroundStreamFailedEventArgs : EventArgs
 public sealed class BackgroundStreamService
 {
     private readonly ConcurrentDictionary<string, BackgroundStreamTask> _tasks = new();
-    private readonly Action<string>? _log;
-
-    public BackgroundStreamService(Action<string>? log = null) => _log = log;
 
     public event EventHandler<BackgroundStreamCompletedEventArgs>? TaskCompleted;
     public event EventHandler<BackgroundStreamFailedEventArgs>? TaskFailed;
@@ -115,106 +98,53 @@ public sealed class BackgroundStreamService
     /// asked for, which is told by the phone instead.</summary>
     public event EventHandler<string>? TaskEnded;
 
-    public bool HasTask(string conversationId) => _tasks.ContainsKey(conversationId);
-    public int ActiveTaskCount => _tasks.Values.Count(task => !task.IsCompleted);
+    public bool HasTask(string conversationId) => GetTask(conversationId) is not null;
+    public int ActiveTaskCount => _tasks.Values.Count(task => task.IsInFlight);
 
     public BackgroundStreamTask? GetTask(string conversationId) =>
-        _tasks.TryGetValue(conversationId, out var task) ? task : null;
+        _tasks.TryGetValue(conversationId, out var task) && task.IsInFlight ? task : null;
 
-    public IReadOnlyCollection<BackgroundStreamTask> ActiveTasks => _tasks.Values.ToList();
+    public IReadOnlyCollection<BackgroundStreamTask> ActiveTasks => _tasks.Values.Where(task => task.IsInFlight).ToList();
 
     public void Register(BackgroundStreamTask task)
     {
-        _tasks[task.ConversationId] = task;
+        if (!_tasks.TryAdd(task.ConversationId, task))
+            throw new InvalidOperationException("此对话仍有任务在途。");
         TaskRegistered?.Invoke(this, task.ConversationId);
     }
 
-    public void RegisterWithPolling(BackgroundStreamTask task, MolaGptProxyProvider provider)
+    public bool TryReattach(BackgroundStreamTask task)
     {
-        _tasks[task.ConversationId] = task;
-        TaskRegistered?.Invoke(this, task.ConversationId);
-        var pollCts = new CancellationTokenSource();
-        task.PollCts = pollCts;
-        _ = PollStreamStatusAsync(task, provider, pollCts.Token);
+        if (!Remove(task)) return false;
+        task.IsDetached = false;
+        TaskEnded?.Invoke(this, task.ConversationId);
+        return true;
     }
 
-    private async Task PollStreamStatusAsync(BackgroundStreamTask task, MolaGptProxyProvider provider, CancellationToken ct)
-    {
-        try
-        {
-            while (!ct.IsCancellationRequested)
-            {
-                await Task.Delay(4000, ct);
-                if (ct.IsCancellationRequested) break;
-
-                var status = await provider.CheckStreamStatusAsync(task.SessionId!, ct);
-                if (status is null)
-                {
-                    if (++task.MissedStatusPolls < 3) continue;
-                }
-                else
-                {
-                    task.MissedStatusPolls = 0;
-                    if (status.Status != "completed") continue;
-                }
-
-                var data = status is null ? null : await provider.FetchCompletedStreamAsync(task.SessionId!, ct);
-                task.ApplyCompletedStream(data);
-                task.IsCompleted = true;
-                if (task.AssistantMessage.RequestError is { } failure)
-                    PublishFailure(task.ConversationId, task.ConversationTitle, task.ModelLabel, failure.Message);
-                else
-                    PublishCompletion(task.ConversationId, task.ConversationTitle, task.ModelLabel);
-                break;
-            }
-        }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) { _log?.Invoke($"background polling failed type={ex.GetType().Name}"); }
-    }
-
-    public void StopPolling(BackgroundStreamTask task)
-    {
-        task.PollCts?.Cancel();
-        task.PollCts?.Dispose();
-        task.PollCts = null;
-    }
-
-    public BackgroundStreamTask? Detach(string conversationId)
-    {
-        _tasks.TryRemove(conversationId, out var task);
-        return task;
-    }
+    private bool Remove(BackgroundStreamTask task) =>
+        _tasks.TryRemove(new KeyValuePair<string, BackgroundStreamTask>(task.ConversationId, task));
 
     public void StopAll()
     {
-        foreach (var task in _tasks.Values)
-        {
-            StopPolling(task);
+        foreach (var task in ActiveTasks)
             task.Cts.Cancel();
-        }
     }
 
     /// <summary>Finish <paramref name="task"/> with no notification; whoever shows it
     /// running still hears that it stopped.</summary>
     public void EndQuietly(BackgroundStreamTask task)
     {
-        task.IsCompleted = true;
-        _tasks.TryRemove(task.ConversationId, out _);
-        TaskEnded?.Invoke(this, task.ConversationId);
+        if (Remove(task)) TaskEnded?.Invoke(this, task.ConversationId);
     }
 
     public void Complete(BackgroundStreamTask task)
     {
-        task.IsCompleted = true;
-        _tasks.TryRemove(task.ConversationId, out _);
-        PublishCompletion(task.ConversationId, task.ConversationTitle, task.ModelLabel);
+        if (Remove(task)) PublishCompletion(task.ConversationId, task.ConversationTitle, task.ModelLabel);
     }
 
     public void Fail(BackgroundStreamTask task, string errorMessage)
     {
-        task.IsCompleted = true;
-        _tasks.TryRemove(task.ConversationId, out _);
-        PublishFailure(task.ConversationId, task.ConversationTitle, task.ModelLabel, errorMessage);
+        if (Remove(task)) PublishFailure(task.ConversationId, task.ConversationTitle, task.ModelLabel, errorMessage);
     }
 
     public void PublishCompletion(string conversationId, string conversationTitle, string? modelLabel)

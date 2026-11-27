@@ -90,6 +90,37 @@ public static partial class MolaGptMarkupSplitter
     public sealed record ToolSearchChip(string Text, IReadOnlyList<string> Badges);
     public sealed record SteelMetaItem(string Text, string? IconClass);
 
+    public static string ToolName(MarkupUnit unit) => unit.ToolName ?? (unit.Kind switch
+    {
+        MarkupUnitKind.ToolStatus when unit.Tag?.Contains("tool-search-blockquote", StringComparison.OrdinalIgnoreCase) == true => "search_web",
+        MarkupUnitKind.ToolStatus when unit.Tag?.Contains("tool-image-blockquote", StringComparison.OrdinalIgnoreCase) == true => "generate_image",
+        MarkupUnitKind.DsAnalysis => unit.Tag switch
+        {
+            "python" => "execute_python_code",
+            "web_search" or "search_web" => "search_web",
+            "tool-call" => "tool",
+            _ => unit.Tag ?? "tool"
+        },
+        MarkupUnitKind.SteelStep => unit.Tag is "scrape" or "screenshot_analyze" ? "web_fetch" : "steel_browser",
+        MarkupUnitKind.ImagePendingSkeleton or MarkupUnitKind.ImageErrorCard => "generate_image",
+        _ => "tool"
+    });
+
+    public static string ToolPhase(MarkupUnit unit, bool isFinal) =>
+        unit.Kind == MarkupUnitKind.DsAnalysis && unit.ToolCallId is null
+            ? unit.AnalysisPhase switch
+            {
+                "error" => "error", "cancelled" => "cancelled",
+                _ => unit.IsClosed ? "completed" : isFinal ? "cancelled" : "running"
+            }
+            : unit.ToolVariant switch
+            {
+                Variant.Completed or Variant.Success => "completed",
+                Variant.Error => "error", Variant.Cancelled => "cancelled", Variant.Info => "info",
+                Variant.None => isFinal ? "completed" : "running",
+                _ => isFinal ? "cancelled" : "running"
+            };
+
     [GeneratedRegex("""<blockquote\b(?<attrs>[^>]*\bclass\s*=\s*(?:"(?<class>[^"]*\btool-status\b[^"]*)"|'(?<class>[^']*\btool-status\b[^']*)')[^>]*)>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
     private static partial Regex ToolStatusOpenRegex();
 
@@ -148,24 +179,35 @@ public static partial class MolaGptMarkupSplitter
     private const string BlockquoteCloseTag = "</blockquote>";
     private const string SteelCloseTag = "</steel-step>";
 
-    public static List<MarkupUnit> Split(string source)
+    public static List<MarkupUnit> Split(string source) =>
+        string.IsNullOrEmpty(source) ? [] : SplitNormalized(NormalizeOutputSegmentMarkers(source));
+
+    internal static List<MarkupUnit> SplitNormalized(string source)
     {
         var result = new List<MarkupUnit>();
         if (string.IsNullOrEmpty(source)) return result;
+        if (!source.Contains("tool-status", StringComparison.OrdinalIgnoreCase)
+            && !source.Contains("<DSanalysis", StringComparison.OrdinalIgnoreCase)
+            && !source.Contains("<steel-step", StringComparison.OrdinalIgnoreCase)
+            && !source.Contains("ai-image-", StringComparison.OrdinalIgnoreCase))
+        {
+            EmitMarkdownIfAny(result, source, 0, source.Length);
+            return result;
+        }
 
-        source = NormalizeOutputSegmentMarkers(source);
+        var literals = MarkdownSource.LiteralSpans(source);
 
-        int pos = 0;
+        int pos = 0, search = 0;
         int len = source.Length;
 
         while (pos < len)
         {
             // Find next marker — earliest of tool-status, DSanalysis, or steel step.
-            var dsMatch = DsOpenRegex().Match(source, pos);
-            var bqMatch = ToolStatusOpenRegex().Match(source, pos);
-            var steelMatch = SteelOpenRegex().Match(source, pos);
-            var imageSkeletonMatch = ImagePendingSkeletonRegex().Match(source, pos);
-            var imageErrorMatch = ImageErrorCardRegex().Match(source, pos);
+            var dsMatch = DsOpenRegex().Match(source, search);
+            var bqMatch = ToolStatusOpenRegex().Match(source, search);
+            var steelMatch = SteelOpenRegex().Match(source, search);
+            var imageSkeletonMatch = ImagePendingSkeletonRegex().Match(source, search);
+            var imageErrorMatch = ImageErrorCardRegex().Match(source, search);
 
             int dsStart = dsMatch.Success ? dsMatch.Index : -1;
             int bqStart = bqMatch.Success ? bqMatch.Index : -1;
@@ -181,6 +223,19 @@ public static partial class MolaGptMarkupSplitter
             }
 
             int nextStart = MinPositive(dsStart, bqStart, steelStart, imageSkeletonStart, imageErrorStart);
+
+            var literalEnd = literals.Where(span => span.Start <= nextStart && nextStart <= span.End)
+                .Select(span => span.End).DefaultIfEmpty(-1).First();
+            if (literalEnd >= 0)
+            {
+                search = literalEnd + 1;
+                if (search >= len)
+                {
+                    EmitMarkdownIfAny(result, source, pos, len);
+                    break;
+                }
+                continue;
+            }
 
             // Flush plain markdown before the marker.
             EmitMarkdownIfAny(result, source, pos, nextStart);
@@ -330,93 +385,89 @@ public static partial class MolaGptMarkupSplitter
                     SourceOffset: dsMatch.Index));
                 pos = unitEnd;
             }
+            search = pos;
         }
 
         CoalesceToolCalls(result);
-        RemoveConnectorFallback(result);
-        ApplyImplicitToolStatusPhases(result);
         MergeToolStatusIntoAnalysis(result);
+        ApplyImplicitToolStatusPhases(result);
         return result;
     }
 
-    // Explicit call identity takes precedence over the legacy adjacency rules.
     private static void CoalesceToolCalls(List<MarkupUnit> units)
     {
-        var merged = new List<MarkupUnit>();
+        var merged = new List<MarkupUnit>(units.Count);
         var calls = new Dictionary<string, int>(StringComparer.Ordinal);
-        int precedingCall = -1;
         foreach (var original in units)
         {
-            var opening = original.Kind == MarkupUnitKind.SteelStep
-                ? SteelRootOpenRegex().Match(original.Source).Value
-                : original.Source[..(original.Source.IndexOf('>') + 1)];
-            var attrs = ParseAttributes(opening);
-            var id = attrs.GetValueOrDefault("data-tool-call");
-            if (original.Kind == MarkupUnitKind.DsAnalysis && precedingCall >= 0)
+            var attrs = CallAttributes(original);
+            if (attrs?.GetValueOrDefault("data-tool-call") is not { Length: > 0 } id)
             {
-                var previous = merged[precedingCall];
-                if (previous.ToolCallId is not null && (id is null || id == previous.ToolCallId))
-                {
-                    merged[precedingCall] = previous with
-                    {
-                        Kind = MarkupUnitKind.DsAnalysis, Tag = original.Tag,
-                        Inner = original.Inner, RawInner = original.RawInner,
-                        IsClosed = original.IsClosed, StatusText = previous.StatusText ?? previous.Inner,
-                        Source = previous.Source
-                    };
-                    continue;
-                }
-            }
-            if (original.Kind is MarkupUnitKind.ToolStatus or MarkupUnitKind.SteelStep && id is not null)
-            {
-                var label = original.Inner;
-                var unit = original with
-                {
-                    ToolCallId = id, ToolName = attrs.GetValueOrDefault("data-tool-name"),
-                    ToolIcon = attrs.GetValueOrDefault("data-tool-icon"),
-                    Metadata = ElementText(original.Source, "tool-status-meta"),
-                    ErrorText = ElementText(original.Source, "tool-status-error"),
-                    RetryTicket = ActionTicket(original.Source, "tool-download-retry"),
-                    FileTicket = ActionTicket(original.Source, "tool-retry-file"),
-                    Filename = ActionTicket(original.Source, "tool-retry-file", "data-filename"),
-                    PresentationPending = original.ToolVariant is Variant.Completed or Variant.Success
-                };
-                if (calls.TryGetValue(id, out var index))
-                {
-                    var previous = merged[index];
-                    merged[index] = unit with
-                    {
-                        Kind = previous.Kind, Tag = previous.Tag,
-                        Inner = previous.Kind == MarkupUnitKind.DsAnalysis ? previous.Inner : label,
-                        RawInner = previous.Kind == MarkupUnitKind.DsAnalysis ? previous.RawInner : unit.RawInner,
-                        StatusText = label, RunningText = previous.RunningText ?? previous.StatusText ?? previous.Inner,
-                        Source = previous.Source,
-                        SourceOffset = previous.SourceOffset,
-                        SearchChips = previous.SearchChips, SteelMetaItems = previous.SteelMetaItems,
-                        Metadata = unit.Metadata ?? previous.Metadata,
-                        ErrorText = unit.ErrorText ?? previous.ErrorText,
-                        RetryTicket = unit.RetryTicket ?? previous.RetryTicket,
-                        FileTicket = unit.FileTicket ?? previous.FileTicket,
-                        Filename = unit.Filename ?? previous.Filename
-                    };
-                    precedingCall = index;
-                    continue;
-                }
-                ReleasePresentation(merged);
-                calls[id] = merged.Count;
-                precedingCall = merged.Count;
-                merged.Add(unit with { StatusText = label, RunningText = label });
+                if (original.Kind != MarkupUnitKind.Markdown || HasVisibleActivity(original.Source))
+                    ReleasePresentation(merged);
+                merged.Add(original);
                 continue;
             }
-            if (original.Kind != MarkupUnitKind.Markdown || HasVisibleActivity(original.Source))
+
+            var isAnalysis = original.Kind == MarkupUnitKind.DsAnalysis;
+            var label = isAnalysis ? null : original.Inner;
+            var unit = original with
+            {
+                ToolCallId = id,
+                ToolName = attrs.GetValueOrDefault("data-tool-name"),
+                ToolIcon = attrs.GetValueOrDefault("data-tool-icon"),
+                StatusText = label,
+                RunningText = original.ToolVariant == Variant.Analyzing ? label : null,
+                Metadata = ElementText(original.Source, "tool-status-meta"),
+                ErrorText = ElementText(original.Source, "tool-status-error"),
+                RetryTicket = ActionTicket(original.Source, "tool-download-retry"),
+                FileTicket = ActionTicket(original.Source, "tool-retry-file"),
+                Filename = ActionTicket(original.Source, "tool-retry-file", "data-filename"),
+                PresentationPending = original.ToolVariant is Variant.Completed or Variant.Success
+            };
+            if (!calls.TryGetValue(id, out var index))
             {
                 ReleasePresentation(merged);
-                precedingCall = -1;
+                calls.Add(id, merged.Count);
+                merged.Add(unit);
+                continue;
             }
-            merged.Add(original);
+
+            var previous = merged[index];
+            var body = isAnalysis || previous.Kind != MarkupUnitKind.DsAnalysis ? unit : previous;
+            merged[index] = body with
+            {
+                StatusText = label ?? previous.StatusText,
+                RunningText = unit.RunningText ?? previous.RunningText,
+                ToolName = unit.ToolName ?? previous.ToolName,
+                ToolIcon = unit.ToolIcon ?? previous.ToolIcon,
+                Source = previous.Source,
+                SourceOffset = previous.SourceOffset,
+                ToolVariant = unit.ToolVariant != Variant.None ? unit.ToolVariant : previous.ToolVariant,
+                PresentationPending = unit.ToolVariant != Variant.None ? unit.PresentationPending : previous.PresentationPending,
+                SearchChips = unit.SearchChips ?? previous.SearchChips,
+                SteelMetaItems = unit.SteelMetaItems ?? previous.SteelMetaItems,
+                Metadata = unit.Metadata ?? previous.Metadata,
+                ErrorText = unit.ErrorText ?? previous.ErrorText,
+                RetryTicket = unit.RetryTicket ?? previous.RetryTicket,
+                FileTicket = unit.FileTicket ?? previous.FileTicket,
+                Filename = unit.Filename ?? previous.Filename
+            };
         }
         units.Clear();
         units.AddRange(merged);
+    }
+
+    private static Dictionary<string, string>? CallAttributes(MarkupUnit original)
+    {
+        var tag = original.Kind switch
+        {
+            MarkupUnitKind.SteelStep => SteelRootOpenRegex().Match(original.Source).Value,
+            MarkupUnitKind.DsAnalysis or MarkupUnitKind.ToolStatus
+                => original.Source[..(original.Source.IndexOf('>') + 1)],
+            _ => string.Empty
+        };
+        return tag.Contains("data-tool-call", StringComparison.OrdinalIgnoreCase) ? ParseAttributes(tag) : null;
     }
 
     private static void ReleasePresentation(List<MarkupUnit> units)
@@ -438,19 +489,6 @@ public static partial class MolaGptMarkupSplitter
     {
         var match = Regex.Match(source, """<button\b[^>]*class=["'][^"']*\b""" + className + """\b[^"']*["'][^>]*>""");
         return match.Success ? ParseAttributes(match.Value).GetValueOrDefault(attribute) : null;
-    }
-
-    private static void RemoveConnectorFallback(List<MarkupUnit> units)
-    {
-        for (var i = units.Count - 1; i >= 0; i--)
-        {
-            var unit = units[i];
-            if (unit.Kind != MarkupUnitKind.ToolStatus || unit.ToolCallId is not null
-                || unit.ToolVariant != Variant.Completed || unit.Inner is not ("处理中..." or "处理中…")) continue;
-            var previous = i - 1;
-            while (previous >= 0 && units[previous].Kind == MarkupUnitKind.Markdown && !HasVisibleActivity(units[previous].Source)) previous--;
-            if (previous >= 0 && units[previous] is { Kind: MarkupUnitKind.DsAnalysis, Tag: "mcp", IsClosed: true }) units.RemoveAt(i);
-        }
     }
 
     private static int MinPositive(params int[] values)
@@ -480,29 +518,41 @@ public static partial class MolaGptMarkupSplitter
     /// </summary>
     public static string NormalizeOutputSegmentMarkers(string source)
     {
-        source = NormalizeMarkerPair(source, PyOutputBegin, PyOutputEnd);
-        source = NormalizeMarkerPair(source, McpOutputBegin, McpOutputEnd);
-        source = RemoveOrphanOutputMarkers(source);
-        return HideDanglingMarkerPrefix(source);
-    }
-
-    /// <summary>
-    /// After pairing, remove any COMPLETE but unpaired marker comments left in
-    /// the middle of the text. The common case: an output frame whose closing
-    /// <c>END</c> has no preceding <c>BEGIN</c> in the current source slice
-    /// (the BEGIN lived in an earlier, already-consumed frame), so
-    /// <see cref="NormalizeMarkerPair"/> appends it verbatim. These markers are
-    /// protocol delimiters, never legitimate visible content, so dropping the
-    /// whole comment is always safe and stops it leaking as literal text.
-    /// </summary>
-    private static string RemoveOrphanOutputMarkers(string source)
-    {
-        if (source.IndexOf("<!--PY_OUTPUT", StringComparison.Ordinal) < 0
-            && source.IndexOf("<!--MCP_OUTPUT", StringComparison.Ordinal) < 0)
-            return source;
-        foreach (var marker in new[] { PyOutputBegin, PyOutputEnd, McpOutputBegin, McpOutputEnd })
-            source = source.Replace(marker, string.Empty);
-        return source;
+        if (!source.Contains("<!--", StringComparison.Ordinal)) return source;
+        // Later paragraphs cannot close a code span around an earlier marker.
+        // Keep the full-source incremental path from rebuilding their AST.
+        var lastComment = source.LastIndexOf("<!--", StringComparison.Ordinal);
+        var paragraphEnd = source.IndexOf("\n\n", lastComment, StringComparison.Ordinal);
+        var windowsParagraphEnd = source.IndexOf("\r\n\r\n", lastComment, StringComparison.Ordinal);
+        var boundary = MinPositive(paragraphEnd, windowsParagraphEnd);
+        var literals = MarkdownSource.LiteralSpans(boundary < 0 ? source : source[..(boundary + 1)]);
+        bool Literal(int index) => literals.Any(span => span.Start <= index && index <= span.End);
+        var result = new System.Text.StringBuilder(source.Length);
+        var pos = 0;
+        while (pos < source.Length)
+        {
+            var next = source.IndexOf("<!--", pos, StringComparison.Ordinal);
+            if (next < 0) { result.Append(source, pos, source.Length - pos); break; }
+            result.Append(source, pos, next - pos);
+            var marker = new[] { PyOutputBegin, PyOutputEnd, McpOutputBegin, McpOutputEnd }
+                .FirstOrDefault(value => source.AsSpan(next).StartsWith(value, StringComparison.Ordinal));
+            if (marker is null || Literal(next))
+            {
+                result.Append("<!--");
+                pos = next + 4;
+                continue;
+            }
+            if (marker == PyOutputBegin || marker == McpOutputBegin)
+            {
+                var closing = marker == PyOutputBegin ? PyOutputEnd : McpOutputEnd;
+                var end = source.IndexOf(closing, next + marker.Length, StringComparison.Ordinal);
+                while (end >= 0 && Literal(end))
+                    end = source.IndexOf(closing, end + closing.Length, StringComparison.Ordinal);
+                if (end < 0) break;
+            }
+            pos = next + marker.Length;
+        }
+        return HideDanglingMarkerPrefix(result.ToString());
     }
 
     private static string StripOrphanSteelMetaFragments(string source)
@@ -510,37 +560,6 @@ public static partial class MolaGptMarkupSplitter
         return source.Contains("tool-steel-meta-item", StringComparison.OrdinalIgnoreCase)
             ? OrphanSteelMetaFragmentRegex().Replace(source, string.Empty)
             : source;
-    }
-
-    private static string NormalizeMarkerPair(string source, string begin, string end)
-    {
-        var result = new System.Text.StringBuilder(source.Length);
-        var pos = 0;
-        while (pos < source.Length)
-        {
-            var beginIdx = source.IndexOf(begin, pos, StringComparison.Ordinal);
-            if (beginIdx < 0)
-            {
-                result.Append(source, pos, source.Length - pos);
-                break;
-            }
-
-            result.Append(source, pos, beginIdx - pos);
-            var payloadStart = beginIdx + begin.Length;
-            var endIdx = source.IndexOf(end, payloadStart, StringComparison.Ordinal);
-            if (endIdx < 0)
-            {
-                // Keep everything before the marker and hide the partial
-                // output tail. The next render tick will include the end
-                // marker and reveal the payload atomically.
-                break;
-            }
-
-            result.Append(source, payloadStart, endIdx - payloadStart);
-            pos = endIdx + end.Length;
-        }
-
-        return result.ToString();
     }
 
     private static string HideDanglingMarkerPrefix(string source)
@@ -551,7 +570,8 @@ public static partial class MolaGptMarkupSplitter
             for (int n = max; n >= 4; n--)
             {
                 if (source.EndsWith(marker[..n], StringComparison.Ordinal))
-                    return source[..^n];
+                    return MarkdownSource.LiteralSpans(source).Any(span => span.Start <= source.Length - n && source.Length - n <= span.End)
+                        ? source : source[..^n];
             }
         }
 
@@ -571,27 +591,6 @@ public static partial class MolaGptMarkupSplitter
 
     private static void ApplyImplicitToolStatusPhases(List<MarkupUnit> units)
     {
-        for (int i = 0; i < units.Count; i++)
-        {
-            var unit = units[i];
-            if (unit.Kind != MarkupUnitKind.ToolStatus) continue;
-            if (unit.ToolCallId is not null) continue;
-            if (unit.ToolVariant is not (Variant.Analyzing or Variant.None)) continue;
-
-            var phase = FindFollowingDsPhase(units, i + 1);
-            var nextVariant = phase switch
-            {
-                "completed" => Variant.Completed,
-                "success" => Variant.Success,
-                "error" => Variant.Error,
-                "analyzing" => Variant.Analyzing,
-                _ => unit.ToolVariant
-            };
-
-            if (nextVariant != unit.ToolVariant)
-                units[i] = unit with { ToolVariant = nextVariant };
-        }
-
         for (int i = 0; i < units.Count; i++)
         {
             var unit = units[i];
@@ -628,13 +627,16 @@ public static partial class MolaGptMarkupSplitter
         for (int i = units.Count - 1; i >= 0; i--)
         {
             if (units[i].Kind != MarkupUnitKind.DsAnalysis) continue;
-            if (units[i].ToolCallId is not null) continue;
+            var analysis = units[i];
+            if (analysis.ToolCallId is not null || analysis.Tag is not ("mcp" or "python" or "image-action" or "code-search"))
+                continue;
 
             var statusIndex = FindPrecedingToolStatus(units, i - 1);
             if (statusIndex < 0) continue;
 
             var status = units[statusIndex];
-            if (string.IsNullOrWhiteSpace(status.Inner)
+            if (status.ToolCallId is not null || status.ToolVariant is not (Variant.None or Variant.Analyzing)
+                || string.IsNullOrWhiteSpace(status.Inner)
                 || status.Tag?.Contains("tool-subagent-blockquote", StringComparison.OrdinalIgnoreCase) == true) continue;
 
             units[i] = units[i] with { StatusText = status.Inner };

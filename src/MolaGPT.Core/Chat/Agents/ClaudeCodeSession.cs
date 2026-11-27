@@ -17,6 +17,7 @@ namespace MolaGPT.Core.Chat.Agents;
 internal sealed partial class ClaudeCodeSession : IAgentSession
 {
     private readonly Process _process;
+    private readonly Action<string>? _log;
     private readonly Channel<AgentEvent> _channel;
     private readonly CancellationTokenSource _lifetimeCts = new();
     private readonly SemaphoreSlim _turnGate = new(1, 1);
@@ -41,9 +42,10 @@ internal sealed partial class ClaudeCodeSession : IAgentSession
     /// self-assigns one when we start fresh without --session-id).</summary>
     public string? CurrentSessionId => _currentSessionId;
 
-    public ClaudeCodeSession(Process process)
+    public ClaudeCodeSession(Process process, Action<string>? log)
     {
         _process = process;
+        _log = log;
         _channel = Channel.CreateUnbounded<AgentEvent>(new UnboundedChannelOptions
         {
             SingleReader = true,

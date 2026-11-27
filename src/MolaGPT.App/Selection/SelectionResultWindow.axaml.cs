@@ -259,11 +259,11 @@ public partial class SelectionResultWindow : Window
         _selectedModel = choice;
         ModelChipText.Text = choice?.DisplayName ?? "选择模型";
         var model = choice?.Model;
-        var mandatory = model?.ThinkingConfig?.Mandatory == true;
+        var thinking = model?.ResolveThinkingConfig();
+        var mandatory = thinking?.Mandatory == true;
         var supportsThinking = model?.SupportsThinking == true || mandatory;
-        var kind = model?.ThinkingConfig?.Kind ?? ThinkingParamKindInference.InferFromModelId(model?.Id);
-        var levels = ThinkingEffortLevels.Resolve(model?.ThinkingConfig, kind);
-        var defEffort = model?.ThinkingConfig?.DefaultEffort;
+        var levels = ThinkingEffortLevels.Resolve(thinking, thinking?.Kind ?? ThinkingParamKind.None);
+        var defEffort = thinking?.DefaultEffort;
         if (!string.IsNullOrEmpty(defEffort) && levels.Contains(defEffort, StringComparer.OrdinalIgnoreCase))
             _reasoningEffort = defEffort;
         else if (!levels.Contains(_reasoningEffort, StringComparer.OrdinalIgnoreCase))
@@ -282,7 +282,7 @@ public partial class SelectionResultWindow : Window
         var mandatory = model?.ThinkingConfig?.Mandatory == true;
         var canToggle = model?.SupportsThinking == true && !mandatory;
         var active = mandatory || (canToggle && _enableThinking);
-        var kind = model?.ThinkingConfig?.Kind ?? ThinkingParamKindInference.InferFromModelId(model?.Id);
+        var kind = model?.ResolveThinkingConfig()?.Kind ?? ThinkingParamKind.None;
         var canEffort = active && (model?.SupportsReasoningEffort == true || kind != ThinkingParamKind.None);
 
         ReasoningPill.IsVisible = canToggle || canEffort;
@@ -731,9 +731,8 @@ public partial class SelectionResultWindow : Window
 
     private void OnEffortClick(object? sender, RoutedEventArgs e)
     {
-        var model = _selectedModel?.Model;
-        var kind = model?.ThinkingConfig?.Kind ?? ThinkingParamKindInference.InferFromModelId(model?.Id);
-        var levels = ThinkingEffortLevels.Resolve(model?.ThinkingConfig, kind);
+        var config = _selectedModel?.Model.ResolveThinkingConfig();
+        var levels = ThinkingEffortLevels.Resolve(config, config?.Kind ?? ThinkingParamKind.None);
         var menu = new ContextMenu();
         foreach (var level in levels)
         {

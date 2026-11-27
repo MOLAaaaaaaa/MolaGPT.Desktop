@@ -21,13 +21,13 @@ public sealed class ResponseStreamEventMapper
     /// <see cref="TryMap"/>. Callers should invoke this BEFORE <see cref="TryMap"/>
     /// (which returns true for every <c>response.*</c> event).
     /// </summary>
-    public bool TryMapControl(JsonElement root, out string? finish, out Usage? usage, out string? error)
+    public bool TryMapControl(JsonElement root, out string? finish, out Usage? usage, out string? error, string? eventName = null)
     {
         finish = null;
         usage = null;
         error = null;
 
-        var eventType = ReadString(root, "type");
+        var eventType = ReadString(root, "type") ?? eventName;
         if (string.IsNullOrWhiteSpace(eventType)) return false;
 
         switch (eventType)
@@ -49,12 +49,12 @@ public sealed class ResponseStreamEventMapper
         }
     }
 
-    public bool TryMap(JsonElement root, out string? text, out string? thinking)
+    public bool TryMap(JsonElement root, out string? text, out string? thinking, string? eventName = null)
     {
         text = null;
         thinking = null;
 
-        var eventType = ReadString(root, "type");
+        var eventType = ReadString(root, "type") ?? eventName;
         if (string.IsNullOrWhiteSpace(eventType) || !eventType!.StartsWith("response.", StringComparison.Ordinal))
             return false;
 
@@ -113,9 +113,9 @@ public sealed class ResponseStreamEventMapper
         if (!response.TryGetProperty("usage", out var u) || u.ValueKind != JsonValueKind.Object)
             return null;
         return new Usage(
-            u.TryGetProperty("input_tokens", out var it) && it.ValueKind == JsonValueKind.Number ? it.GetInt32() : null,
-            u.TryGetProperty("output_tokens", out var ot) && ot.ValueKind == JsonValueKind.Number ? ot.GetInt32() : null,
-            u.TryGetProperty("total_tokens", out var tt) && tt.ValueKind == JsonValueKind.Number ? tt.GetInt32() : null);
+            ReadInt(u, "input_tokens"),
+            ReadInt(u, "output_tokens"),
+            ReadInt(u, "total_tokens"));
     }
 
     private static string? ExtractResponseError(JsonElement root)

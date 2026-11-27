@@ -52,11 +52,11 @@ public partial class ImagePreviewWindow : MolaWindow
     {
         if (owner is null || bytes is null || bytes.Length == 0) return Task.CompletedTask;
 
-        Bitmap bitmap;
+        Bitmap? bitmap;
         try
         {
-            using var stream = new MemoryStream(bytes);
-            bitmap = new Bitmap(stream);
+            bitmap = ImageSourceLoader.Decode(bytes, 0);
+            if (bitmap is null) return Task.CompletedTask;
         }
         catch
         {
@@ -88,7 +88,7 @@ public partial class ImagePreviewWindow : MolaWindow
         }
 
         var bytes = ImageSourceLoader.TryResolveLocalPath(url, out var path)
-            ? TryReadAllBytes(path)
+            ? await TryReadAllBytesAsync(path)
             : null;
 
         // Never owned: the loader hands back a cached, shared instance, and the
@@ -156,9 +156,9 @@ public partial class ImagePreviewWindow : MolaWindow
         Height = Math.Clamp(natural.Height + chromeHeight, 320, Math.Max(320, maxHeight));
     }
 
-    private static byte[]? TryReadAllBytes(string path)
+    private static async Task<byte[]?> TryReadAllBytesAsync(string path)
     {
-        try { return File.ReadAllBytes(path); }
+        try { return await ImageSourceLoader.ReadFileAsync(path); }
         catch { return null; }
     }
 

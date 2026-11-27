@@ -1,5 +1,5 @@
 using System.Text;
-using System.Text.RegularExpressions;
+using MolaGPT.Presentation;
 
 namespace MolaGPT.App.Rendering.Tex;
 
@@ -12,6 +12,46 @@ internal readonly record struct PreparedLatex(string Formula, bool DrawBox);
 /// </summary>
 internal static class LatexNormalizer
 {
+    private static readonly IReadOnlyDictionary<string, string> CommonCommands = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["overbrace"] = @"\overline",
+        ["underbrace"] = @"\underline",
+        ["textcolor"] = @"\color",
+        ["notag"] = string.Empty,
+        ["nonumber"] = string.Empty,
+    };
+
+    private static readonly IReadOnlyDictionary<string, string> AvaloniaCommands = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["dfrac"] = @"\frac",
+        ["tfrac"] = @"\frac",
+        ["cfrac"] = @"\frac",
+        ["dbinom"] = @"\binom",
+        ["tbinom"] = @"\binom",
+        [" "] = @"\;",
+        ["qquad"] = @"\;\;\;\;",
+        ["quad"] = @"\;\;",
+        ["displaystyle"] = string.Empty,
+        ["textstyle"] = string.Empty,
+        ["scriptstyle"] = string.Empty,
+        ["scriptscriptstyle"] = string.Empty,
+        ["operatorname*"] = @"\mathrm",
+        ["operatorname"] = @"\mathrm",
+        ["mathbf"] = @"\mathrm",
+        ["mathbb"] = @"\mathrm",
+        ["mathsf"] = @"\mathrm",
+        ["mathtt"] = @"\mathrm",
+        ["mathfrak"] = @"\mathrm",
+        ["boldsymbol"] = @"\mathrm",
+        ["mathscr"] = @"\mathcal",
+        ["textrm"] = @"\text",
+        ["textbf"] = @"\text",
+        ["textit"] = @"\text",
+        ["texttt"] = @"\text",
+        ["mbox"] = @"\text",
+        ["dots"] = @"\ldots",
+    };
+
     public static PreparedLatex Prepare(string source)
     {
         var formula = StripOuterDelimiters(source.Trim());
@@ -26,7 +66,7 @@ internal static class LatexNormalizer
 
     public static string ForCSharpMath(string source)
     {
-        var formula = Prepare(source).Formula;
+        var formula = source;
         formula = RewriteEnvironment(
             formula, "align", static body => $@"\begin{{aligned}}{body}\end{{aligned}}");
         formula = RewriteEnvironment(
@@ -48,7 +88,7 @@ internal static class LatexNormalizer
 
     public static string ForAvaloniaMath(string source)
     {
-        var formula = Prepare(source).Formula;
+        var formula = source;
 
         formula = RewriteEnvironment(
             formula, "align*", static body => $@"\begin{{align}}{body}\end{{align}}");
@@ -73,38 +113,9 @@ internal static class LatexNormalizer
         formula = RewriteEnvironment(formula, "cases", static body => $@"\cases{{{body}}}");
         formula = RewriteEnvironment(formula, "array", static body => Matrix(StripLeadingGroup(body)));
 
-        formula = formula
-            .Replace(@"\dfrac", @"\frac", StringComparison.Ordinal)
-            .Replace(@"\tfrac", @"\frac", StringComparison.Ordinal)
-            .Replace(@"\cfrac", @"\frac", StringComparison.Ordinal)
-            .Replace(@"\dbinom", @"\binom", StringComparison.Ordinal)
-            .Replace(@"\tbinom", @"\binom", StringComparison.Ordinal)
-            .Replace(@"\qquad", @"\;\;\;\;", StringComparison.Ordinal)
-            .Replace(@"\quad", @"\;\;", StringComparison.Ordinal)
-            .Replace(@"\displaystyle", string.Empty, StringComparison.Ordinal)
-            .Replace(@"\textstyle", string.Empty, StringComparison.Ordinal)
-            .Replace(@"\scriptstyle", string.Empty, StringComparison.Ordinal)
-            .Replace(@"\scriptscriptstyle", string.Empty, StringComparison.Ordinal)
-            .Replace(@"\operatorname*", @"\mathrm", StringComparison.Ordinal)
-            .Replace(@"\operatorname", @"\mathrm", StringComparison.Ordinal)
-            .Replace(@"\mathbf", @"\mathrm", StringComparison.Ordinal)
-            .Replace(@"\mathbb", @"\mathrm", StringComparison.Ordinal)
-            .Replace(@"\mathsf", @"\mathrm", StringComparison.Ordinal)
-            .Replace(@"\mathtt", @"\mathrm", StringComparison.Ordinal)
-            .Replace(@"\mathfrak", @"\mathrm", StringComparison.Ordinal)
-            .Replace(@"\boldsymbol", @"\mathrm", StringComparison.Ordinal)
-            .Replace(@"\mathscr", @"\mathcal", StringComparison.Ordinal)
-            .Replace(@"\textrm", @"\text", StringComparison.Ordinal)
-            .Replace(@"\textbf", @"\text", StringComparison.Ordinal)
-            .Replace(@"\textit", @"\text", StringComparison.Ordinal)
-            .Replace(@"\texttt", @"\text", StringComparison.Ordinal)
-            .Replace(@"\mbox", @"\text", StringComparison.Ordinal);
+        formula = RewriteCommands(formula, AvaloniaCommands);
 
-        return Regex.Replace(
-            formula,
-            @"\\dots(?![A-Za-z])",
-            @"\ldots",
-            RegexOptions.CultureInvariant);
+        return formula;
     }
 
     private static string RewriteCompatibilityCommands(string formula)
@@ -140,12 +151,7 @@ internal static class LatexNormalizer
             if (string.Equals(before, formula, StringComparison.Ordinal)) break;
         }
 
-        formula = formula
-            .Replace(@"\overbrace", @"\overline", StringComparison.Ordinal)
-            .Replace(@"\underbrace", @"\underline", StringComparison.Ordinal)
-            .Replace(@"\textcolor", @"\color", StringComparison.Ordinal)
-            .Replace(@"\notag", string.Empty, StringComparison.Ordinal)
-            .Replace(@"\nonumber", string.Empty, StringComparison.Ordinal);
+        formula = RewriteCommands(formula, CommonCommands);
 
         foreach (var (body, starred) in tags)
         {
@@ -158,16 +164,62 @@ internal static class LatexNormalizer
     }
 
     private static string RewriteEnvironment(
-        string source,
-        string environment,
-        Func<string, string> replacement)
+        string source, string environment, Func<string, string> replacement, int depth = 0)
     {
-        var escaped = Regex.Escape(environment);
-        return Regex.Replace(
-            source,
-            $@"\\begin\{{{escaped}\}}(?<body>[\s\S]*?)\\end\{{{escaped}\}}",
-            match => replacement(match.Groups["body"].Value),
-            RegexOptions.CultureInvariant);
+        if (depth >= 64) return source;
+        var opening = @"\begin{" + environment + "}";
+        var closingLength = environment.Length + 6;
+        StringBuilder? result = null;
+        var emitted = 0;
+        var search = 0;
+        while (TryFindCommand(source, opening, search, out var start))
+        {
+            var bodyStart = start + opening.Length;
+            var end = LatexDisplayParser.FindEnvironmentEnd(source, environment, bodyStart);
+            if (end < 0) break;
+            result ??= new StringBuilder(source.Length);
+            result.Append(source, emitted, start - emitted);
+            var body = source[bodyStart..(end - closingLength)];
+            result.Append(replacement(RewriteEnvironment(body, environment, replacement, depth + 1)));
+            emitted = search = end;
+        }
+        if (result is null) return source;
+        result.Append(source, emitted, source.Length - emitted);
+        return result.ToString();
+    }
+
+    private static string RewriteCommands(string source, IReadOnlyDictionary<string, string> commands)
+    {
+        StringBuilder? result = null;
+        var emitted = 0;
+        for (var cursor = 0; cursor < source.Length; cursor++)
+        {
+            if (source[cursor] == '%' && !IsEscaped(source, cursor))
+            {
+                var end = source.IndexOf('\n', cursor);
+                if (end < 0) break;
+                cursor = end;
+                continue;
+            }
+            if (source[cursor] != '\\' || IsEscaped(source, cursor)) continue;
+            var start = cursor++;
+            if (cursor < source.Length && source[cursor] == ' ') cursor++;
+            else while (cursor < source.Length && char.IsAsciiLetter(source[cursor])) cursor++;
+            var command = source[(start + 1)..cursor];
+            if (cursor < source.Length && source[cursor] == '*' && commands.ContainsKey(command + "*"))
+                command = source[(start + 1)..++cursor];
+            if (commands.TryGetValue(command, out var replacement))
+            {
+                result ??= new StringBuilder(source.Length);
+                result.Append(source, emitted, start - emitted);
+                result.Append(replacement);
+                emitted = cursor;
+            }
+            cursor--;
+        }
+        if (result is null) return source;
+        result.Append(source, emitted, source.Length - emitted);
+        return result.ToString();
     }
 
     private static string RewriteOneArgumentCommand(
@@ -246,15 +298,22 @@ internal static class LatexNormalizer
 
     private static bool TryFindCommand(string source, string marker, int start, out int commandStart)
     {
-        for (commandStart = source.IndexOf(marker, start, StringComparison.Ordinal);
-             commandStart >= 0;
-             commandStart = source.IndexOf(marker, commandStart + marker.Length, StringComparison.Ordinal))
+        for (commandStart = start; commandStart <= source.Length - marker.Length; commandStart++)
         {
             if (IsEscaped(source, commandStart)) continue;
+            if (source[commandStart] == '%')
+            {
+                var newline = source.IndexOf('\n', commandStart);
+                if (newline < 0) break;
+                commandStart = newline;
+                continue;
+            }
+            if (!source.AsSpan(commandStart, marker.Length).SequenceEqual(marker)) continue;
             var after = commandStart + marker.Length;
-            if (after >= source.Length || !char.IsLetter(source[after])) return true;
+            if (marker.EndsWith('}') || after >= source.Length || !char.IsAsciiLetter(source[after])) return true;
         }
 
+        commandStart = -1;
         return false;
     }
 
@@ -268,6 +327,13 @@ internal static class LatexNormalizer
         for (var cursor = open; cursor < source.Length; cursor++)
         {
             if (IsEscaped(source, cursor)) continue;
+            if (source[cursor] == '%')
+            {
+                var newline = source.IndexOf('\n', cursor);
+                if (newline < 0) break;
+                cursor = newline;
+                continue;
+            }
             if (source[cursor] == '{')
             {
                 depth++;

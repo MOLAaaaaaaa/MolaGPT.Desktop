@@ -1,9 +1,10 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Tasks;
 using MolaGPT.Storage;
 
-namespace MolaGPT.Desktop.Services.Remote;
+namespace MolaGPT.App.Remote;
 
 /// <summary>
 /// Stored messages as a phone receives them: the desktop's own row and meta, with
@@ -20,7 +21,6 @@ internal static class RemoteProjection
     private const int ThinkingLimit = 16 * 1024;
     private const int ArgumentsLimit = 2 * 1024;
     private const int ResultLimit = 4 * 1024;
-    private const string HiddenHint = "✝";
 
     /// <summary>Total size a snapshot aims for; older messages beyond it go as previews.</summary>
     public const int SnapshotBudget = 400 * 1024;
@@ -37,7 +37,7 @@ internal static class RemoteProjection
 
     public static JsonObject Message(MessageRow row, Detail detail = Detail.Normal, Func<string, string?>? taskState = null)
     {
-        var content = StripHiddenHints(row.Content ?? string.Empty);
+        var content = ChatMessageText.StripSystemHints(row.Content, preserveLeadingWhitespace: true);
         var result = new JsonObject
         {
             ["id"] = row.Id,
@@ -65,19 +65,6 @@ internal static class RemoteProjection
     }
 
     public static int Size(JsonNode node) => System.Text.Encoding.UTF8.GetByteCount(node.ToJsonString());
-
-    private static string StripHiddenHints(string text)
-    {
-        var start = text.IndexOf(HiddenHint, StringComparison.Ordinal);
-        while (start >= 0)
-        {
-            var end = text.IndexOf(HiddenHint, start + HiddenHint.Length, StringComparison.Ordinal);
-            if (end < 0) break;
-            text = text.Remove(start, end + HiddenHint.Length - start);
-            start = text.IndexOf(HiddenHint, start, StringComparison.Ordinal);
-        }
-        return text.TrimEnd();
-    }
 
     private static JsonObject? Meta(string? json, Detail detail, Func<string, string?>? taskState)
     {

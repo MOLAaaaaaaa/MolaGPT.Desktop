@@ -3,8 +3,9 @@ using System.Text;
 using System.Text.Json.Nodes;
 using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Remote;
+using MolaGPT.Desktop.Services.Remote;
 
-namespace MolaGPT.Desktop.Services.Remote;
+namespace MolaGPT.App.Remote;
 
 /// <summary>
 /// The anonymous (account-less) half of remote control. This machine signs in
@@ -40,15 +41,17 @@ public sealed partial class RemoteControlHost
     /// use, then connects the relay as the device of the #dev: namespace.</summary>
     public async Task StartAnonymousAsync(CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         if (_anonApi is null || AnonymousRunning) return;
         try
         {
             await EnsureRegisteredAsync(ct).ConfigureAwait(false);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             Log($"anon register: {ex.Message}");
         }
+        ct.ThrowIfCancellationRequested();
         StartLink(_anonLink);
     }
 
@@ -67,6 +70,7 @@ public sealed partial class RemoteControlHost
             return;
         }
 
+        ct.ThrowIfCancellationRequested();
         // Reconcile both ways. A server grant this desk no longer recognises
         // (revoked while offline, or a pairing that crashed before activating) is
         // revoked now; a local pairing the server no longer has (the phone removed
@@ -288,6 +292,7 @@ public sealed partial class RemoteControlHost
         {
             if (Text(plain, "ctl") == "ready")
             {
+                using var _ = _activity.Acquire("remote-anon-ready");
                 session.Ready = true;
                 _phones.Touch(session.PairId);
                 // The same phone paired both ways shows up twice; the code pairing wins on
@@ -299,6 +304,7 @@ public sealed partial class RemoteControlHost
                     ["v"] = 2, ["ctl"] = "ready_ack", ["accountMachineId"] = _machineId,
                 });
                 SendFrame(peer, readyAck);
+                _activity.Pulse("remote-interactive", RemoteInteractiveCooldown);
             }
             else AnonDropSession(peer);
             return;
@@ -332,6 +338,8 @@ public sealed partial class RemoteControlHost
         var expected = AnonSessionV2.ProofPhone(connectKey, deviceId, pairId, nP);
         if (!AnonText.FixedTimeEqual(AnonText.FromBase64Url(proof), AnonText.FromBase64Url(expected))) return;
 
+        using var _ = _activity.Acquire("remote-anon-hello");
+        _activity.Pulse("remote-interactive", RemoteInteractiveCooldown);
         var nD = RandomNumberGenerator.GetBytes(32);
         var keys = AnonSessionV2.DeriveSession(master, deviceId, pairId, nP, nD);
         var session = new AnonPeerSession
@@ -387,6 +395,8 @@ public sealed partial class RemoteControlHost
             if (!room.RoomId.AsSpan().SequenceEqual(roomId)) return;
         }
 
+        using var _ = _activity.Acquire("remote-anon-pair");
+        _activity.Pulse("remote-interactive", RemoteInteractiveCooldown);
         var ephemeral = AnonCrypto.NewEphemeralKey();
         var nD = RandomNumberGenerator.GetBytes(32);
         var ephPubD = ephemeral.ExportSubjectPublicKeyInfo();
@@ -457,6 +467,8 @@ public sealed partial class RemoteControlHost
             AnonCloseRoom("bad_commit");
             return;
         }
+        using var _ = _activity.Acquire("remote-anon-pair");
+        _activity.Pulse("remote-interactive", RemoteInteractiveCooldown);
         byte[] z;
         AnonPairingV2.MasterKeys keys;
         byte[] transcript;

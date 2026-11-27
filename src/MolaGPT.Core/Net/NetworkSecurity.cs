@@ -4,13 +4,15 @@ namespace MolaGPT.Core.Net;
 
 public static class NetworkSecurity
 {
+    internal const string MolaGptAccountHost = "chatgpt.wljay.cn";
+
     public static Uri RequireMolaGptAccountOrigin(Uri uri, string context)
     {
         if (!uri.IsAbsoluteUri
             || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(uri.DnsSafeHost, "chatgpt.wljay.cn", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(uri.DnsSafeHost, MolaGptAccountHost, StringComparison.OrdinalIgnoreCase)
             || uri.Port != 443
-            || !string.IsNullOrEmpty(uri.UserInfo))
+            || uri.GetComponents(UriComponents.UserInfo | UriComponents.KeepDelimiter, UriFormat.UriEscaped).Length != 0)
             throw new InvalidOperationException($"{context} 只能访问 MolaGPT 官方 HTTPS 地址。");
 
         return uri;

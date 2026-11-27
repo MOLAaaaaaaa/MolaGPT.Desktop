@@ -69,12 +69,6 @@ public sealed class OneShotCompletionClient
     /// wants a long answer, so the default is small rather than generous.</summary>
     private const int DefaultAnthropicMaxTokens = 2048;
 
-    /// <summary>The cheapest <c>reasoning.effort</c> that every Responses-capable
-    /// reasoning model accepts. Known exception: <c>gpt-5-pro</c> takes only
-    /// <c>high</c> — it would reject any level we could name, so there is no value
-    /// that is universally safe and this is the one that fails least often.</summary>
-    private const string ResponsesMinimumEffort = "low";
-
     /// <summary>
     /// System.Text.Json escapes every non-ASCII character by default, which turns
     /// a Chinese prompt into <c>\uXXXX</c> escapes and roughly doubles the bytes.
@@ -94,25 +88,18 @@ public sealed class OneShotCompletionClient
     /// are internal errands, not answers the user reads, so paying for reasoning
     /// tokens on them is waste — and a reasoning preamble is one more thing the
     /// caller has to strip back out of a conversation title.</param>
-    /// <param name="thinkingKind">Which dialect the "off" switch has to be spoken
-    /// in. Providers disagree, so the flag alone is not enough.</param>
     public async Task<string> CompleteAsync(
         OneShotTarget target,
-        string modelId,
+        ProviderModel model,
         IReadOnlyList<ChatMessage> messages,
         double? temperature = null,
         int? maxTokens = null,
         bool? useThinking = null,
-        ThinkingParamKind? thinkingKind = null,
-
-
         CancellationToken ct = default,
-
-        string? reasoningEffort = null,
-        ThinkingConfig? thinkingConfig = null)
+        string? reasoningEffort = null)
     {
-        using var resp = await SendRequestAsync(target, modelId, messages, stream: false,
-            temperature, maxTokens, useThinking, thinkingKind, reasoningEffort, thinkingConfig, ct).ConfigureAwait(false);
+        using var resp = await SendRequestAsync(target, model, messages, stream: false,
+            temperature, maxTokens, useThinking, reasoningEffort, ct).ConfigureAwait(false);
         await ChatApiErrorHelper.EnsureSuccessAsync(resp, target.DisplayName, ct).ConfigureAwait(false);
 
         if (target.StreamOnly)
@@ -135,22 +122,17 @@ public sealed class OneShotCompletionClient
     /// </summary>
     public async Task<string> CompleteStreamAsync(
         OneShotTarget target,
-        string modelId,
+        ProviderModel model,
         IReadOnlyList<ChatMessage> messages,
         Action<string>? onDelta = null,
         double? temperature = null,
         int? maxTokens = null,
         bool? useThinking = null,
-        ThinkingParamKind? thinkingKind = null,
-
-
         CancellationToken ct = default,
-
-        string? reasoningEffort = null,
-        ThinkingConfig? thinkingConfig = null)
+        string? reasoningEffort = null)
     {
-        using var resp = await SendRequestAsync(target, modelId, messages, stream: true,
-            temperature, maxTokens, useThinking, thinkingKind, reasoningEffort, thinkingConfig, ct).ConfigureAwait(false);
+        using var resp = await SendRequestAsync(target, model, messages, stream: true,
+            temperature, maxTokens, useThinking, reasoningEffort, ct).ConfigureAwait(false);
         await ChatApiErrorHelper.EnsureSuccessAsync(resp, target.DisplayName, ct).ConfigureAwait(false);
 
         if (!IsEventStream(resp))
@@ -172,19 +154,26 @@ public sealed class OneShotCompletionClient
     /// the <c>:streamGenerateContent?alt=sse</c> method swap for Google.</summary>
     private async Task<HttpResponseMessage> SendRequestAsync(
         OneShotTarget target,
-        string modelId,
+        ProviderModel model,
         IReadOnlyList<ChatMessage> messages,
         bool stream,
         double? temperature,
         int? maxTokens,
         bool? useThinking,
-        ThinkingParamKind? thinkingKind,
         string? reasoningEffort,
-        ThinkingConfig? thinkingConfig,
         CancellationToken ct)
     {
+        var modelId = model.Id;
+        if (!model.SupportsTemperature) temperature = null;
         var officialPath = OpenAiRequestParams.OfficialPath(target.Endpoint);
         var directOpenAiResponses = officialPath == "/v1/responses";
+        var nativeGoogle = target.Api == OneShotWireApi.GoogleGenerativeAi;
+        var google = nativeGoogle
+            ? GeminiModelPolicy.IsRoute("gemini", target.Endpoint)
+            : target.Api == OneShotWireApi.OpenAiCompletions && GeminiModelPolicy.IsOpenAiCompatEndpoint(target.Endpoint);
+        var config = model.ResolveThinkingConfig(google);
+        var useGeminiLevel = google && config?.Kind == ThinkingParamKind.GeminiThinkingLevel;
+        var overrides = target.ExtraBody ?? model.CustomBody;
         var body = target.Api switch
         {
             OneShotWireApi.AnthropicMessages => BuildAnthropicBody(modelId, messages, temperature, maxTokens),
@@ -192,8 +181,9 @@ public sealed class OneShotCompletionClient
             OneShotWireApi.GoogleGenerativeAi => BuildGoogleBody(messages, temperature, maxTokens),
             _ => BuildCompletionsBody(modelId, messages, temperature, maxTokens),
         };
-        ApplyThinking(body, target.Api, modelId, useThinking, thinkingKind, reasoningEffort, thinkingConfig, target.Endpoint);
-        CustomRequestParams.ApplyBody(body, target.ExtraBody);
+        if (!useGeminiLevel && useThinking is { } requested && config is { Kind: not ThinkingParamKind.None })
+            ApplyThinking(body, target, modelId, requested, reasoningEffort, config);
+        CustomRequestParams.ApplyBody(body, overrides);
         foreach (var key in target.DropBodyKeys ?? []) body.Remove(key);
         OpenAiRequestParams.Apply(body, officialPath);
         if (stream || target.StreamOnly)
@@ -202,9 +192,8 @@ public sealed class OneShotCompletionClient
             if (target.Api != OneShotWireApi.GoogleGenerativeAi) body["stream"] = true;
             if (target.Api == OneShotWireApi.OpenAiResponses || target.StreamOnly) body["store"] = false;
         }
-        var nativeGoogle = target.Api == OneShotWireApi.GoogleGenerativeAi;
-        if (GeminiRequestParams.Applies(modelId, nativeGoogle, target.Endpoint))
-            GeminiRequestParams.Apply(body, modelId, nativeGoogle, effort: useThinking == true ? reasoningEffort : null, useThinking: useThinking);
+        if (useGeminiLevel)
+            GeminiRequestParams.Apply(body, config!, nativeGoogle, reasoningEffort, useThinking, overrides);
 
         var endpoint = target.Endpoint;
         if (stream && target.Api == OneShotWireApi.GoogleGenerativeAi)
@@ -285,33 +274,34 @@ public sealed class OneShotCompletionClient
     /// </summary>
     private static void ApplyThinking(
         IDictionary<string, object?> body,
-        OneShotWireApi api,
+        OneShotTarget target,
         string modelId,
-        bool? useThinking,
-        ThinkingParamKind? thinkingKind,
+        bool useThinking,
         string? reasoningEffort,
-        ThinkingConfig? thinkingConfig,
-        string? endpoint = null)
+        ThinkingConfig config)
     {
-        if (useThinking is null) return;
+        var api = target.Api;
+        var effort = reasoningEffort ?? config.DefaultEffort;
+        if (config.Mandatory && effort?.Trim().ToLowerInvariant() is "none" or "off")
+            effort = ThinkingEffortLevels.MinimumEnabled(config.EffortLevels);
 
         if (api == OneShotWireApi.AnthropicMessages)
         {
-            if (useThinking == true)
+            if (useThinking)
             {
-                if (thinkingKind == ThinkingParamKind.AnthropicBudget)
+                if (config.Kind == ThinkingParamKind.AnthropicBudget)
                 {
-                    body["thinking"] = new { type = "enabled", budget_tokens = thinkingConfig?.DefaultBudget ?? 8192 };
+                    body["thinking"] = new { type = "enabled", budget_tokens = config.DefaultBudget ?? 8192 };
                     body.Remove("temperature");
                 }
                 else
                 {
                     body["thinking"] = new { type = "adaptive" };
-                    if (!string.IsNullOrWhiteSpace(reasoningEffort))
-                        body["output_config"] = new { effort = reasoningEffort };
+                    if (!string.IsNullOrWhiteSpace(effort))
+                        body["output_config"] = new { effort };
                 }
             }
-            else if (thinkingConfig?.Mandatory != true)
+            else if (!config.Mandatory)
                 body["thinking"] = new { type = "disabled" };
 
 
@@ -320,34 +310,25 @@ public sealed class OneShotCompletionClient
 
         if (api == OneShotWireApi.OpenAiResponses)
         {
-            // "low", not "none". Both mean "spend as little as possible", but the
-            // vocabulary is model-dependent and "none" only arrived with GPT-5.1 —
-            // every earlier reasoning model (o-series, the original GPT-5) accepts
-            // only low/medium/high and answers 400 to anything else. A rejected
-            // errand is worse than a slightly more expensive one, because the
-            // callers here treat a failure as "leave the title alone".
-            if (useThinking == true && !string.IsNullOrWhiteSpace(reasoningEffort))
-                body["reasoning"] = new { effort = reasoningEffort };
-            else if (useThinking == false && thinkingConfig?.Mandatory != true)
-                body["reasoning"] = new { effort = ResponsesMinimumEffort };
+            if (!useThinking)
+                effort = !config.Mandatory && (config.EffortLevels?.Contains("none", StringComparer.OrdinalIgnoreCase) == true
+                    || ThinkingParams.SupportsNativeResponsesOff(modelId, target.Endpoint))
+                    ? "none" : ThinkingEffortLevels.MinimumEnabled(config.EffortLevels);
+            if (!string.IsNullOrWhiteSpace(effort))
+                body["reasoning"] = new { effort };
             return;
         }
 
         if (api == OneShotWireApi.GoogleGenerativeAi)
         {
+            if (config.Kind != ThinkingParamKind.GeminiBudget) return;
+            int? budget = useThinking ? config.DefaultBudget ?? 8192
+                : !config.Mandatory ? 0 : config.MinBudget is > 0 ? config.MinBudget : null;
+            if (budget is null) return;
             var generation = body.TryGetValue("generationConfig", out var value)
-                             && value is Dictionary<string, object?> existing
-                ? existing
-                : new Dictionary<string, object?>();
-            if (useThinking == true && thinkingKind == ThinkingParamKind.GeminiThinkingLevel && !string.IsNullOrWhiteSpace(reasoningEffort))
-                generation["thinkingConfig"] = new { thinkingLevel = reasoningEffort.ToUpperInvariant() };
-            else if (useThinking == true && thinkingKind == ThinkingParamKind.GeminiBudget)
-                generation["thinkingConfig"] = new { thinkingBudget = thinkingConfig?.DefaultBudget ?? 8192 };
-            else if (useThinking == false && thinkingConfig?.Mandatory != true && thinkingKind == ThinkingParamKind.GeminiThinkingLevel)
-                generation["thinkingConfig"] = new { thinkingLevel = "LOW" };
-            else if (useThinking == false && thinkingKind == ThinkingParamKind.GeminiBudget)
-                generation["thinkingConfig"] = new { thinkingBudget = 0 };
-            if (generation.Count > 0) body["generationConfig"] = generation;
+                ? (Dictionary<string, object?>)value! : new Dictionary<string, object?>();
+            generation["thinkingConfig"] = new { thinkingBudget = budget };
+            body["generationConfig"] = generation;
             return;
         }
 
@@ -357,11 +338,11 @@ public sealed class OneShotCompletionClient
                 modelId,
                 Array.Empty<ChatMessage>(),
                 UseThinking: useThinking,
-                ThinkingParamKind: thinkingKind,
-                ReasoningEffort: reasoningEffort,
-                ThinkingBudgetTokens: thinkingConfig?.DefaultBudget),
-            endpoint,
-            thinkingConfig);
+                ThinkingParamKind: config.Kind,
+                ReasoningEffort: effort,
+                ThinkingBudgetTokens: config.DefaultBudget),
+            target.Endpoint,
+            config);
 
     }
 
@@ -557,7 +538,7 @@ public sealed class OneShotCompletionClient
             var doc = JsonDocument.Parse(ev.Data);
             using (doc)
             {
-                var root = doc.RootElement;
+                var root = ChatApiErrorHelper.ReadStreamObject(doc.RootElement, ev.EventName);
                 var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
                 if (type == "response.output_text.delta"
                     && root.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.String)
@@ -605,7 +586,7 @@ public sealed class OneShotCompletionClient
             var doc = JsonDocument.Parse(ev.Data);
             using (doc)
             {
-                var root = doc.RootElement;
+                var root = ChatApiErrorHelper.ReadStreamObject(doc.RootElement, ev.EventName);
                 if (ChatApiErrorHelper.TryExtractStreamingError(root, out var streamError))
                     throw new InvalidOperationException($"{displayName}失败：{streamError}");
                 var piece = api switch

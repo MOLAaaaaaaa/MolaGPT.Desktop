@@ -10,7 +10,7 @@ namespace MolaGPT.Core.Chat.Agents;
 /// User turns are written to stdin as JSON lines; assistant output, tool calls,
 /// and the per-turn <c>result</c> marker arrive on stdout as NDJSON.
 /// </summary>
-public sealed class ClaudeCodeBackend : IAgentBackend
+public sealed class ClaudeCodeBackend(Action<string>? log = null) : IAgentBackend
 {
     public const string BackendId = "claude-code";
     public string Id => BackendId;
@@ -31,7 +31,7 @@ public sealed class ClaudeCodeBackend : IAgentBackend
             throw new InvalidOperationException("Failed to start the Claude Code process.");
         }
 
-        var session = new ClaudeCodeSession(process);
+        var session = new ClaudeCodeSession(process, log);
         // Kick off the initialize handshake to discover the model catalog
         // (initialize.models) in the background — the phone's picker reads it via
         // session meta; falls back to observed ids if it isn't ready yet.

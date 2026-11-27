@@ -328,7 +328,10 @@ public sealed partial class ChatViewModel
         _conversationRepo.CreateTimelineWithMessage(
             new MessageRow(id, conversationId, source.Role, content, meta, now, source.ParentId),
             RoleJson.Serialize(context));
-        await LoadConversationAsync(conversationId);
+        var navigation = BeginNavigation(loading: true);
+        try { await LoadConversationAsync(conversationId, false, navigation); }
+        finally { CompleteNavigation(navigation); }
+        if (navigation.IsCancellationRequested) return null;
         AnnounceHistoryEdit();
         return Messages.FirstOrDefault(item => item.MessageId == id);
     }
@@ -359,6 +362,7 @@ public sealed partial class ChatViewModel
             SyncMessageTaskStates(message, ConversationId);
             _messageRepo.UpdateRoleMessage(ConversationId, message.MessageId, message.FullContent,
                 BuildMessageMeta(message), RoleJson.Serialize(context));
+            _unsavedMessages.TryRemove(message.MessageId, out _);
         }
         RoleContext = context;
         OnPropertyChanged(nameof(RoleContext));

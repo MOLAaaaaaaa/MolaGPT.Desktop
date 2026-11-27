@@ -5,6 +5,10 @@ using System.Net.Http;
 using System.Text;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
+using MolaGPT.Core.Chat.Providers;
+using MolaGPT.Core.Models;
+using MolaGPT.Core.Net;
+using MolaGPT.Core.Sse;
 
 namespace MolaGPT.Core.Chat.Agents.Pi;
 
@@ -29,10 +33,7 @@ public sealed class PiWorkLlmShim : IDisposable
     // Inspect the same SSE bytes that are relayed to Pi. Never alter the wire stream.
     private sealed class WorkStreamErrorObserver(Action<ChatRequestError?>? report)
     {
-        private const int MaxLineBytes = 64 * 1024;
-        private readonly MemoryStream _line = new();
-        private string? _eventName;
-        private bool _discardLine;
+        private readonly SseEventParser _parser = new(64 * 1024, 64 * 1024, skipOversized: true);
         private bool _reported;
         public bool HasError => _reported;
         private StringBuilder? _legacyCandidate = new();
@@ -40,7 +41,7 @@ public sealed class PiWorkLlmShim : IDisposable
         public void Complete()
         {
             if (_reported) return;
-            if (!_discardLine && _line.Length > 0) ReadLine();
+            if (_parser.Complete() is { } last) Observe(last);
             if (!_reported && ChatApiErrorHelper.ReadLegacySharedQuota(_legacyCandidate?.ToString()) is { } error)
                 Report(error);
         }
@@ -78,37 +79,19 @@ public sealed class PiWorkLlmShim : IDisposable
                 _legacyCandidate = null;
         }
 
-        public void Feed(ReadOnlySpan<byte> bytes)
+        public void Feed(ReadOnlyMemory<byte> bytes)
         {
             if (_reported || report is null) return;
-            while (!bytes.IsEmpty)
+            foreach (var item in _parser.Feed(bytes))
             {
-                var end = bytes.IndexOf((byte)'\n');
-                var segment = end >= 0 ? bytes[..end] : bytes;
-                if (!_discardLine && _line.Length + segment.Length <= MaxLineBytes)
-                    _line.Write(segment);
-                else
-                    _discardLine = true;
-                if (end < 0) return;
-                if (!_discardLine) ReadLine();
-                _line.SetLength(0);
-                _discardLine = false;
+                Observe(item);
                 if (_reported) return;
-                bytes = bytes[(end + 1)..];
             }
         }
 
-        private void ReadLine()
+        private void Observe(SsePayload item)
         {
-            var line = Encoding.UTF8.GetString(_line.GetBuffer(), 0, (int)_line.Length).TrimEnd('\r');
-            if (line.Length == 0) { _eventName = null; return; }
-            if (line.StartsWith("event:", StringComparison.Ordinal))
-            {
-                _eventName = line[6..].Trim();
-                return;
-            }
-            if (!line.StartsWith("data:", StringComparison.Ordinal)) return;
-            var data = line[5..].Trim();
+            var data = item.Data.Trim();
             if (data.Length == 0) return;
             if (data == "[DONE]")
             {
@@ -120,12 +103,12 @@ public sealed class PiWorkLlmShim : IDisposable
             try
             {
                 using var document = JsonDocument.Parse(data);
-                error = ChatApiErrorHelper.ReadBusinessError(document.RootElement, _eventName);
+                error = ChatApiErrorHelper.ReadBusinessError(document.RootElement, item.EventName);
                 if (error is null) ObserveLegacyText(document.RootElement);
             }
             catch (JsonException)
             {
-                error = _eventName is "error" or "mola_error" or "response.failed"
+                error = item.EventName is "error" or "mola_error" or "response.failed"
                     ? ChatApiErrorHelper.ReadProviderError(data) : null;
             }
             if (error is not null) Report(error);
@@ -176,7 +159,9 @@ public sealed class PiWorkLlmShim : IDisposable
         CancellationToken TurnCancellation = default,
         IProgress<PendingStatusDelta>? WorkStatus = null,
         Action<ChatRequestError?>? WorkError = null,
-        Func<ChatRequestError?>? ReadWorkError = null);
+        Func<ChatRequestError?>? ReadWorkError = null,
+        ThinkingConfig? GeminiThinking = null,
+        string? ProviderId = null);
 
     public sealed record GenerationOptions(
         string Api, double? Temperature, double? TopP, int? MaxTokens,
@@ -228,6 +213,8 @@ public sealed class PiWorkLlmShim : IDisposable
     };
 
     private readonly HttpListener _listener = new();
+    private const int MaxRequestBytes = 128 * 1024 * 1024;
+    private readonly SemaphoreSlim _slots;
     private readonly CancellationTokenSource _cts = new();
     private readonly Action<string>? _log;
 
@@ -251,9 +238,10 @@ public sealed class PiWorkLlmShim : IDisposable
     /// <summary>Base URL to hand Pi (it appends <c>/chat/completions</c> and friends).</summary>
     public string BaseUrl { get; }
 
-    public PiWorkLlmShim(Action<string>? log = null)
+    public PiWorkLlmShim(Action<string>? log = null, int maxConcurrent = PiRuntime.DefaultMaxSidecars)
     {
         _log = log;
+        _slots = new SemaphoreSlim(maxConcurrent, maxConcurrent);
         var port = FreeTcpPort();
         BaseUrl = $"http://127.0.0.1:{port}{BasePath}";
         _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
@@ -282,11 +270,27 @@ public sealed class PiWorkLlmShim : IDisposable
             HttpListenerContext ctx;
             try { ctx = await _listener.GetContextAsync().ConfigureAwait(false); }
             catch { break; }
-            _ = Task.Run(() => HandleAsync(ctx));
+            var token = PresentedToken(ctx.Request);
+            var target = token is null ? null : _targets.GetValueOrDefault(token);
+            if (target is not null && _slots.Wait(0))
+            {
+                _ = Task.Run(() => HandleAsync(ctx, target));
+                continue;
+            }
+            try
+            {
+                if (target is null) await WriteError(ctx, 403, "bad token").ConfigureAwait(false);
+                else
+                {
+                    ctx.Response.Headers["Retry-After"] = "1";
+                    await WriteError(ctx, 503, "shim at capacity").ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex) when (ex is HttpListenerException or IOException or ObjectDisposedException) { }
         }
     }
 
-    private async Task HandleAsync(HttpListenerContext ctx)
+    private async Task HandleAsync(HttpListenerContext ctx, ForwardTarget target)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var operationKey = Guid.NewGuid().ToString("N");
@@ -295,19 +299,6 @@ public sealed class PiWorkLlmShim : IDisposable
         _log?.Invoke($"[llm-shim] request={requestId} started");
         try
         {
-            var path = ctx.Request.Url?.AbsolutePath ?? "";
-
-            // Which credential arrives depends on the API the sidecar was told to
-            // speak: OpenAI-family clients send a bearer, Anthropic's sends
-            // x-api-key, Google's sends x-goog-api-key. All three carry the same
-            // throwaway value, so any of them identifies the sidecar.
-            var presented = PresentedToken(ctx.Request);
-            if (presented is null || !_targets.TryGetValue(presented, out var target))
-            {
-                await WriteError(ctx, 403, "bad token").ConfigureAwait(false);
-                return;
-            }
-
             var url = ResolveUpstreamUrl(target, ctx.Request.Url);
             if (url is null)
             {
@@ -316,10 +307,25 @@ public sealed class PiWorkLlmShim : IDisposable
                 return;
             }
 
+            var official = string.Equals(target.ProviderId, MolaGptProviderIds.LocalTools, StringComparison.OrdinalIgnoreCase);
+            if (official)
+                MolaGptProxyProvider.RequireLocalToolsChatEndpoint(new Uri(url, UriKind.Absolute));
+
             using var requestLifetime = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, target.TurnCancellation);
             var ct = requestLifetime.Token;
-            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-            var body = await reader.ReadToEndAsync(ct).ConfigureAwait(false);
+            string body;
+            try
+            {
+                if (ctx.Request.ContentLength64 > MaxRequestBytes) throw new InvalidDataException();
+                var bytes = await BoundedRead.ReadAsync(ctx.Request.InputStream, MaxRequestBytes, ct).ConfigureAwait(false);
+                using var reader = new StreamReader(new MemoryStream(bytes), Encoding.UTF8);
+                body = reader.ReadToEnd();
+            }
+            catch (InvalidDataException)
+            {
+                await WriteError(ctx, 413, "request exceeds 128 MiB").ConfigureAwait(false);
+                return;
+            }
             var preparedBody = RewriteBody(body, target);
             if (target.AdaptBody is { } adapt
                 && System.Text.Json.Nodes.JsonNode.Parse(preparedBody) is System.Text.Json.Nodes.JsonObject adapted)
@@ -327,9 +333,6 @@ public sealed class PiWorkLlmShim : IDisposable
                 adapt(adapted);
                 preparedBody = adapted.ToJsonString(RelaxedJson);
             }
-            var official = Uri.TryCreate(url, UriKind.Absolute, out var endpoint)
-                && endpoint.Scheme == "https" && endpoint.Host == "chatgpt.wljay.cn" && endpoint.IsDefaultPort
-                && endpoint.AbsolutePath == "/v2/api/auth/desktop_chat_completions.php";
             var retriedConcurrency = false;
             for (var attempt = 0; attempt < 2; attempt++)
             {
@@ -400,7 +403,7 @@ public sealed class PiWorkLlmShim : IDisposable
                         continue;
                     }
                 }
-                if (resp.StatusCode == HttpStatusCode.Unauthorized && (workError is null || workError.NeedsSignIn))
+                if (resp.StatusCode == HttpStatusCode.Unauthorized && (workError is null || workError.InvalidatesAccountSession))
                 {
                     try { target.OnUnauthorized?.Invoke(token); }
                     catch (Exception ex) { _log?.Invoke("[llm-shim] unauthorized handler: " + ex.Message); }
@@ -438,7 +441,7 @@ public sealed class PiWorkLlmShim : IDisposable
                 {
                     if (!chunk.IsEmpty)
                     {
-                        errorObserver?.Feed(chunk.Span);
+                        errorObserver?.Feed(chunk);
                         if (target.RelayTap is { } tap)
                         {
                             // Watchers must never break the relay: a parse error in
@@ -456,13 +459,6 @@ public sealed class PiWorkLlmShim : IDisposable
                             outcome = "client_disconnected";
                             return;
                         }
-                    }
-                    // The gateway emits a canonical OpenAI error and ends the
-                    // stream. Do not relay another upstream read after that error.
-                    if (errorObserver?.HasError == true)
-                    {
-                        outcome = "stream_error";
-                        return;
                     }
                     var read = await upstreamStream.ReadAsync(buffer, ct).ConfigureAwait(false);
                     chunk = buffer.AsMemory(0, read);
@@ -493,6 +489,7 @@ public sealed class PiWorkLlmShim : IDisposable
         }
         finally
         {
+            _slots.Release();
             _log?.Invoke($"[llm-shim] request={requestId} result={outcome} elapsed_ms={System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}");
             try { ctx.Response.Close(); } catch { /* ignore */ }
         }
@@ -637,7 +634,7 @@ public sealed class PiWorkLlmShim : IDisposable
         var dropKeys = target.DropBodyKeys;
         var generation = target.Generation;
         var nativeGoogle = target.PathMode == TargetPathMode.GeminiModelTemplate;
-        var google = GeminiRequestParams.Applies(target.ModelId, nativeGoogle, target.Endpoint);
+        var google = target.GeminiThinking is not null;
         var officialPath = OpenAiRequestParams.OfficialPath(target.Endpoint);
         var hasExtra = extra is { Count: > 0 };
         var hasDrops = dropKeys is { Count: > 0 };
@@ -659,8 +656,8 @@ public sealed class PiWorkLlmShim : IDisposable
         if (hasDrops)
             foreach (var key in dropKeys!) merged.Remove(key);
         OpenAiRequestParams.Apply(merged, officialPath);
-        if (google)
-            GeminiRequestParams.Apply(merged, target.ModelId!, nativeGoogle, generation?.ReasoningEffort, generation?.UseThinking);
+        if (target.GeminiThinking is { } config)
+            GeminiRequestParams.Apply(merged, config, nativeGoogle, generation?.ReasoningEffort, generation?.UseThinking, extra);
         return JsonSerializer.Serialize(merged, RelaxedJson);
     }
 

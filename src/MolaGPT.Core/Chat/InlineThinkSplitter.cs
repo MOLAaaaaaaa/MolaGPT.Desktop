@@ -1,183 +1,261 @@
 using System.Text;
+using System.Buffers;
 
 namespace MolaGPT.Core.Chat;
 
-/// <summary>
-/// Streaming-friendly state-machine that splits a chat completion's
-/// <c>delta.content</c> text into (visible_text, thinking_text) pairs by
-/// recognizing inline <c>&lt;think&gt;…&lt;/think&gt;</c> tags.
-///
-/// Why this exists: DeepSeek-R1, QwQ-32B, and a handful of other reasoning
-/// models don't use OpenAI's <c>delta.reasoning_content</c> channel — they
-/// emit reasoning as <c>&lt;think&gt;</c> blocks inside the regular content
-/// stream. Without this splitter the desktop app would show the model's
-/// chain-of-thought as raw <c>&lt;think&gt;</c> tagged text in the message
-/// body, which is both ugly and breaks the ThinkBlock UI.
-///
-/// Usage: keep one instance per assistant message (per <see cref="IChatProvider"/>
-/// stream). Feed every chunk's text via <see cref="Feed(string)"/>; the
-/// returned <see cref="SplitResult"/> tells you what to push as visible text
-/// and what to route into the thinking channel.
-///
-/// Notes:
-/// <list type="bullet">
-///   <item>Tags can straddle chunk boundaries — we buffer up to a tag's
-///         length before emitting tail bytes that look like a partial open
-///         tag (e.g. "&lt;th") so we never split through a tag.</item>
-///   <item>Nesting is not supported (R1's protocol is flat); a stray
-///         <c>&lt;think&gt;</c> inside an already-open block is treated as
-///         literal text.</item>
-///   <item>Tags are matched case-insensitively. Whitespace and attributes
-///         inside the open tag are tolerated (e.g. <c>&lt;think id="0"&gt;</c>).</item>
-/// </list>
-/// </summary>
+/// <summary>Incrementally separates the relay's flat think tags while preserving Markdown literals and comments.</summary>
 public sealed class InlineThinkSplitter
 {
-    private const string OpenTag = "<think";   // partial; we accept any closing >
-    private const string CloseTag = "</think>";
-
-    private enum Mode { Outside, Inside }
-
-    private Mode _mode = Mode.Outside;
-    /// <summary>Pending bytes that look like the start of a tag. Carried over to next chunk.</summary>
-    private string _pending = string.Empty;
-
-    /// <summary>The raw "&lt;think...&gt;" we're currently parsing the open tag of.</summary>
-    private bool _scanningOpenTag;
+    private const string OpenTag = "<think";
+    private const string CloseTag = "</think";
+    private static readonly SearchValues<char> SyntaxCharacters = SearchValues.Create("<\u0060~\\\t\r\n>");
+    private readonly StringBuilder _tag = new();
+    private bool _inside, _comment, _attributes, _sawThinking, _separateThinking;
+    private char _attributeQuote, _runCharacter, _fenceCharacter;
+    private int _commentDashes, _runLength, _fenceLength, _inlineLength;
+    private bool _runAtLineStart, _closeFenceAtEol;
+    private bool _lineStart = true, _quotedLine, _escaped;
+    private int _indent;
 
     public readonly record struct SplitResult(string Visible, string Thinking);
+    public bool IsThinking => _inside;
 
-    /// <summary>
-    /// Feed the next chunk of streamed content. Returns the portion that
-    /// should be appended to the visible message body and the portion that
-    /// should be appended to the thinking channel.
-    /// </summary>
-    public SplitResult Feed(string chunk)
+    private readonly StringBuilder _visible = new();
+    private readonly StringBuilder _thinking = new();
+    private StringBuilder? _part;
+    private Action<SplitResult>? _onPart;
+    private bool _partThinking;
+
+    public SplitResult Feed(string chunk, Action<SplitResult>? onPart = null)
     {
-        if (string.IsNullOrEmpty(chunk)) return new SplitResult(string.Empty, string.Empty);
+        _visible.Clear();
+        _thinking.Clear();
+        _part?.Clear();
+        if (onPart is not null) _part ??= new StringBuilder();
+        _onPart = onPart;
+        _partThinking = false;
 
-        // Prepend any unflushed pending bytes from the previous call.
-        var input = _pending + chunk;
-        _pending = string.Empty;
-
-        var visible = new StringBuilder();
-        var thinking = new StringBuilder();
-        int i = 0;
-
-        while (i < input.Length)
+        for (var index = 0; index < chunk.Length; index++)
         {
-            if (_scanningOpenTag)
+            var c = chunk[index];
+            if (_runLength > 0 && c != _runCharacter)
+                FinishRun();
+            if (_tag.Length == 0 && !_comment && _runLength == 0 && !_escaped)
             {
-                // Inside "<think...". Look for the closing '>'.
-                int gt = input.IndexOf('>', i);
-                if (gt < 0)
+                var count = chunk.AsSpan(index).IndexOfAny(SyntaxCharacters);
+                if (count < 0) count = chunk.Length - index;
+                if (count > 0)
                 {
-                    // No close yet — buffer the rest.
-                    _pending = input.Substring(i - OpenTag.Length); // include "<think" itself
-                    return new SplitResult(visible.ToString(), thinking.ToString());
-                }
-                _scanningOpenTag = false;
-                _mode = Mode.Inside;
-                i = gt + 1;
-                continue;
-            }
-
-            if (_mode == Mode.Outside)
-            {
-                int lt = input.IndexOf('<', i);
-                if (lt < 0)
-                {
-                    visible.Append(input, i, input.Length - i);
-                    return new SplitResult(visible.ToString(), thinking.ToString());
-                }
-
-                // Push everything up to '<' as visible.
-                if (lt > i) visible.Append(input, i, lt - i);
-
-                // Check for HTML comment: <!--
-                if (lt + 4 <= input.Length && input.AsSpan(lt, 4).Equals("<!--".AsSpan(), StringComparison.Ordinal))
-                {
-                    // Find the closing -->
-                    int commentEnd = input.IndexOf("-->", lt + 4, StringComparison.Ordinal);
-                    if (commentEnd < 0)
+                    PrepareOutput();
+                    if (_onPart is not null) _part!.Append(chunk, index, count);
+                    (_inside ? _thinking : _visible).Append(chunk, index, count);
+                    if (_inside) _sawThinking = true;
+                    if (_lineStart)
                     {
-                        // Comment not closed in this chunk — buffer it
-                        _pending = input.Substring(lt);
-                        return new SplitResult(visible.ToString(), thinking.ToString());
+                        var spaces = 0;
+                        while (spaces < count && chunk[index + spaces] == ' ') spaces++;
+                        _indent += spaces;
+                        _lineStart = spaces == count;
                     }
-                    // Skip the entire comment (including <!--...-->)
-                    i = commentEnd + 3;
+                    if (_closeFenceAtEol && !chunk.AsSpan(index, count).Trim().IsEmpty) _closeFenceAtEol = false;
+                    index += count - 1;
                     continue;
                 }
-
-                // Could this be "<think"? We need at least 6 chars from lt.
-                int needed = OpenTag.Length;
-                if (lt + needed > input.Length)
-                {
-                    // Buffer "<..." and wait for more bytes.
-                    _pending = input.Substring(lt);
-                    return new SplitResult(visible.ToString(), thinking.ToString());
-                }
-
-                if (input.AsSpan(lt, needed).Equals(OpenTag.AsSpan(), StringComparison.OrdinalIgnoreCase))
-                {
-                    // Match. Advance past "<think" and start scanning for close-bracket.
-                    _scanningOpenTag = true;
-                    i = lt + needed;
-                    continue;
-                }
-
-                // Not a think tag — emit '<' as literal and continue past it.
-                visible.Append('<');
-                i = lt + 1;
-                continue;
             }
-            else
-            {
-                // Inside <think>...</think>. Look for the closing tag.
-                int closeIdx = input.IndexOf(CloseTag, i, StringComparison.OrdinalIgnoreCase);
-                if (closeIdx < 0)
-                {
-                    // No close — buffer the trailing bytes that could be a partial close.
-                    int safeEnd = Math.Max(i, input.Length - (CloseTag.Length - 1));
-                    if (safeEnd > i) thinking.Append(input, i, safeEnd - i);
-                    if (safeEnd < input.Length) _pending = input.Substring(safeEnd);
-                    return new SplitResult(visible.ToString(), thinking.ToString());
-                }
 
-                if (closeIdx > i) thinking.Append(input, i, closeIdx - i);
-                _mode = Mode.Outside;
-                i = closeIdx + CloseTag.Length;
+            if (_comment)
+            {
+                EmitCharacter(c);
+                if (c == '>' && _commentDashes >= 2) _comment = false;
+                _commentDashes = c == '-' ? _commentDashes + 1 : 0;
+            }
+            else if (_tag.Length > 0)
+            {
+                ReadTag(c);
+            }
+            else if (!_escaped && (c == '`' || c == '~' && (_runLength > 0 || _fenceLength > 0 || _lineStart)))
+            {
+                if (_runLength == 0)
+                {
+                    _runAtLineStart = _lineStart && !_quotedLine && _indent <= 3;
+                    _runCharacter = c;
+                }
+                _runLength++;
+            }
+            else if (c == '<' && !_escaped && _fenceLength == 0 && _inlineLength == 0 && !_quotedLine && _indent < 4)
+            {
+                _tag.Append(c);
+            }
+            else EmitCharacter(c);
+
+            TrackLine(c);
+        }
+        FlushPart();
+        _onPart = null;
+        return new SplitResult(_visible.ToString(), _thinking.ToString());
+    }
+
+    private void FlushPart()
+    {
+        if (_onPart is null || _part is not { Length: > 0 }) return;
+        _onPart!(_partThinking ? new SplitResult("", _part.ToString()) : new SplitResult(_part.ToString(), ""));
+        _part.Clear();
+    }
+
+    private void PrepareOutput()
+    {
+        if (_inside && _separateThinking)
+        {
+            _separateThinking = false;
+            _thinking.Append("\n\n");
+            if (_onPart is not null)
+            {
+                if (!_partThinking) FlushPart();
+                _partThinking = true;
+                _part!.Append("\n\n");
             }
         }
-
-        return new SplitResult(visible.ToString(), thinking.ToString());
+        if (_onPart is not null)
+        {
+            if (_partThinking != _inside) FlushPart();
+            _partThinking = _inside;
+        }
     }
 
-    /// <summary>
-    /// Flush any pending state. Called at end-of-stream so a malformed
-    /// trailing <c>&lt;think&gt;</c> without a close doesn't lose the bytes —
-    /// we surface them as visible text.
-    /// </summary>
+    private void Emit(string value)
+    {
+        if (value.Length == 0) return;
+        PrepareOutput();
+        if (_onPart is not null) _part!.Append(value);
+        (_inside ? _thinking : _visible).Append(value);
+        if (_inside) _sawThinking = true;
+    }
+
+    private void EmitCharacter(char value)
+    {
+        PrepareOutput();
+        if (_onPart is not null) _part!.Append(value);
+        (_inside ? _thinking : _visible).Append(value);
+        if (_inside) _sawThinking = true;
+    }
+
+    private void ReadTag(char c)
+    {
+        _tag.Append(c);
+        if (!_attributes)
+        {
+            var target = _inside ? CloseTag : OpenTag;
+            var length = _tag.Length;
+            if (length <= target.Length && char.ToLowerInvariant(c) == target[length - 1])
+                return;
+            if (length <= 4 && _tag[1] == '!' && c == "<!--"[length - 1])
+            {
+                if (length == 4)
+                {
+                    Emit(_tag.ToString());
+                    _tag.Clear();
+                    _comment = true;
+                    _commentDashes = 0;
+                }
+                return;
+            }
+            if (length == target.Length + 1 && (c == '>' || IsTagSpace(c)))
+            {
+                if (c == '>') CompleteTag();
+                else _attributes = true;
+                return;
+            }
+            Emit(_tag.ToString());
+            _tag.Clear();
+            return;
+        }
+
+        if (_attributeQuote != '\0')
+        {
+            if (c == _attributeQuote) _attributeQuote = '\0';
+        }
+        else if (!_inside && c is '\'' or '"') _attributeQuote = c;
+        else if (c == '>') CompleteTag();
+        else if (c == '<' || _inside && !IsTagSpace(c))
+        {
+            Emit(_tag.ToString());
+            _tag.Clear();
+            _attributes = false;
+        }
+    }
+
+    private void CompleteTag()
+    {
+        if (_tag.Length > 1 && _tag[^2] == '/')
+            Emit(_tag.ToString());
+        else
+        {
+            _inside = !_inside;
+            _separateThinking = _inside && _sawThinking;
+        }
+        _tag.Clear();
+        _attributes = false;
+        _attributeQuote = '\0';
+    }
+
+    private void FinishRun()
+    {
+        if (_runAtLineStart && _runLength >= 3 && _inlineLength == 0)
+        {
+            if (_fenceLength == 0)
+            {
+                _fenceCharacter = _runCharacter;
+                _fenceLength = _runLength;
+            }
+            else if (_runCharacter == _fenceCharacter && _runLength >= _fenceLength)
+                _closeFenceAtEol = true;
+        }
+        else if (_fenceLength == 0 && _runCharacter == '`')
+        {
+            if (_inlineLength == 0) _inlineLength = _runLength;
+            else if (_inlineLength == _runLength) _inlineLength = 0;
+        }
+        Emit(new string(_runCharacter, _runLength));
+        _runLength = 0;
+    }
+
+    private void TrackLine(char c)
+    {
+        if (c is '\r' or '\n')
+        {
+            if (_closeFenceAtEol) _fenceLength = 0;
+            _closeFenceAtEol = false;
+            _lineStart = true;
+            _indent = 0;
+            _quotedLine = _escaped = false;
+            return;
+        }
+        if (_closeFenceAtEol && !IsTagSpace(c)) _closeFenceAtEol = false;
+        if (_lineStart && c is ' ' or '\t') _indent += c == ' ' ? 1 : 4 - _indent % 4;
+        else
+        {
+            if (_lineStart && c == '>') _quotedLine = true;
+            _lineStart = false;
+        }
+        _escaped = c == '\\' && !_escaped;
+    }
+
     public SplitResult Flush()
     {
-        if (string.IsNullOrEmpty(_pending) && _mode == Mode.Outside)
-            return new SplitResult(string.Empty, string.Empty);
-
-        var visible = new StringBuilder();
-        var thinking = new StringBuilder();
-
-        // If we're inside an unterminated <think>, treat the remainder as thinking.
-        if (_mode == Mode.Inside) thinking.Append(_pending);
-        else visible.Append(_pending);
-
-        _pending = string.Empty;
-        _mode = Mode.Outside;
-        _scanningOpenTag = false;
-
-        return new SplitResult(visible.ToString(), thinking.ToString());
+        _visible.Clear();
+        _thinking.Clear();
+        _part?.Clear();
+        _onPart = null;
+        var remaining = _tag.ToString();
+        _tag.Clear();
+        Emit(remaining);
+        if (_runLength > 0) FinishRun();
+        var result = new SplitResult(_visible.ToString(), _thinking.ToString());
+        _inside = _comment = _attributes = _escaped = false;
+        _fenceLength = _inlineLength = 0;
+        _attributeQuote = '\0';
+        return result;
     }
 
-    /// <summary>True if we're currently mid-tag (i.e. expecting more bytes).</summary>
-    public bool IsThinking => _mode == Mode.Inside || _scanningOpenTag;
+    private static bool IsTagSpace(char c) => c is ' ' or '\t' or '\r' or '\n' or '\f';
 }

@@ -1,6 +1,7 @@
 using Avalonia.Media.Imaging;
+using MolaGPT.Core.Net;
+using SkiaSharp;
 using System.Runtime.CompilerServices;
-using System.Text;
 
 namespace MolaGPT.App.Rendering;
 
@@ -21,20 +22,19 @@ namespace MolaGPT.App.Rendering;
 public static class ImageSourceLoader
 {
     private const long CacheBudget = 32L * 1024 * 1024;
+    internal const int MaxEncodedBytes = 32 * 1024 * 1024;
     private const long RemoteSourceBudget = 32L * 1024 * 1024;
     private const int RemoteSourceCapacity = 32;
-    private static readonly Dictionary<string, Bitmap> s_cache = new(StringComparer.Ordinal);
-    private static readonly List<string> s_order = [];
+    private static readonly Dictionary<(string Url, int Width), Bitmap> s_cache = new();
+    private static readonly List<(string Url, int Width)> s_order = [];
     private static readonly ConditionalWeakTable<Bitmap, BitmapMemoryPressure> s_pressure = new();
     private static readonly LinkedList<(string Url, byte[] Bytes)> s_remoteSources = new();
     private static long s_cacheBytes;
     private static long s_remoteSourceBytes;
     private static readonly SemaphoreSlim s_gate = new(1, 1);
 
-    private static readonly HttpClient s_http = new()
-    {
-        Timeout = TimeSpan.FromSeconds(20)
-    };
+    private static readonly HttpClient s_http = new(new HttpClientHandler
+        { AutomaticDecompression = System.Net.DecompressionMethods.All });
 
     internal static void TrimForBackground()
     {
@@ -44,7 +44,7 @@ public static class ImageSourceLoader
             // connection goes offline. Controls still own displayed bitmaps.
             foreach (var key in s_order.ToArray())
             {
-                var url = key[..key.LastIndexOf('|')].Trim().Trim('"', '\'');
+                var url = key.Url.Trim().Trim('"', '\'');
                 if (!url.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
                     && !TryResolveLocalPath(url, out _)) continue;
                 RemoveCached(key);
@@ -61,7 +61,8 @@ public static class ImageSourceLoader
     {
         if (string.IsNullOrWhiteSpace(url)) return null;
 
-        var key = $"{url}|{decodeWidth}";
+        ct.ThrowIfCancellationRequested();
+        var key = (url, decodeWidth);
         lock (s_cache)
         {
             if (s_cache.TryGetValue(key, out var hit))
@@ -115,7 +116,7 @@ public static class ImageSourceLoader
     private static long BitmapBytes(Bitmap bitmap) =>
         (long)bitmap.PixelSize.Width * bitmap.PixelSize.Height * 4;
 
-    private static void RemoveCached(string key)
+    private static void RemoveCached((string Url, int Width) key)
     {
         // The view can still be displaying this shared bitmap.
         s_cache.Remove(key, out var bitmap);
@@ -140,22 +141,28 @@ public static class ImageSourceLoader
     {
         if (url.Length == 0) return null;
 
-        if (TryResolveLocalPath(url, out var path))
-        {
-            await using var file = new FileStream(
-                path, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete, 4096, useAsync: true);
-            return Decode(await BufferAsync(file, ct).ConfigureAwait(false), decodeWidth);
-        }
-
         if (url.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
         {
             var comma = url.IndexOf(',');
             if (comma < 0) return null;
-            var payload = url[(comma + 1)..];
-            if (!url[..comma].Contains("base64", StringComparison.OrdinalIgnoreCase)) return null;
-            return Decode(new MemoryStream(Convert.FromBase64String(payload)), decodeWidth);
+            if (!url.AsSpan(0, comma).Contains(";base64", StringComparison.OrdinalIgnoreCase)) return null;
+            var payload = url.AsSpan(comma + 1);
+            var chars = 0;
+            var padding = 0;
+            foreach (var c in payload)
+            {
+                if (c is ' ' or '\r' or '\n' or '\t') continue;
+                chars++;
+                if (c == '=' && ++padding > 2) return null;
+            }
+            var size = (long)chars / 4 * 3 - padding;
+            if (size is <= 0 or > MaxEncodedBytes || chars % 4 != 0) return null;
+            var bytes = new byte[(int)size];
+            return Convert.TryFromBase64Chars(payload, bytes, out _) ? Decode(bytes, decodeWidth) : null;
         }
+
+        if (TryResolveLocalPath(url, out var path))
+            return Decode(await ReadFileAsync(path, ct).ConfigureAwait(false), decodeWidth);
 
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return null;
         if (uri.Scheme is not ("http" or "https")) return null;
@@ -170,8 +177,14 @@ public static class ImageSourceLoader
                 source = FindRemoteSource(url);
                 if (source is null)
                 {
-                    var bytes = await s_http.GetByteArrayAsync(uri, ct).ConfigureAwait(false);
-                    var bitmap = Decode(new MemoryStream(bytes, writable: false), decodeWidth);
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    timeout.CancelAfter(TimeSpan.FromSeconds(20));
+                    using var response = await s_http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+                    response.EnsureSuccessStatusCode();
+                    if (response.Content.Headers.ContentLength > MaxEncodedBytes) return null;
+                    using var body = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
+                    var bytes = await BoundedRead.ReadAsync(body, MaxEncodedBytes, timeout.Token).ConfigureAwait(false);
+                    var bitmap = Decode(bytes, decodeWidth);
                     if (bitmap is not null) CacheRemoteSource(url, bytes);
                     return bitmap;
                 }
@@ -183,7 +196,7 @@ public static class ImageSourceLoader
         }
 
         // A cache hit bypasses the asynchronous download, so decode off the UI thread.
-        return await Task.Run(() => Decode(new MemoryStream(source, writable: false), decodeWidth), ct)
+        return await Task.Run(() => Decode(source, decodeWidth), ct)
             .ConfigureAwait(false);
     }
 
@@ -219,41 +232,28 @@ public static class ImageSourceLoader
         }
     }
 
-    private static async Task<MemoryStream> BufferAsync(Stream source, CancellationToken ct)
+    internal static async Task<byte[]> ReadFileAsync(string path, CancellationToken ct = default)
     {
-        var memory = new MemoryStream();
-        await source.CopyToAsync(memory, ct).ConfigureAwait(false);
-        memory.Position = 0;
-        return memory;
+        using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, useAsync: true);
+        return await BoundedRead.ReadAsync(file, MaxEncodedBytes, ct).ConfigureAwait(false);
     }
 
-    internal static Bitmap? Decode(MemoryStream stream, int decodeWidth)
+    internal static Bitmap? Decode(byte[] bytes, int decodeWidth)
     {
-        using (stream)
+        if (bytes.Length > MaxEncodedBytes) return null;
+        using (var probe = new MemoryStream(bytes, writable: false))
+        using (var codec = SKCodec.Create(probe))
         {
-            stream.Position = 0;
-            if (IsSvg(stream)) return null;
-
-            stream.Position = 0;
-            return decodeWidth > 0
-                ? Bitmap.DecodeToWidth(stream, decodeWidth, BitmapInterpolationMode.HighQuality)
-                : new Bitmap(stream);
+            if (codec is null || !ValidSize(codec.Info.Width, codec.Info.Height)) return null;
+            if (decodeWidth > 0 && !ValidSize(decodeWidth,
+                Math.Max(1, ((long)decodeWidth * codec.Info.Height + codec.Info.Width - 1) / codec.Info.Width))) return null;
         }
+        using var stream = new MemoryStream(bytes, writable: false);
+        return decodeWidth > 0 ? Bitmap.DecodeToWidth(stream, decodeWidth, BitmapInterpolationMode.HighQuality) : new Bitmap(stream);
     }
 
-    private static bool IsSvg(Stream stream)
-    {
-        Span<byte> prefix = stackalloc byte[1024];
-        var read = stream.Read(prefix);
-        stream.Position = 0;
-        if (read == 0) return false;
-
-        var text = Encoding.UTF8.GetString(prefix[..read]);
-        var start = text.TrimStart('\uFEFF', ' ', '\t', '\r', '\n');
-        return start.Length > 0
-            && start[0] == '<'
-            && start.Contains("<svg", StringComparison.OrdinalIgnoreCase);
-    }
+    internal static bool ValidSize(int width, long height) =>
+        width is > 0 and <= 16_384 && height is > 0 and <= 16_384 && width * height <= 40_000_000;
 
     /// <summary>
     /// Resolves the local-file shapes a markdown image URL can take, in order of

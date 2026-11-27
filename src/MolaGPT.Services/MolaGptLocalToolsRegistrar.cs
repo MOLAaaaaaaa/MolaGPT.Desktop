@@ -10,13 +10,11 @@ namespace MolaGPT.Desktop.Services;
 
 public sealed class MolaGptLocalToolsRegistrar
 {
-    private const string RequiredBaseHost = "chatgpt.wljay.cn";
-    private const string RequiredBasePathPrefix = "/v2/";
-
     private readonly MolaGptAuthService _auth;
     private readonly MolaGptProxyProvider _proxy;
     private readonly ProviderRegistry _registry;
-    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly HttpClient _officialHttp;
+    private readonly HttpClient _byokHttp;
     private readonly IChatToolHost _toolHost;
     private readonly PiWorkSidecarLocator _piLocator;
     private readonly PiRuntime _runtime;
@@ -30,7 +28,8 @@ public sealed class MolaGptLocalToolsRegistrar
         MolaGptAuthService auth,
         MolaGptProxyProvider proxy,
         ProviderRegistry registry,
-        IHttpClientFactory httpClientFactory,
+        HttpClient officialHttp,
+        HttpClient byokHttp,
         IChatToolHost toolHost,
         PiWorkSidecarLocator piLocator,
         PiRuntime runtime)
@@ -38,7 +37,8 @@ public sealed class MolaGptLocalToolsRegistrar
         _auth = auth;
         _proxy = proxy;
         _registry = registry;
-        _httpClientFactory = httpClientFactory;
+        _officialHttp = officialHttp;
+        _byokHttp = byokHttp;
         _toolHost = toolHost;
         _piLocator = piLocator;
         _runtime = runtime;
@@ -46,14 +46,15 @@ public sealed class MolaGptLocalToolsRegistrar
 
     public async Task<bool> RefreshAsync(CancellationToken ct = default)
     {
-        var jwt = _auth.CurrentJwt;
-        if (string.IsNullOrWhiteSpace(jwt))
+        var session = _auth.ReadSession();
+        if (!session.IsLoggedIn)
         {
             Deactivate();
             return false;
         }
 
         var models = await _proxy.FetchLocalToolsModelsAsync(ct);
+        if (session.Generation != _auth.SessionGeneration) return false;
         if (models.Count == 0)
         {
             Deactivate();
@@ -100,7 +101,9 @@ public sealed class MolaGptLocalToolsRegistrar
         // PiWorkProvider stamps the live token per request, so nothing sensitive is
         // handed to the Node child. Model comes from the request: every model is
         // registered at spawn, and a switch is a set_model on the same process.
-        var endpoint = new Uri(new Uri(ValidateMolaGptBaseUrl(_proxy.BaseUrl)), MolaGptProxyProvider.LocalToolsChatPath).ToString();
+        var baseUri = new Uri(_proxy.BaseUrl.TrimEnd('/') + "/", UriKind.Absolute);
+        var endpoint = MolaGptProxyProvider.RequireLocalToolsChatEndpoint(
+            new Uri(baseUri, MolaGptProxyProvider.LocalToolsChatPath)).ToString();
         const string api = "openai-completions";
         var config = new PiWorkProviderConfig(
             MolaGptProviderIds.LocalTools,
@@ -130,8 +133,7 @@ public sealed class MolaGptLocalToolsRegistrar
             request =>
             {
                 var jwt = _auth.CurrentJwt;
-                return new PiProviderCreds(endpoint, _ => Task.FromResult(jwt), request.ModelId,
-                    OnUnauthorized: failedJwt => _auth.LogoutIfCurrent(failedJwt));
+                return new PiProviderCreds(endpoint, _ => Task.FromResult(jwt), request.ModelId);
             });
 
         if (_activePi is { } current && current.TryUpdateConfig(config))
@@ -143,8 +145,8 @@ public sealed class MolaGptLocalToolsRegistrar
         var pi = new PiWorkProvider(
             config,
             _toolHost,
-            _httpClientFactory.CreateClient(HttpClientNames.MolaGpt),
-            _httpClientFactory.CreateClient(HttpClientNames.Byok),
+            _officialHttp,
+            _byokHttp,
             _runtime,
             // To the diagnostic log, not just the debugger: Work is where sidecar
             // trouble actually shows up, and a line only a debugger can see is one
@@ -170,22 +172,4 @@ public sealed class MolaGptLocalToolsRegistrar
         });
     }
 
-    private static string ValidateMolaGptBaseUrl(string baseUrl)
-    {
-        if (!Uri.TryCreate(baseUrl.TrimEnd('/') + "/", UriKind.Absolute, out var uri))
-            throw new InvalidOperationException("MolaGPT 本地工具服务地址无效。");
-
-        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("MolaGPT 本地工具服务必须使用 HTTPS。");
-
-        var hostAllowed = string.Equals(uri.Host, RequiredBaseHost, StringComparison.OrdinalIgnoreCase)
-            || uri.Host.EndsWith("." + RequiredBaseHost, StringComparison.OrdinalIgnoreCase);
-        if (!hostAllowed)
-            throw new InvalidOperationException("MolaGPT 本地工具服务地址必须位于官方域名。");
-
-        if (!uri.AbsolutePath.StartsWith(RequiredBasePathPrefix, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("MolaGPT 本地工具服务地址必须位于 /v2/ 路径下。");
-
-        return uri.ToString();
-    }
 }

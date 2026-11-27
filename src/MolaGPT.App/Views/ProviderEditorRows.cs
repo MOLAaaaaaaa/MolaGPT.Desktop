@@ -1,165 +1,10 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
-using System.Linq;
-using Avalonia.Controls;
-using Avalonia.Interactivity;
 using CommunityToolkit.Mvvm.ComponentModel;
 using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Models;
-using MolaGPT.ViewModels;
 
 namespace MolaGPT.App.Views;
-
-/// <summary>
-/// Editor for one BYOK provider. Returns the saved <see cref="ProviderEntry"/>,
-/// or null when cancelled.
-///
-/// The stored shapes are immutable records, so editing happens on the mutable
-/// row types below and is folded back into records on save. That is what makes
-/// "cancel" mean anything: nothing the user typed touches the registry until the
-/// save button assembles a new entry.
-/// </summary>
-public partial class ProviderDialog : MolaContentWindow
-{
-    private static readonly string[] Types = ["openai-compat", "anthropic", "gemini"];
-
-    private readonly string _id;
-    private readonly int _sortOrder;
-    private readonly ObservableCollection<ModelRow> _models = [];
-    private readonly ObservableCollection<HeaderRow> _headers = [];
-
-    public ProviderDialog() : this(null) { }
-
-    public ProviderDialog(ProviderEntry? existing)
-    {
-        InitializeComponent();
-
-        _id = existing?.Id ?? Guid.NewGuid().ToString("n");
-        _sortOrder = existing?.SortOrder ?? 0;
-
-        Title = existing is null ? "添加模型服务" : $"编辑「{existing.Name}」";
-
-        PART_Type.SelectedIndex = Math.Max(0, Array.IndexOf(Types, existing?.Type ?? Types[0]));
-        PART_Name.Text = existing?.Name ?? string.Empty;
-        PART_BaseUrl.Text = existing?.BaseUrl ?? string.Empty;
-        PART_ApiKey.Text = existing?.ApiKey ?? string.Empty;
-
-        foreach (var model in existing?.Models ?? [])
-        {
-            _models.Add(new ModelRow
-            {
-                Id = model.Id,
-                DisplayName = model.DisplayName,
-                Vision = model.Vision,
-                Thinking = model.Thinking,
-                ReasoningEffort = model.ReasoningEffort,
-                Tools = model.Tools,
-                Source = model
-            });
-        }
-
-        foreach (var header in existing?.CustomHeaders ?? [])
-            _headers.Add(new HeaderRow { Name = header.Name, Value = header.Value });
-
-        PART_Models.ItemsSource = _models;
-        PART_Headers.ItemsSource = _headers;
-        _models.CollectionChanged += (_, _) => RefreshEmptyStates();
-        RefreshEmptyStates();
-
-        PART_AddModel.Click += (_, _) => _models.Add(new ModelRow());
-        PART_AddHeader.Click += (_, _) => _headers.Add(new HeaderRow());
-        PART_RevealKey.Click += (_, _) =>
-            PART_ApiKey.PasswordChar = PART_ApiKey.PasswordChar == '\0' ? '•' : '\0';
-
-        PART_Cancel.Click += (_, _) => Close(null);
-        PART_Save.Click += (_, _) => Save();
-    }
-
-    private void RefreshEmptyStates() => PART_NoModels.IsVisible = _models.Count == 0;
-
-    private void OnRemoveModel(object? sender, RoutedEventArgs e)
-    {
-        if (sender is Control { DataContext: ModelRow row }) _models.Remove(row);
-    }
-
-    private void OnRemoveHeader(object? sender, RoutedEventArgs e)
-    {
-        if (sender is Control { DataContext: HeaderRow row }) _headers.Remove(row);
-    }
-
-    private void Save()
-    {
-        var name = PART_Name.Text?.Trim() ?? string.Empty;
-        var baseUrl = PART_BaseUrl.Text?.Trim();
-
-        if (name.Length == 0)
-        {
-            Fail("给这个服务起个名字。");
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(baseUrl))
-        {
-            Fail("接口地址不能为空。");
-            return;
-        }
-
-        var models = _models
-            .Where(m => !string.IsNullOrWhiteSpace(m.Id))
-            .Select(m => ToEntry(m))
-            .ToList();
-
-        if (models.Count == 0)
-        {
-            Fail("至少要有一个填了 ID 的模型。");
-            return;
-        }
-
-        var headers = _headers
-            .Where(h => !string.IsNullOrWhiteSpace(h.Name))
-            .Select(h => new CustomHeaderEntry(h.Name.Trim(), h.Value ?? string.Empty))
-            .ToList();
-
-        Close(new ProviderEntry(
-            Id: _id,
-            Type: Types[Math.Max(0, PART_Type.SelectedIndex)],
-            Name: name,
-            BaseUrl: baseUrl!.TrimEnd('/'),
-            ApiKey: PART_ApiKey.Text,
-            Models: models,
-            Enabled: true,
-            SortOrder: _sortOrder,
-            CustomHeaders: headers.Count > 0 ? headers : null));
-    }
-
-    /// <summary>
-    /// Rebuilds the record from the edited row, carrying over every field the
-    /// dialog does not expose. Constructing a fresh <see cref="ProviderModelEntry"/>
-    /// from the four visible flags would silently wipe thinking budgets, effort
-    /// levels, per-model system prompts and custom body overrides set elsewhere.
-    /// </summary>
-    private static ProviderModelEntry ToEntry(ModelRow row)
-    {
-        var id = row.Id.Trim();
-        var display = string.IsNullOrWhiteSpace(row.DisplayName) ? id : row.DisplayName.Trim();
-
-        return (row.Source ?? new ProviderModelEntry(id, display)) with
-        {
-            Id = id,
-            DisplayName = display,
-            Vision = row.Vision,
-            Thinking = row.Thinking,
-            ReasoningEffort = row.ReasoningEffort,
-            Tools = row.Tools
-        };
-    }
-
-    private void Fail(string message)
-    {
-        PART_Error.Text = message;
-        PART_Error.IsVisible = true;
-    }
-}
 
 /// <summary>Mutable edit buffer for one model row.</summary>
 public sealed partial class ModelRow : ObservableObject
@@ -167,13 +12,15 @@ public sealed partial class ModelRow : ObservableObject
     private bool _loadingPrice;
     private static readonly string[] ThinkingKinds =
     [
-        "OpenAiReasoningEffort",
-        "AnthropicAdaptive",
-        "AnthropicBudget",
-        "DeepSeekV4",
-        "GeminiThinkingLevel",
-        "GeminiBudget",
-        "QwenThinkingBudget"
+        nameof(ThinkingParamKind.OpenAiReasoningEffort),
+        nameof(ThinkingParamKind.AnthropicAdaptive),
+        nameof(ThinkingParamKind.AnthropicBudget),
+        nameof(ThinkingParamKind.DeepSeekV4),
+        nameof(ThinkingParamKind.GeminiThinkingLevel),
+        nameof(ThinkingParamKind.GeminiBudget),
+        nameof(ThinkingParamKind.QwenThinkingBudget),
+        nameof(ThinkingParamKind.QwenReasoningEffort),
+        nameof(ThinkingParamKind.KimiToggle)
     ];
 
     [ObservableProperty] private string _id = string.Empty;
@@ -410,12 +257,6 @@ public sealed partial class ModelRow : ObservableObject
         OnPropertyChanged(nameof(IsBudgetOptionsVisible));
     }
 
-    /// <summary>Known effort levels, ordered low → high. Union of the
-    /// OpenAI / Anthropic-adaptive / Gemini-level vocabularies so presets
-    /// work regardless of thinking kind; custom names append after these.</summary>
-    public static readonly string[] KnownEffortLevels =
-        ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
-
     /// <summary>档位为空（新模型或老数据）时的默认选中：low、medium、high、xhigh。</summary>
     public static readonly string[] DefaultEffortLevels = ["low", "medium", "high", "xhigh"];
 
@@ -444,7 +285,7 @@ public sealed partial class ModelRow : ObservableObject
     /// presets in canonical low → high order, then stored custom names in
     /// entry order. Call after loading a row; edits afterwards go through
     /// the options and write back to <see cref="EffortLevelsText"/>.</summary>
-    public void RefreshEffortLevelOptions()
+    public void RefreshEffortLevelOptions(IReadOnlyList<string>? allowedLevels = null)
     {
         _suspendEffortSync = true;
         try
@@ -460,12 +301,13 @@ public sealed partial class ModelRow : ObservableObject
             if (!string.IsNullOrWhiteSpace(DefaultEffort))
                 selected.Add(DefaultEffort.Trim().ToLowerInvariant());
             EffortLevelOptions.Clear();
-            foreach (var preset in KnownEffortLevels)
+            foreach (var preset in allowedLevels ?? ThinkingEffortLevels.KnownLevels)
                 EffortLevelOptions.Add(new EffortLevelItem(this, preset, false,
                     selected.Contains(preset)));
-            foreach (var custom in selected.Where(name =>
-                         !KnownEffortLevels.Contains(name, StringComparer.OrdinalIgnoreCase)))
-                EffortLevelOptions.Add(new EffortLevelItem(this, custom, true, true));
+            if (allowedLevels is null)
+                foreach (var custom in selected.Where(name =>
+                             !ThinkingEffortLevels.KnownLevels.Contains(name, StringComparer.OrdinalIgnoreCase)))
+                    EffortLevelOptions.Add(new EffortLevelItem(this, custom, true, true));
         }
         finally
         {
@@ -524,7 +366,7 @@ public sealed partial class ModelRow : ObservableObject
                 continue;
             }
             EffortLevelOptions.Add(new EffortLevelItem(this, token,
-                !KnownEffortLevels.Contains(token, StringComparer.OrdinalIgnoreCase), true));
+                !ThinkingEffortLevels.KnownLevels.Contains(token, StringComparer.OrdinalIgnoreCase), true));
         }
         CustomEffortInput = string.Empty;
         SyncEffortLevelsFromOptions();

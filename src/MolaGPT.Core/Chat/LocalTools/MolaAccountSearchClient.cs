@@ -92,11 +92,9 @@ public sealed class MolaAccountSearchClient(HttpClient http, MolaGptAuthService 
         using (resp)
         {
             var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            if (resp.StatusCode == HttpStatusCode.Unauthorized)
+            if (resp.StatusCode == HttpStatusCode.Unauthorized
+                && (await ChatApiErrorHelper.ReadAccountHttpErrorAsync(resp, ct).ConfigureAwait(false))?.InvalidatesAccountSession == true)
             {
-                // Do not clear a newer session if the user logged in while this
-                // request was in flight.
-                auth.LogoutIfCurrent(jwt);
                 throw new MolaSearchException(SessionExpiredMessage);
             }
             if (!resp.IsSuccessStatusCode) throw new MolaSearchException(ReadError(text, resp.StatusCode));

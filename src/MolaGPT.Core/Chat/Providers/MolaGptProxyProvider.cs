@@ -9,7 +9,6 @@ using System.Text.Json.Nodes;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Models;
 using MolaGPT.Core.Net;
-using MolaGPT.Core.Sse;
 
 namespace MolaGPT.Core.Chat.Providers;
 
@@ -22,13 +21,12 @@ namespace MolaGPT.Core.Chat.Providers;
 /// login. Each model in MolaGPT registry has its own <c>apiUrl</c> (relative
 /// path); we resolve against <see cref="BaseUrl"/> per request.
 ///
-/// On 401 we treat the JWT as permanently dead; clear it and throw a
-/// <see cref="MolaGptAuthExpiredException"/> so the chat surface can prompt
-/// the user to re-login instead of retrying a doomed request.
+/// Authenticated requests use the account HTTP handler to invalidate expired credentials.
 /// </summary>
 public sealed class MolaGptProxyProvider : IChatProvider
 {
     private const int MaxPublicImageUploadBytes = 10 * 1024 * 1024;
+    private const string AccountApiBasePath = "/v2/";
 
     public const string LocalToolsModelsPath = "api/auth/desktop_local_models.php";
     public const string LocalToolsChatPath = "api/auth/desktop_chat_completions.php";
@@ -39,9 +37,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
     public ProviderKind Kind => ProviderKind.MolaGptProxy;
     public IReadOnlyList<ProviderModel> Models => _models;
 
-    public string BaseUrl { get; init; } = "https://chatgpt.wljay.cn/v2/";
+    public string BaseUrl { get; init; } = "https://" + NetworkSecurity.MolaGptAccountHost + AccountApiBasePath;
     public IReadOnlyDictionary<string, string> ModelToApiUrl => _modelToApiUrl;
-    public string? LastResolvedApiUrl { get; private set; }
 
     private readonly HttpClient _http;
     private readonly MolaGptAuthService _auth;
@@ -54,16 +51,15 @@ public sealed class MolaGptProxyProvider : IChatProvider
         _auth = auth ?? throw new ArgumentNullException(nameof(auth));
     }
 
+    public long AccountSessionGeneration => _auth.SessionGeneration;
+
     public async Task RefreshModelsAsync(CancellationToken ct = default)
     {
+        var generation = _auth.SessionGeneration;
         var baseUri = new Uri(NetworkSecurity.RequireHttpsBaseUrl(BaseUrl, "MolaGPT 云服务"));
         var url = NetworkSecurity.RequireHttps(new Uri(baseUri, "api/auth/model_config_public.php"), "MolaGPT 模型列表");
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
-        if (resp.StatusCode == HttpStatusCode.Unauthorized)
-        {
-            throw new MolaGptAuthExpiredException();
-        }
         resp.EnsureSuccessStatusCode();
 
         var root = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: ct).ConfigureAwait(false);
@@ -96,6 +92,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
             apiMap[modelName] = apiUrl;
         }
 
+        if (generation != _auth.SessionGeneration)
+            throw new OperationCanceledException("账户已切换，原请求已取消。");
         _models = list;
         _modelToApiUrl = apiMap;
     }
@@ -116,12 +114,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
-        if (resp.StatusCode == HttpStatusCode.Unauthorized)
-        {
-            _auth.LogoutIfCurrent(jwt);
-            throw new MolaGptAuthExpiredException();
-        }
-        resp.EnsureSuccessStatusCode();
+        await ChatApiErrorHelper.EnsureSuccessAsync(resp, "MolaGPT 本地工具模型列表", ct, accountRequest: true).ConfigureAwait(false);
 
         var root = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: ct).ConfigureAwait(false);
         if (generation != _auth.SessionGeneration)
@@ -199,8 +192,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
     /// <summary>
     /// Fetch the user's account state from <c>api/auth/status.php</c> (the
     /// account status endpoint. Returns null when no JWT
-    /// is stored; throws <see cref="MolaGptAuthExpiredException"/> on 401
-    /// so the caller can re-prompt login. The response shape includes:
+    /// is stored. Account errors retain the server's business classification.
+    /// The response shape includes:
     /// <code>
     ///   { user: { logged_in, username, type, unlimited, is_donor,
     ///             usage:{model_id:int}, tokens_usage:{model_id:int},
@@ -230,12 +223,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
-        if (resp.StatusCode == HttpStatusCode.Unauthorized)
-        {
-            _auth.LogoutIfCurrent(jwt);
-            throw new MolaGptAuthExpiredException();
-        }
-        resp.EnsureSuccessStatusCode();
+        await ChatApiErrorHelper.EnsureSuccessAsync(resp, "MolaGPT 账号状态", ct, accountRequest: true).ConfigureAwait(false);
 
         var root = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: ct).ConfigureAwait(false);
         if (generation != _auth.SessionGeneration)
@@ -346,7 +334,8 @@ public sealed class MolaGptProxyProvider : IChatProvider
             CanResumeWork: permissions?["account_access"]?.GetValue<bool>() == true
                 && permissions["official_models"]?.GetValue<bool>() == true
                 && permissions["free_usage"]?.GetValue<bool>() == true
-                && !workModelBlocked);
+                && !workModelBlocked,
+            ApiAccessState: user["api_access"]?["state"]?.GetValue<string>());
     }
 
     private static string? ReadSecurityStatus(JsonNode? security, bool desktopWork, bool workModelBlocked)
@@ -479,8 +468,12 @@ public sealed class MolaGptProxyProvider : IChatProvider
         return new MolaGptPreparedAttachments(prepared, BuildSandboxHint(sandboxEntries));
     }
 
+    public IAsyncEnumerable<ChatChunk> StreamChatAsync(ChatRequest request, CancellationToken ct) =>
+        StreamChatAsync(request, new MolaGptStreamDecoder(), ct);
+
     public async IAsyncEnumerable<ChatChunk> StreamChatAsync(
         ChatRequest request,
+        MolaGptStreamDecoder decoder,
         [EnumeratorCancellation] CancellationToken ct)
     {
         var jwt = _auth.CurrentJwt;
@@ -541,7 +534,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         }
 
         var fullUrl = ResolveEndpoint(baseUri, apiUrlRel, "MolaGPT 对话请求");
-        LastResolvedApiUrl = apiUrlRel;
+        request.ResolvedEndpoint?.Invoke(apiUrlRel);
 
         using var httpReq = new HttpRequestMessage(HttpMethod.Post, fullUrl)
         {
@@ -558,7 +551,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
 
             var wait = resp.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(2);
             await Task.Delay(wait, ct).ConfigureAwait(false);
-            await foreach (var chunk in ResumeStreamAsync((string)bodyDict["session_id"]!, 0, apiUrlRel, ct, missingRunError: rejection)
+            await foreach (var chunk in ResumeStreamAsync((string)bodyDict["session_id"]!, decoder, apiUrlRel, ct, missingRunError: rejection)
                 .ConfigureAwait(false))
                 yield return chunk;
             yield break;
@@ -567,117 +560,10 @@ public sealed class MolaGptProxyProvider : IChatProvider
 
         await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
 
-        // Per-stream <think>...</think> splitter; needed for models like
-        // DeepSeek-R1 / QwQ that emit reasoning inline in delta.content
-        // instead of via the dedicated reasoning_content channel. Allocated
-        // once per request because state must persist across SSE chunks.
-        var thinkSplitter = new InlineThinkSplitter();
-        var toolSynthesizer = new ToolCallContentSynthesizer();
-        var responseMapper = new ResponseStreamEventMapper();
-        string? turnFinishReason = null;
-
-        await foreach (var ev in SseStreamReader.ReadAsync(stream, ct))
-        {
-            if (ev.IsDone)
-            {
-                var toolTail = toolSynthesizer.FinalizeOpenBlocks();
-                if (!string.IsNullOrEmpty(toolTail))
-                    yield return new ChatChunk(DeltaText: toolTail);
-                // Surface any trailing buffered bytes from the splitter so we
-                // don't lose content if the model never closed a <think>.
-                var tail = thinkSplitter.Flush();
-                if (!string.IsNullOrEmpty(tail.Visible) || !string.IsNullOrEmpty(tail.Thinking))
-                    yield return new ChatChunk(
-                        DeltaText: string.IsNullOrEmpty(tail.Visible) ? null : tail.Visible,
-                        DeltaThinking: string.IsNullOrEmpty(tail.Thinking) ? null : tail.Thinking,
-                        Usage: null);
-                yield return new ChatChunk(FinishReason: turnFinishReason ?? "stop");
-                yield break;
-            }
-            if (string.IsNullOrEmpty(ev.Data)) continue;
-
-            ChatChunk? chunk = null;
-            try
-            {
-                using var doc = JsonDocument.Parse(ev.Data);
-                var root = doc.RootElement;
-                if (ChatApiErrorHelper.ReadBusinessError(root, ev.EventName) is { } businessError)
-                    throw new ChatRequestException(businessError);
-                if (ChatApiErrorHelper.TryExtractStreamingError(root, out var streamError))
-                    throw new ChatRequestException(ChatApiErrorHelper.ReadProviderError(streamError));
-                if (root.TryGetProperty("molagpt_subagents", out var subagents))
-                {
-                    chunk = new ChatChunk(Subagents: JsonNode.Parse(subagents.GetRawText())!.AsObject(), RawJson: ev.Data);
-                }
-                if (TryParseSources(root, out var sources))
-                {
-                    chunk = new ChatChunk(Sources: sources, RawJson: ev.Data);
-                }
-                if (responseMapper.TryMap(root, out var responseText, out var responseThinking))
-                {
-                    if (!string.IsNullOrEmpty(responseText))
-                    {
-                        var split = thinkSplitter.Feed(responseText);
-                        responseText = string.IsNullOrEmpty(split.Visible) ? null : split.Visible;
-                        if (!string.IsNullOrEmpty(split.Thinking))
-                            responseThinking = string.IsNullOrEmpty(responseThinking) ? split.Thinking : responseThinking + split.Thinking;
-                    }
-
-                    chunk = string.IsNullOrEmpty(responseText) && string.IsNullOrEmpty(responseThinking)
-                        ? null
-                        : new ChatChunk(DeltaText: responseText, DeltaThinking: responseThinking, RawJson: ev.Data);
-                }
-                if (root.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
-                {
-                    var choice = choices[0];
-                    if (choice.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.Object)
-                    {
-                        var toolText = toolSynthesizer.HandleToolCalls(delta);
-                        if (toolText is not null)
-                        {
-                            chunk = string.IsNullOrEmpty(toolText) ? null : new ChatChunk(DeltaText: toolText, RawJson: ev.Data);
-                        }
-                        else
-                        {
-                            string? text = ExtractContentText(delta);
-                            // Aggregate all supported reasoning channels with
-                            // cross-channel de-duplication.
-                            string? thinking = ReasoningExtractor.Extract(delta);
-                            string? finish = choice.TryGetProperty("finish_reason", out var f) && f.ValueKind == JsonValueKind.String ? f.GetString() : null;
-                            if (finish is not null && finish != "tool_calls") turnFinishReason = finish;
-                            var finalizeToolUi = finish == "tool_calls" || (toolSynthesizer.HasOpenBlocks && (!string.IsNullOrEmpty(text) || !string.IsNullOrEmpty(thinking)));
-                            if (finalizeToolUi)
-                            {
-                                var toolTail = toolSynthesizer.FinalizeOpenBlocks();
-                                if (!string.IsNullOrEmpty(toolTail))
-                                    text = string.IsNullOrEmpty(text) ? toolTail : toolTail + text;
-                            }
-
-                            // Run the visible text through the inline <think>
-                            // splitter. Any thinking bytes it pulls out are
-                            // merged with the structured reasoning channels.
-                            if (!string.IsNullOrEmpty(text))
-                            {
-                                var split = thinkSplitter.Feed(text!);
-                                text = string.IsNullOrEmpty(split.Visible) ? null : split.Visible;
-                                if (!string.IsNullOrEmpty(split.Thinking))
-                                    thinking = string.IsNullOrEmpty(thinking) ? split.Thinking : thinking + split.Thinking;
-                            }
-
-                            chunk = new ChatChunk(DeltaText: text, DeltaThinking: thinking, Usage: TryParseUsage(root), RawJson: ev.Data);
-                        }
-                    }
-                }
-            }
-            catch (JsonException)
-            {
-                chunk = new ChatChunk(RawJson: ev.Data);
-            }
-            if (chunk is null && IsRecoverableSseDataLine(ev.Data))
-                chunk = new ChatChunk(RawJson: ev.Data);
-            if (chunk is not null) yield return chunk;
-        }
+        await foreach (var chunk in decoder.ReadAsync(stream, ct).ConfigureAwait(false))
+            yield return chunk;
     }
+
 
     private async Task<Dictionary<int, MolaGptUploadResult>> UploadImagesBatchAsync(
         Uri baseUri,
@@ -712,12 +598,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
             using var req = new HttpRequestMessage(HttpMethod.Post, endpoint) { Content = form };
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
             using var response = await _http.SendAsync(req, ct).ConfigureAwait(false);
-            if (response.StatusCode == HttpStatusCode.Unauthorized)
-            {
-                _auth.LogoutIfCurrent(jwt);
-                throw new MolaGptAuthExpiredException();
-            }
-            await ChatApiErrorHelper.EnsureSuccessAsync(response, "MolaGPT 图片上传", ct).ConfigureAwait(false);
+            await ChatApiErrorHelper.EnsureSuccessAsync(response, "MolaGPT 图片上传", ct, accountRequest: true).ConfigureAwait(false);
 
             var root = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: ct).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("图片上传失败：服务器响应为空。");
@@ -763,12 +644,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         using var req = new HttpRequestMessage(HttpMethod.Post, endpoint) { Content = form };
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         using var response = await _http.SendAsync(req, ct).ConfigureAwait(false);
-        if (response.StatusCode == HttpStatusCode.Unauthorized)
-        {
-            _auth.LogoutIfCurrent(jwt);
-            throw new MolaGptAuthExpiredException();
-        }
-        await ChatApiErrorHelper.EnsureSuccessAsync(response, "MolaGPT 沙箱文件上传", ct).ConfigureAwait(false);
+        await ChatApiErrorHelper.EnsureSuccessAsync(response, "MolaGPT 沙箱文件上传", ct, accountRequest: true).ConfigureAwait(false);
 
         var root = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException("附件上传失败：服务器响应为空。");
@@ -908,12 +784,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
 
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
-        if (resp.StatusCode == HttpStatusCode.Unauthorized)
-        {
-            _auth.LogoutIfCurrent(jwt);
-            throw new MolaGptAuthExpiredException();
-        }
-        await ChatApiErrorHelper.EnsureSuccessAsync(resp, "MolaGPT Routes 路由请求", ct).ConfigureAwait(false);
+        await ChatApiErrorHelper.EnsureSuccessAsync(resp, "MolaGPT Routes 路由请求", ct, accountRequest: true).ConfigureAwait(false);
 
         var root = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException("MolaGPT Routes 未返回有效路由结果。");
@@ -1001,6 +872,14 @@ public sealed class MolaGptProxyProvider : IChatProvider
         return NetworkSecurity.RequireMolaGptAccountOrigin(uri, label);
     }
 
+    public static Uri RequireLocalToolsChatEndpoint(Uri uri)
+    {
+        NetworkSecurity.RequireMolaGptAccountOrigin(uri, "MolaGPT 本地工具服务");
+        if (!string.Equals(uri.AbsolutePath, AccountApiBasePath + LocalToolsChatPath, StringComparison.Ordinal))
+            throw new InvalidOperationException("MolaGPT 本地工具服务地址与官方请求路径不符。");
+        return uri;
+    }
+
     private static bool IsAutoRouteEndpoint(string apiUrl, string modelId)
     {
         return string.Equals(modelId, "autoLLM", StringComparison.OrdinalIgnoreCase)
@@ -1070,91 +949,6 @@ public sealed class MolaGptProxyProvider : IChatProvider
         return null;
     }
 
-    private static string? ExtractContentText(JsonElement delta)
-    {
-        if (!delta.TryGetProperty("content", out var content)) return null;
-        if (content.ValueKind == JsonValueKind.String) return content.GetString();
-        if (content.ValueKind != JsonValueKind.Array) return content.ToString();
-
-        var parts = new List<string>();
-        foreach (var item in content.EnumerateArray())
-        {
-            if (item.ValueKind == JsonValueKind.String)
-                parts.Add(item.GetString() ?? string.Empty);
-            else if (item.ValueKind != JsonValueKind.Null && item.ValueKind != JsonValueKind.Undefined)
-                parts.Add(item.ToString());
-        }
-
-        return parts.Count == 0 ? null : string.Concat(parts);
-    }
-
-    private static Usage? TryParseUsage(JsonElement root)
-    {
-        if (!root.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
-            return null;
-
-        return new Usage(
-            TryGetInt(usage, "prompt_tokens"),
-            TryGetInt(usage, "completion_tokens"),
-            TryGetInt(usage, "total_tokens"));
-    }
-
-    private static int? TryGetInt(JsonElement obj, string name)
-    {
-        return obj.TryGetProperty(name, out var value)
-               && value.ValueKind == JsonValueKind.Number
-               && value.TryGetInt32(out var number)
-            ? number
-            : null;
-    }
-
-    private static bool IsRecoverableSseDataLine(string data)
-    {
-        if (string.IsNullOrWhiteSpace(data)) return false;
-        try
-        {
-            using var doc = JsonDocument.Parse(data);
-            var root = doc.RootElement;
-            return !(root.TryGetProperty("type", out var type)
-                     && type.ValueKind == JsonValueKind.String
-                     && string.Equals(type.GetString(), "session_init", StringComparison.Ordinal));
-        }
-        catch (JsonException)
-        {
-            return true;
-        }
-    }
-
-    private static bool TryParseSources(JsonElement root, out IReadOnlyList<SourceReference> sources)
-    {
-        sources = Array.Empty<SourceReference>();
-        if (!root.TryGetProperty("molagpt_sources", out var node) || node.ValueKind != JsonValueKind.Array)
-            return false;
-
-        var list = new List<SourceReference>();
-        var fallbackId = 1;
-        foreach (var item in node.EnumerateArray())
-        {
-            if (item.ValueKind != JsonValueKind.Object) continue;
-            var id = TryGetInt(item, "id") ?? fallbackId;
-            var title = item.TryGetProperty("title", out var titleNode) && titleNode.ValueKind == JsonValueKind.String
-                ? titleNode.GetString() ?? string.Empty
-                : string.Empty;
-            var url = item.TryGetProperty("url", out var urlNode) && urlNode.ValueKind == JsonValueKind.String
-                ? urlNode.GetString() ?? string.Empty
-                : string.Empty;
-            var date = item.TryGetProperty("published_date", out var dateNode)
-                       && dateNode.ValueKind == JsonValueKind.String
-                ? dateNode.GetString()?.Trim() is { Length: > 0 } d ? d : null
-                : null;
-            list.Add(new SourceReference(id, title, url, date));
-            fallbackId++;
-        }
-
-        sources = list;
-        return list.Count > 0;
-    }
-
     private sealed record AutoRouteResult(
         string ModelName,
         string? ModelKey,
@@ -1221,7 +1015,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
 
     public async IAsyncEnumerable<ChatChunk> ResumeStreamAsync(
         string sessionId,
-        int offset,
+        MolaGptStreamDecoder decoder,
         string apiUrl,
         [EnumeratorCancellation] CancellationToken ct,
         ChatRequestError? missingRunError = null)
@@ -1237,7 +1031,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         {
             ["action"] = "resume",
             ["session_id"] = sessionId,
-            ["offset"] = offset,
+            ["offset"] = decoder.ResumeOffset,
             ["mola_error_protocol"] = 1
         };
 
@@ -1255,103 +1049,12 @@ public sealed class MolaGptProxyProvider : IChatProvider
         await ChatApiErrorHelper.EnsureSuccessAsync(resp, "MolaGPT 流恢复", ct).ConfigureAwait(false);
 
         await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        var thinkSplitter = new InlineThinkSplitter();
-        var toolSynthesizer = new ToolCallContentSynthesizer();
-        var responseMapper = new ResponseStreamEventMapper();
-        string? turnFinishReason = null;
-
-        await foreach (var ev in SseStreamReader.ReadAsync(stream, ct))
-        {
-            if (ev.IsDone)
-            {
-                var toolTail = toolSynthesizer.FinalizeOpenBlocks();
-                if (!string.IsNullOrEmpty(toolTail))
-                    yield return new ChatChunk(DeltaText: toolTail);
-                var tail = thinkSplitter.Flush();
-                if (!string.IsNullOrEmpty(tail.Visible) || !string.IsNullOrEmpty(tail.Thinking))
-                    yield return new ChatChunk(
-                        DeltaText: string.IsNullOrEmpty(tail.Visible) ? null : tail.Visible,
-                        DeltaThinking: string.IsNullOrEmpty(tail.Thinking) ? null : tail.Thinking,
-                        Usage: null);
-                yield return new ChatChunk(FinishReason: turnFinishReason ?? "stop");
-                yield break;
-            }
-            if (string.IsNullOrEmpty(ev.Data)) continue;
-
-            ChatChunk? chunk = null;
-            try
-            {
-                using var doc = JsonDocument.Parse(ev.Data);
-                var root = doc.RootElement;
-                if (ChatApiErrorHelper.ReadBusinessError(root, ev.EventName) is { } businessError)
-                    throw new ChatRequestException(businessError);
-                if (ChatApiErrorHelper.TryExtractStreamingError(root, out var streamError))
-                    throw new ChatRequestException(ChatApiErrorHelper.ReadProviderError(streamError));
-                if (root.TryGetProperty("molagpt_subagents", out var subagents))
-                {
-                    chunk = new ChatChunk(Subagents: JsonNode.Parse(subagents.GetRawText())!.AsObject(), RawJson: ev.Data);
-                }
-                if (TryParseSources(root, out var sources))
-                    chunk = new ChatChunk(Sources: sources, RawJson: ev.Data);
-                if (responseMapper.TryMap(root, out var responseText, out var responseThinking))
-                {
-                    if (!string.IsNullOrEmpty(responseText))
-                    {
-                        var split = thinkSplitter.Feed(responseText);
-                        responseText = string.IsNullOrEmpty(split.Visible) ? null : split.Visible;
-                        if (!string.IsNullOrEmpty(split.Thinking))
-                            responseThinking = string.IsNullOrEmpty(responseThinking) ? split.Thinking : responseThinking + split.Thinking;
-                    }
-                    chunk = string.IsNullOrEmpty(responseText) && string.IsNullOrEmpty(responseThinking)
-                        ? null
-                        : new ChatChunk(DeltaText: responseText, DeltaThinking: responseThinking, RawJson: ev.Data);
-                }
-                if (root.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
-                {
-                    var choice = choices[0];
-                    if (choice.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.Object)
-                    {
-                        var toolText = toolSynthesizer.HandleToolCalls(delta);
-                        if (toolText is not null)
-                        {
-                            chunk = string.IsNullOrEmpty(toolText) ? null : new ChatChunk(DeltaText: toolText, RawJson: ev.Data);
-                        }
-                        else
-                        {
-                            string? text = ExtractContentText(delta);
-                            string? thinking = ReasoningExtractor.Extract(delta);
-                            string? finish = choice.TryGetProperty("finish_reason", out var f) && f.ValueKind == JsonValueKind.String ? f.GetString() : null;
-                            if (finish is not null && finish != "tool_calls") turnFinishReason = finish;
-                            var finalizeToolUi = finish == "tool_calls" || (toolSynthesizer.HasOpenBlocks && (!string.IsNullOrEmpty(text) || !string.IsNullOrEmpty(thinking)));
-                            if (finalizeToolUi)
-                            {
-                                var toolTailInner = toolSynthesizer.FinalizeOpenBlocks();
-                                if (!string.IsNullOrEmpty(toolTailInner))
-                                    text = string.IsNullOrEmpty(text) ? toolTailInner : toolTailInner + text;
-                            }
-                            if (!string.IsNullOrEmpty(text))
-                            {
-                                var split = thinkSplitter.Feed(text!);
-                                text = string.IsNullOrEmpty(split.Visible) ? null : split.Visible;
-                                if (!string.IsNullOrEmpty(split.Thinking))
-                                    thinking = string.IsNullOrEmpty(thinking) ? split.Thinking : thinking + split.Thinking;
-                            }
-                            chunk = new ChatChunk(DeltaText: text, DeltaThinking: thinking, Usage: TryParseUsage(root), RawJson: ev.Data);
-                        }
-                    }
-                }
-            }
-            catch (JsonException)
-            {
-                chunk = new ChatChunk(RawJson: ev.Data);
-            }
-            if (chunk is null && IsRecoverableSseDataLine(ev.Data))
-                chunk = new ChatChunk(RawJson: ev.Data);
-            if (chunk is not null) yield return chunk;
-        }
+        await foreach (var chunk in decoder.ReadAsync(stream, ct).ConfigureAwait(false))
+            yield return chunk;
     }
 
-    public async Task<CompletedStreamData?> FetchCompletedStreamAsync(string sessionId, CancellationToken ct)
+
+    public async Task<CompletedStreamData?> FetchCompletedStreamAsync(string sessionId, CancellationToken ct, bool cleanup = true)
     {
         var jwt = _auth.CurrentJwt;
         if (string.IsNullOrEmpty(jwt)) return null;
@@ -1359,7 +1062,7 @@ public sealed class MolaGptProxyProvider : IChatProvider
         var baseUri = new Uri(NetworkSecurity.RequireHttpsBaseUrl(BaseUrl, "MolaGPT 云服务"));
         var url = ResolveEndpoint(baseUri, "api/auth/fetch_completed_stream.php", "MolaGPT 完成流拉取");
 
-        var body = new { session_id = sessionId, cleanup = true };
+        var body = new { session_id = sessionId, cleanup };
         using var req = new HttpRequestMessage(HttpMethod.Post, url)
         {
             Content = JsonContent.Create(body)
@@ -1367,165 +1070,117 @@ public sealed class MolaGptProxyProvider : IChatProvider
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
 
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
-        if (!resp.IsSuccessStatusCode) return null;
+        if (!resp.IsSuccessStatusCode)
+        {
+            if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Conflict
+                && await ChatApiErrorHelper.ReadAccountHttpErrorAsync(resp, ct).ConfigureAwait(false) is { } failure)
+                return new CompletedStreamData(string.Empty, null, Error: failure);
+            return null;
+        }
 
-        using var doc = await JsonDocument.ParseAsync(
-            await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false), cancellationToken: ct).ConfigureAwait(false);
-
+        await using var responseStream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var doc = await JsonDocument.ParseAsync(responseStream, cancellationToken: ct).ConfigureAwait(false);
         var root = doc.RootElement;
-        if (!root.TryGetProperty("success", out var success) || !success.GetBoolean())
+        if (ChatApiErrorHelper.ReadBusinessError(root) is { } error)
+            return new CompletedStreamData(string.Empty, null, Error: error);
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("success", out var success)
+            || success.ValueKind != JsonValueKind.True)
             return null;
 
-        var text = root.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String
-            ? c.GetString() ?? string.Empty
-            : string.Empty;
-
-        List<SourceReference>? sources = null;
-        if (root.TryGetProperty("sources", out var srcNode) && srcNode.ValueKind == JsonValueKind.Array)
-        {
-            sources = new List<SourceReference>();
-            var fallbackId = 1;
-            foreach (var item in srcNode.EnumerateArray())
-            {
-                if (item.ValueKind != JsonValueKind.Object) continue;
-                var id = TryGetInt(item, "id") ?? fallbackId;
-                var title = item.TryGetProperty("title", out var tn) && tn.ValueKind == JsonValueKind.String
-                    ? tn.GetString() ?? string.Empty : string.Empty;
-                var srcUrl = item.TryGetProperty("url", out var un) && un.ValueKind == JsonValueKind.String
-                    ? un.GetString() ?? string.Empty : string.Empty;
-                sources.Add(new SourceReference(id, title, srcUrl));
-                fallbackId++;
-            }
-        }
-
-        var runStatus = root.TryGetProperty("run_status", out var statusNode) ? statusNode.GetString() : null;
+        var text = MolaGptStreamDecoder.ReadString(root, "content") ?? string.Empty;
+        var sources = MolaGptStreamDecoder.ReadSources(root, "sources");
+        var runStatus = MolaGptStreamDecoder.ReadString(root, "run_status");
         var terminalError = runStatus switch
         {
-            "lost" => new ChatRequestError("interrupted", "网络中断，回答没有完成。", Retryable: true),
+            "lost" => InterruptedStream(),
             "error" => new ChatRequestError("server_error", "请求暂时无法完成，请稍后重试。", Retryable: true),
+            "stopped" => new ChatRequestError("stream_stopped", "回答已停止。"),
             _ => null
         };
-        if (root.TryGetProperty("raw_sse", out var rawNode)
-            && rawNode.ValueKind == JsonValueKind.String)
+        if (MolaGptStreamDecoder.ReadString(root, "raw_sse") is { Length: > 0 } raw)
         {
-            var parsed = await ParseCompletedRawSseAsync(rawNode.GetString() ?? string.Empty, sources, ct)
-                .ConfigureAwait(false);
-            return parsed with { Text = string.IsNullOrEmpty(parsed.Text) ? text : parsed.Text, Error = parsed.Error ?? terminalError };
+            var parsed = await ParseCompletedRawSseAsync(raw, sources, ct).ConfigureAwait(false);
+            return parsed with
+            {
+                Text = string.IsNullOrEmpty(parsed.Text) ? text : parsed.Text,
+                Error = parsed.Error ?? terminalError
+                    ?? (parsed.FinishReason is null && runStatus != "completed" ? InterruptedStream() : null)
+            };
         }
 
-        return new CompletedStreamData(text, sources, Error: terminalError);
+        terminalError ??= ChatApiErrorHelper.ReadLegacySharedQuota(text);
+        return new CompletedStreamData(ChatApiErrorHelper.WithoutSharedQuotaTail(text, terminalError), sources, Error: terminalError);
     }
+
+    private static ChatRequestError InterruptedStream() =>
+        new("interrupted", "网络中断，回答没有完成。", Retryable: true);
 
     private static async Task<CompletedStreamData> ParseCompletedRawSseAsync(
         string rawSse,
-        IReadOnlyList<SourceReference>? fallbackSources,
+        IReadOnlyList<SourceReference>? sources,
         CancellationToken ct)
     {
         var text = new StringBuilder();
-        IReadOnlyList<SourceReference>? sources = fallbackSources;
-        JsonObject? subagentBatches = null;
+        var thinking = new StringBuilder();
+        var segments = new List<RecoveredThinkingSegment>();
+        var tools = new Dictionary<string, ToolCallDelta>(StringComparer.Ordinal);
+        var sequence = 0;
+        JsonObject? subagents = null;
+        Usage? usage = null;
+        string? finishReason = null;
         ChatRequestError? error = null;
-        await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(rawSse));
-        var thinkSplitter = new InlineThinkSplitter();
-        var toolSynthesizer = new ToolCallContentSynthesizer();
-        var responseMapper = new ResponseStreamEventMapper();
 
-        await foreach (var ev in SseStreamReader.ReadAsync(stream, ct).ConfigureAwait(false))
+        void FinishThinking()
         {
-            if (ev.IsDone)
-            {
-                AppendVisibleText(text, toolSynthesizer.FinalizeOpenBlocks());
-                var tail = thinkSplitter.Flush();
-                AppendVisibleText(text, tail.Visible);
-                break;
-            }
-
-            if (string.IsNullOrEmpty(ev.Data)) continue;
-
-            try
-            {
-                using var doc = JsonDocument.Parse(ev.Data);
-                var root = doc.RootElement;
-                if (ChatApiErrorHelper.ReadBusinessError(root, ev.EventName) is { } failure)
-                {
-                    error = failure;
-                    break;
-                }
-                if (root.TryGetProperty("molagpt_subagents", out var frame))
-                {
-                    subagentBatches = ServerSubagents.Merge(subagentBatches, JsonNode.Parse(frame.GetRawText())!.AsObject());
-                    continue;
-                }
-                if (TryParseSources(root, out var parsedSources))
-                {
-                    sources = parsedSources;
-                    continue;
-                }
-
-                if (responseMapper.TryMap(root, out var responseText, out _))
-                {
-                    if (!string.IsNullOrEmpty(responseText))
-                    {
-                        var split = thinkSplitter.Feed(responseText);
-                        AppendVisibleText(text, split.Visible);
-                    }
-                    continue;
-                }
-
-                if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
-                    continue;
-
-                var choice = choices[0];
-                if (!choice.TryGetProperty("delta", out var delta) || delta.ValueKind != JsonValueKind.Object)
-                    continue;
-
-                var toolText = toolSynthesizer.HandleToolCalls(delta);
-                if (toolText is not null)
-                {
-                    AppendVisibleText(text, toolText);
-                    continue;
-                }
-
-                var visible = ExtractContentText(delta);
-                var finish = choice.TryGetProperty("finish_reason", out var f) && f.ValueKind == JsonValueKind.String
-                    ? f.GetString()
-                    : null;
-                var finalizeToolUi = finish == "tool_calls" || (toolSynthesizer.HasOpenBlocks && !string.IsNullOrEmpty(visible));
-                if (finalizeToolUi)
-                {
-                    var toolTail = toolSynthesizer.FinalizeOpenBlocks();
-                    if (!string.IsNullOrEmpty(toolTail))
-                        visible = string.IsNullOrEmpty(visible) ? toolTail : toolTail + visible;
-                }
-
-                if (!string.IsNullOrEmpty(visible))
-                {
-                    var split = thinkSplitter.Feed(visible);
-                    AppendVisibleText(text, split.Visible);
-                }
-            }
-            catch (JsonException) { }
+            if (thinking.Length == 0) return;
+            segments.Add(new RecoveredThinkingSegment(thinking.ToString(), text.Length, sequence++));
+            thinking.Clear();
         }
 
-        AppendVisibleText(text, toolSynthesizer.FinalizeOpenBlocks());
-        var finalTail = thinkSplitter.Flush();
-        AppendVisibleText(text, finalTail.Visible);
+        await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(rawSse));
+        try
+        {
+            await foreach (var chunk in new MolaGptStreamDecoder().ReadAsync(stream, ct).ConfigureAwait(false))
+            {
+                if (chunk.Tool is { } tool)
+                {
+                    if (tools.TryGetValue(tool.Id, out var previous))
+                        tools[tool.Id] = tool with { ContentOffset = previous.ContentOffset, TimelineIndex = previous.TimelineIndex };
+                    else
+                    {
+                        FinishThinking();
+                        tools.Add(tool.Id, tool with { ContentOffset = text.Length, TimelineIndex = sequence++ });
+                    }
+                }
+                thinking.Append(chunk.DeltaThinking);
+                if (chunk.DeltaText is { Length: > 0 } visible)
+                {
+                    FinishThinking();
+                    text.Append(visible);
+                }
+                if (chunk.Subagents is { } frame)
+                    subagents = ServerSubagents.Merge(subagents, frame);
+                sources = chunk.Sources ?? sources;
+                usage = chunk.Usage ?? usage;
+                finishReason = chunk.FinishReason ?? finishReason;
+            }
+        }
+        catch (ChatRequestException failure) { error = failure.Error; }
+
+        FinishThinking();
         var content = text.ToString();
         error ??= ChatApiErrorHelper.ReadLegacySharedQuota(content);
         return new CompletedStreamData(ChatApiErrorHelper.WithoutSharedQuotaTail(content, error), sources,
-            ServerSubagents.Finish(subagentBatches), error);
-    }
-
-    private static void AppendVisibleText(StringBuilder builder, string? value)
-    {
-        if (!string.IsNullOrEmpty(value))
-            builder.Append(value);
+            ServerSubagents.Finish(subagents), error, segments, usage, finishReason, tools.Values.ToArray());
     }
 }
 
 public sealed record StreamSessionStatus(string Status, int ChunksCount, long TotalBytes);
+public sealed record RecoveredThinkingSegment(string Text, int ContentOffset, int TimelineIndex);
 public sealed record CompletedStreamData(string Text, IReadOnlyList<SourceReference>? Sources,
-    JsonObject? Subagents = null, ChatRequestError? Error = null);
+    JsonObject? Subagents = null, ChatRequestError? Error = null,
+    IReadOnlyList<RecoveredThinkingSegment>? Thinking = null, Usage? Usage = null, string? FinishReason = null,
+    IReadOnlyList<ToolCallDelta>? ToolCalls = null);
 public sealed record MolaGptPreparedAttachments(IReadOnlyList<Attachment> Attachments, string? SystemHint);
 internal sealed record MolaGptUploadResult(string FileName, string? Url, string FilePathOnHost);
 internal sealed record MolaGptSandboxEntry(string TypeLabel, string FileName, string SandboxPath, string? Url);
@@ -1549,7 +1204,10 @@ public sealed record MolaGptStatus(
     AccountMembership? Membership = null,
     string? SecurityStatus = null,
     string? WorkSecurityStatus = null,
-    bool CanResumeWork = false);
+    bool CanResumeWork = false,
+    // Null until the server announces user-API access for the account; the API-key
+    // entry points stay hidden instead of guessing at availability.
+    string? ApiAccessState = null);
 
 public sealed record MolaGptModelLimit(
     string DisplayName,

@@ -18,15 +18,9 @@ public partial class BrowserSetupWindow : MolaContentWindow
     /// <summary>True when the user closed with 「完成并检测」.</summary>
     public bool CheckRequested { get; private set; }
 
-    public BrowserSetupWindow() : this(null) { }
-
-    public BrowserSetupWindow(BrowserBridgeStatusViewModel? status)
+    public BrowserSetupWindow()
     {
         InitializeComponent();
-
-        // Shares the settings page's view model when there is one, so an install
-        // run here updates the connection card behind it.
-        DataContext = status ?? new BrowserBridgeStatusViewModel(new WebBridgeClient(new HttpClient()));
 
         PART_OpenChromeStore.Click += (_, _) => Open(BrowserBridgeStatusViewModel.ChromeStoreUrl);
         PART_OpenEdgeStore.Click += (_, _) => Open(BrowserBridgeStatusViewModel.EdgeStoreUrl);

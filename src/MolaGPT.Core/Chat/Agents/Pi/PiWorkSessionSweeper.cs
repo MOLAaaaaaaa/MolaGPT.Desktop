@@ -41,23 +41,20 @@ public sealed class PiWorkSessionSweeper
     /// is the safe direction to err in.
     /// </remarks>
     public int Sweep(IReadOnlyCollection<string> liveConversationIds,
-        IReadOnlyCollection<string>? liveSubagentKeys = null, DateTime? cutoff = null,
+        IReadOnlyCollection<string> liveSubagentKeys, DateTime cutoff,
         CancellationToken ct = default)
     {
-        // An empty set almost certainly means "could not read the database", not
-        // "the user has no conversations". Deleting everything on that reading
-        // would be unrecoverable, so do nothing instead.
-        if (liveConversationIds.Count == 0) return 0;
-        if (!Directory.Exists(_sessionRoot)) return 0;
+        if (!Directory.Exists(_sessionRoot) || File.GetAttributes(_sessionRoot).HasFlag(FileAttributes.ReparsePoint)) return 0;
 
         var live = liveConversationIds
-            .Concat(liveSubagentKeys ?? [])
+            .Concat(liveSubagentKeys)
             .Where(id => !string.IsNullOrWhiteSpace(id))
             .Select(PiWorkProvider.SanitizeSessionId)
             .ToArray();
 
         var removed = 0;
-        foreach (var file in Directory.EnumerateFiles(_sessionRoot, "*.jsonl", SearchOption.AllDirectories))
+        var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
+        foreach (var file in Directory.EnumerateFiles(_sessionRoot, "*.jsonl", options))
         {
             if (ct.IsCancellationRequested) break;
             var name = Path.GetFileNameWithoutExtension(file);
@@ -65,8 +62,7 @@ public sealed class PiWorkSessionSweeper
 
             try
             {
-                if (cutoff is { } time
-                    && (File.GetCreationTimeUtc(file) >= time || File.GetLastWriteTimeUtc(file) >= time))
+                if (File.GetCreationTimeUtc(file) >= cutoff || File.GetLastWriteTimeUtc(file) >= cutoff)
                     continue;
                 File.Delete(file);
                 removed++;

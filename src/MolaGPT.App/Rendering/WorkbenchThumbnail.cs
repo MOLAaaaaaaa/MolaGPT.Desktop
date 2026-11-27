@@ -13,6 +13,8 @@ public sealed class WorkbenchThumbnail : Image
         AvaloniaProperty.Register<WorkbenchThumbnail, string?>(nameof(ImagePath));
     public static readonly StyledProperty<PixelSize> ImageSizeProperty =
         AvaloniaProperty.Register<WorkbenchThumbnail, PixelSize>(nameof(ImageSize));
+    public static readonly StyledProperty<Func<byte[]>?> FallbackBytesProperty =
+        AvaloniaProperty.Register<WorkbenchThumbnail, Func<byte[]>?>(nameof(FallbackBytes));
 
     private static readonly SemaphoreSlim DecodeGate = new(1, 1);
     private readonly List<Visual> _ancestors = [];
@@ -31,6 +33,12 @@ public sealed class WorkbenchThumbnail : Image
     {
         get => GetValue(ImageSizeProperty);
         set => SetValue(ImageSizeProperty, value);
+    }
+
+    public Func<byte[]>? FallbackBytes
+    {
+        get => GetValue(FallbackBytesProperty);
+        set => SetValue(FallbackBytesProperty, value);
     }
 
     static WorkbenchThumbnail() => AffectsMeasure<WorkbenchThumbnail>(ImageSizeProperty);
@@ -69,8 +77,8 @@ public sealed class WorkbenchThumbnail : Image
     protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
     {
         base.OnPropertyChanged(change);
-        if (change.Property == ImagePathProperty) ReleaseBitmap();
-        if (change.Property == ImagePathProperty || change.Property == BoundsProperty
+        if (change.Property == ImagePathProperty || change.Property == FallbackBytesProperty) ReleaseBitmap();
+        if (change.Property == ImagePathProperty || change.Property == FallbackBytesProperty || change.Property == BoundsProperty
             || change.Property == IsVisibleProperty) UpdateLoading();
     }
 
@@ -101,11 +109,13 @@ public sealed class WorkbenchThumbnail : Image
             ReleaseBitmap();
             return;
         }
-        if (_bitmap is null && _load is null && ImagePath is { Length: > 0 } path)
-            _ = LoadAsync(path);
+        var path = ImagePath;
+        var fallback = FallbackBytes;
+        if (_bitmap is null && _load is null && (path is { Length: > 0 } || fallback is not null))
+            _ = LoadAsync(path, fallback);
     }
 
-    private async Task LoadAsync(string path)
+    private async Task LoadAsync(string? path, Func<byte[]>? fallback)
     {
         var load = new CancellationTokenSource();
         _load = load;
@@ -115,10 +125,10 @@ public sealed class WorkbenchThumbnail : Image
             await DecodeGate.WaitAsync(load.Token);
             try
             {
-                bitmap = await Task.Run(() =>
+                bitmap = await Task.Run(async () =>
                 {
-                    using var stream = File.OpenRead(path);
-                    return Bitmap.DecodeToWidth(stream, 640);
+                    var bytes = path is null ? fallback!() : await ImageSourceLoader.ReadFileAsync(path, load.Token);
+                    return ImageSourceLoader.Decode(bytes, 640);
                 }, load.Token);
             }
             finally { DecodeGate.Release(); }

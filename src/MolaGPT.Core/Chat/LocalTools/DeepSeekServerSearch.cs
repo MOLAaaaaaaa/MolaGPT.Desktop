@@ -62,7 +62,7 @@ public static class BuiltinWebSearch
         if (host == "api.deepseek.com") return BuiltinSearchVendor.DeepSeek;
         if (host == "api.openai.com") return BuiltinSearchVendor.OpenAi;
         if (host == "api.anthropic.com") return BuiltinSearchVendor.Anthropic;
-        if (host == "generativelanguage.googleapis.com") return BuiltinSearchVendor.Gemini;
+        if (host == GeminiModelPolicy.ApiHost) return BuiltinSearchVendor.Gemini;
         if (host is "dashscope.aliyuncs.com" or "dashscope-intl.aliyuncs.com" or "dashscope-us.aliyuncs.com"
             || host.EndsWith(".maas.aliyuncs.com", StringComparison.Ordinal))
         {

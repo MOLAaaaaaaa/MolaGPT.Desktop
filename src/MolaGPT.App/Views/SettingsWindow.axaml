@@ -7,7 +7,7 @@
         xmlns:agents="clr-namespace:MolaGPT.ViewModels.Agents;assembly=MolaGPT.ViewModels"
         xmlns:dto="clr-namespace:MolaGPT.Core.Chat.Agents;assembly=MolaGPT.Core"
         xmlns:relay="clr-namespace:MolaGPT.Core.Chat.Agents.Relay;assembly=MolaGPT.Core"
-        xmlns:remote="clr-namespace:MolaGPT.Desktop.Services.Remote;assembly=MolaGPT.Services"
+        xmlns:remote="clr-namespace:MolaGPT.App.Remote"
         xmlns:repo="clr-namespace:MolaGPT.Storage.Repositories;assembly=MolaGPT.Storage"
         x:Class="MolaGPT.App.Views.SettingsWindow"
         x:DataType="vm:SettingsViewModel"
@@ -1210,6 +1210,8 @@
                             <ComboBoxItem Content="Gemini Level" />
                             <ComboBoxItem Content="Gemini Budget" />
                             <ComboBoxItem Content="Qwen Budget" />
+                            <ComboBoxItem Content="Qwen Effort" />
+                            <ComboBoxItem Content="Kimi Toggle" />
                           </ComboBox>
                         </StackPanel>
                         <Grid ColumnDefinitions="*,10,*" IsEnabled="{Binding Thinking}"
@@ -2298,7 +2300,7 @@
                           Height="30" MinHeight="30" Width="170"
                           VerticalAlignment="Center" IsVisible="False">
                   <ComboBox.ItemTemplate>
-                    <DataTemplate x:DataType="vm:ProviderEntry">
+                    <DataTemplate x:DataType="m:ProviderEntry">
                       <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"
                                  ToolTip.Tip="{Binding Name}" />
                     </DataTemplate>
@@ -2327,7 +2329,7 @@
                                 Height="28" MinHeight="28" HorizontalAlignment="Stretch"
                                 VerticalAlignment="Center" IsVisible="False">
                         <ComboBox.ItemTemplate>
-                          <DataTemplate x:DataType="vm:ProviderEntry">
+                          <DataTemplate x:DataType="m:ProviderEntry">
                             <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"
                                        ToolTip.Tip="{Binding Name}" />
                           </DataTemplate>
@@ -3206,6 +3208,16 @@
                            Foreground="{DynamicResource Brush.Text.Secondary}"
                            VerticalAlignment="Center" />
                 <TextBlock Text="账户与安全" VerticalAlignment="Center" />
+              </StackPanel>
+            </Button>
+            <Button Name="PART_AccountApiKeys" Classes="outline"
+                    Padding="12,6" VerticalAlignment="Center" IsVisible="False"
+                    ToolTip.Tip="在浏览器中管理 API 密钥">
+              <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                <TextBlock Classes="icon" Text="&#xE8D7;" FontSize="12"
+                           Foreground="{DynamicResource Brush.Text.Secondary}"
+                           VerticalAlignment="Center" />
+                <TextBlock Text="API 密钥" VerticalAlignment="Center" />
               </StackPanel>
             </Button>
             <Button Name="PART_Logout" Classes="outline danger" Content="退出登录"

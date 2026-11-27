@@ -6,6 +6,7 @@ using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.LocalTools;
+using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Models;
@@ -108,9 +109,6 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// toggle button). The host listens to apply token dictionaries.
     /// </summary>
     public event EventHandler<ThemeMode>? ThemeModeChanged;
-
-    [ObservableProperty] private string? _molaGptUsername;
-    [ObservableProperty] private bool _isLoggedIn;
 
     /// <summary>
     /// Visibility of account entry points on the main window.
@@ -299,14 +297,14 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// has only a forward BooleanToVisibility converter to work with.</summary>
     public bool HasNoAlwaysAllowedTools => AlwaysAllowedTools.Count == 0;
 
-    public ObservableCollection<ProviderEntry> Providers { get; } = new();
+    public IReadOnlyList<ProviderEntry> Providers { get; private set; } = [];
+    public event EventHandler? ProviderConfigurationsChanged;
     public ObservableCollection<McpServerEntry> McpServers { get; } = new();
     public ObservableCollection<TitleProviderModelOption> TitleProviderModels { get; } = new();
     public ObservableCollection<TitleProviderModelOption> SubagentProviderModels { get; } = new();
     public ObservableCollection<VisionProviderModelOption> VisionProviderModels { get; } = new();
     public ObservableCollection<ImageGenerationProviderModelOption> ImageGenerationProviderModels { get; } = new();
 
-    private readonly ProviderRepository? _repo;
     private readonly CredentialStore? _credentialStore;
     private readonly SettingsRepository? _settingsRepo;
     private readonly ProviderRegistry? _providerRegistry;
@@ -322,13 +320,14 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public SettingsViewModel() { }
 
-    public SettingsViewModel(ProviderRepository? repo, CredentialStore? credentialStore,
-        SettingsRepository? settingsRepo = null, ProviderRegistry? providerRegistry = null)
+    public SettingsViewModel(CredentialStore? credentialStore,
+        SettingsRepository? settingsRepo = null, ProviderRegistry? providerRegistry = null,
+        MolaGptProxyProvider? accountProvider = null)
     {
-        _repo = repo;
         _credentialStore = credentialStore;
         _settingsRepo = settingsRepo;
         _providerRegistry = providerRegistry;
+        _accountProvider = accountProvider;
         if (providerRegistry is not null)
         {
             // Providers register after this view model exists (agent runtime, sign-in),
@@ -337,50 +336,61 @@ public sealed partial class SettingsViewModel : ObservableObject
             var ui = SynchronizationContext.Current;
             providerRegistry.Changed += (_, _) =>
             {
-                if (ui is null || SynchronizationContext.Current == ui) { RefreshReviewProviderModels(); RefreshSelectionModels(); }
-                else ui.Post(_ => { RefreshReviewProviderModels(); RefreshSelectionModels(); }, null);
+                if (ui is null || SynchronizationContext.Current == ui) RefreshRuntimeProviderModels();
+                else ui.Post(_ => RefreshRuntimeProviderModels(), null);
             };
         }
-        Reload();
+        ReloadSettings();
         PropertyChanged += PersistSelectionSetting;
     }
 
     public void Reload()
     {
+        ReloadSettings();
+        RefreshProviderConfigurations();
+    }
+
+    private void ReloadSettings()
+    {
         LoadSettings();
         ReloadToolGrants();
-        Providers.Clear();
-        if (_repo is null) return;
-        foreach (var row in _repo.List())
-        {
-            string? plainKey = null;
-            if (row.ApiKeyEnc is { Length: > 0 } && _credentialStore is not null)
-                plainKey = _credentialStore.Decrypt(row.ApiKeyEnc);
-            var models = TryDeserializeModels(row.Models);
-            var customHeaders = TryDeserializeHeaders(row.CustomHeaders is { } headers && _credentialStore is not null
-                ? _credentialStore.DecryptText(headers) : row.CustomHeaders);
-            var entry = new ProviderEntry(row.Id, row.Type, row.Name, row.BaseUrl, plainKey, models, row.Enabled, row.SortOrder, row.Purpose, row.ApiPath, row.ImageEditPath, row.ImageFormat, customHeaders, row.ImageChatPath, row.BuiltinSearch);
-            if (IsImagePurpose(entry.Purpose) && entry.ImageChatPath is null)
-            {
-                var legacyChat = ImageApiFormat.IsChatImage(entry.ImageFormat)
-                    || entry.Type == "gemini" && entry.ApiPath?.Contains(":generateContent", StringComparison.OrdinalIgnoreCase) == true;
-                entry = entry with
-                {
-                    ImageChatPath = legacyChat ? entry.ApiPath ?? ImageApiFormat.DefaultChatPath(entry.Type) : ImageApiFormat.DefaultChatPath(entry.Type),
-                    ApiPath = legacyChat ? ImageApiFormat.DefaultImagesPath(entry.Type, entry.BaseUrl) : entry.ApiPath,
-                    ImageFormat = legacyChat ? ImageApiFormat.OpenAiChatImage : entry.ImageFormat
-                };
-            }
-            Providers.Add(entry);
-        }
-        RefreshTitleProviderModels();
+        RefreshRuntimeProviderModels();
+    }
+
+    public void SetProviderEntries(IReadOnlyList<ProviderEntry> entries) => Providers = entries;
+
+    private void RefreshRuntimeProviderModels()
+    {
         RefreshSubagentProviderModels();
         RefreshReviewProviderModels();
         RefreshSelectionModels();
+    }
+
+    public void RefreshProviderConfigurations(string? deletedId = null, bool enableImageGeneration = false)
+    {
+        if (enableImageGeneration) ImageGenerationEnabled = true;
+        RefreshTitleProviderModels();
         RefreshMemoryProviderModels();
         RefreshVisionProviderModels();
         RefreshImageGenerationProviderModels();
-        RaiseSearchConfigurationChanged();
+
+        if (deletedId is not null && ImageGenerationProviderId == deletedId)
+        {
+            ImageGenerationProviderId = null;
+            ImageGenerationModelId = null;
+        }
+        if (deletedId is not null && WorkbenchImageGenerationProviderId == deletedId)
+        {
+            WorkbenchImageGenerationProviderId = null;
+            WorkbenchImageGenerationModelId = null;
+        }
+        if (deletedId is not null && DeepSeekSearchLinkedProviderId == deletedId)
+            DeepSeekSearchLinkedProviderId = null;
+        else
+            RaiseSearchConfigurationChanged();
+        OnPropertyChanged(nameof(IsImageGenerationConfigured));
+        OnPropertyChanged(nameof(IsWorkbenchImageGenerationConfigured));
+        ProviderConfigurationsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private void LoadSettings()
@@ -890,7 +900,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public IReadOnlyList<ProviderEntry> GetOfficialDeepSeekProviders() =>
         Providers
-            .Where(entry => !IsImagePurpose(entry.Purpose)
+            .Where(entry => !ProviderPurpose.IsImage(entry.Purpose)
                             && !string.IsNullOrWhiteSpace(entry.ApiKey)
                             && BuiltinWebSearch.DetectVendor(entry.BaseUrl) == BuiltinSearchVendor.DeepSeek)
             .ToArray();
@@ -1269,64 +1279,6 @@ public sealed partial class SettingsViewModel : ObservableObject
             _ => string.Empty
         };
 
-    public void Save(ProviderEntry entry)
-    {
-        if (_repo is null) return;
-        byte[]? cipher = null;
-        if (!string.IsNullOrEmpty(entry.ApiKey) && _credentialStore is not null)
-            cipher = _credentialStore.Encrypt(entry.ApiKey);
-
-        _repo.Upsert(new MolaGPT.Storage.ProviderRow(
-            Id: entry.Id,
-            Type: entry.Type,
-            Name: entry.Name,
-            BaseUrl: entry.BaseUrl,
-            ApiKeyEnc: cipher,
-            Models: JsonSerializer.Serialize(entry.Models),
-            Enabled: entry.Enabled,
-            SortOrder: entry.SortOrder,
-            Purpose: entry.Purpose,
-            ApiPath: entry.ApiPath,
-            ImageEditPath: entry.ImageEditPath,
-            ImageFormat: entry.ImageFormat,
-            CustomHeaders: entry.CustomHeaders is { Count: > 0 }
-                ? (_credentialStore ?? throw new InvalidOperationException("凭据存储不可用。"))
-                    .EncryptText(JsonSerializer.Serialize(entry.CustomHeaders))
-                : null,
-            ImageChatPath: entry.ImageChatPath,
-            BuiltinSearch: entry.BuiltinSearch));
-        RefreshVisionProviderModels();
-        RefreshTitleProviderModels();
-        RefreshSubagentProviderModels();
-        RefreshReviewProviderModels();
-        RefreshSelectionModels();
-        RefreshMemoryProviderModels();
-        RefreshImageGenerationProviderModels();
-        RaiseSearchConfigurationChanged();
-
-        if (string.Equals(entry.Purpose, "image", StringComparison.OrdinalIgnoreCase))
-        {
-            ImageGenerationEnabled = true;
-            // Only adopt the saved service when nothing is selected yet (e.g. the
-            // first image provider). Editing an existing image provider must not
-            // steal the current pick away from another one in multi-provider setups.
-            if (string.IsNullOrWhiteSpace(ImageGenerationProviderId))
-            {
-                ImageGenerationProviderId = entry.Id;
-                var firstModel = entry.Models.FirstOrDefault()?.Id;
-                if (!string.IsNullOrWhiteSpace(firstModel))
-                {
-                    ImageGenerationModelId = firstModel;
-                    if (string.IsNullOrWhiteSpace(WorkbenchImageGenerationProviderId))
-                    {
-                        WorkbenchImageGenerationProviderId = entry.Id;
-                        WorkbenchImageGenerationModelId = firstModel;
-                    }
-                }
-            }
-        }
-    }
-
     public void UpsertMcpServer(McpServerEntry entry)
     {
         var existing = McpServers.FirstOrDefault(s => s.Id == entry.Id);
@@ -1419,34 +1371,6 @@ public sealed partial class SettingsViewModel : ObservableObject
             string.Equals(m.ProviderId, WorkbenchImageGenerationProviderId, StringComparison.Ordinal)
             && string.Equals(m.ModelId, WorkbenchImageGenerationModelId, StringComparison.Ordinal));
 
-    public string? ImageGenerationBaseUrl
-    {
-        get => GetImageGenerationProvider()?.BaseUrl;
-        set
-        {
-            var provider = GetImageGenerationProvider();
-            if (provider is null) return;
-            Save(provider with { BaseUrl = string.IsNullOrWhiteSpace(value) ? null : value.Trim() });
-        }
-    }
-
-    public string? ImageGenerationApiKey
-    {
-        get => GetImageGenerationProvider()?.ApiKey;
-        set
-        {
-            var provider = GetImageGenerationProvider();
-            if (provider is null) return;
-            Save(provider with { ApiKey = string.IsNullOrWhiteSpace(value) ? null : value.Trim() });
-        }
-    }
-
-    public string? ImageGenerationModel
-    {
-        get => ImageGenerationModelId;
-        set => ImageGenerationModelId = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-    }
-
     public bool IsImageGenerationConfigured =>
         ImageGenerationEnabled
         && !string.IsNullOrWhiteSpace(ImageGenerationProviderId)
@@ -1524,7 +1448,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         var followCurrent = new TitleProviderModelOption(null, null, "跟随当前对话模型");
         TitleProviderModels.Add(followCurrent);
 
-        foreach (var provider in Providers.Where(p => p.Enabled && !IsImagePurpose(p.Purpose)))
+        foreach (var provider in Providers.Where(p => p.Enabled && !ProviderPurpose.IsImage(p.Purpose)))
         {
             foreach (var model in provider.Models)
             {
@@ -1599,7 +1523,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     public void RefreshImageGenerationProviderModels()
     {
         ImageGenerationProviderModels.Clear();
-        foreach (var provider in Providers.Where(p => p.Enabled && IsImagePurpose(p.Purpose)))
+        foreach (var provider in Providers.Where(p => p.Enabled && ProviderPurpose.IsImage(p.Purpose)))
         {
             foreach (var model in provider.Models)
             {
@@ -1628,15 +1552,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         Providers.FirstOrDefault(p =>
             string.Equals(p.Id, providerId, StringComparison.Ordinal)
             && p.Enabled
-            && IsImagePurpose(p.Purpose));
-
-    public void RefreshImageGenerationSelection()
-    {
-        if (ImageGenerationProviderModels.Count == 0) return;
-
-        EnsureImageGenerationSelection();
-        EnsureWorkbenchImageGenerationSelection();
-    }
+            && ProviderPurpose.IsImage(p.Purpose));
 
     private void EnsureImageGenerationSelection()
     {
@@ -1663,52 +1579,6 @@ public sealed partial class SettingsViewModel : ObservableObject
                 WorkbenchImageGenerationModelId = first.ModelId;
         }
     }
-
-    public void Delete(string id)
-    {
-        if (_repo is null) return;
-        _repo.Delete(id);
-        var existing = Providers.FirstOrDefault(p => p.Id == id);
-        if (existing is not null) Providers.Remove(existing);
-        RefreshTitleProviderModels();
-        RefreshSubagentProviderModels();
-        RefreshReviewProviderModels();
-        RefreshSelectionModels();
-        RefreshMemoryProviderModels();
-        RefreshImageGenerationProviderModels();
-
-        if (string.Equals(ImageGenerationProviderId, id, StringComparison.Ordinal))
-        {
-            ImageGenerationProviderId = null;
-            ImageGenerationModelId = null;
-        }
-        if (string.Equals(WorkbenchImageGenerationProviderId, id, StringComparison.Ordinal))
-        {
-            WorkbenchImageGenerationProviderId = null;
-            WorkbenchImageGenerationModelId = null;
-        }
-        if (string.Equals(DeepSeekSearchLinkedProviderId, id, StringComparison.Ordinal))
-            DeepSeekSearchLinkedProviderId = null;
-        else
-            RaiseSearchConfigurationChanged();
-    }
-
-    private static List<ProviderModelEntry> TryDeserializeModels(string json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return new();
-        try { return JsonSerializer.Deserialize<List<ProviderModelEntry>>(json) ?? new(); }
-        catch (JsonException) { return new(); }
-    }
-
-    private static List<CustomHeaderEntry>? TryDeserializeHeaders(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return null;
-        try { return JsonSerializer.Deserialize<List<CustomHeaderEntry>>(json); }
-        catch (JsonException) { return null; }
-    }
-
-    public static bool IsImagePurpose(string? purpose) =>
-        string.Equals(purpose, "image", StringComparison.OrdinalIgnoreCase);
 
     // ---- Standing tool grants ("始终允许") --------------------------------
 
@@ -1756,120 +1626,6 @@ public enum TrayCloseBehavior
     Ask,
     MinimizeToTray,
     Exit
-}
-
-public sealed record ProviderEntry(
-    string Id,
-    string Type,                                           // 协议族: openai-compat|anthropic|gemini
-    string Name,
-    string? BaseUrl,
-    string? ApiKey,
-    List<ProviderModelEntry> Models,
-    bool Enabled,
-    int SortOrder,
-    string Purpose = "chat",                               // 用途: chat|image
-    string? ApiPath = null,                                // chat: 对话路径; image: 生成路径 (含版本段)
-    string? ImageEditPath = null,                          // image(openai-images): 编辑路径
-    string? ImageFormat = null,                            // image: openai-images|openai-chat-image
-    List<CustomHeaderEntry>? CustomHeaders = null,
-    string? ImageChatPath = null,
-    bool BuiltinSearch = false);
-
-public sealed record ProviderModelEntry(
-    string Id,
-    string DisplayName,
-    bool Vision = false,
-    int? ContextWindow = null,
-    bool Thinking = false,
-    bool ReasoningEffort = false,
-    bool Tools = false,
-    string? ThinkingParamKind = null,
-    int? ThinkingBudgetMin = null,
-    int? ThinkingBudgetMax = null,
-    int? ThinkingBudgetDefault = null,
-    string? DefaultEffort = null,
-    bool ImageEdit = false,
-    List<CustomBodyEntry>? CustomBody = null,
-    List<string>? EffortLevels = null,
-    /// <summary>The provider declares this model always reasons (OpenRouter's
-    /// <c>reasoning.mandatory</c>). No disable parameter may be sent.</summary>
-    bool ReasoningMandatory = false,
-    bool SupportsTemperature = true,
-    bool SupportsTopP = true,
-    ModelPricing? Pricing = null,
-    string? ImageFormat = null,
-    bool? BuiltinSearch = null);
-
-/// <summary>A user-defined HTTP header appended to a BYOK provider's requests.</summary>
-public sealed record CustomHeaderEntry(string Name = "", string Value = "");
-
-/// <summary>A user-defined request-body override for a BYOK model. <see cref="Type"/>
-/// is one of string|number|boolean|json and controls how <see cref="Value"/> is parsed.</summary>
-public sealed record CustomBodyEntry(string Key = "", string Type = "string", string Value = "");
-
-/// <summary>Converts persisted <see cref="CustomBodyEntry"/>/<see cref="CustomHeaderEntry"/>
-/// lists into the runtime forms the providers consume.</summary>
-public static class CustomParamConverter
-{
-    public static IReadOnlyDictionary<string, System.Text.Json.JsonElement>? ToBodyDict(IReadOnlyList<CustomBodyEntry>? entries)
-    {
-        if (entries is null || entries.Count == 0) return null;
-        var dict = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.Ordinal);
-        foreach (var e in entries)
-        {
-            if (string.IsNullOrWhiteSpace(e.Key)) continue;
-            dict[e.Key.Trim()] = ConvertValue(e.Type, e.Value);
-        }
-        return dict.Count == 0 ? null : dict;
-    }
-
-    public static IReadOnlyList<KeyValuePair<string, string>>? ToHeaderList(IReadOnlyList<CustomHeaderEntry>? entries)
-    {
-        if (entries is null || entries.Count == 0) return null;
-        var list = entries
-            .Where(h => !string.IsNullOrWhiteSpace(h.Name))
-            .Select(h => new KeyValuePair<string, string>(h.Name.Trim(), h.Value ?? string.Empty))
-            .ToList();
-        return list.Count == 0 ? null : list;
-    }
-
-    /// <summary>Deserializes a persisted <c>custom_headers</c> JSON blob into the runtime
-    /// header list. Tolerant: returns null on missing/invalid JSON.</summary>
-    public static IReadOnlyList<KeyValuePair<string, string>>? ToHeaderListFromJson(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return null;
-        try { return ToHeaderList(System.Text.Json.JsonSerializer.Deserialize<List<CustomHeaderEntry>>(json)); }
-        catch (System.Text.Json.JsonException) { return null; }
-    }
-
-    private static System.Text.Json.JsonElement ConvertValue(string? type, string? value)
-    {
-        value ??= string.Empty;
-        switch (type?.Trim().ToLowerInvariant())
-        {
-            case "number":
-                if (long.TryParse(value, out var l))
-                    return System.Text.Json.JsonSerializer.SerializeToElement(l);
-                if (double.TryParse(value, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d))
-                    return System.Text.Json.JsonSerializer.SerializeToElement(d);
-                return System.Text.Json.JsonSerializer.SerializeToElement(value);
-            case "boolean":
-                return System.Text.Json.JsonSerializer.SerializeToElement(bool.TryParse(value, out var b) && b);
-            case "json":
-                try
-                {
-                    using var doc = System.Text.Json.JsonDocument.Parse(value);
-                    return doc.RootElement.Clone();
-                }
-                catch (System.Text.Json.JsonException)
-                {
-                    return System.Text.Json.JsonSerializer.SerializeToElement(value);
-                }
-            default: // "string"
-                return System.Text.Json.JsonSerializer.SerializeToElement(value);
-        }
-    }
-
 }
 
 public sealed record McpServerEntry(

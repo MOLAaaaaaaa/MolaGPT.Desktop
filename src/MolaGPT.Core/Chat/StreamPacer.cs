@@ -145,6 +145,11 @@ public sealed class StreamPacer
         get { lock (_gate) return _answer.Peek(); }
     }
 
+    public int PendingAnswerLength
+    {
+        get { lock (_gate) return _answer.Length; }
+    }
+
     public string PendingThinking
     {
         get { lock (_gate) return _thinking.Peek(); }

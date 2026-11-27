@@ -1,5 +1,6 @@
 using Dapper;
 using Microsoft.Data.Sqlite;
+using MolaGPT.Core.Chat;
 
 namespace MolaGPT.Storage.Repositories;
 
@@ -78,30 +79,11 @@ public sealed class ConversationRepository
         }
     }
 
-    public IReadOnlyList<ConversationRow> ListDeletedSince(long timestampMs)
-    {
-        using var conn = _db.Open();
-        return conn.Query<ConversationRow>(
-            $"SELECT {SelectColumns} FROM conversations " +
-            "WHERE deleted_at IS NOT NULL AND deleted_at >= @t ORDER BY deleted_at DESC",
-            new { t = timestampMs })
-            .ToList();
-    }
-
     /// <summary>Every row, soft-deleted ones included.</summary>
     public IReadOnlyList<ConversationRow> ListAll()
     {
         using var conn = _db.Open();
         return conn.Query<ConversationRow>($"SELECT {SelectColumns} FROM conversations").ToList();
-    }
-
-    public IReadOnlyList<(ConversationRow Row, string? Setting)> ListAllWithSetting(string settingKeyPrefix)
-    {
-        using var conn = _db.Open();
-        return conn.Query<ConversationRow, string?, (ConversationRow, string?)>(
-            $"SELECT {SelectColumns}, s.value AS SettingValue FROM conversations AS c " +
-            "LEFT JOIN settings AS s ON s.key = @settingKeyPrefix || c.id",
-            (row, setting) => (row, setting), new { settingKeyPrefix }, splitOn: "SettingValue").AsList();
     }
 
     /// <summary>
@@ -113,7 +95,8 @@ public sealed class ConversationRepository
     /// go, re-checked inside the transaction, so an undo that lands between the
     /// caller's listing and this call wins. Returns the ids actually removed.
     /// </summary>
-    public IReadOnlyList<string> PurgeDeleted(IReadOnlyList<string> ids, long deletedBeforeMs)
+    public IReadOnlyList<string> PurgeDeleted(IReadOnlyList<string> ids, long deletedBeforeMs,
+        IReadOnlySet<string> confirmedCloudDeletes)
     {
         var removed = new List<string>();
         if (ids.Count == 0) return removed;
@@ -123,8 +106,10 @@ public sealed class ConversationRepository
         {
             using var tx = conn.BeginTransaction();
             var eligible = conn.Query<string>(
-                "SELECT id FROM conversations WHERE id IN @chunk AND deleted_at IS NOT NULL AND deleted_at < @t",
-                new { chunk, t = deletedBeforeMs }, tx).ToArray();
+                @"SELECT id FROM conversations WHERE id IN @chunk AND deleted_at IS NOT NULL AND deleted_at < @t
+                  AND (id NOT IN @cloudIds OR cloud_pending = 0)",
+                new { chunk, t = deletedBeforeMs, cloudIds = chunk.Where(confirmedCloudDeletes.Contains).ToArray() }, tx)
+                .ToArray();
             if (eligible.Length > 0)
             {
                 conn.Execute(
@@ -161,6 +146,13 @@ public sealed class ConversationRepository
     {
         using var conn = _db.Open();
         using var tx = conn.BeginTransaction();
+        Upsert(conn, tx, row);
+        tx.Commit();
+        ConversationChanged?.Invoke(row.Id);
+    }
+
+    private static void Upsert(SqliteConnection conn, SqliteTransaction tx, ConversationRow row)
+    {
         conn.Execute(
             @"INSERT INTO conversations (id, title, model_id, provider_id, created_at, updated_at, pinned, deleted_at, system_prompt, persona_id, system_prompt_mode, role_context_json, active_timeline_id)
               VALUES (@Id, @Title, @ModelId, @ProviderId, @CreatedAt, @UpdatedAt, @Pinned, @DeletedAt, @SystemPrompt, @PersonaId, @SystemPromptMode, @RoleContextJson, @ActiveTimelineId)
@@ -193,8 +185,67 @@ public sealed class ConversationRepository
               SET role_context_json = @roleContext, updated_at = @updatedAt
               WHERE id = @timelineId AND conversation_id = @conversationId;",
             new { timelineId, conversationId = row.Id, roleContext = row.RoleContextJson, updatedAt = row.UpdatedAt }, tx);
+    }
+
+    public string? GetCloudRevision(string id)
+    {
+        using var conn = _db.Open();
+        return conn.QuerySingleOrDefault<string>(
+            "SELECT cloud_revision FROM conversations WHERE id = @id AND lower(provider_id) IN (@chat, @work)",
+            new { id, chat = MolaGptProviderIds.Proxy, work = MolaGptProviderIds.LocalTools });
+    }
+
+    public IReadOnlyList<CloudConversationVersion> ListCloudVersions(string syncMarkerPrefix) =>
+        ReadCloudVersions(syncMarkerPrefix, null);
+
+    public CloudConversationVersion? GetCloudVersion(string id, string syncMarkerPrefix) =>
+        ReadCloudVersions(syncMarkerPrefix, id).SingleOrDefault();
+
+    private IReadOnlyList<CloudConversationVersion> ReadCloudVersions(string syncMarkerPrefix, string? id)
+    {
+        using var conn = _db.Open();
+        var filter = id is null ? string.Empty : " AND c.id = @id";
+        return conn.Query<ConversationRow, (string Revision, int Pending, string? Timestamp), CloudConversationVersion>(
+            $@"SELECT {SelectColumns}, cloud_revision AS Revision, cloud_pending AS Pending, s.value AS Timestamp
+               FROM conversations AS c LEFT JOIN settings AS s ON s.key = @syncMarkerPrefix || c.id
+               WHERE lower(c.provider_id) IN (@chat, @work){filter}",
+            (row, sync) => new CloudConversationVersion(row, sync.Revision, (CloudChanges)sync.Pending, sync.Timestamp),
+            new { id, syncMarkerPrefix, chat = MolaGptProviderIds.Proxy, work = MolaGptProviderIds.LocalTools },
+            splitOn: "Revision").AsList();
+    }
+
+    /// <summary>Apply a cloud snapshot only while the conversation still has the revision read before fetching it.</summary>
+    public bool TryApplyCloudSnapshot(string id, string? revision, ConversationRow? row,
+        IEnumerable<MessageRow>? messages, IReadOnlyDictionary<string, string?> settings, CancellationToken ct,
+        CloudChanges? changes = null)
+    {
+        ct.ThrowIfCancellationRequested();
+        using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
+        var current = conn.QuerySingleOrDefault<(string? ProviderId, string? Revision)>(
+            "SELECT COALESCE(provider_id, ''), cloud_revision FROM conversations WHERE id = @id", new { id }, tx);
+        if (current.ProviderId is not null
+            ? !MolaGptProviderIds.IsMolaGptAccount(current.ProviderId) || current.Revision != revision
+            : revision is not null || row is null)
+            return false;
+
+        if (row is not null)
+        {
+            if (row.Id != id || !MolaGptProviderIds.IsMolaGptAccount(row.ProviderId))
+                throw new InvalidDataException("云端快照的会话标识不匹配。");
+            Upsert(conn, tx, row);
+        }
+        if (messages is not null)
+            MessageRepository.ReplaceConversationMessages(conn, tx, id, messages);
+        if (changes is { } pending)
+            conn.Execute("UPDATE conversations SET cloud_pending = @pending WHERE id = @id AND cloud_pending IS NOT @pending",
+                new { id, pending = (int)pending }, tx);
+        foreach (var (key, value) in settings)
+            SettingsRepository.WriteValue(conn, tx, key, value);
+        ct.ThrowIfCancellationRequested();
         tx.Commit();
-        ConversationChanged?.Invoke(row.Id);
+        if (row is not null) ConversationChanged?.Invoke(id);
+        return true;
     }
 
     public void SoftDelete(string id, long timestampMs)
@@ -317,6 +368,16 @@ public sealed class ConversationRepository
         ConversationChanged?.Invoke(id);
     }
 
+    public bool TouchActive(string id, long timestampMs)
+    {
+        using var conn = _db.Open();
+        if (conn.Execute("UPDATE conversations SET updated_at = MAX(updated_at, @timestampMs) WHERE id = @id AND deleted_at IS NULL",
+                new { id, timestampMs }) == 0)
+            return false;
+        ConversationChanged?.Invoke(id);
+        return true;
+    }
+
     public void SoftDeleteMany(IReadOnlyList<string> ids, long timestampMs)
     {
         if (ids.Count == 0) return;
@@ -383,25 +444,6 @@ public sealed class ConversationRepository
                 "AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = conversations.id)",
                 new { p = providerId });
         return ids;
-    }
-
-    public IReadOnlyList<string> HardDeleteDeletedByProvider(IReadOnlyList<string> ids, string providerId)
-    {
-        if (ids.Count == 0) return Array.Empty<string>();
-
-        using var conn = _db.Open();
-        using var tx = conn.BeginTransaction();
-        var deleted = new List<string>();
-        foreach (var id in ids.Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal))
-        {
-            var affected = conn.Execute(
-                "DELETE FROM conversations WHERE id = @id AND provider_id = @p AND deleted_at IS NOT NULL",
-                new { id, p = providerId }, tx);
-            if (affected > 0) deleted.Add(id);
-        }
-
-        tx.Commit();
-        return deleted;
     }
 
     /// <summary>

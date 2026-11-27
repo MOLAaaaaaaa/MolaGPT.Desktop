@@ -1,5 +1,7 @@
 using System.Net;
 using Microsoft.Extensions.DependencyInjection;
+using MolaGPT.App.Remote;
+using MolaGPT.App.Views;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents;
@@ -19,6 +21,7 @@ using MolaGPT.Core.Memory;
 using MolaGPT.Core.Net;
 using MolaGPT.Core.Personalization;
 using MolaGPT.Core.Remote;
+using MolaGPT.Core.Runtime;
 using MolaGPT.Desktop.Services;
 using MolaGPT.Desktop.Services.Remote;
 using MolaGPT.Storage;
@@ -36,11 +39,17 @@ namespace MolaGPT.App.Infrastructure;
 /// </summary>
 internal static class AppServices
 {
+    private const string AuthHttpClientName = "molagpt-auth";
     private const string BrowserActivityStorageKey = "browser_tool_activity";
 
     public static ServiceProvider Build()
     {
         var services = new ServiceCollection();
+
+        // ---- power & idle activity tracking --------------------------------
+        services.AddSingleton(_ => new AppPowerModeCoordinator(
+            line => DiagnosticLog.Write("power", line)));
+        services.AddSingleton<IActivityTracker>(sp => sp.GetRequiredService<AppPowerModeCoordinator>());
 
         // ---- storage -------------------------------------------------------
         services.AddSingleton(_ => new MolaGptDatabase(MolaGptDatabase.DefaultPath()));
@@ -64,7 +73,8 @@ internal static class AppServices
         // stay constant for the process lifetime.
         services.AddSingleton<CookieContainer>();
         services.AddTransient<MolaDeviceCookieHandler>();
-        services.AddTransient<MolaAccountAuthHandler>();
+        services.AddTransient(sp => new MolaAccountAuthHandler(
+            sp.GetRequiredService<MolaGptAuthService>(), line => DiagnosticLog.Write("account", line)));
 
         // Loaded here rather than by the settings page: the first request can leave
         // before anyone opens it, and it must already know the user's proxy.
@@ -76,7 +86,7 @@ internal static class AppServices
             return proxy;
         });
 
-        foreach (var clientName in new[] { HttpClientNames.MolaGpt, "molagpt-auth" })
+        foreach (var clientName in new[] { HttpClientNames.MolaGpt, AuthHttpClientName })
         {
             var clientBuilder = services.AddHttpClient(clientName, (_, client) =>
             {
@@ -114,30 +124,44 @@ internal static class AppServices
             // Keeps the factory's own defaults (no cookie jar, pooled lifetime); only the proxy is ours.
             .UseSocketsHttpHandler((handler, sp) => handler.Proxy = sp.GetRequiredService<AppProxy>().General);
 
+        // The app owns the clients used by long-lived services and Pi providers.
+        // Interactive probes, tools and downloads that create a client per call
+        // keep using the named factory and dispose that client when done.
+        foreach (var name in new[] { HttpClientNames.MolaGpt, AuthHttpClientName, HttpClientNames.Byok })
+            services.AddKeyedSingleton<HttpClient>(name,
+                (sp, _) => sp.GetRequiredService<IHttpClientFactory>().CreateClient(name));
+        services.AddKeyedSingleton<Func<HttpClient>>(HttpClientNames.Byok, (sp, _) =>
+        {
+            var factory = sp.GetRequiredService<IHttpClientFactory>();
+            return () => factory.CreateClient(HttpClientNames.Byok);
+        });
+
         // ---- auth / providers ---------------------------------------------
         services.AddSingleton(sp => new MolaGptAuthService(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient("molagpt-auth"),
+            sp.GetRequiredKeyedService<HttpClient>(AuthHttpClientName),
             sp.GetRequiredService<CredentialStore>(),
             log: line => DiagnosticLog.Write("account", line)));
 
         services.AddSingleton<ProviderRegistry>();
+        services.AddSingleton<ProviderConnection>();
         services.AddSingleton(sp => new MolaGptProxyProvider(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.MolaGpt),
             sp.GetRequiredService<MolaGptAuthService>()));
 
         services.AddSingleton(sp => new ServerToolActions(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.MolaGpt),
             sp.GetRequiredService<MolaGptAuthService>()));
 
         services.AddSingleton(sp => new CloudSyncService(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.MolaGpt),
             sp.GetRequiredService<MolaGptAuthService>(),
             sp.GetRequiredService<ConversationRepository>(),
             sp.GetRequiredService<MessageRepository>(),
-            sp.GetRequiredService<SettingsRepository>()));
+            sp.GetRequiredService<SettingsRepository>(),
+            sp.GetRequiredService<IActivityTracker>()));
 
         services.AddSingleton(sp => new MolaPersonalizationService(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.MolaGpt),
             sp.GetRequiredService<MolaGptAuthService>()));
 
         services.AddSingleton(sp => new ConversationTitleService(
@@ -145,7 +169,7 @@ internal static class AppServices
             sp.GetRequiredService<MessageRepository>(),
             sp.GetRequiredService<ProviderRegistry>(),
             sp.GetRequiredService<SettingsRepository>(),
-            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            sp.GetRequiredKeyedService<Func<HttpClient>>(HttpClientNames.Byok),
             (userText, assistantText, ct) =>
                 sp.GetRequiredService<CloudSyncService>()
                     .GenerateMolaGptTitleAsync(userText, assistantText, ct),
@@ -153,7 +177,7 @@ internal static class AppServices
 
         // ---- local tool gateway (Work mode) --------------------------------
         services.AddSingleton(sp => new PiSidecarRuntimeManager(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.Byok),
             Environment.GetEnvironmentVariable("MOLAGPT_PI_SIDECAR_MANIFEST_URL")));
         services.AddSingleton(sp => new PiWorkSidecarLocator(
             () => sp.GetRequiredService<PiSidecarRuntimeManager>().GetCompatibleInstalled()));
@@ -161,23 +185,39 @@ internal static class AppServices
         // and the capped sidecar pool. Per-provider runtimes would put the memory
         // ceiling back where it was, since nothing would bound the total.
         services.AddSingleton(sp => new PiRuntime(
-            line => DiagnosticLog.Write("pi-runtime", line)));
-        services.AddSingleton<MolaGptLocalToolsRegistrar>();
+            line => DiagnosticLog.Write("pi-runtime", line),
+            activity: sp.GetRequiredService<IActivityTracker>()));
+        services.AddSingleton(sp => new MolaGptLocalToolsRegistrar(
+            sp.GetRequiredService<MolaGptAuthService>(),
+            sp.GetRequiredService<MolaGptProxyProvider>(),
+            sp.GetRequiredService<ProviderRegistry>(),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.MolaGpt),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.Byok),
+            sp.GetRequiredService<IChatToolHost>(),
+            sp.GetRequiredService<PiWorkSidecarLocator>(),
+            sp.GetRequiredService<PiRuntime>()));
         services.AddSingleton(sp => new ChatGptAccount(
             sp.GetRequiredService<CredentialStore>(),
-            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            sp.GetRequiredKeyedService<Func<HttpClient>>(HttpClientNames.Byok),
             line => DiagnosticLog.Write("chatgpt", line)));
         services.AddSingleton(sp => new PiByokProviderFactory(
             sp.GetRequiredService<PiWorkSidecarLocator>(),
             sp.GetRequiredService<IChatToolHost>(),
-            sp.GetRequiredService<IHttpClientFactory>(),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.Byok),
             sp.GetRequiredService<PiRuntime>(),
             line => DiagnosticLog.Write("pi-byok", line),
             sp.GetRequiredService<ChatGptAccount>()));
+        services.AddSingleton(sp => new ProviderRestorer(
+            sp.GetRequiredService<ProviderRepository>(),
+            sp.GetRequiredService<CredentialStore>(),
+            sp.GetRequiredService<SettingsViewModel>(),
+            sp.GetRequiredService<ProviderRegistry>(),
+            sp.GetRequiredService<PiByokProviderFactory>(),
+            line => DiagnosticLog.Write("provider", line)));
 
-        services.AddSingleton(new BackgroundStreamService(line => DiagnosticLog.Write("sync", line)));
+        services.AddSingleton<BackgroundStreamService>();
         services.AddSingleton(sp => new McpClientManager(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.Byok),
             line => DiagnosticLog.Write("mcp", line),
             // npx and uvx fetch their packages from inside the child, which knows nothing of ours.
             () => sp.GetRequiredService<AppProxy>().Config.ToEnvironment()));
@@ -186,8 +226,8 @@ internal static class AppServices
         services.AddSingleton<AgentCliResolver>();
         services.AddSingleton<DesktopAgentConfigProvider>();
         services.AddSingleton<IAgentConfigProvider>(sp => sp.GetRequiredService<DesktopAgentConfigProvider>());
-        services.AddSingleton<IAgentBackend, ClaudeCodeBackend>();
-        services.AddSingleton<IAgentBackend, CodexBackend>();
+        services.AddSingleton<IAgentBackend>(_ => new ClaudeCodeBackend(line => DiagnosticLog.Write("agentrelay", line)));
+        services.AddSingleton<IAgentBackend>(_ => new CodexBackend(line => DiagnosticLog.Write("agentrelay", line)));
         services.AddSingleton(sp => new AgentSessionManager(
             sp.GetServices<IAgentBackend>(),
             sp.GetRequiredService<AgentCliResolver>(),
@@ -196,10 +236,11 @@ internal static class AppServices
         services.AddSingleton(sp => new AgentBridgeService(
             sp.GetRequiredService<AgentSessionManager>(),
             sp.GetRequiredService<AgentHistoryReader>(),
-            sp.GetRequiredService<IAgentConfigProvider>()));
+            sp.GetRequiredService<IAgentConfigProvider>(),
+            sp.GetRequiredService<IActivityTracker>()));
         // The third constructor parameter is baseUrl, so keep these named.
         services.AddSingleton<IRelayProducer>(sp => new HttpRelayProducer(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.MolaGpt),
             sp.GetRequiredService<MolaGptAuthService>(),
             machineId: sp.GetRequiredService<IAgentConfigProvider>().MachineId,
             machineName: sp.GetRequiredService<IAgentConfigProvider>().MachineName,
@@ -211,7 +252,8 @@ internal static class AppServices
             line => DiagnosticLog.Write("AgentRelay", line),
             new RelayCommandJournal(Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "MolaGPT", "agent-command-journal"))));
+                "MolaGPT", "agent-command-journal")),
+            sp.GetRequiredService<IActivityTracker>()));
         services.AddSingleton<AgentBridgeStatusViewModel>();
 
         // ---- remote control of MolaGPT conversations ---------------------------
@@ -220,11 +262,11 @@ internal static class AppServices
             () => sp.GetRequiredService<MolaGptAuthService>().CurrentUsername));
         services.AddSingleton(sp => new AnonymousDeviceIdentity(sp.GetRequiredService<CredentialStore>()));
         services.AddSingleton(sp => new AnonApiClient(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.MolaGpt),
             sp.GetRequiredService<AnonymousDeviceIdentity>(),
             baseUrl: "https://chatgpt.wljay.cn/v2"));
         services.AddSingleton(sp => new RemoteControlHost(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.MolaGpt),
             sp.GetRequiredService<MolaGptAuthService>(),
             sp.GetRequiredService<ChatViewModel>(),
             sp.GetRequiredService<ComposerViewModel>(),
@@ -236,10 +278,13 @@ internal static class AppServices
             onUi: work => Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(work),
             machineId: sp.GetRequiredService<IAgentConfigProvider>().MachineId,
             machineName: sp.GetRequiredService<IAgentConfigProvider>().MachineName,
+            dataRoot: Path.GetDirectoryName(sp.GetRequiredService<MolaGptDatabase>().FilePath)!,
             log: line => DiagnosticLog.Write("RemoteWork", line),
             proxy: sp.GetRequiredService<AppProxy>().Official,
             anonApi: sp.GetRequiredService<AnonApiClient>(),
-            grantStore: sp.GetRequiredService<IToolGrantStore>()));
+            grantStore: sp.GetRequiredService<IToolGrantStore>(),
+            backgroundStreams: sp.GetRequiredService<BackgroundStreamService>(),
+            activity: sp.GetRequiredService<IActivityTracker>()));
         services.AddSingleton(sp => new RemoteWorkSettingsViewModel(
             sp.GetRequiredService<RemoteControlHost>(),
             sp.GetRequiredService<SettingsRepository>(),
@@ -248,12 +293,12 @@ internal static class AppServices
         // ---- tools ---------------------------------------------------------
         services.AddSingleton(sp => new VisionProxyTool(
             sp.GetRequiredService<ProviderRegistry>(),
-            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok)));
+            sp.GetRequiredKeyedService<Func<HttpClient>>(HttpClientNames.Byok)));
 
         // Skia handles image normalization without a UI-framework imaging type.
         services.AddSingleton(sp => new ImageAnalysisTool(
             sp.GetRequiredService<ProviderRegistry>(),
-            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            sp.GetRequiredKeyedService<Func<HttpClient>>(HttpClientNames.Byok),
             (bytes, mime, name) =>
             {
                 var processed = SkiaImageNormalizer.Process(bytes, mime, name);
@@ -263,7 +308,7 @@ internal static class AppServices
             }));
 
         services.AddSingleton(sp => new ImageGenerationTool(
-            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            sp.GetRequiredKeyedService<Func<HttpClient>>(HttpClientNames.Byok),
             sp.GetRequiredService<AttachmentStore>().Save));
 
         services.AddSingleton<IPythonSessionAllowList, PythonSessionAllowList>();
@@ -299,7 +344,9 @@ internal static class AppServices
                 int.TryParse(settings.Get(SettingsViewModel.SubagentMaxPerConversationKey), out var perConversation)
                     ? Math.Clamp(perConversation, 1, 4) : 4);
         });
-        services.AddSingleton(sp => new AgentTaskRegistry(sp.GetRequiredService<Func<SubagentRuntimeOptions>>()));
+        services.AddSingleton(sp => new AgentTaskRegistry(
+            sp.GetRequiredService<Func<SubagentRuntimeOptions>>(),
+            sp.GetRequiredService<IActivityTracker>()));
         services.AddSingleton<ISubagentRunner>(sp => new PiSubagentRunner(
             sp.GetRequiredService<ProviderRegistry>(),
             sp.GetRequiredService<Func<SubagentRuntimeOptions>>(),
@@ -308,29 +355,31 @@ internal static class AppServices
         {
             var settings = sp.GetRequiredService<SettingsRepository>();
             var providers = sp.GetRequiredService<ProviderRegistry>();
-            var http = sp.GetRequiredService<IHttpClientFactory>();
+            var http = sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.Byok);
             return new PythonAutoReviewer(
                 () => PythonAutoReviewer.ResolveTarget(
                     providers,
                     settings.Get(SettingsViewModel.ReviewProviderIdKey),
                     settings.Get(SettingsViewModel.ReviewModelIdKey)),
-                () => new OneShotCompletionClient(http.CreateClient(HttpClientNames.Byok)));
+                () => new OneShotCompletionClient(http));
         });
         services.AddSingleton<IToolAutoReviewer>(sp =>
         {
             var settings = sp.GetRequiredService<SettingsRepository>();
             var providers = sp.GetRequiredService<ProviderRegistry>();
-            var http = sp.GetRequiredService<IHttpClientFactory>();
+            var http = sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.Byok);
             return new ToolAutoReviewer(
                 () => PythonAutoReviewer.ResolveTarget(
                     providers,
                     settings.Get(SettingsViewModel.ReviewProviderIdKey),
                     settings.Get(SettingsViewModel.ReviewModelIdKey)),
-                () => new OneShotCompletionClient(http.CreateClient(HttpClientNames.Byok)));
+                () => new OneShotCompletionClient(http));
         });
-        services.AddSingleton<PythonExecutionTool>();
-        services.AddSingleton(sp => new BrowserControlTool(
-            new WebBridgeClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok))));
+        services.AddSingleton(sp => ActivatorUtilities.CreateInstance<PythonExecutionTool>(
+            sp, (Action<string>)(line => DiagnosticLog.Write("python", line))));
+        services.AddSingleton(sp => new WebBridgeClient(
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.Byok)));
+        services.AddSingleton<BrowserControlTool>();
         // 浏览器流水账落在 settings 表里而不是新开一张表：200 条元数据的 JSON 很小，
         // 而这份记录的价值在于「重启之后还在」——出事之后才去翻的记录已经晚了。
         services.AddSingleton(sp =>
@@ -356,12 +405,12 @@ internal static class AppServices
             sp.GetRequiredService<SettingsViewModel>(),
             sp.GetRequiredService<ProviderRegistry>(),
             () => new OneShotCompletionClient(
-                sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok)),
+                sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.Byok)),
             sp.GetRequiredService<PersonaListViewModel>()));
         // MolaGPT's built-in search for signed-in accounts; goes through the MolaGPT client
         // so it carries the same User-Agent and device cookie as the rest of the account's traffic.
         services.AddSingleton(sp => new MolaAccountSearchClient(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.MolaGpt),
             sp.GetRequiredService<MolaGptAuthService>()));
         services.AddSingleton<IChatToolHost, ChatToolHost>();
 
@@ -419,13 +468,13 @@ internal static class AppServices
             sp.GetRequiredService<AppProxy>(),
             sp.GetRequiredService<SettingsRepository>(),
             sp.GetRequiredService<CredentialStore>(),
-            () => sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            sp.GetRequiredKeyedService<Func<HttpClient>>(HttpClientNames.Byok),
             line => DiagnosticLog.Write("proxy", line)));
         services.AddSingleton(sp => new SettingsViewModel(
-            sp.GetRequiredService<ProviderRepository>(),
             sp.GetRequiredService<CredentialStore>(),
             sp.GetRequiredService<SettingsRepository>(),
-            sp.GetRequiredService<ProviderRegistry>())
+            sp.GetRequiredService<ProviderRegistry>(),
+            sp.GetRequiredService<MolaGptProxyProvider>())
         {
             NetworkProxy = sp.GetRequiredService<NetworkProxyViewModel>()
         });
@@ -456,15 +505,15 @@ internal static class AppServices
             sp.GetRequiredService<SkillsViewModel>(),
             sp.GetRequiredService<MemoryService>(),
             sp.GetRequiredService<MemoryConsolidator>(),
-            sp.GetRequiredService<ApprovalModeState>()));
+            sp.GetRequiredService<ApprovalModeState>(),
+            sp.GetRequiredService<IActivityTracker>()));
         services.AddSingleton(sp => new MainViewModel(
             sp.GetRequiredService<ConversationListViewModel>(),
             sp.GetRequiredService<ChatViewModel>(),
             sp.GetRequiredService<ComposerViewModel>(),
             sp.GetRequiredService<SettingsViewModel>(),
             sp.GetRequiredService<PersonaListViewModel>(),
-            sp.GetRequiredService<BackgroundStreamService>(),
-            sp.GetRequiredService<MolaGptProxyProvider>()));
+            sp.GetRequiredService<BackgroundStreamService>()));
         services.AddSingleton<AccountSessionCoordinator>();
         services.AddSingleton(sp => new AppNotificationService(
             conversationId =>
@@ -473,24 +522,65 @@ internal static class AppServices
                 if (string.Equals(conversations.SelectedId, conversationId, StringComparison.Ordinal))
                     conversations.SelectedId = null;
                 conversations.SelectById(conversationId);
-            }));
+            },
+            onWake: () => sp.GetRequiredService<AppPowerModeCoordinator>().NotifyForegroundIntent("toast-click")));
 
         // ---- runtime / updates ---------------------------------------------
         services.AddSingleton(sp => new UpdateCheckService(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.Byok),
             Environment.GetEnvironmentVariable("MOLAGPT_UPDATE_API_URL"),
             Environment.GetEnvironmentVariable("MOLAGPT_UPDATE_MANIFEST_URL")));
         services.AddSingleton(sp => new AppAutoUpdateService(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok)));
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.Byok)));
         services.AddSingleton(sp => new PythonRuntimeManager(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.Byok),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.Byok),
             Environment.GetEnvironmentVariable("MOLAGPT_PYTHON_RUNTIME_MANIFEST_URL")));
+        services.AddSingleton<PythonRuntimeSetup>();
+        services.AddSingleton<AgentRuntimeSetup>();
         services.AddSingleton<NotificationCenter>();
+        services.AddSingleton(sp => new ImageWorkbenchTasks(
+            sp.GetRequiredService<ImageGenerationTool>(),
+            sp.GetRequiredService<AttachmentStore>(),
+            sp.GetRequiredService<ConversationRepository>(),
+            sp.GetRequiredService<MessageRepository>(),
+            sp.GetRequiredService<ConversationListViewModel>(),
+            sp.GetRequiredService<NotificationCenter>(),
+            sp.GetRequiredService<IActivityTracker>(),
+            message => DiagnosticLog.Write("images", message)));
         services.AddSingleton<StorageService>();
+        services.AddTransient<LoginWindow>();
+        services.AddTransient(sp => new SettingsWindow(
+            sp.GetRequiredService<SettingsViewModel>(),
+            sp.GetRequiredService<MolaGptAuthService>(),
+            sp.GetRequiredService<CloudSyncService>(),
+            sp.GetRequiredService<ConversationListViewModel>(),
+            sp.GetRequiredService<AgentBridgeStatusViewModel>(),
+            sp.GetRequiredService<PersonaListViewModel>(),
+            sp.GetRequiredService<McpClientManager>(),
+            sp.GetRequiredService<ImageGenerationTool>(),
+            sp.GetRequiredService<PythonRuntimeManager>(),
+            sp.GetRequiredService<PythonRuntimeSetup>(),
+            sp.GetRequiredService<PiSidecarRuntimeManager>(),
+            sp.GetRequiredService<AgentRuntimeSetup>(),
+            sp.GetRequiredService<NotificationCenter>(),
+            sp.GetRequiredService<SkillsViewModel>(),
+            sp.GetRequiredService<BrowserActivityLog>(),
+            sp.GetRequiredService<WebBridgeClient>(),
+            sp.GetRequiredKeyedService<Func<HttpClient>>(HttpClientNames.Byok),
+            sp.GetRequiredService<ProviderConnection>(),
+            sp.GetRequiredService<ProviderRegistry>(),
+            sp.GetRequiredService<ProviderRestorer>(),
+            sp.GetRequiredService<PiByokProviderFactory>(),
+            sp.GetRequiredService<PersonalizationViewModel>(),
+            sp.GetRequiredService<MemoryPageViewModel>(),
+            sp.GetRequiredService<PersonalDataService>(),
+            sp.GetRequiredService<MolaAccountSearchClient>(),
+            sp.GetRequiredService<RemoteWorkSettingsViewModel>(),
+            sp.GetRequiredService<StorageService>()));
         services.AddSingleton(sp => new SponsorsService(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt)));
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.MolaGpt)));
         services.AddSingleton(sp => new MembershipService(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.MolaGpt),
+            sp.GetRequiredKeyedService<HttpClient>(HttpClientNames.MolaGpt),
             sp.GetRequiredService<MolaGptAuthService>()));
 
         var provider = services.BuildServiceProvider(new ServiceProviderOptions

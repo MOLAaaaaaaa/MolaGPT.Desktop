@@ -1,4 +1,3 @@
-using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -24,6 +23,9 @@ public sealed record ChatRequestError(
     public bool NeedsSignIn => Reauth || NextAction == "sign_in";
 
     [JsonIgnore]
+    public bool InvalidatesAccountSession => Type == "auth_expired";
+
+    [JsonIgnore]
     public bool IsPausedWork => Type is "work_account_paused" or "work_paused";
 }
 
@@ -37,13 +39,15 @@ public static class ChatApiErrorHelper
     public static async Task EnsureSuccessAsync(
         HttpResponseMessage response,
         string context,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool accountRequest = false)
     {
         if (response.IsSuccessStatusCode) return;
 
-        var body = await ReadBodyAsync(response.Content, ct).ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         var status = (int)response.StatusCode;
-        if (ReadHttpError(body, status) is { } error)
+        if ((ReadHttpError(body, status, accountRequest)
+            ?? (accountRequest && status == 401 ? AccountAuthExpired() : null)) is { } error)
             throw new ChatRequestException(error);
         // 服务端 nginx 的长连接并发上限触发时回的是一页 HTML，剥完标签只剩「429 Too Many Requests nginx」
         if (status == 429 && body.TrimStart().StartsWith('<'))
@@ -60,7 +64,7 @@ public static class ChatApiErrorHelper
     public static async Task<ChatRequestError?> ReadAccountHttpErrorAsync(HttpResponseMessage response, CancellationToken ct)
     {
         var status = (int)response.StatusCode;
-        return ReadHttpError(await ReadBodyAsync(response.Content, ct).ConfigureAwait(false), status, accountRequest: true)
+        return ReadHttpError(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false), status, accountRequest: true)
             ?? (status == 401 ? AccountAuthExpired() : null);
     }
 
@@ -112,7 +116,7 @@ public static class ChatApiErrorHelper
     public static ChatRequestError? ReadBusinessError(JsonElement root, string? eventName = null, int httpStatus = 0,
         bool accountRequest = false)
     {
-        var namedError = eventName is "error" or "mola_error" or "response.failed";
+        var namedError = IsErrorEvent(eventName);
         if (root.ValueKind != JsonValueKind.Object)
             return namedError ? ReadProviderError(root.ValueKind == JsonValueKind.String ? root.GetString() : null, httpStatus) : null;
 
@@ -173,9 +177,7 @@ public static class ChatApiErrorHelper
         if (TryReadErrorNode(root, out message))
             return true;
 
-        if (root.TryGetProperty("type", out var type)
-            && type.ValueKind == JsonValueKind.String
-            && string.Equals(type.GetString(), "error", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(ReadString(root, "type"), "error", StringComparison.OrdinalIgnoreCase))
         {
             message = ReadString(root, "message") ?? root.ToString();
             return true;
@@ -203,17 +205,20 @@ public static class ChatApiErrorHelper
         }
     }
 
-    private static async Task<string> ReadBodyAsync(HttpContent content, CancellationToken ct)
+    private static bool IsErrorEvent(string? name) => name is "error" or "mola_error" or "response.failed";
+
+    internal static JsonElement ReadStreamObject(JsonElement root, string? eventName)
     {
-        await using var stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
-        return await reader.ReadToEndAsync(ct).ConfigureAwait(false);
+        if (IsErrorEvent(eventName) && ReadBusinessError(root, eventName) is { } error)
+            throw new ChatRequestException(error);
+        return root.ValueKind == JsonValueKind.Object ? root : throw new JsonException("Expected an SSE object.");
     }
 
     private static bool TryReadErrorNode(JsonElement root, out string message)
     {
         message = string.Empty;
-        if (!root.TryGetProperty("error", out var error))
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("error", out var error)
+            || error.ValueKind is JsonValueKind.Null or JsonValueKind.False)
             return false;
 
         if (error.ValueKind == JsonValueKind.String)

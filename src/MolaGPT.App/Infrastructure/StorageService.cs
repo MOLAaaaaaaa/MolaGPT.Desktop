@@ -28,6 +28,7 @@ internal sealed class StorageService(
     CloudSyncService cloud,
     ComposerViewModel composer,
     AgentTaskRegistry tasks,
+    ImageWorkbenchTasks imageTasks,
     SettingsRepository settings,
     string? dataRoot = null,
     string? runtimeRoot = null)
@@ -170,10 +171,10 @@ internal sealed class StorageService(
             var eligible = old.Where(row => (!cloud.RequiresCloudDeletion(row) || confirmed.Contains(row.Id))
                                             && !IsBusy(row.Id)).ToArray();
             var keys = eligible.ToDictionary(row => row.Id,
-                row => messages.ListSubagentSessionKeys(row.Id).Append(row.Id).ToArray());
+                row => messages.ListSubagentSessionKeys(row.Id)?.Append(row.Id).ToArray());
             var scratch = eligible.ToDictionary(row => row.Id,
                 row => messages.ListReferencedWorkspaceNames(row.Id).Where(PythonWorkspaceStore.IsScratchName).ToArray());
-            var removed = conversations.PurgeDeleted(eligible.Select(row => row.Id).ToArray(), cutoff);
+            var removed = conversations.PurgeDeleted(eligible.Select(row => row.Id).ToArray(), cutoff, confirmed);
             foreach (var id in removed) cloud.ForgetPurgedConversation(id);
 
             var remaining = conversations.ListAll();
@@ -189,21 +190,22 @@ internal sealed class StorageService(
             foreach (var name in removed.SelectMany(id => scratch[id]).Distinct(StringComparer.OrdinalIgnoreCase))
                 if (!referenced.Contains(name)) result += DeleteOwned(Path.Combine(SessionsRoot, name));
 
-            var retainedKeys = remaining.Select(row => PiWorkProvider.SanitizeSessionId(row.Id))
-                .Concat(messages.ListSubagentSessionKeys().Select(PiWorkProvider.SanitizeSessionId)).ToArray();
-            var removedKeys = removed.SelectMany(id => keys[id]).Select(PiWorkProvider.SanitizeSessionId).ToArray();
             var sessionRoot = Path.Combine(DataRoot, "pi-sessions");
-            if (removedKeys.Length > 0 && IsOwnedPath(sessionRoot) && Directory.Exists(sessionRoot))
+            if (removed.Count > 0 && IsOwnedPath(sessionRoot) && Directory.Exists(sessionRoot))
             {
-                var options = new EnumerationOptions { RecurseSubdirectories = true,
-                    AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = true };
-                foreach (var path in Directory.EnumerateFiles(sessionRoot, "*.jsonl", options))
+                if (removed.All(id => keys[id] is not null) && messages.ListSubagentSessionKeys() is { } children)
                 {
-                    var name = Path.GetFileNameWithoutExtension(path);
-                    if (removedKeys.Any(key => MatchesSession(name, key))
-                        && !retainedKeys.Any(key => MatchesSession(name, key)))
-                        result += DeleteOwned(path);
+                    var retainedKeys = remaining.Select(row => row.Id).Concat(children).Select(PiWorkProvider.SanitizeSessionId).ToArray();
+                    var removedKeys = removed.SelectMany(id => keys[id]!).Select(PiWorkProvider.SanitizeSessionId).ToArray();
+                    var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
+                    foreach (var path in Directory.EnumerateFiles(sessionRoot, "*.jsonl", options))
+                    {
+                        var name = Path.GetFileNameWithoutExtension(path);
+                        if (removedKeys.Any(key => MatchesSession(name, key)) && !retainedKeys.Any(key => MatchesSession(name, key)))
+                            result += DeleteOwned(path);
+                    }
                 }
+                else DiagnosticLog.Write("storage", "子会话引用扫描不完整，跳过 Pi 文件清理。");
             }
 
             string? compactError = null;
@@ -320,14 +322,16 @@ internal sealed class StorageService(
     }
 
     private bool IsBusy(string id) => Dispatcher.UIThread.CheckAccess()
-        ? composer.IsConversationBusy(id) || tasks.RunningCount(id) > 0
-        : Dispatcher.UIThread.InvokeAsync(() => composer.IsConversationBusy(id) || tasks.RunningCount(id) > 0)
-            .GetAwaiter().GetResult();
+        ? IsBusyOnUi(id)
+        : Dispatcher.UIThread.InvokeAsync(() => IsBusyOnUi(id)).GetAwaiter().GetResult();
+
+    private bool IsBusyOnUi(string id) =>
+        composer.IsConversationBusy(id) || tasks.RunningCount(id) > 0 || imageTasks.IsGenerating(id);
 
     private bool AnyConversationBusy()
     {
         var ids = conversations.ListAll().Select(row => row.Id).ToArray();
-        bool Check() => ids.Any(id => composer.IsConversationBusy(id) || tasks.RunningCount(id) > 0);
+        bool Check() => ids.Any(IsBusyOnUi);
         return Dispatcher.UIThread.CheckAccess() ? Check() : Dispatcher.UIThread.InvokeAsync(Check).GetAwaiter().GetResult();
     }
 

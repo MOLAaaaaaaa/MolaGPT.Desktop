@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using MolaGPT.Core.Runtime;
 
 namespace MolaGPT.Core.Chat.Agents;
 
@@ -24,6 +25,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
     private readonly AgentSessionManager _manager;
     private readonly AgentHistoryReader _history;
     private readonly IAgentConfigProvider _config;
+    private readonly IActivityTracker _activity;
 
     private readonly ConcurrentDictionary<string, BridgeSession> _sessions = new(StringComparer.Ordinal);
     private readonly System.Timers.Timer _publishTimer;
@@ -50,11 +52,13 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
     public AgentBridgeService(
         AgentSessionManager manager,
         AgentHistoryReader history,
-        IAgentConfigProvider config)
+        IAgentConfigProvider config,
+        IActivityTracker? activity = null)
     {
         _manager = manager;
         _history = history;
         _config = config;
+        _activity = activity ?? NullActivityTracker.Instance;
         _publishTimer = new System.Timers.Timer(100) { AutoReset = true };
         _publishTimer.Elapsed += (_, _) => PublishIfDirty();
     }
@@ -87,6 +91,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
     public async Task<IReadOnlyList<AgentSessionStateDto>> ListSessionsAsync(
         CancellationToken ct = default, TimeSpan maxStaleness = default, bool includeTranscript = true)
     {
+        ct.ThrowIfCancellationRequested();
         // Restore durable stubs FIRST. They carry each conversation's CLI-side
         // resume id, which the history scan below needs in order to recognise a
         // transcript as already-owned — doing this second let a phantom Codex
@@ -139,7 +144,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
                 ApplyHistoryTitle(entry, e.Title, fileMs);
             }
         }
-        catch { /* history is best-effort */ }
+        catch (Exception ex) when (ex is not OperationCanceledException) { /* history is best-effort */ }
 
         // Warm up each present backend's model catalog (once) so history-loaded
         // sessions — which have no live process until their first turn — still show
@@ -319,6 +324,7 @@ public sealed partial class AgentBridgeService : IAsyncDisposable
         if (!_sessions.TryGetValue(conversationId, out var entry))
             throw new InvalidOperationException($"未知 agent 会话：{conversationId}");
 
+        using var activityLease = _activity.Acquire("agent-bridge-turn");
         using var gate = await entry.Gate.AcquireAsync(ct).ConfigureAwait(false);
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         entry.TurnCts = cts; // remember so InterruptAsync can cancel this turn

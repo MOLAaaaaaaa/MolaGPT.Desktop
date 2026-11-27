@@ -39,7 +39,7 @@ internal sealed partial class CodexSession
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _turnChannel?.Writer.TryWrite(AgentEvent.Failure($"Codex model discovery failed: {ex.Message}"));
+            _log?.Invoke($"Codex model discovery failed: {ex.Message}");
         }
     }
 

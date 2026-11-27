@@ -7,12 +7,12 @@ namespace MolaGPT.Storage.Repositories;
 
 internal static class SubagentSessionMetadata
 {
-    internal static void CollectKeys(Stream stream, HashSet<string> keys)
+    internal static bool TryCollectKeys(Stream stream, HashSet<string> keys)
     {
         var reader = new JsonStreamReader(stream);
         try
         {
-            if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject) return;
+            if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject) return false;
             List<string>? tools = null;
             List<string>? retry = null;
             while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
@@ -26,11 +26,12 @@ internal static class SubagentSessionMetadata
             }
 
             // Validate the complete row before adding any of its keys.
-            if (reader.TokenType != JsonTokenType.EndObject || reader.Read()) return;
+            if (reader.TokenType != JsonTokenType.EndObject || reader.Read()) return false;
             if (tools is not null) keys.UnionWith(tools);
             if (retry is not null) keys.UnionWith(retry);
+            return true;
         }
-        catch (JsonException) { }
+        catch (JsonException) { return false; }
         finally { reader.Dispose(); }
     }
 
@@ -141,7 +142,8 @@ internal static class SubagentSessionMetadata
                 {
                     // Utf8JsonReader needs an entire token. Rent a larger buffer
                     // only for rows containing a string that spans the buffer.
-                    var larger = ArrayPool<byte>.Shared.Rent(checked((int)stream.Length + 1));
+                    if (remaining >= 16 * 1024 * 1024) throw new JsonException("Pi metadata token exceeds 16 MiB.");
+                    var larger = ArrayPool<byte>.Shared.Rent(remaining * 2);
                     _buffer.AsSpan(consumed, remaining).CopyTo(larger);
                     ArrayPool<byte>.Shared.Return(_buffer);
                     _buffer = larger;

@@ -1,6 +1,5 @@
 using System.Collections.ObjectModel;
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -19,6 +18,7 @@ using MolaGPT.Core.Chat.Tools.PythonExecution;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Chat.Tasks;
 using MolaGPT.Core.Models;
+using MolaGPT.Core.Runtime;
 using MolaGPT.ViewModels.Services;
 
 namespace MolaGPT.ViewModels;
@@ -145,10 +145,8 @@ public sealed partial class ComposerViewModel : ObservableObject
     private readonly Services.MemoryService? _memory;
     private readonly Services.MemoryConsolidator? _consolidator;
     private readonly MolaGPT.Storage.AttachmentStore? _attachmentStore;
+    private readonly IActivityTracker _activity;
     private readonly Dictionary<MessageViewModel, List<PythonArtifactMarkdownRewriter.ArtifactContext>> _pythonArtifactContexts = new();
-    private CancellationTokenSource? _cts;
-    private Task? _activeStreamTask;
-    private MessageViewModel? _activeAssistantMsg;
     private BackgroundStreamTask? _activeTask;
 
     /// <summary>Exposed to XAML so the composer can bind directly to chat state
@@ -185,7 +183,8 @@ public sealed partial class ComposerViewModel : ObservableObject
         SkillsViewModel? skills = null,
         Services.MemoryService? memory = null,
         Services.MemoryConsolidator? consolidator = null,
-        ApprovalModeState? approvalMode = null)
+        ApprovalModeState? approvalMode = null,
+        IActivityTracker? activity = null)
     {
         _chat = chat;
         _backgroundStreams = backgroundStreams;
@@ -195,6 +194,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             _approvalMode.PropertyChanged += (_, _) => RaiseApprovalModeChanged();
         _personas = personas;
         _attachmentStore = attachmentStore;
+        _activity = activity ?? NullActivityTracker.Instance;
         _skills = skills;
         _memory = memory;
         _consolidator = consolidator;
@@ -209,6 +209,13 @@ public sealed partial class ComposerViewModel : ObservableObject
         WireContextGauge();
         _chat.PropertyChanged += (_, e) =>
         {
+            if (e.PropertyName == nameof(ChatViewModel.IsConversationLoading))
+            {
+                SendCommand.NotifyCanExecuteChanged();
+                RetryCommand.NotifyCanExecuteChanged();
+                ContinueCommand.NotifyCanExecuteChanged();
+                if (!_chat.IsConversationLoading) ScheduleTasksAfterNavigation();
+            }
             if (e.PropertyName == nameof(ChatViewModel.ActivePersona))
             {
                 ApplyRoleOptions(true);
@@ -259,8 +266,7 @@ public sealed partial class ComposerViewModel : ObservableObject
                 if (!IsImageGenerationAvailable && IsImageGenerationMode)
                     IsImageGenerationMode = false;
 
-                ActiveThinkingKind = _chat.ActiveModel?.ThinkingConfig?.Kind
-                    ?? MolaGPT.Core.Models.ThinkingParamKindInference.InferFromModelId(_chat.ActiveModel?.Id);
+                ActiveThinkingKind = _chat.ActiveModel?.ResolveThinkingConfig()?.Kind ?? MolaGPT.Core.Models.ThinkingParamKind.None;
 
                 // Normalize ReasoningEffort BEFORE notifying AvailableEffortLevels so
                 // the ComboBox doesn't reverse-write null when the previous value
@@ -312,9 +318,6 @@ public sealed partial class ComposerViewModel : ObservableObject
                 if (e.PropertyName is nameof(SettingsViewModel.ImageGenerationEnabled)
                     or nameof(SettingsViewModel.ImageGenerationProviderId)
                     or nameof(SettingsViewModel.ImageGenerationModelId)
-                    or nameof(SettingsViewModel.ImageGenerationBaseUrl)
-                    or nameof(SettingsViewModel.ImageGenerationApiKey)
-                    or nameof(SettingsViewModel.ImageGenerationModel)
                     or nameof(SettingsViewModel.IsImageGenerationConfigured))
                 {
                     OnPropertyChanged(nameof(IsImageGenerationAvailable));
@@ -817,306 +820,193 @@ public sealed partial class ComposerViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanSend), AllowConcurrentExecutions = true)]
     public async Task SendAsync()
     {
-        if (string.IsNullOrWhiteSpace(Text) && Attachments.Count == 0 && ArtifactReferences.Count == 0) return;
+        if (!CanSend()) return;
+        var navigation = _chat.NavigationToken;
         var sentByUser = !_sendingLeftover;
-        var artifactReferences = ArtifactReferences.ToList();
         if (_chat.ActiveProvider is null || _chat.ActiveModel is null)
         {
             if (EnsureAgentRuntimeAsync is null || !await EnsureAgentRuntimeAsync()) return;
         }
-        if (_chat.ActiveProvider is null || _chat.ActiveModel is null) return;
-        if (HasUnsupportedImages(Attachments, _chat.ActiveProvider, _chat.ActiveModel))
-            return;
-        var isMolaGptImageGenerationSend =
-            _chat.ActiveProvider.Kind == ProviderKind.MolaGptProxy && IsImageGenerationMode;
+        if (navigation.IsCancellationRequested || !CanSend()
+            || _chat.ActiveProvider is not { } provider || _chat.ActiveModel is not { } model) return;
+
+        var isMolaGptImageGenerationSend = provider.Kind == ProviderKind.MolaGptProxy && IsImageGenerationMode;
         var imageGenerationAspectRatio = isMolaGptImageGenerationSend ? ImageAspectRatio : null;
         var imageGenerationStyle = isMolaGptImageGenerationSend ? ImageStyle : null;
-        var generateLocalTitleOnCompletion =
-            !_chat.Messages.Any(message => message.Role == ChatMessage.RoleUser)
-            && _chat.ActiveProvider.Kind != ProviderKind.MolaGptProxy;
-        if (isMolaGptImageGenerationSend && string.IsNullOrWhiteSpace(Text))
-            return;
-
+        var generateTitle = !_chat.Messages.Any(message => message.Role == ChatMessage.RoleUser)
+            && provider.Kind != ProviderKind.MolaGptProxy;
         var memoryOverride = _pendingMemoryOverride;
-        if (string.IsNullOrEmpty(_chat.ConversationId))
-            _chat.ConversationId = CreateWebCompatibleConversationId();
+        var conversationId = _chat.ConversationId ?? CreateWebCompatibleConversationId();
+        var artifactReferences = ArtifactReferences.ToList();
+        _chat.ConversationId = conversationId;
+        var userText = string.IsNullOrWhiteSpace(Text) && artifactReferences.Count > 0
+            ? "请在这一版的基础上继续完善。" : Text;
+        var outgoingAttachments = Attachments.ToList();
+        if (!await _chat.TrySaveAsync(() =>
+        {
+            _chat.EnsureRoleGreeting();
+            _chat.AppendUserMessage(userText, BuildAttachmentChips(outgoingAttachments),
+                artifactRefs: artifactReferences.Count > 0 ? artifactReferences.Select(r => r.ToChip()).ToList() : null);
+            return Task.CompletedTask;
+        })) return;
 
-        _chat.EnsureRoleGreeting();
-        var userText = Text;
-        if (string.IsNullOrWhiteSpace(userText) && artifactReferences.Count > 0)
-            userText = "请在这一版的基础上继续完善。";
-        var queuedAttachments = Attachments.ToList();
-        Text = string.Empty;
-        ArtifactReferences.Clear();
-        _chat.AppendUserMessage(
-            userText,
-            BuildAttachmentChips(queuedAttachments),
-            artifactRefs: artifactReferences.Count > 0 ? artifactReferences.Select(r => r.ToChip()).ToList() : null);
-        if (memoryOverride is { } memoryEnabled)
-            _memory?.SetConversationOverride(_chat.ConversationId!, memoryEnabled);
         var userMsg = _chat.Messages.LastOrDefault(m => m.Role == ChatMessage.RoleUser);
         var assistantMsg = _chat.BeginAssistantMessage();
-        MessageSubmitted?.Invoke();
-        if (sentByUser) _chat.RequestScrollToLatest();
-        IsSending = true;
-        _chat.IsStreaming = true;
-        Attachments.Clear();
-
-        var cts = new CancellationTokenSource();
-        _cts = cts;
-        _activeAssistantMsg = assistantMsg;
-
-        var provider = _chat.ActiveProvider;
-        var model = _chat.ActiveModel;
-        var conversationId = _chat.ConversationId!;
-        var conversationTitle = _chat.ConversationTitle;
-        var outgoingUserText = userText;
-        var outgoingAttachments = queuedAttachments;
-
-        if (queuedAttachments.Count > 0
-            && provider is MolaGptProxyProvider proxyForUploads)
-        {
-            try
-            {
-                assistantMsg.SetPendingStatus("上传附件", "同步到会话沙箱");
-                var prepared = await proxyForUploads.PrepareAttachmentsAsync(
-                    queuedAttachments,
-                    conversationId,
-                    model.SupportsVision || isMolaGptImageGenerationSend,
-                    cts.Token);
-                outgoingAttachments = prepared.Attachments.ToList();
-                if (isMolaGptImageGenerationSend)
-                {
-                    outgoingUserText = BuildImageGenerationPrompt(
-                        userText, outgoingAttachments, prepared.SystemHint,
-                        imageGenerationAspectRatio, imageGenerationStyle);
-                }
-                else if (!string.IsNullOrWhiteSpace(prepared.SystemHint))
-                {
-                    outgoingUserText = AppendHiddenSystemHint(userText, prepared.SystemHint!);
-                }
-
-                if (userMsg is not null)
-                {
-                    userMsg.Content = outgoingUserText;
-                    userMsg.Attachments = BuildAttachmentChips(outgoingAttachments);
-                    userMsg.ContentPartsJson = model.SupportsVision
-                        ? BuildOpenAiContentPartsJson(outgoingUserText, outgoingAttachments)
-                        : null;
-                    _chat.UpdatePersistedMessage(userMsg);
-                }
-            }
-            catch (Exception ex)
-            {
-                assistantMsg.AppendDelta($"\n\n> **附件上传失败**：{ex.Message}");
-                assistantMsg.FlushPendingDelta();
-                assistantMsg.IsStreaming = false;
-                assistantMsg.StopThinking();
-                _chat.FinalizeAssistantMessage(conversationId, assistantMsg);
-                IsSending = false;
-                _chat.IsStreaming = false;
-                _activeStreamTask = null;
-                _activeAssistantMsg = null;
-                _activeTask = null;
-                _cts = null;
-                cts.Dispose();
-                return;
-            }
-        }
-        else if (isMolaGptImageGenerationSend)
-        {
-            outgoingUserText = BuildImageGenerationPrompt(
-                userText, outgoingAttachments, null,
-                imageGenerationAspectRatio, imageGenerationStyle);
-            if (userMsg is not null)
-            {
-                userMsg.Content = outgoingUserText;
-                _chat.UpdatePersistedMessage(userMsg);
-            }
-        }
-        else if (userMsg is not null && outgoingAttachments.Any(a => a.Kind == AttachmentKind.Image && !string.IsNullOrWhiteSpace(a.RemoteUrl)))
-        {
-            userMsg.ContentPartsJson = BuildOpenAiContentPartsJson(outgoingUserText, outgoingAttachments);
-            _chat.UpdatePersistedMessage(userMsg);
-        }
-
-        // BYOK file attachments: extract their text up front and drop a copy in
-        // the per-conversation Python workspace. The text reaches the model
-        // inline (so a weak or tool-less model still sees the content) while the
-        // original stays reachable by path for tables, page operations and
-        // embedded images. The chips the user sees are unchanged — only the
-        // model-visible payload differs.
-        // Images join the copy only when a tool could actually open them
-        // (analyze_image needs vision *and* one of these; execute_python_code can
-        // crop or measure one on its own). Writing the user's pictures to disk for
-        // a chat that has nothing to read them with buys nothing.
-        var copyImages = CanUseByokPythonTool || CanUseByokFileTools;
-        if (provider.Kind != ProviderKind.MolaGptProxy
-            && outgoingAttachments.Any(a => a.Kind == AttachmentKind.File
-                                            || (copyImages && a.Kind == AttachmentKind.Image)))
-        {
-            assistantMsg.SetPendingStatus(
-                "处理附件",
-                outgoingAttachments.Any(a => a.Kind == AttachmentKind.File) ? "提取文档文本" : "准备图片");
-            var pending = outgoingAttachments;
-            try
-            {
-                // Parsing a large PDF takes about a second; off the UI thread so
-                // the message bubble the user just posted stays responsive.
-                outgoingAttachments = await Task.Run(
-                    () => PrepareByokFileAttachments(pending, conversationId, copyImages, cts.Token), cts.Token);
-
-                if (userMsg is not null)
-                {
-                    // Re-chip so the workspace/sidecar paths persist with the
-                    // message and later turns reuse them instead of copying the
-                    // file again.
-                    userMsg.Attachments = BuildAttachmentChips(outgoingAttachments);
-                    _chat.UpdatePersistedMessage(userMsg);
-                }
-                // Uploaded files now live in the working directory — reflect them
-                // in the artifact panel right away.
-                _chat.RefreshArtifacts();
-            }
-            catch (OperationCanceledException)
-            {
-                // User pressed stop while the documents were being parsed.
-                assistantMsg.WasStopped = true;
-                assistantMsg.IsStreaming = false;
-                assistantMsg.StopThinking();
-                _chat.FinalizeAssistantMessage(conversationId, assistantMsg);
-                IsSending = false;
-                _chat.IsStreaming = false;
-                _activeStreamTask = null;
-                _activeAssistantMsg = null;
-                _activeTask = null;
-                _cts = null;
-                cts.Dispose();
-                return;
-            }
-            catch (Exception ex)
-            {
-                // Per-file failures are already absorbed inside the preparation
-                // step, so reaching here means something systemic. Send the text
-                // anyway rather than losing the user's message, and say what was
-                // lost instead of silently dropping the attachments.
-                assistantMsg.AppendDelta($"\n\n> **附件处理失败**：{ex.Message}（本轮仅发送文字）");
-                assistantMsg.FlushPendingDelta();
-                outgoingAttachments = outgoingAttachments
-                    .Where(a => a.Kind != AttachmentKind.File)
-                    .ToList();
-            }
-        }
-
-        var requestAttachments = BuildRequestAttachments(provider, model, outgoingAttachments);
-
-        // BYOK history images are re-fed from the local store so multi-turn
-        // follow-ups can still see earlier pictures. MolaGPT-account mode keeps
-        // images in ContentPartsJson (durable RemoteUrl), so we don't backfill
-        // raw bytes there.
-        var backfillHistory = provider.Kind != ProviderKind.MolaGptProxy;
-
-        // Model-only: what the referenced artifact is, and its source when the
-        // model cannot already see it. Never persisted — the bubble shows a chip.
-        if (artifactReferences.Count > 0)
-        {
-            var referencePrompt = ArtifactReferencePrompt.Build(artifactReferences, _chat.Messages, userMsg);
-            outgoingUserText = provider.Kind == ProviderKind.MolaGptProxy
-                ? AppendHiddenSystemHint(outgoingUserText, BuildHiddenSystemHint(referencePrompt))
-                : AppendHiddenSystemHint(outgoingUserText, referencePrompt);
-        }
-
-        var summarizedTasks = new List<AgentTask>();
-        var agentMessages = new List<AgentMessage>();
-        if (provider is PiWorkProvider)
-            outgoingUserText = AppendTaskSummary(conversationId, outgoingUserText, summarizedTasks, agentMessages);
-
-        var msgs = _chat.Messages
-            .Where(m => !m.IsStreaming || m == assistantMsg)
-            .Where(m => m != assistantMsg)
-            .Select(m => new ChatMessage(
-                m.Role,
-                ReferenceEquals(m, userMsg) ? outgoingUserText : BuildContentForHistory(m),
-                Attachments: ReferenceEquals(m, userMsg)
-                    ? (requestAttachments.Count > 0 ? requestAttachments : null)
-                    : (backfillHistory && m.Role == ChatMessage.RoleUser ? BuildHistoryAttachments(m) : null),
-                ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null))
-            .ToList();
-
         var generationId = Guid.NewGuid().ToString("N");
+        var cts = new CancellationTokenSource();
         var streamContext = new BackgroundStreamTask
         {
             ConversationId = conversationId,
-            ConversationTitle = conversationTitle,
+            ConversationTitle = _chat.ConversationTitle,
             ModelLabel = assistantMsg.ModelLabel,
             ModelId = model.Id,
             ProviderId = provider.Id,
             ProviderKind = provider.Kind,
             AssistantMessage = assistantMsg,
             Cts = cts,
-            StreamTask = Task.CompletedTask,
             SessionId = generationId,
             RoleRevision = _chat.RoleContext.HistoryRevision,
-            GenerateTitleOnCompletion = generateLocalTitleOnCompletion
+            GenerateTitleOnCompletion = generateTitle
         };
-        _activeTask = streamContext;
-        _injectable = true;
-        NotifyInjectState();
+        using var turnLease = _activity.Acquire("chat-turn");
+        AttachTurn(streamContext);
+        Text = string.Empty;
+        ArtifactReferences.Clear();
+        Attachments.Clear();
+        MessageSubmitted?.Invoke();
+        if (sentByUser) _chat.RequestScrollToLatest();
 
+        var summarizedTasks = new List<AgentTask>();
+        var agentMessages = new List<AgentMessage>();
         var wasCancelled = false;
         string? failureMessage = null;
-
         try
         {
+            if (memoryOverride is { } memoryEnabled)
+                _memory?.SetConversationOverride(conversationId, memoryEnabled);
+            // Capture the conversation's options and history before attachment preparation can yield.
+            var copyImages = CanUseByokPythonTool || CanUseByokFileTools;
+            var referencePrompt = artifactReferences.Count > 0
+                ? ArtifactReferencePrompt.Build(artifactReferences, _chat.Messages, userMsg) : null;
+            var backfillHistory = provider.Kind != ProviderKind.MolaGptProxy;
+            var prior = _chat.Messages
+                .Where(m => !m.IsStreaming && m != userMsg && m != assistantMsg)
+                .Select(m => new ChatMessage(
+                    m.Role, BuildContentForHistory(m),
+                    Attachments: backfillHistory && m.Role == ChatMessage.RoleUser ? BuildHistoryAttachments(m) : null,
+                    ReasoningContent: m.Role == ChatMessage.RoleAssistant ? m.Thinking : null))
+                .ToList();
             var maxTokens = ResolveRoleMaxTokens(model);
             var role = PrepareRolePrompt(assistantMsg, generationId, false, maxTokens);
             streamContext.RoleStates = role?.Lore.States;
             var systemPrompt = ResolveSystemPrompt(role?.SystemPrompt);
-            if (!string.IsNullOrWhiteSpace(systemPrompt)) msgs.Insert(0, new ChatMessage("system", systemPrompt));
-            var req = new ChatRequest(
-                ModelId: model.Id, Messages: msgs, ConversationId: conversationId, SessionId: generationId,
+            if (!string.IsNullOrWhiteSpace(systemPrompt)) prior.Insert(0, new ChatMessage(ChatMessage.RoleSystem, systemPrompt));
+            var extras = BuildExtras();
+            var request = ApplyRoleRequestOptions(new ChatRequest(
+                ModelId: model.Id, Messages: prior, ConversationId: conversationId, SessionId: generationId,
                 UseThinking: IsThinkingEnabled, ReasoningEffort: IsReasoningEffortVisible ? ReasoningEffort : null,
-                ExtraBody: BuildImageGenerationExtras(
-                    BuildExtras(), isMolaGptImageGenerationSend, outgoingAttachments,
-                    imageGenerationAspectRatio, imageGenerationStyle),
-                ThinkingBudgetTokens: IsThinkingEnabled ? ThinkingBudgetTokens : null,
+                ExtraBody: extras, ThinkingBudgetTokens: IsThinkingEnabled ? ThinkingBudgetTokens : null,
                 ThinkingParamKind: ResolveActiveThinkingParamKind(), RolePrompt: role?.Plan,
-                WorkStatus: CreateWorkStatus(provider, assistantMsg));
-            req = ApplyRoleRequestOptions(req, BuildHistorySeed(userMsg), maxTokens);
-            RememberTurnTemplate(conversationId, provider, model, req, assistantMsg);
-            var streamTask = RunStreamLoopAsync(provider, req, assistantMsg, cts, streamContext);
-            streamContext.StreamTask = streamTask;
-            _activeStreamTask = streamTask;
-            await streamContext.StreamTask;
+                WorkStatus: CreateWorkStatus(provider, assistantMsg)), BuildHistorySeed(userMsg), maxTokens);
+
+            var outgoingUserText = userText;
+            if (outgoingAttachments.Count > 0 && provider is MolaGptProxyProvider proxy)
+            {
+                assistantMsg.SetPendingStatus("上传附件", "同步到会话沙箱");
+                MolaGptPreparedAttachments prepared;
+                try
+                {
+                    prepared = await proxy.PrepareAttachmentsAsync(outgoingAttachments, conversationId,
+                        model.SupportsVision || isMolaGptImageGenerationSend, cts.Token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    failureMessage = "附件上传失败：" + ex.Message;
+                    assistantMsg.AppendDelta($"\n\n> **附件上传失败**：{ex.Message}");
+                    ClassifyActionableError(assistantMsg, ex);
+                    return;
+                }
+                outgoingAttachments = prepared.Attachments.ToList();
+                if (isMolaGptImageGenerationSend)
+                    outgoingUserText = BuildImageGenerationPrompt(userText, outgoingAttachments, prepared.SystemHint,
+                        imageGenerationAspectRatio, imageGenerationStyle);
+                else if (!string.IsNullOrWhiteSpace(prepared.SystemHint))
+                    outgoingUserText = AppendHiddenSystemHint(userText, prepared.SystemHint);
+
+                if (userMsg is not null)
+                {
+                    userMsg.Content = outgoingUserText;
+                    userMsg.Attachments = BuildAttachmentChips(outgoingAttachments);
+                    userMsg.ContentPartsJson = model.SupportsVision
+                        ? BuildOpenAiContentPartsJson(outgoingUserText, outgoingAttachments) : null;
+                    _ = SaveMessageAsync(conversationId, userMsg);
+                }
+            }
+            else if (isMolaGptImageGenerationSend)
+            {
+                outgoingUserText = BuildImageGenerationPrompt(userText, outgoingAttachments, null,
+                    imageGenerationAspectRatio, imageGenerationStyle);
+                if (userMsg is not null)
+                {
+                    userMsg.Content = outgoingUserText;
+                    _ = SaveMessageAsync(conversationId, userMsg);
+                }
+            }
+            else if (userMsg is not null && outgoingAttachments.Any(a => a.Kind == AttachmentKind.Image && !string.IsNullOrWhiteSpace(a.RemoteUrl)))
+            {
+                userMsg.ContentPartsJson = BuildOpenAiContentPartsJson(outgoingUserText, outgoingAttachments);
+                _ = SaveMessageAsync(conversationId, userMsg);
+            }
+
+            if (backfillHistory && outgoingAttachments.Any(a => a.Kind == AttachmentKind.File
+                || (copyImages && a.Kind == AttachmentKind.Image)))
+            {
+                assistantMsg.SetPendingStatus("处理附件",
+                    outgoingAttachments.Any(a => a.Kind == AttachmentKind.File) ? "提取文档文本" : "准备图片");
+                var pending = outgoingAttachments;
+                try
+                {
+                    outgoingAttachments = await Task.Run(
+                        () => PrepareByokFileAttachments(pending, conversationId, copyImages, cts.Token), cts.Token);
+                    if (userMsg is not null)
+                    {
+                        userMsg.Attachments = BuildAttachmentChips(outgoingAttachments);
+                        _ = SaveMessageAsync(conversationId, userMsg);
+                    }
+                    if (_chat.ConversationId == conversationId) _chat.RefreshArtifacts();
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    assistantMsg.AppendDelta($"\n\n> **附件处理失败**：{ex.Message}（本轮仅发送文字）");
+                    assistantMsg.FlushPendingDelta();
+                    outgoingAttachments = outgoingAttachments.Where(a => a.Kind != AttachmentKind.File).ToList();
+                }
+            }
+
+            cts.Token.ThrowIfCancellationRequested();
+            if (referencePrompt is not null)
+                outgoingUserText = AppendHiddenSystemHint(outgoingUserText,
+                    backfillHistory ? referencePrompt : BuildHiddenSystemHint(referencePrompt));
+            if (provider is PiWorkProvider)
+                outgoingUserText = AppendTaskSummary(conversationId, outgoingUserText, summarizedTasks, agentMessages);
+            var attachments = BuildRequestAttachments(provider, model, outgoingAttachments);
+            prior.Add(new ChatMessage(ChatMessage.RoleUser, outgoingUserText,
+                Attachments: attachments.Count > 0 ? attachments : null));
+            BuildImageGenerationExtras(extras, isMolaGptImageGenerationSend, outgoingAttachments,
+                imageGenerationAspectRatio, imageGenerationStyle);
+            RememberTurnTemplate(conversationId, provider, model, request, assistantMsg);
+            await RunStreamLoopAsync(provider, request, streamContext);
             if (streamContext.CompletedSuccessfully)
             {
                 foreach (var task in summarizedTasks) _chat.Tasks?.MarkDelivered(task);
                 _chat.Tasks?.AcknowledgeParentMessages(conversationId, agentMessages.Select(m => m.Id));
             }
-            _chat.MarkHistorySynchronized(conversationId, req.HistoryRevision);
+            _chat.MarkHistorySynchronized(conversationId, request.HistoryRevision);
         }
         catch (OperationCanceledException)
         {
             wasCancelled = true;
-            // Marks the bubble as stopped rather than merely empty, so it keeps its
-            // action bar (retry) and says why there is nothing there. The stream's
-            // bubble, not the first one: a queued message may have split the reply.
             streamContext.AssistantMessage.WasStopped = true;
-        }
-        catch (MolaGptAuthExpiredException ex)
-        {
-            failureMessage = ex.Message;
-            ClassifyActionableError(streamContext.AssistantMessage, ex);
-            try
-            {
-                if (MolaGptProviderIds.IsMolaGptAccount(provider.Id) && _chat.ActiveProvider?.Id == provider.Id)
-                {
-                    _chat.ActiveProvider = null;
-                    _chat.ActiveModel = null;
-                    _chat.TryAutoPickActive();
-                }
-            }
-            catch { }
         }
         catch (Exception ex)
         {
@@ -1127,24 +1017,8 @@ public sealed partial class ComposerViewModel : ObservableObject
         {
             _inflightTaskResults.ExceptWith(summarizedTasks);
             _inflightAgentMessages.ExceptWith(agentMessages);
-            FlushPendingInjections(streamContext, wasCancelled);
-            CompleteStreamContext(streamContext, publishNotification: !wasCancelled, failureMessage);
-            // A turn ended; whether that is worth a consolidation pass is the
-            // consolidator's call, not ours. Cancelled and failed turns count as
-            // turns too — the user's own message in them is still evidence.
+            await CompleteStreamContextAsync(streamContext, publishNotification: !wasCancelled, failureMessage, wasCancelled);
             if (!wasCancelled && provider.ToAppMode().IsLocalAgent()) _consolidator?.NoteTurnFinished();
-            if (ReferenceEquals(_activeTask, streamContext))
-            {
-                IsSending = false;
-                _chat.IsStreaming = false;
-                _activeStreamTask = null;
-                _activeAssistantMsg = null;
-                _activeTask = null;
-                _cts = null;
-                _injectable = false;
-                NotifyInjectState();
-            }
-            cts.Dispose();
         }
     }
 
@@ -1154,187 +1028,160 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// </summary>
     public bool DetachToBackground()
     {
-        if (_backgroundStreams is null || _activeTask is null)
-            return false;
-        if (string.IsNullOrEmpty(_activeTask.ConversationId))
+        if (_backgroundStreams is null || _activeTask is not { IsInFlight: true } task)
             return false;
 
-        _activeTask.IsDetached = true;
-        _chat.DetachTransientMessage(_activeTask.AssistantMessage);
-
-        if (_activeTask.ProviderKind == ProviderKind.MolaGptProxy
-            && _chat.ActiveProvider is MolaGptProxyProvider proxyProvider)
-            _activeTask.ApiUrl = proxyProvider.LastResolvedApiUrl;
-
-        _backgroundStreams.Register(_activeTask);
-
-        // What is already queued stays queued in the agent; the chips stay with the
-        // stream and come back when its conversation is opened again.
+        task.IsDetached = true;
+        _backgroundStreams.Register(task);
+        _chat.DetachTransientMessage(task.AssistantMessage);
         PendingInjections.Clear();
-        _injectable = false;
-        _cts = null;
-        _activeStreamTask = null;
-        _activeAssistantMsg = null;
-        _activeTask = null;
-        IsSending = false;
-        _chat.IsStreaming = false;
-        NotifyInjectState();
-
+        ClearAttachedTurn(task);
         return true;
     }
 
-    /// <summary>
-    /// Re-attach a background stream that was previously detached. Called when
-    /// the user switches back to a conversation with an active background task.
-    /// </summary>
-    public async Task ReattachFromBackgroundAsync(string conversationId)
+    /// <summary>Attaches the same turn, including while its final write is pending.</summary>
+    public void ReattachFromBackground(string conversationId, CancellationToken navigation)
     {
-        if (_backgroundStreams is null) return;
-        var task = _backgroundStreams.GetTask(conversationId);
-        if (task is null) return;
-
-        _backgroundStreams.StopPolling(task);
-        _backgroundStreams.Detach(conversationId);
-        task.IsDetached = false;
-
-        if (task.IsCompleted)
-        {
-            _chat.AttachTransientMessage(task.AssistantMessage);
-            task.AssistantMessage.FinishStreaming();
-            CompleteStreamContext(task, publishNotification: false);
+        if (navigation.IsCancellationRequested || _chat.ConversationId != conversationId || _activeTask is not null
+            || _backgroundStreams?.GetTask(conversationId) is not { } task
+            || !_backgroundStreams.TryReattach(task))
             return;
-        }
 
         _chat.AttachTransientMessage(task.AssistantMessage);
-
-        if (!task.StreamTask.IsCompleted && !task.Cts.IsCancellationRequested)
-        {
-            _activeAssistantMsg = task.AssistantMessage;
-            _cts = task.Cts;
-            _activeStreamTask = task.StreamTask;
-            _activeTask = task;
-            ShowInjections(task);
-            _injectable = !task.IsRegeneration && !task.IsContinuation;
-            IsSending = true;
-            _chat.IsStreaming = true;
-            NotifyInjectState();
-            return;
-        }
-
-        if (task.ProviderKind == ProviderKind.MolaGptProxy
-            && _chat.ActiveProvider is MolaGptProxyProvider proxyProvider
-            && !string.IsNullOrEmpty(task.SessionId))
-        {
-            var status = await proxyProvider.CheckStreamStatusAsync(task.SessionId!, CancellationToken.None);
-
-            if (status is null || status.Status == "completed")
-            {
-                var data = await proxyProvider.FetchCompletedStreamAsync(task.SessionId!, CancellationToken.None);
-                task.ApplyCompletedStream(data);
-                _chat.RefreshServerSubagents();
-                task.AssistantMessage.FinishStreaming();
-                CompleteStreamContext(task, publishNotification: false);
-                return;
-            }
-
-            var cts = new CancellationTokenSource();
-            _cts = cts;
-            _activeAssistantMsg = task.AssistantMessage;
-            _activeTask = task;
-            task.Cts = cts;
-            IsSending = true;
-            _chat.IsStreaming = true;
-
-            var resumeTask = RunResumeStreamLoopAsync(
-                proxyProvider, task.SessionId!, task.ReceivedChunkCount,
-                task.ApiUrl ?? "api/auth/chatAuto.php",
-                task.AssistantMessage, cts, task);
-            _activeStreamTask = resumeTask;
-            task.StreamTask = resumeTask;
-
-            try
-            {
-                await resumeTask;
-            }
-            catch (OperationCanceledException) { }
-            catch (Exception ex)
-            {
-                ClassifyActionableError(task.AssistantMessage, ex);
-            }
-            finally
-            {
-                CompleteStreamContext(task, publishNotification: true);
-                if (ReferenceEquals(_activeTask, task))
-                {
-                    IsSending = false;
-                    _chat.IsStreaming = false;
-                    _activeStreamTask = null;
-                    _activeAssistantMsg = null;
-                    _activeTask = null;
-                    _cts = null;
-                }
-                cts.Dispose();
-            }
-            return;
-        }
-
-        _activeAssistantMsg = task.AssistantMessage;
-        _cts = task.Cts;
-        _activeStreamTask = task.StreamTask;
-        _activeTask = task;
-        IsSending = true;
-        _chat.IsStreaming = true;
+        AttachTurn(task);
     }
 
-    private async Task RunStreamLoopAsync(
-        IChatProvider provider,
-        ChatRequest req,
-        MessageViewModel assistantMsg,
-        CancellationTokenSource cts,
-        BackgroundStreamTask? trackingTask = null)
+    private void AttachTurn(BackgroundStreamTask task)
     {
-        // 首字延迟的起点。放在这里而不是 SendAsync/RetryAsync 里：发送、重试、
-        // 后台续流都走这个入口，且刻意排除附件上传与模型路由的耗时。
-        assistantMsg.MarkRequestStarted();
-        RememberArtifactContext(assistantMsg, PythonArtifactMarkdownRewriter.CreateWorkspaceContext(req.ConversationId));
+        _activeTask = task;
+        ShowInjections(task);
+        _chat.IsStreaming = true;
+        IsSending = true;
+    }
+
+    private void ClearAttachedTurn(BackgroundStreamTask task)
+    {
+        if (!ReferenceEquals(_activeTask, task)) return;
+        _activeTask = null;
+        _chat.IsStreaming = false;
+        IsSending = false;
+    }
+
+    private async Task RunStreamLoopAsync(IChatProvider provider, ChatRequest request, BackgroundStreamTask turn)
+    {
+        var assistant = turn.AssistantMessage;
+        assistant.MarkRequestStarted();
+        RememberArtifactContext(assistant, PythonArtifactMarkdownRewriter.CreateWorkspaceContext(request.ConversationId));
+        var ct = turn.Cts.Token;
         using var checkpointCancellation = new CancellationTokenSource();
-        var checkpointTask = trackingTask is null ? Task.CompletedTask
-            : SaveStreamProgressAsync(trackingTask, checkpointCancellation.Token);
+        var checkpointTask = SaveStreamProgressAsync(turn, checkpointCancellation.Token);
+        var proxy = provider as MolaGptProxyProvider;
+        var decoder = proxy is null ? null : new MolaGptStreamDecoder();
+        var accountGeneration = proxy?.AccountSessionGeneration;
+        string? route = null;
+        if (proxy is not null)
+            request = request with { ResolvedEndpoint = endpoint => route = endpoint };
+
+        var finished = false;
+        turn.IsReadingStream = true;
+        if (ReferenceEquals(_activeTask, turn)) NotifyInjectState();
         try
         {
-            await foreach (var chunk in provider.StreamChatAsync(req, cts.Token).WithCancellation(cts.Token))
+            try
             {
-                if (chunk.PromptTrace is { } trace && trackingTask is not null)
-                    _chat.SetRolePromptTrace(trackingTask.ConversationId, trace);
-                if (trackingTask is not null)
+                var chunks = proxy is not null && decoder is not null
+                    ? proxy.StreamChatAsync(request, decoder, ct)
+                    : provider.StreamChatAsync(request, ct);
+                await foreach (var chunk in chunks.WithCancellation(ct))
                 {
-                    trackingTask.HasUnsavedChanges = true;
+                    if (chunk.PromptTrace is { } trace)
+                        _chat.SetRolePromptTrace(turn.ConversationId, trace);
+                    turn.HasUnsavedChanges = true;
                     if (chunk.Injected is { } injected)
                     {
-                        assistantMsg = SplitAtInjection(trackingTask, assistantMsg, injected.Text);
-                        RememberArtifactContext(assistantMsg, PythonArtifactMarkdownRewriter.CreateWorkspaceContext(req.ConversationId));
+                        assistant = await SplitAtInjectionAsync(turn, assistant, injected.Text);
+                        RememberArtifactContext(assistant, PythonArtifactMarkdownRewriter.CreateWorkspaceContext(request.ConversationId));
                         continue;
                     }
-                    if (chunk.Tool is { } tool) TrackTool(trackingTask, tool);
+                    if (chunk.Tool is { } tool) TrackTool(turn, tool);
+                    ApplyStreamChunk(assistant, chunk, request.ConversationId);
+                    if (chunk.FinishReason is null) continue;
+                    finished = true;
+                    break;
                 }
-                ApplyStreamChunk(assistantMsg, chunk, req.ConversationId);
-                if (trackingTask is not null && chunk.RawJson is not null)
-                    trackingTask.ReceivedChunkCount++;
-                if (chunk.FinishReason is not null) break;
+            }
+            catch (Exception ex) when (proxy is not null && route is not null && !ct.IsCancellationRequested
+                && ex is IOException or HttpRequestException { StatusCode: null })
+            {
+                // A disconnected Chat stream can still have an answer on the server.
             }
 
-            if (!cts.IsCancellationRequested && MolaGptProviderIds.IsMolaGptAccount(provider.Id)
-                && ChatApiErrorHelper.ReadLegacySharedQuota(assistantMsg.FullContent) is { } quotaError)
+            ct.ThrowIfCancellationRequested();
+            if (!finished && proxy is not null && decoder is not null && route is not null && request.SessionId is { } sessionId)
             {
-                assistantMsg.ReplaceContent(string.Empty);
+                if (proxy.AccountSessionGeneration != accountGeneration)
+                    throw new OperationCanceledException("账户已切换，原请求已取消。");
+                using var resumeLease = _activity.Acquire("chat-turn-resume");
+                var status = await proxy.CheckStreamStatusAsync(sessionId, ct);
+                if (proxy.AccountSessionGeneration != accountGeneration)
+                    throw new OperationCanceledException("账户已切换，原请求已取消。");
+                if (status is null || status.Status == "completed")
+                {
+                    var data = await proxy.FetchCompletedStreamAsync(sessionId, ct, cleanup: false);
+                    if (proxy.AccountSessionGeneration != accountGeneration)
+                        throw new OperationCanceledException("账户已切换，原请求已取消。");
+                    if (data is null)
+                        throw new ChatRequestException(new ChatRequestError("stream_unavailable", "暂时无法读取原有回答。"));
+                    if (data.Error is { } failure) throw new ChatRequestException(failure);
+                    assistant.ReplaceContent(data.Text);
+                    if (data.Thinking is { } thinking)
+                    {
+                        assistant.StopThinking();
+                        assistant.Thinking = thinking.Count == 0 ? null : string.Concat(thinking.Select(segment => segment.Text));
+                        assistant.RestoreThinkingSegments(thinking
+                            .Select(segment => new ThinkingSegmentDelta(segment.Text, segment.ContentOffset,
+                                TimelineIndex: segment.TimelineIndex)).ToArray());
+                    }
+                    if (data.ToolCalls is { } tools)
+                    {
+                        assistant.ToolCalls.Clear();
+                        foreach (var tool in tools) assistant.ApplyToolDelta(tool);
+                    }
+                    if (data.Usage is not null) assistant.Usage = data.Usage;
+                    if (data.FinishReason is not null) assistant.FinishReason = data.FinishReason;
+                    assistant.ServerSubagents = data.Subagents;
+                    if (data.Sources is { Count: > 0 }) assistant.Sources = data.Sources;
+                    _chat.RefreshServerSubagents();
+                    finished = true;
+                }
+                else
+                {
+                    await foreach (var chunk in proxy.ResumeStreamAsync(sessionId, decoder, route, ct))
+                    {
+                        turn.HasUnsavedChanges = true;
+                        ApplyStreamChunk(assistant, chunk, request.ConversationId);
+                        if (chunk.FinishReason is null) continue;
+                        finished = true;
+                        break;
+                    }
+                }
+                if (!finished)
+                    throw new ChatRequestException(new ChatRequestError("stream_unavailable", "回答连接中断，请重试。"));
+            }
+
+            ct.ThrowIfCancellationRequested();
+            if (MolaGptProviderIds.IsMolaGptAccount(provider.Id)
+                && ChatApiErrorHelper.ReadLegacySharedQuota(assistant.FullContent) is { } quotaError)
+            {
+                assistant.ReplaceContent(string.Empty);
                 throw new ChatRequestException(quotaError);
             }
-
-            if (trackingTask is not null && !cts.IsCancellationRequested)
-                trackingTask.CompletedSuccessfully = true;
+            turn.CompletedSuccessfully = true;
         }
         finally
         {
+            turn.IsReadingStream = false;
+            if (ReferenceEquals(_activeTask, turn)) NotifyInjectState();
             checkpointCancellation.Cancel();
             await checkpointTask;
         }
@@ -1343,74 +1190,41 @@ public sealed partial class ComposerViewModel : ObservableObject
     private async Task SaveStreamProgressAsync(BackgroundStreamTask stream, CancellationToken ct)
     {
         stream.HasUnsavedChanges = false;
-        await _chat.SaveInProgressMessageAsync(stream.ConversationId, stream.AssistantMessage);
+        var retryPending = !await SaveMessageAsync(stream.ConversationId, stream.AssistantMessage);
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
         try
         {
             while (await timer.WaitForNextTickAsync(ct))
             {
-                if (!stream.HasUnsavedChanges) continue;
+                if (!stream.HasUnsavedChanges && !retryPending) continue;
                 stream.HasUnsavedChanges = false;
-                await _chat.SaveInProgressMessageAsync(stream.ConversationId, stream.AssistantMessage);
+                if (await SaveMessageAsync(stream.ConversationId, stream.AssistantMessage))
+                    retryPending = false;
+                else if (retryPending)
+                    break; // The final save still gets its own attempt.
+                else
+                    retryPending = true;
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
     }
 
-    public void SaveInProgressMessages()
+    private Task<bool> SaveMessageAsync(string conversationId, MessageViewModel message) =>
+        _chat.TrySaveAsync(() => _chat.SaveInProgressMessageAsync(conversationId, message));
+
+    public async Task SaveInProgressMessagesAsync()
     {
-        if (_chat.ConversationId is { } conversationId)
-            foreach (var message in _chat.Messages.Where(message => message.IsStreaming))
-                _chat.SaveInProgressMessage(conversationId, message);
+        var saves = new List<Task>();
+        if (_activeTask is { IsFinalizing: false } active)
+            saves.Add(SaveMessageAsync(active.ConversationId, active.AssistantMessage));
         if (_backgroundStreams is not null)
             foreach (var stream in _backgroundStreams.ActiveTasks)
-                if (stream.IsCompleted)
-                    CompleteStreamContext(stream, publishNotification: false);
-                else
-                    _chat.SaveInProgressMessage(stream.ConversationId, stream.AssistantMessage);
-    }
+                if (!stream.IsFinalizing)
+                    saves.Add(SaveMessageAsync(stream.ConversationId, stream.AssistantMessage));
 
-    private async Task RunResumeStreamLoopAsync(
-        MolaGptProxyProvider provider,
-        string sessionId,
-        int offset,
-        string apiUrl,
-        MessageViewModel assistantMsg,
-        CancellationTokenSource cts,
-        BackgroundStreamTask? trackingTask = null)
-    {
-        // 幂等：续流重连不会覆盖最初请求的起点。
-        assistantMsg.MarkRequestStarted();
-        RememberArtifactContext(assistantMsg, PythonArtifactMarkdownRewriter.CreateWorkspaceContext(trackingTask?.ConversationId));
-        using var checkpointCancellation = new CancellationTokenSource();
-        var checkpointTask = trackingTask is null ? Task.CompletedTask
-            : SaveStreamProgressAsync(trackingTask, checkpointCancellation.Token);
-        try
-        {
-            await foreach (var chunk in provider.ResumeStreamAsync(sessionId, offset, apiUrl, cts.Token).WithCancellation(cts.Token))
-            {
-                if (trackingTask is not null) trackingTask.HasUnsavedChanges = true;
-                ApplyStreamChunk(assistantMsg, chunk, trackingTask?.ConversationId);
-                if (trackingTask is not null && chunk.RawJson is not null)
-                    trackingTask.ReceivedChunkCount++;
-                if (chunk.FinishReason is not null) break;
-            }
-
-            if (!cts.IsCancellationRequested && MolaGptProviderIds.IsMolaGptAccount(provider.Id)
-                && ChatApiErrorHelper.ReadLegacySharedQuota(assistantMsg.FullContent) is { } quotaError)
-            {
-                assistantMsg.ReplaceContent(string.Empty);
-                throw new ChatRequestException(quotaError);
-            }
-
-            if (trackingTask is not null && !cts.IsCancellationRequested)
-                trackingTask.CompletedSuccessfully = true;
-        }
-        finally
-        {
-            checkpointCancellation.Cancel();
-            await checkpointTask;
-        }
+        // Capture UI state before waiting so this also works during shutdown.
+        await Task.WhenAll(saves).ConfigureAwait(false);
+        await _chat.RetryUnsavedMessagesAsync().ConfigureAwait(false);
     }
 
     private Dictionary<string, object> BuildExtras()
@@ -2181,7 +1995,8 @@ public sealed partial class ComposerViewModel : ObservableObject
         // "no more of this", not "no more of the part I can see".
         if (_activeTask is { SessionId: { } turn } stream)
             _chat.Tasks?.StopTurn(stream.ConversationId, turn);
-        _cts?.Cancel();
+        _activeTask?.Cts.Cancel();
+        NotifyInjectState();
     }
 
     [RelayCommand(CanExecute = nameof(CanRetry), AllowConcurrentExecutions = true)]
@@ -2189,17 +2004,16 @@ public sealed partial class ComposerViewModel : ObservableObject
         CanRetry(assistantMsg) ? GenerateAgainAsync(assistantMsg, false) : Task.CompletedTask;
 
     [RelayCommand(CanExecute = nameof(CanContinue), AllowConcurrentExecutions = true)]
-    public Task ContinueAsync(MessageViewModel? assistantMsg) => GenerateAgainAsync(assistantMsg, true);
+    public Task ContinueAsync(MessageViewModel? assistantMsg) =>
+        CanContinue(assistantMsg) ? GenerateAgainAsync(assistantMsg, true) : Task.CompletedTask;
 
     public Task ReplyToExistingUserAsync(MessageViewModel? userMessage)
     {
-        if (IsSending || userMessage is null || userMessage.Role != ChatMessage.RoleUser
+        if (!CanStartTurnHere || userMessage is null || userMessage.Role != ChatMessage.RoleUser
             || !ReferenceEquals(_chat.Messages.LastOrDefault(), userMessage)
             || _chat.ActiveProvider is null || _chat.ActiveModel is null)
             return Task.CompletedTask;
         var assistant = _chat.BeginAssistantMessage();
-        MessageSubmitted?.Invoke();
-        _chat.RequestScrollToLatest();
         return GenerateAgainAsync(assistant, false, newReply: true);
     }
 
@@ -2207,7 +2021,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     {
         var activeProvider = _chat.ActiveProvider;
         var activeModel = _chat.ActiveModel;
-        if (assistantMsg is null || activeProvider is null || activeModel is null) return;
+        if (!CanStartTurnHere || assistantMsg is null || activeProvider is null || activeModel is null) return;
         var index = _chat.Messages.IndexOf(assistantMsg);
         if (index < 0 || !assistantMsg.IsLatestAssistant) return;
         var restartingPausedWork = continuation && assistantMsg.RequestError?.IsPausedWork == true;
@@ -2218,6 +2032,12 @@ public sealed partial class ComposerViewModel : ObservableObject
             .Take(index)
             .LastOrDefault(m => m.Role == ChatMessage.RoleUser);
         if (previousUser is null && !continuation) return;
+
+        var conversationId = _chat.ConversationId ?? string.Empty;
+        // Chat retries do not insert another user message. Record the local
+        // edit before queuing the first checkpoint so an older sync cannot win.
+        if (!newReply && activeProvider.Kind == ProviderKind.MolaGptProxy
+            && !await _chat.MarkCloudReplyStartedAsync(conversationId)) return;
 
         if (!newReply)
         {
@@ -2236,14 +2056,9 @@ public sealed partial class ComposerViewModel : ObservableObject
         assistantMsg.ProviderLabel = activeProvider.DisplayName;
         assistantMsg.IsStreaming = true;
         assistantMsg.StartPending(IsRoutesModel(activeModel));
-        IsSending = true;
-        _chat.IsStreaming = true;
-
+        using var retryLease = _activity.Acquire("chat-turn-retry");
         var cts = new CancellationTokenSource();
-        _cts = cts;
-        _activeAssistantMsg = assistantMsg;
 
-        var conversationId = _chat.ConversationId ?? string.Empty;
         var sessionId = Guid.NewGuid().ToString("N");
 
         // A retry runs through the same machinery as a first send, and for the same
@@ -2261,14 +2076,18 @@ public sealed partial class ComposerViewModel : ObservableObject
             ProviderKind = activeProvider.Kind,
             AssistantMessage = assistantMsg,
             Cts = cts,
-            StreamTask = Task.CompletedTask,
             SessionId = sessionId,
             IsRegeneration = !newReply,
             IsContinuation = continuation,
             ResponsePostProcessingStartIndex = continuation ? assistantMsg.FullContent.Length : 0,
             RoleRevision = _chat.RoleContext.HistoryRevision
         };
-        _activeTask = streamContext;
+        AttachTurn(streamContext);
+        if (newReply)
+        {
+            MessageSubmitted?.Invoke();
+            _chat.RequestScrollToLatest();
+        }
         var wasCancelled = false;
         string? failureMessage = null;
 
@@ -2283,9 +2102,6 @@ public sealed partial class ComposerViewModel : ObservableObject
             // the retry then fails, the provider has forgotten a turn the UI still
             // shows, which is recoverable. The other order leaves the old attempt
             // in the model's context, which is the bug.
-            if (!newReply && !continuation && activeProvider is IStatefulHistoryProvider stateful)
-                await stateful.ForgetLastTurnAsync(conversationId, cts.Token);
-
             var backfillHistory = activeProvider.Kind != ProviderKind.MolaGptProxy;
             var msgs = _chat.Messages
                 .Take(continuation ? index + 1 : index)
@@ -2322,7 +2138,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             var req = new ChatRequest(
                 ModelId: activeModel.Id,
                 Messages: msgs,
-                ConversationId: _chat.ConversationId,
+                ConversationId: conversationId,
                 SessionId: sessionId,
                 UseThinking: IsThinkingEnabled,
                 ReasoningEffort: IsReasoningEffortVisible ? ReasoningEffort : null,
@@ -2335,10 +2151,9 @@ public sealed partial class ComposerViewModel : ObservableObject
             req = ApplyRoleRequestOptions(req, seed, maxTokens);
             RememberTurnTemplate(conversationId, activeProvider, activeModel, req, assistantMsg);
 
-            var streamTask = RunStreamLoopAsync(activeProvider, req, assistantMsg, cts, streamContext);
-            streamContext.StreamTask = streamTask;
-            _activeStreamTask = streamTask;
-            await streamTask;
+            if (!newReply && !continuation && activeProvider is IStatefulHistoryProvider stateful)
+                await stateful.ForgetLastTurnAsync(conversationId, cts.Token);
+            await RunStreamLoopAsync(activeProvider, req, streamContext);
             _chat.MarkHistorySynchronized(conversationId, req.HistoryRevision);
         }
         catch (OperationCanceledException)
@@ -2355,31 +2170,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         }
         finally
         {
-            // Ahead of CompleteStreamContext, which persists: the stored meta and
-            // the version switcher both read RetryAttempts, and capturing an
-            // attempt means capturing the text. Resolve artifact links and apply
-            // response rules before taking that snapshot.
-            //
-            // Everything downstream of here reads FullContent, so the pacer is
-            // allowed to keep revealing the tail while this runs.
-            assistantMsg.StopPending();
-            assistantMsg.CompleteStreaming();
-            assistantMsg.IsStreaming = false;
-            assistantMsg.StopThinking();
-            PrepareCompletedResponse(streamContext, failureMessage);
-            if (!newReply) assistantMsg.CommitRetryAttempt();
-
-            CompleteStreamContext(streamContext, publishNotification: !wasCancelled, failureMessage);
-            if (ReferenceEquals(_activeTask, streamContext))
-            {
-                IsSending = false;
-                _chat.IsStreaming = false;
-                _activeStreamTask = null;
-                _activeAssistantMsg = null;
-                _activeTask = null;
-                _cts = null;
-            }
-            cts.Dispose();
+            await CompleteStreamContextAsync(streamContext, publishNotification: !wasCancelled, failureMessage, wasCancelled);
         }
     }
 
@@ -2406,10 +2197,13 @@ public sealed partial class ComposerViewModel : ObservableObject
         assistantMsg.SetRequestError(error);
     }
 
+    private bool CanStartTurnHere => !IsSending && !_chat.IsConversationLoading
+        && (_chat.ConversationId is not { } id || StreamFor(id) is null);
+
     private bool CanSend()
     {
         var providerReady = _chat.ActiveProvider is not null && _chat.ActiveModel is not null;
-        return !IsSending
+        return CanStartTurnHere
                && (!string.IsNullOrWhiteSpace(Text) || Attachments.Count > 0 || ArtifactReferences.Count > 0)
                && (!(IsImageGenerationAvailable && IsImageGenerationMode) || !string.IsNullOrWhiteSpace(Text))
                && (providerReady || EnsureAgentRuntimeAsync is not null)
@@ -2427,7 +2221,7 @@ public sealed partial class ComposerViewModel : ObservableObject
 
     private bool CanStop() => IsSending;
     private bool CanGenerateReply(MessageViewModel? message) =>
-        !IsSending
+        CanStartTurnHere
         && message is not null
         && message.Role == ChatMessage.RoleAssistant
         && message.IsLatestAssistant
@@ -2487,15 +2281,17 @@ public sealed partial class ComposerViewModel : ObservableObject
         {
             assistantMsg.FlushPendingDelta();
             assistantMsg.ApplyToolDelta(tool);
-            if (isCurrentConversation && tool.Name == TaskTools.StatusToolName && tool.Status == "completed")
+            var executionCompleted = tool.Origin == ToolCallOrigin.Execution
+                && string.Equals(tool.Status, "completed", StringComparison.OrdinalIgnoreCase);
+            if (executionCompleted && isCurrentConversation && tool.Name == TaskTools.StatusToolName)
                 _chat.ApplyTaskStates();
-            if (string.Equals(tool.Status, "completed", StringComparison.OrdinalIgnoreCase)
+            if (executionCompleted
                 && string.Equals(tool.Name, ImageGenerationTool.ToolName, StringComparison.Ordinal))
             {
                 AttachGeneratedImages(assistantMsg, tool.ResultPreviewJson);
                 RememberGeneratedImageContext(assistantMsg);
             }
-            if (string.Equals(tool.Status, "completed", StringComparison.OrdinalIgnoreCase)
+            if (executionCompleted
                 && string.Equals(tool.Name, PythonExecutionTool.ToolName, StringComparison.Ordinal))
             {
                 RememberPythonArtifactContext(assistantMsg, tool.ResultPreviewJson);
@@ -2507,7 +2303,7 @@ public sealed partial class ComposerViewModel : ObservableObject
             // Browser screenshots land in the same workspace and get embedded the
             // same way, so they need the same rewrite — the model shortens the
             // absolute path the tool returned down to a bare file name.
-            if (string.Equals(tool.Status, "completed", StringComparison.OrdinalIgnoreCase)
+            if (executionCompleted
                 && string.Equals(tool.Name, BrowserControlTool.ToolName, StringComparison.Ordinal))
             {
                 RememberArtifactContext(
@@ -2548,13 +2344,10 @@ public sealed partial class ComposerViewModel : ObservableObject
                     compaction.Reason);
             }
         }
-        if (chunk.DeltaText is { Length: > 0 } t)
-        {
-            t = RewritePythonArtifactMarkdownLinks(t, assistantMsg);
-            assistantMsg.AppendDelta(t);
-        }
         if (chunk.DeltaThinking is { Length: > 0 } th)
             assistantMsg.AppendThinking(th);
+        if (chunk.DeltaText is { Length: > 0 } t)
+            assistantMsg.AppendDelta(t);
         if (chunk.FinishReason is { } finish)
             assistantMsg.FinishReason = finish;
     }
@@ -2690,7 +2483,7 @@ public sealed partial class ComposerViewModel : ObservableObject
         foreach (var key in _pythonArtifactContexts.Keys)
         {
             if (key.IsStreaming) continue;
-            if (ReferenceEquals(key, _activeAssistantMsg)) continue;
+            if (ReferenceEquals(key, _activeTask?.AssistantMessage)) continue;
             if (background is not null && background.Any(t => ReferenceEquals(t.AssistantMessage, key))) continue;
             (stale ??= new List<MessageViewModel>()).Add(key);
         }
@@ -2717,11 +2510,6 @@ public sealed partial class ComposerViewModel : ObservableObject
         contexts.Add(context);
     }
 
-    private string RewritePythonArtifactMarkdownLinks(string text, MessageViewModel assistantMsg) =>
-        _pythonArtifactContexts.TryGetValue(assistantMsg, out var contexts)
-            ? PythonArtifactMarkdownRewriter.Rewrite(text, contexts)
-            : text;
-
     private void RewritePythonArtifactMarkdownLinks(MessageViewModel assistantMsg)
     {
         if (!_pythonArtifactContexts.TryGetValue(assistantMsg, out var contexts))
@@ -2731,9 +2519,16 @@ public sealed partial class ComposerViewModel : ObservableObject
         // discards what the pacer still holds, so feeding it a prefix would drop
         // the tail outright rather than merely delay it.
         var full = assistantMsg.FullContent;
-        var rewritten = PythonArtifactMarkdownRewriter.Rewrite(full, contexts);
+        var offsets = assistantMsg.ToolCalls.Select(tool => tool.ContentOffset)
+            .Concat(assistantMsg.ThinkingSegments.Select(thinking => thinking.ContentOffset)).ToArray();
+        var rewritten = PythonArtifactMarkdownRewriter.Rewrite(full, contexts, offsets);
         if (!string.Equals(rewritten, full, StringComparison.Ordinal))
+        {
+            for (var i = 0; i < assistantMsg.ToolCalls.Count; i++) assistantMsg.ToolCalls[i].ContentOffset = offsets[i];
+            for (var i = 0; i < assistantMsg.ThinkingSegments.Count; i++)
+                assistantMsg.ThinkingSegments[i].ContentOffset = offsets[assistantMsg.ToolCalls.Count + i];
             assistantMsg.ReplaceContent(rewritten);
+        }
     }
 
     private static string? ReadJsonString(JsonElement obj, string name) =>
@@ -2747,63 +2542,80 @@ public sealed partial class ComposerViewModel : ObservableObject
     /// 「回复已完成」 over a bubble that failed is how a rate-limited research turn
     /// came out looking merely truncated.
     /// </summary>
-    private void CompleteStreamContext(
-        BackgroundStreamTask streamContext,
+    private async Task CompleteStreamContextAsync(
+        BackgroundStreamTask turn,
         bool publishNotification,
-        string? failureMessage = null)
+        string? failureMessage = null,
+        bool cancelled = false)
     {
-        failureMessage ??= streamContext.AssistantMessage.RequestError?.Message;
-        OnStreamCompletedForTasks(streamContext);
-        PrepareCompletedResponse(streamContext, failureMessage);
+        if (!turn.TryBeginFinalization()) return;
+        if (ReferenceEquals(_activeTask, turn)) NotifyInjectState();
+        var saved = false;
+        try
+        {
+            failureMessage ??= turn.AssistantMessage.RequestError?.Message;
+            saved = await _chat.TrySaveAsync(async () =>
+            {
+                if (turn.IsRegeneration)
+                {
+                    turn.AssistantMessage.CompleteStreaming();
+                    turn.AssistantMessage.StopThinking();
+                }
+                PrepareCompletedResponse(turn, failureMessage);
+                if (turn.IsRegeneration) turn.AssistantMessage.CommitRetryAttempt();
+                await _chat.FinalizeAssistantMessageAsync(turn.ConversationId, turn.AssistantMessage, turn.IsRegeneration);
+                if (turn.ProviderKind != ProviderKind.MolaGptProxy)
+                    _chat.CompleteRoleGeneration(turn.ConversationId, turn.AssistantMessage,
+                        turn.RoleStates, turn.RoleRevision, turn.SessionId,
+                        turn.IsRegeneration, turn.IsContinuation,
+                        turn.CompletedSuccessfully && failureMessage is null);
+            });
+        }
+        finally
+        {
+            var attached = ReferenceEquals(_activeTask, turn);
+            cancelled |= turn.Cts.IsCancellationRequested;
+            ClearTurnDeliveries(turn.ConversationId);
+            ClearAttachedTurn(turn);
+            turn.Cts.Dispose();
+            turn.Finish();
+            try { PublishTurnResult(turn, saved && publishNotification && !cancelled, failureMessage); }
+            finally
+            {
+                FlushPendingInjections(turn, attached, cancelled || !saved);
+                SendCommand.NotifyCanExecuteChanged();
+                RetryCommand.NotifyCanExecuteChanged();
+                ContinueCommand.NotifyCanExecuteChanged();
+                if (saved && !cancelled) ScheduleTasksAfterTurn(turn);
+            }
+        }
 
-        // A regeneration's bubble is already a row; finalizing it the normal way
-        // would insert a second one.
-        if (streamContext.IsRegeneration)
-            _chat.CompleteRetriedAssistantMessage(streamContext.ConversationId, streamContext.AssistantMessage);
+        if (!saved) return;
+        if (turn.ProviderKind == ProviderKind.MolaGptProxy)
+            _ = CompleteConversationTurnAsync(turn.ConversationId);
+        else if (turn.GenerateTitleOnCompletion && turn.CompletedSuccessfully && turn.TryBeginTitleGeneration())
+            _ = GenerateLocalConversationTitleAsync(turn);
+        if (turn.CompletedSuccessfully && failureMessage is null && !turn.IsRegeneration
+            && turn.RoleStates is not null && AutoStorySummaryAsync is { } summarize)
+            _ = summarize(turn.ConversationId, turn.ProviderId, turn.ModelId, CancellationToken.None);
+    }
+
+    private void PublishTurnResult(BackgroundStreamTask turn, bool notify, string? failureMessage)
+    {
+        if (_backgroundStreams is not { } streams) return;
+        if (!notify)
+        {
+            if (turn.IsDetached) streams.EndQuietly(turn);
+        }
+        else if (turn.IsDetached)
+        {
+            if (failureMessage is null) streams.Complete(turn);
+            else streams.Fail(turn, failureMessage);
+        }
+        else if (failureMessage is null)
+            streams.PublishCompletion(turn.ConversationId, turn.ConversationTitle, turn.ModelLabel);
         else
-            _chat.FinalizeAssistantMessage(streamContext.ConversationId, streamContext.AssistantMessage);
-
-        if (streamContext.ProviderKind != ProviderKind.MolaGptProxy)
-            _chat.CompleteRoleGeneration(streamContext.ConversationId, streamContext.AssistantMessage,
-                streamContext.RoleStates, streamContext.RoleRevision, streamContext.SessionId,
-                streamContext.IsRegeneration, streamContext.IsContinuation,
-                streamContext.CompletedSuccessfully && failureMessage is null);
-
-        if (publishNotification && failureMessage is not null)
-        {
-            if (streamContext.IsDetached)
-                _backgroundStreams?.Fail(streamContext, failureMessage);
-            else
-                _backgroundStreams?.PublishFailure(
-                    streamContext.ConversationId,
-                    streamContext.ConversationTitle,
-                    streamContext.ModelLabel,
-                    failureMessage);
-        }
-        else if (publishNotification)
-        {
-            if (streamContext.IsDetached)
-                _backgroundStreams?.Complete(streamContext);
-            else
-                _backgroundStreams?.PublishCompletion(
-                    streamContext.ConversationId,
-                    streamContext.ConversationTitle,
-                    streamContext.ModelLabel);
-        }
-        else if (streamContext.IsDetached)
-        {
-            _backgroundStreams?.EndQuietly(streamContext);
-        }
-
-        if (streamContext.ProviderKind == ProviderKind.MolaGptProxy)
-            _ = CompleteConversationTurnAsync(streamContext.ConversationId);
-        else if (streamContext.GenerateTitleOnCompletion
-                 && streamContext.CompletedSuccessfully
-                 && streamContext.TryBeginTitleGeneration())
-            _ = GenerateLocalConversationTitleAsync(streamContext);
-        if (streamContext.CompletedSuccessfully && failureMessage is null && !streamContext.IsRegeneration
-            && streamContext.RoleStates is not null && AutoStorySummaryAsync is { } summarize)
-            _ = summarize(streamContext.ConversationId, streamContext.ProviderId, streamContext.ModelId, CancellationToken.None);
+            streams.PublishFailure(turn.ConversationId, turn.ConversationTitle, turn.ModelLabel, failureMessage);
     }
 
     private void PrepareCompletedResponse(BackgroundStreamTask streamContext, string? failureMessage)
@@ -2932,8 +2744,7 @@ public sealed partial class ComposerViewModel : ObservableObject
     private MolaGPT.Core.Models.ThinkingParamKind EffectiveThinkingKind =>
         ActiveThinkingKind != MolaGPT.Core.Models.ThinkingParamKind.None
             ? ActiveThinkingKind
-            : _chat.ActiveModel?.ThinkingConfig?.Kind
-              ?? MolaGPT.Core.Models.ThinkingParamKindInference.InferFromModelId(_chat.ActiveModel?.Id);
+            : _chat.ActiveModel?.ResolveThinkingConfig()?.Kind ?? MolaGPT.Core.Models.ThinkingParamKind.None;
 
     internal static string CreateWebCompatibleConversationId()
     {

@@ -80,7 +80,7 @@ public sealed partial class ChatViewModel
     {
         _tasks = registry;
         _post = post;
-        registry.Changed += task => post(() => OnTaskChanged(task));
+        registry.Changed += task => post(() => _ = OnTaskChangedAsync(task));
         registry.AgentActivityChanged += (conversationId, agentId, activity) => post(() =>
         {
             if (conversationId != ConversationId) return;
@@ -106,15 +106,15 @@ public sealed partial class ChatViewModel
         };
     }
 
-    private void OnTaskChanged(AgentTask task)
+    private async Task OnTaskChangedAsync(AgentTask task)
     {
         if (!task.IsRunning && _messageRepo is not null)
         {
             var conversationId = task.ConversationId;
             var taskId = task.Id;
             var state = TaskTools.StatusName(task.Status);
-            QueueMessageWrite(() => _messageRepo.UpdateBackgroundTaskState(
-                conversationId, taskId, state)).GetAwaiter().GetResult();
+            await TrySaveAsync(() => QueueMessageWrite(task.ConversationId, () => _messageRepo.UpdateBackgroundTaskState(
+                conversationId, taskId, state)));
         }
         if (task.ConversationId == ConversationId)
         {
@@ -236,7 +236,7 @@ public sealed partial class ChatViewModel
         foreach (var message in Messages)
         {
             if (SyncMessageTaskStates(message, ConversationId!))
-                UpdatePersistedMessage(message, ConversationId);
+                _ = TrySaveAsync(() => SaveInProgressMessageAsync(ConversationId, message));
         }
     }
 
@@ -353,9 +353,9 @@ public sealed partial class ChatViewModel
             ParentMessageId = parentId,
             Attachments = attachments
         };
+        PersistMessage(vm, conversationId);
         vm.VersionSelected += OnMessageVersionSelected;
         if (ConversationId == conversationId) Messages.Add(vm);
-        PersistMessage(vm, conversationId);
         TouchConversation(conversationId);
         return vm;
     }
@@ -378,7 +378,6 @@ public sealed partial class ChatViewModel
         vm.StartPending(false);
         vm.VersionSelected += OnMessageVersionSelected;
         if (ConversationId == conversationId) Messages.Add(vm);
-        PersistMessage(vm, conversationId);
         return vm;
     }
 

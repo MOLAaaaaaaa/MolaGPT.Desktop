@@ -81,6 +81,7 @@ public partial class LoginWindow : MolaContentWindow
                 return;
             }
 
+            var session = _auth.ReadSession();
             try
             {
                 await _proxy.RefreshModelsAsync();
@@ -91,11 +92,13 @@ public partial class LoginWindow : MolaContentWindow
                 return;
             }
 
+            if (!session.IsLoggedIn || session.Generation != _auth.SessionGeneration) return;
             _registry.Register(_proxy);
             try { await _localToolsRegistrar.RefreshAsync(); }
             catch { }
 
-            Close(true);
+            if (session.Generation == _auth.SessionGeneration)
+                Close(true);
         }
         catch (Exception ex)
         {

@@ -13,20 +13,20 @@ using Microsoft.Extensions.DependencyInjection;
 using MolaGPT.App.Infrastructure;
 using MolaGPT.App.Rendering;
 using MolaGPT.App.Rendering.Canvas;
+using MolaGPT.App.Remote;
 using MolaGPT.App.Views;
 using MolaGPT.Core.Auth;
 using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents;
 using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Agents.Relay;
+using MolaGPT.Core.Chat.LocalTools;
 using MolaGPT.Core.Chat.Providers;
-using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Chat.Tools.Browser;
-using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Chat.Tools.Mcp;
 using MolaGPT.Core.Net;
+using MolaGPT.Core.Runtime;
 using MolaGPT.Desktop.Services;
-using MolaGPT.Desktop.Services.Remote;
 using MolaGPT.Storage;
 using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels;
@@ -40,24 +40,28 @@ public partial class App : Application
     private ServiceProvider? _services;
     private TrayIconHost? _tray;
     private CancellationTokenSource? _agentRelayCts;
-    private CancellationTokenSource? _storageMaintenanceCts;
     private Task? _agentRelayTask;
     private const string UpdateNotificationKey = "app-update";
     private const string CloudSyncNotificationKey = "cloud-sync";
     private const string CommunityNotificationKey = "community-prompt";
 
-    private string? _pendingUpdateInstallerPath;
+    private (string Path, string Sha256)? _pendingUpdateInstaller;
     private NotificationRouter? _notificationRouter;
     private Selection.SelectionAssistantService? _selectionAssistant;
     private NotificationCenter? _notifications;
+    private AppPowerModeCoordinator? _powerMode;
+    private readonly List<IDisposable> _windowPowerSubscriptions = [];
     private long _lastBackgroundTrimTicks;
     private bool _backgroundMode;
+    private bool _pendingBackgroundTrim;
+    private volatile bool _shuttingDown;
     private IDisposable? _backgroundCheck;
 
     /// <summary>How long a window state has to hold before it counts. Sized
     /// against the ~1.5s Minimized→Normal→Minimized blip Windows emits on its
     /// own; a real restore just waits this long before leaving background mode.</summary>
     private static readonly TimeSpan BackgroundSettleDelay = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan BackgroundTrimCooldown = TimeSpan.FromMinutes(5);
 
     public override void Initialize() => AvaloniaXamlLoader.Load(this);
 
@@ -67,10 +71,10 @@ public partial class App : Application
         {
             UrlSchemeRegistrar.EnsureRegistered();
             _services = AppServices.Build();
-            Resources["ServerToolActions"] = _services.GetRequiredService<ServerToolActions>();
             _services.GetRequiredService<MolaGptDatabase>().EnsureSchema();
+            Resources["ServerToolActions"] = _services.GetRequiredService<ServerToolActions>();
             CdnProxy.ConfigureProxy(_services.GetRequiredService<AppProxy>().General);
-            _services.GetRequiredService<PersonalDataService>().UpgradeCredentialStorage();
+            _services.GetRequiredService<CredentialStore>().UpgradeEncryption();
             _services.GetRequiredService<PersonaListViewModel>().EnsureBuiltinsSeeded();
 
             var main = _services.GetRequiredService<MainViewModel>();
@@ -96,12 +100,8 @@ public partial class App : Application
                 auth.Logout();
             }
 
-            settings.IsLoggedIn = !string.IsNullOrEmpty(auth.CurrentJwt);
-            settings.MolaGptUsername = settings.IsLoggedIn ? auth.CurrentUsername : null;
-            if (settings.IsLoggedIn) cloudSync.AdoptSignedInAccountAtStartup();
-
             var accountSession = _services.GetRequiredService<AccountSessionCoordinator>();
-            if (!settings.IsLoggedIn) accountSession.CleanupLoggedOutAccountState();
+            accountSession.Initialize();
 
             ApplyTheme(settings.ThemeMode);
             settings.ThemeModeChanged += (_, mode) => ApplyTheme(mode);
@@ -115,14 +115,14 @@ public partial class App : Application
             // DiagnosticLog, not Debug.WriteLine: the previous sink was compiled out
             // of release builds, so on the machines where rows silently vanish from
             // the picker the reason was the one thing not written down anywhere.
-            var restored = ProviderRestorer.Restore(
-                _services, line => DiagnosticLog.Write("provider", line));
+            var providerRestorer = _services.GetRequiredService<ProviderRestorer>();
+            var restored = providerRestorer.LoadSaved();
             if (restored.LostEverythingToRuntime)
                 DiagnosticLog.Write("provider",
                     $"{restored.RuntimeUnavailable} 个已保存的服务全部未注册：Agent 运行环境不可用。"
                     + "模型选择器的本地侧会是空的。");
 
-            main.EnsureConversationDetailAsync = id => cloudSync.FetchConversationToLocalAsync(id);
+            main.EnsureConversationDetailAsync = cloudSync.FetchConversationToLocalAsync;
             main.Composer.ConversationCompletedAsync = cloudSync.CompleteConversationTurnAsync;
             main.Composer.ResponsePostProcessingFailed += message =>
                 notifications.Error("回答后处理失败", message, key: "response-postprocessing");
@@ -135,13 +135,16 @@ public partial class App : Application
             cloudSync.LocalConversationsChanged += (_, _) =>
                 Dispatcher.UIThread.Post(() => _ = main.ConversationList.ReloadAsync(), DispatcherPriority.Background);
             cloudSync.StatusChanged += (_, status) =>
+            {
                 Dispatcher.UIThread.Post(
                     () =>
                     {
+                        if (status.SessionGeneration != auth.SessionGeneration) return;
                         main.UpdateCloudSyncStatus(status.State.ToString(), status.Message, status.Timestamp);
                         PublishCloudSyncNotification(notifications, main, status);
                     },
                     DispatcherPriority.Background);
+            };
             main.CloudSyncRequested = async () =>
             {
                 await cloudSync.RequestForegroundSyncAsync();
@@ -163,37 +166,51 @@ public partial class App : Application
                 }
             };
 
+            var uiServices = _services;
+            var httpClients = uiServices.GetRequiredService<IHttpClientFactory>();
+            var agentRuntime = uiServices.GetRequiredService<AgentRuntimeSetup>();
+            var remoteWorkSettings = uiServices.GetRequiredService<RemoteWorkSettingsViewModel>();
+            var mcp = uiServices.GetRequiredService<McpClientManager>();
+            void ReportHistorySaveFailure(string error)
+            {
+                DiagnosticLog.Write("storage", $"消息保存失败：{error}");
+                notifications.Error("消息保存失败", error, "message-history");
+            }
+            void ReportMcpUnavailable(McpServerOptions server, string error) =>
+                notifications.Warning($"MCP 服务器「{server.Name}」不可用", error, "mcp-" + server.Id);
+            main.Chat.HistorySaveFailed += ReportHistorySaveFailure;
+            mcp.ServerUnavailable += ReportMcpUnavailable;
+            main.Composer.AutoStorySummaryAsync = async (conversationId, providerId, modelId, ct) =>
+            {
+                try
+                {
+                    if (providerId is null || modelId is null || providers.FindModel(providerId, modelId) is not { } target) return;
+                    using var http = httpClients.CreateClient(HttpClientNames.Byok);
+                    await main.Chat.AutoSummarizeAsync(conversationId, new OneShotCompletionClient(http),
+                        target.Provider, target.Model, ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+                catch (Exception ex) { notifications.Error("剧情整理失败", ex.Message, "story-summary-" + conversationId); }
+            };
+
             var window = new MainWindow(
                 main,
-                main.Chat, main.ConversationList, main.Composer,
                 providers,
-                settings,
-                _services.GetRequiredService<UpdateCheckService>(),
-                 auth, proxy, localTools, cloudSync, agentStatus,
-                 _services.GetRequiredService<McpClientManager>(),
-                 _services.GetRequiredService<ImageGenerationTool>(),
-                 _services.GetRequiredService<AttachmentStore>(),
-                 _services.GetRequiredService<ConversationRepository>(),
-                 _services.GetRequiredService<MessageRepository>(),
-                 _services.GetRequiredService<PythonRuntimeManager>(),
-                 piSidecar,
-                 _services.GetRequiredService<PiWorkSidecarLocator>(),
-                 notifications,
-                _services.GetRequiredService<SkillsViewModel>(),
-                 _services.GetRequiredService<BrowserActivityLog>(),
-                 _services.GetRequiredService<IHttpClientFactory>(),
-                 _services.GetRequiredService<IChatToolHost>(),
-                 _services.GetRequiredService<PiByokProviderFactory>(),
-                 _services.GetRequiredService<PersonalizationViewModel>(),
-                 _services.GetRequiredService<MemoryPageViewModel>(),
-                 _services.GetRequiredService<PersonalDataService>(),
-                 _services.GetRequiredService<SponsorsService>(),
-                 _services.GetRequiredService<MembershipService>());
-            window.RemoteWork = _services.GetRequiredService<RemoteWorkSettingsViewModel>();
-            window.Storage = storage;
+                updateCheck, auth, cloudSync,
+                uiServices.GetRequiredService<AttachmentStore>(),
+                uiServices.GetRequiredService<ImageWorkbenchTasks>(),
+                uiServices.GetRequiredService<PythonRuntimeSetup>(),
+                agentRuntime, notifications, httpClients,
+                uiServices.GetRequiredService<SettingsWindow>,
+                uiServices.GetRequiredService<LoginWindow>,
+                remoteWorkSettings,
+                uiServices.GetRequiredService<SponsorsService>(),
+                uiServices.GetRequiredService<MembershipService>());
+            var powerMode = _services.GetRequiredService<AppPowerModeCoordinator>();
+            _powerMode = powerMode;
             desktop.MainWindow = window;
             _selectionAssistant = new Selection.SelectionAssistantService(settings, providers,
-                _services.GetRequiredService<IHttpClientFactory>(), window);
+                httpClients, window, powerMode);
 
             // One router owns "banner, Windows toast, or wait" for every source.
             // The workbench counts as the current conversation while it is open,
@@ -206,8 +223,9 @@ public partial class App : Application
                 _services.GetRequiredService<AppNotificationService>(),
                 window,
                 () => main.IsImageWorkbenchVisible
-                    ? main.ConversationList.SelectedId
+                    ? window.DisplayedImageTaskId
                     : main.Chat.ConversationId);
+            restored.ReportFailures(notifications);
 
             main.UpdateActionRequested = async (version, notes, downloadUrl, actionText, installerSha256) =>
             {
@@ -223,10 +241,10 @@ public partial class App : Application
             };
             main.UpdateInstallReadyRequested = () =>
             {
-                if (string.IsNullOrWhiteSpace(_pendingUpdateInstallerPath)) return;
+                if (_pendingUpdateInstaller is not { } installer) return;
                 try
                 {
-                    AppAutoUpdateService.StartInstallerAfterExit(_pendingUpdateInstallerPath);
+                    AppAutoUpdateService.StartInstallerAfterExit(installer.Path, installer.Sha256);
                     desktop.TryShutdown();
                 }
                 catch (Exception ex)
@@ -239,8 +257,11 @@ public partial class App : Application
             agentStatus.InitializeBridgeEnabled(agentConfig.BridgeEnabled, settings.IsLoggedIn);
             agentStatus.ConfirmEnableAsync = async () =>
                 await new BridgePrivacyWindow().ShowDialog<bool>(window);
+            var agentRelaySync = new SemaphoreSlim(1, 1);
+            var agentRelayRestartNeeded = false;
             agentStatus.ApplyBridgeEnabled = enabled =>
             {
+                if (!enabled) Volatile.Write(ref agentRelayRestartNeeded, true);
                 agentConfig.BridgeEnabled = enabled;
                 SyncAgentRelay();
             };
@@ -249,15 +270,36 @@ public partial class App : Application
             settings.PropertyChanged += (_, e) =>
             {
                 if (e.PropertyName != nameof(SettingsViewModel.IsLoggedIn)) return;
+                if (!settings.IsLoggedIn) Volatile.Write(ref agentRelayRestartNeeded, true);
                 agentStatus.SetSignedIn(settings.IsLoggedIn);
                 SyncAgentRelay();
             };
             SyncAgentRelay();
 
-            void SyncAgentRelay()
+            void SyncAgentRelay() => _ = SyncAgentRelayAsync();
+
+            async Task SyncAgentRelayAsync()
             {
-                if (agentConfig.BridgeEnabled && settings.IsLoggedIn) StartAgentRelay();
-                else _ = StopAgentRelayAsync();
+                await agentRelaySync.WaitAsync();
+                try
+                {
+                    if (_shuttingDown) return;
+                    var forceRestart = Volatile.Read(ref agentRelayRestartNeeded);
+                    Volatile.Write(ref agentRelayRestartNeeded, false);
+                    var shouldRun = agentConfig.BridgeEnabled && settings.IsLoggedIn;
+                    if (!shouldRun || forceRestart)
+                        await StopAgentRelayAsync(shutdown: false);
+                    if (shouldRun && !_shuttingDown)
+                        StartAgentRelay();
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticLog.Write("AgentRelay", $"sync failed: {ex.GetType().Name}: {ex.Message}");
+                }
+                finally
+                {
+                    agentRelaySync.Release();
+                }
             }
 
             // Remote clients control MolaGPT conversations while switched on: over the account
@@ -265,6 +307,7 @@ public partial class App : Application
             var remoteWork = _services.GetRequiredService<RemoteControlHost>();
             remoteWork.ConfirmAccountPairingAsync = async device =>
             {
+                powerMode.NotifyForegroundIntent("remote-pair-confirm");
                 if (!window.IsVisible) window.Show();
                 if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
                 window.Activate();
@@ -272,19 +315,22 @@ public partial class App : Application
                     $"设备「{device}」正在申请查看并控制本机的 MolaGPT 对话。请确认这是你自己的设备。",
                     "允许配对");
             };
-            var remoteWorkSettings = _services.GetRequiredService<RemoteWorkSettingsViewModel>();
             var remoteSync = new SemaphoreSlim(1, 1);
+            var remoteLifetime = new CancellationTokenSource();
+            var remoteToken = remoteLifetime.Token;
             remoteWorkSettings.EnabledChanged += SyncRemoteWork;
-            settings.PropertyChanged += (_, e) =>
+            settings.PropertyChanged += OnRemoteAccountChanged;
+            void OnRemoteAccountChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
             {
                 if (e.PropertyName != nameof(SettingsViewModel.IsLoggedIn)) return;
                 remoteWork.Phones.AccountChanged();
                 SyncRemoteWork();
                 OfferRemoteWork();
-            };
+            }
             // A code is typed at this desk, so its result shows on the settings page.
             // Same-account clients are approved locally; announce the new device here.
-            remoteWork.Paired += (device, viaAccount) =>
+            remoteWork.Paired += OnRemotePaired;
+            void OnRemotePaired(string device, bool viaAccount)
             {
                 if (!viaAccount) return;
                 Dispatcher.UIThread.Post(() => notifications.Notify(new AppNotification
@@ -297,30 +343,35 @@ public partial class App : Application
                     Action = () => window.OpenAgentSettings(),
                     Sticky = true
                 }));
-            };
+            }
             SyncRemoteWork();
             OfferRemoteWork();
 
-            void SyncRemoteWork() => _ = SyncRemoteWorkAsync();
+            void SyncRemoteWork()
+            {
+                if (!remoteToken.IsCancellationRequested) _ = SyncRemoteWorkAsync();
+            }
 
             async Task SyncRemoteWorkAsync()
             {
-                await remoteSync.WaitAsync();
                 try
                 {
-                    var enabled = remoteWorkSettings.IsEnabled;
-                    if (enabled && settings.IsLoggedIn) remoteWork.Start();
-                    else await remoteWork.StopAccountAsync();
-                    if (enabled) await remoteWork.StartAnonymousAsync();
-                    else await remoteWork.StopAnonymousAsync();
+                    await remoteSync.WaitAsync(remoteToken);
+                    try
+                    {
+                        remoteToken.ThrowIfCancellationRequested();
+                        var enabled = remoteWorkSettings.IsEnabled;
+                        if (enabled && settings.IsLoggedIn) remoteWork.Start();
+                        else await remoteWork.StopAccountAsync();
+                        if (enabled) await remoteWork.StartAnonymousAsync(remoteToken);
+                        else await remoteWork.StopAnonymousAsync();
+                    }
+                    finally { remoteSync.Release(); }
                 }
+                catch (OperationCanceledException) when (remoteToken.IsCancellationRequested) { }
                 catch (Exception ex)
                 {
                     DiagnosticLog.Write("RemoteWork", $"sync failed: {ex.GetType().Name}: {ex.Message}");
-                }
-                finally
-                {
-                    remoteSync.Release();
                 }
             }
 
@@ -344,11 +395,31 @@ public partial class App : Application
             // Tray close behavior may hide the main window, so shutdown stays
             // explicit and the tray host owns the final decision.
             desktop.ShutdownMode = Avalonia.Controls.ShutdownMode.OnExplicitShutdown;
-            _tray = new TrayIconHost(settings);
+            _tray = new TrayIconHost(settings, onWake: () => powerMode.NotifyForegroundIntent("tray-restore"));
             _tray.Attach(window);
-            _tray.SettingsRequested += (_, _) => window.OpenSettings();
-            _tray.AgentStatusRequested += (_, _) => window.OpenAgentSettings();
+            _tray.SettingsRequested += (_, _) =>
+            {
+                powerMode.NotifyForegroundIntent("tray-settings");
+                window.OpenSettings();
+            };
+            _tray.AgentStatusRequested += (_, _) =>
+            {
+                powerMode.NotifyForegroundIntent("tray-agent");
+                window.OpenAgentSettings();
+            };
             window.PropertyChanged += OnMainWindowPropertyChanged;
+            _windowPowerSubscriptions.Add(Visual.IsVisibleProperty.Changed.AddClassHandler<Window>(
+                (_, _) => RefreshWindowPowerState(desktop, "window-visible")));
+            _windowPowerSubscriptions.Add(Window.WindowStateProperty.Changed.AddClassHandler<Window>(
+                (_, _) => RefreshWindowPowerState(desktop, "window-state")));
+            _windowPowerSubscriptions.Add(WindowBase.IsActiveProperty.Changed.AddClassHandler<Window>(
+                (activeWindow, e) =>
+                {
+                    if (e.GetNewValue<bool>() && IsVisibleUnminimized(activeWindow))
+                        powerMode.NotifyForegroundIntent("window-activated");
+                }));
+            powerMode.EnteredBackgroundIdle += OnPowerModeEnteredBackgroundIdle;
+            RefreshWindowPowerState(desktop, "startup");
 
             SingleInstanceHost.Attach(deepLink => Dispatcher.UIThread.Post(() =>
             {
@@ -356,17 +427,17 @@ public partial class App : Application
                 if (!string.IsNullOrEmpty(deepLink)) _ = HandleOAuthDeepLinkAsync(deepLink, window);
             }));
 
+            var maintenanceLifetime = new CancellationTokenSource();
+            var maintenanceToken = maintenanceLifetime.Token;
             cloudSync.StartPeriodicSync();
-            _ = RunStartupCloudSyncAsync(cloudSync, main.ConversationList);
-            _storageMaintenanceCts = new CancellationTokenSource();
+            _ = RunStartupCloudSyncAsync(cloudSync, main.ConversationList, maintenanceToken);
             var startupStorage = Task.Run(() =>
             {
                 try { storage.StartupMaintenance(); }
                 catch (Exception ex) { DiagnosticLog.Write("storage", "启动清理失败：" + ex.Message); }
             });
-            _ = RunStorageMaintenanceAsync(storage, startupStorage, _storageMaintenanceCts.Token);
+            _ = RunStorageMaintenanceAsync(storage, startupStorage, maintenanceToken);
             var piSweepCutoff = DateTime.UtcNow;
-            var maintenanceToken = _storageMaintenanceCts.Token;
             _ = Task.Run(async () =>
             {
                 await Task.Delay(TimeSpan.FromSeconds(45), maintenanceToken).ConfigureAwait(false);
@@ -382,26 +453,48 @@ public partial class App : Application
                 window);
             Dispatcher.UIThread.Post(
                 () => _ = RunStartupAccountRefreshAsync(
-                    auth, providers, proxy, localTools, accountSession, window),
+                    auth, providers, proxy, localTools, window),
                 DispatcherPriority.Background);
             _ = RunUpdateCheckAsync(main, updateCheck, notifications);
-            _ = RunAgentRuntimeUpdateAfterStorageAsync(window, piSidecar, startupStorage);
+            _ = RunAgentRuntimeUpdateAfterStorageAsync(piSidecar, startupStorage,
+                () => agentRuntime.OfferInstall(window.OpenProviderSettings), maintenanceToken);
 
             desktop.ShutdownRequested += (_, _) =>
             {
+                if (_shuttingDown) return;
+                _shuttingDown = true;
+                remoteWorkSettings.EnabledChanged -= SyncRemoteWork;
+                settings.PropertyChanged -= OnRemoteAccountChanged;
+                remoteWork.Paired -= OnRemotePaired;
+                remoteWork.ConfirmAccountPairingAsync = null;
+                remoteLifetime.Cancel();
+                maintenanceLifetime.Cancel();
                 window.PropertyChanged -= OnMainWindowPropertyChanged;
+                if (_powerMode is { } pm) pm.EnteredBackgroundIdle -= OnPowerModeEnteredBackgroundIdle;
+                foreach (var sub in _windowPowerSubscriptions) sub.Dispose();
+                _windowPowerSubscriptions.Clear();
+                main.Chat.HistorySaveFailed -= ReportHistorySaveFailure;
+                mcp.ServerUnavailable -= ReportMcpUnavailable;
                 _selectionAssistant?.Dispose();
-                main.Composer.SaveInProgressMessages();
+                // ShutdownRequested is synchronous, including Windows sign-out.
+                // Drain captured writes before disposing their services.
+                try { main.Composer.SaveInProgressMessagesAsync().GetAwaiter().GetResult(); }
+                catch (Exception ex) { DiagnosticLog.Write("storage", $"退出时保存消息失败：{ex.Message}"); }
                 _backgroundCheck?.Dispose();
-                _storageMaintenanceCts?.Cancel();
                 cloudSync.StopPeriodicSync();
                 _notificationRouter?.Dispose();
-                StopAgentRelayAsync().GetAwaiter().GetResult();
-                remoteWork.StopAsync().GetAwaiter().GetResult();
+                try { StopAgentRelayAsync(shutdown: true).GetAwaiter().GetResult(); }
+                catch (Exception ex) { DiagnosticLog.Write("AgentRelay", "退出时停止中继失败：" + ex.Message); }
                 _tray?.Dispose();
+                _powerMode = null;
                 var services = _services;
                 _services = null;
-                services?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                try { services?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+                finally
+                {
+                    remoteLifetime.Dispose();
+                    maintenanceLifetime.Dispose();
+                }
             };
 
             // Off the dispatcher: the sidebar read is the first thing that
@@ -413,10 +506,21 @@ public partial class App : Application
     }
 
     private static async Task RunAgentRuntimeUpdateAfterStorageAsync(
-        MainWindow window, PiSidecarRuntimeManager piSidecar, Task startupStorage)
+        PiSidecarRuntimeManager piSidecar, Task startupStorage, Action announce, CancellationToken ct)
     {
-        await startupStorage;
-        await RunAgentRuntimeUpdateCheckAsync(window, piSidecar);
+        try
+        {
+            await startupStorage.WaitAsync(ct).ConfigureAwait(false);
+            await Task.Delay(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+            if (piSidecar.GetCompatibleInstalled() is null || !await piSidecar.IsUpdateAvailableAsync(ct).ConfigureAwait(false))
+                return;
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (!ct.IsCancellationRequested && piSidecar.GetCompatibleInstalled() is not null)
+                    announce();
+            });
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
     }
 
     private static async Task RunStorageMaintenanceAsync(StorageService storage, Task startup, CancellationToken ct)
@@ -445,19 +549,14 @@ public partial class App : Application
         ProviderRegistry providers,
         MolaGptProxyProvider proxy,
         MolaGptLocalToolsRegistrar localTools,
-        AccountSessionCoordinator accountSession,
         MainWindow window)
     {
-        var startupJwt = auth.CurrentJwt;
-        if (string.IsNullOrEmpty(startupJwt)) return;
+        var session = auth.ReadSession();
+        if (!session.IsLoggedIn) return;
 
         try
         {
             await proxy.RefreshModelsAsync();
-        }
-        catch (MolaGptAuthExpiredException)
-        {
-            auth.LogoutIfCurrent(startupJwt);
         }
         catch
         {
@@ -465,15 +564,14 @@ public partial class App : Application
             // account action can refresh the model list when the network returns.
         }
 
-        if (!string.IsNullOrEmpty(auth.CurrentJwt)) providers.Register(proxy);
+        if (session.Generation != auth.SessionGeneration) return;
+        providers.Register(proxy);
         // Work disappearing from the picker used to leave nothing behind at all.
         // Still non-fatal — Chat must come up either way — but it is written down.
         try { await localTools.RefreshAsync(); }
         catch (Exception ex) { DiagnosticLog.Write("pi-work", "启动时刷新 Work 失败：" + ex.Message); }
 
-        if (string.IsNullOrEmpty(auth.CurrentJwt))
-            accountSession.CleanupLoggedOutAccountState();
-        else
+        if (session.Generation == auth.SessionGeneration)
             window.CompleteAccountLogin();
     }
 
@@ -484,6 +582,7 @@ public partial class App : Application
     {
         if (main.UpdateState == "Downloading") return;
 
+        using var updateLease = _powerMode?.Acquire("app-update-download");
         main.BeginUpdateDownload();
         _notifications?.Progress(UpdateNotificationKey, $"正在下载 {package.Version}", "0%", 0);
 
@@ -503,7 +602,7 @@ public partial class App : Application
                     UpdateNotificationKey, $"正在下载 {package.Version}", percent < 0 ? null : $"{percent}%", value);
             });
 
-            _pendingUpdateInstallerPath = await autoUpdate.DownloadAndVerifyAsync(package, progress);
+            _pendingUpdateInstaller = (await autoUpdate.DownloadAndVerifyAsync(package, progress), package.Sha256.Trim());
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
                 main.MarkUpdateReady();
@@ -624,17 +723,6 @@ public partial class App : Application
         });
     }
 
-    private static async Task RunAgentRuntimeUpdateCheckAsync(
-        MainWindow window,
-        PiSidecarRuntimeManager piSidecar)
-    {
-        await Task.Delay(TimeSpan.FromSeconds(5));
-        if (piSidecar.GetCompatibleInstalled() is null) return;
-        if (!await piSidecar.IsUpdateAvailableAsync()) return;
-
-        Dispatcher.UIThread.Post(window.AnnounceAvailableAgentRuntimeUpdate);
-    }
-
     private static string? FirstLine(string? notes)
     {
         if (string.IsNullOrWhiteSpace(notes)) return null;
@@ -686,12 +774,17 @@ public partial class App : Application
 
     private static async Task RunStartupCloudSyncAsync(
         CloudSyncService cloudSync,
-        ConversationListViewModel conversations)
+        ConversationListViewModel conversations,
+        CancellationToken ct)
     {
-        await Task.Delay(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
-        // Nobody asked for this one, so it stays silent unless it fails.
-        await cloudSync.RequestForegroundSyncAsync(userInitiated: false).ConfigureAwait(false);
-        await conversations.ReloadAsync().ConfigureAwait(false);
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(3), ct).ConfigureAwait(false);
+            // Nobody asked for this one, so it stays silent unless it fails.
+            await cloudSync.RequestForegroundSyncAsync(ct, userInitiated: false).ConfigureAwait(false);
+            if (!ct.IsCancellationRequested) await conversations.ReloadAsync().ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
     }
 
     private void SweepOrphanedPiSessions(DateTime cutoff, CancellationToken ct)
@@ -704,6 +797,11 @@ public partial class App : Application
                 .Select(conversation => conversation.Id)
                 .ToArray();
             var children = _services.GetRequiredService<MessageRepository>().ListSubagentSessionKeys();
+            if (children is null)
+            {
+                DiagnosticLog.Write("pi-work", "子会话引用扫描不完整，跳过文件清理。");
+                return;
+            }
             if (ct.IsCancellationRequested) return;
             var removed = new PiWorkSessionSweeper(PiWorkSidecarLocator.SessionRoot).Sweep(live, children, cutoff, ct);
             if (removed > 0) DiagnosticLog.Write("pi-work", $"清理了 {removed} 个无主的 Pi 会话文件");
@@ -869,20 +967,15 @@ public partial class App : Application
             return;
         }
 
-        var loginJwt = auth.CurrentJwt;
+        var session = auth.ReadSession();
         try
         {
             var proxy = _services.GetRequiredService<MolaGptProxyProvider>();
             await proxy.RefreshModelsAsync();
+            if (session.Generation != auth.SessionGeneration) return;
             _services.GetRequiredService<ProviderRegistry>().Register(proxy);
             try { await _services.GetRequiredService<MolaGptLocalToolsRegistrar>().RefreshAsync(); }
             catch { }
-        }
-        catch (MolaGptAuthExpiredException ex)
-        {
-            auth.LogoutIfCurrent(loginJwt);
-            LoginWindow.NotifyExternalLoginCompleted(false, $"账号验证失败：{ex.Message}");
-            return;
         }
         catch
         {
@@ -890,6 +983,11 @@ public partial class App : Application
             // account action or application start.
         }
 
+        if (session.Generation != auth.SessionGeneration || !session.IsLoggedIn)
+        {
+            LoginWindow.NotifyExternalLoginCompleted(false, "登录状态已变化，请重新登录。");
+            return;
+        }
         if (!LoginWindow.NotifyExternalLoginCompleted(true))
             window.CompleteAccountLogin();
     }
@@ -912,12 +1010,32 @@ public partial class App : Application
         _backgroundCheck = DispatcherTimer.RunOnce(() =>
         {
             _backgroundCheck = null;
-            var background = !window.IsVisible || window.WindowState == WindowState.Minimized;
+            var background = !IsVisibleUnminimized(window);
             if (_backgroundMode == background) return;
             _backgroundMode = background;
             if (background) EnterBackground();
             else ExitBackground();
+            if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+                RefreshWindowPowerState(desktop, "main-window-settled");
         }, BackgroundSettleDelay);
+    }
+
+    private static bool IsVisibleUnminimized(Window window) =>
+        window.IsVisible && window.WindowState != WindowState.Minimized;
+
+    private void RefreshWindowPowerState(IClassicDesktopStyleApplicationLifetime desktop, string reason)
+    {
+        // The main window can report Normal before its restore has settled.
+        // A real activation and a visible secondary window still promote QoS immediately.
+        var hasVisible = false;
+        foreach (var window in desktop.Windows)
+        {
+            if (!IsVisibleUnminimized(window)) continue;
+            if (ReferenceEquals(window, desktop.MainWindow) && _backgroundMode && !window.IsActive) continue;
+            hasVisible = true;
+            break;
+        }
+        _powerMode?.SetHasVisibleWindow(hasVisible, reason);
     }
 
     private void EnterBackground()
@@ -926,17 +1044,62 @@ public partial class App : Application
         _services?.GetRequiredService<PiRuntime>().SetBackgroundMode(true);
         _services?.GetRequiredService<CloudSyncService>().SetBackgroundMode(true);
 
+        _pendingBackgroundTrim = true;
+        if (_powerMode is null)
+        {
+            TryExecuteBackgroundTrim(expectedIdleGeneration: null);
+            return;
+        }
+        if (_powerMode.IsIdleAtGeneration(out var idleGen))
+        {
+            TryExecuteBackgroundTrim(idleGen);
+        }
+    }
+
+    private void OnPowerModeEnteredBackgroundIdle(long idleGeneration)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (!_backgroundMode || !_pendingBackgroundTrim) return;
+            if (_powerMode is null || !_powerMode.MatchesIdleGeneration(idleGeneration)) return;
+            TryExecuteBackgroundTrim(idleGeneration);
+        });
+    }
+
+    private void TryExecuteBackgroundTrim(long? expectedIdleGeneration)
+    {
+        if (!_pendingBackgroundTrim) return;
+        if (_powerMode is { HasActiveWork: true }) return;
+        if (expectedIdleGeneration is { } gen && _powerMode is not null && !_powerMode.MatchesIdleGeneration(gen)) return;
+
+        _pendingBackgroundTrim = false;
+
         var now = DateTime.UtcNow.Ticks;
-        if (now - Interlocked.Read(ref _lastBackgroundTrimTicks) < TimeSpan.FromSeconds(30).Ticks) return;
+        if (now - Interlocked.Read(ref _lastBackgroundTrimTicks) < BackgroundTrimCooldown.Ticks) return;
         Interlocked.Exchange(ref _lastBackgroundTrimTicks, now);
 
         CodeHighlighter.TrimForBackground();
         ImageSourceLoader.TrimForBackground();
         _ = TrimGraphicsForBackgroundAsync();
 
-        // 回收一次并归还空闲 GC 堆页；30s 内不重复请求。
-        _ = Task.Run(() => GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive,
-            blocking: true, compacting: true));
+        // 每次切入后台最多执行一次，驻留后台期间不再重复，跨周期至少间隔 5 分钟。
+        var powerMode = _powerMode;
+        _ = Task.Run(() =>
+        {
+            if (powerMode is not null)
+            {
+                if (expectedIdleGeneration is { } idleGen)
+                {
+                    if (!powerMode.MatchesIdleGeneration(idleGen)) return;
+                }
+                else if (powerMode.HasActiveWork)
+                {
+                    return;
+                }
+            }
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive,
+                blocking: true, compacting: true);
+        });
     }
 
     private async Task TrimGraphicsForBackgroundAsync()
@@ -998,13 +1161,15 @@ public partial class App : Application
 
     private void ExitBackground()
     {
+        _pendingBackgroundTrim = false;
         _services?.GetRequiredService<AgentBridgeService>().SetBackgroundMode(false);
         _services?.GetRequiredService<PiRuntime>().SetBackgroundMode(false);
         _services?.GetRequiredService<CloudSyncService>().SetBackgroundMode(false);
     }
 
-    private static void BringToFront(Window window)
+    private void BringToFront(Window window)
     {
+        _powerMode?.NotifyForegroundIntent("bring-to-front");
         if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
         if (!window.IsVisible) window.Show();
         window.Activate();
@@ -1012,7 +1177,7 @@ public partial class App : Application
 
     private void StartAgentRelay()
     {
-        if (_agentRelayTask is not null || _services is null) return;
+        if (_shuttingDown || _agentRelayTask is not null || _services is null) return;
 
         _agentRelayCts = new CancellationTokenSource();
         var token = _agentRelayCts.Token;
@@ -1050,12 +1215,16 @@ public partial class App : Application
         });
     }
 
-    private async Task StopAgentRelayAsync()
+    private async Task StopAgentRelayAsync(bool shutdown = false)
     {
         var cts = _agentRelayCts;
         var task = _agentRelayTask;
-        _agentRelayCts = null;
-        _agentRelayTask = null;
+        if (shutdown)
+        {
+            _shuttingDown = true;
+            _agentRelayCts = null;
+            _agentRelayTask = null;
+        }
 
         if (cts is null && task is null) return;
 
@@ -1067,8 +1236,26 @@ public partial class App : Application
         }
 
         if (task is not null)
-            await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(2))).ConfigureAwait(false);
-        cts?.Dispose();
+        {
+            if (shutdown)
+            {
+                await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(2))).ConfigureAwait(false);
+            }
+            else
+            {
+                try { await task.ConfigureAwait(false); }
+                catch (OperationCanceledException) { }
+                catch (Exception ex) { DiagnosticLog.Write("AgentRelay", $"stop error: {ex.GetType().Name}: {ex.Message}"); }
+            }
+        }
+
+        if (!shutdown)
+        {
+            if (ReferenceEquals(_agentRelayCts, cts)) _agentRelayCts = null;
+            if (ReferenceEquals(_agentRelayTask, task)) _agentRelayTask = null;
+        }
+        if (task is null || task.IsCompleted)
+            cts?.Dispose();
     }
 
     private void ApplyTheme(ThemeMode mode) =>

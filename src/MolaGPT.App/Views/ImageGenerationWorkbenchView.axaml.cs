@@ -1,7 +1,5 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -10,11 +8,11 @@ using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using MolaGPT.App.Infrastructure;
+using MolaGPT.App.Rendering;
 using MolaGPT.Core.Chat.Tools.ImageGeneration;
 using MolaGPT.Core.Models;
+using MolaGPT.Core.Net;
 using MolaGPT.Desktop.Services;
-using MolaGPT.Storage;
-using MolaGPT.Storage.Repositories;
 using MolaGPT.ViewModels;
 using SkiaSharp;
 
@@ -26,17 +24,13 @@ public partial class ImageGenerationWorkbenchView : UserControl
     private const int GalleryLimit = 200;
 
     private readonly SettingsViewModel _settings;
-    private readonly ImageGenerationTool _imageGeneration;
-    private readonly AttachmentStore _attachmentStore;
-    private readonly ConversationRepository _conversationRepo;
-    private readonly MessageRepository _messageRepo;
-    private readonly Func<string, string?, string> _createConversation;
-    private readonly Action<string, bool> _onGeneratingChanged;
-    private readonly NotificationCenter? _notifications;
+    private readonly ImageWorkbenchTasks _tasks;
+    private readonly NotificationCenter _notifications;
     private readonly ObservableCollection<ImageWorkbenchRun> _runs = new();
     private readonly ObservableCollection<ImageWorkbenchResult> _gallery = new();
-    private CancellationTokenSource? _cts;
     private string? _conversationId;
+    private bool _presented;
+    private DateTimeOffset? _resultsClearedAt;
     private bool _loading;
     private string _size = "1024x1024";
     private WorkbenchMode _mode = WorkbenchMode.Conversation;
@@ -52,7 +46,6 @@ public partial class ImageGenerationWorkbenchView : UserControl
     /// edits.
     /// </summary>
     private bool _baseIsChainHead;
-    private bool _hiddenNotificationShown;
 
     /// <summary>
     /// What a run does with the images already in the task. The base image is
@@ -73,25 +66,15 @@ public partial class ImageGenerationWorkbenchView : UserControl
         Conversation
     }
 
-    public ImageGenerationWorkbenchView(
+    internal ImageGenerationWorkbenchView(
         SettingsViewModel settings,
-        ImageGenerationTool imageGeneration,
-        AttachmentStore attachmentStore,
-        ConversationRepository conversationRepo,
-        MessageRepository messageRepo,
+        ImageWorkbenchTasks tasks,
         string? conversationId,
-        Func<string, string?, string> createConversation,
-        Action<string, bool> onGeneratingChanged,
-        NotificationCenter? notifications = null)
+        NotificationCenter notifications)
     {
         _settings = settings;
-        _imageGeneration = imageGeneration;
-        _attachmentStore = attachmentStore;
-        _conversationRepo = conversationRepo;
-        _messageRepo = messageRepo;
+        _tasks = tasks;
         _conversationId = conversationId;
-        _createConversation = createConversation;
-        _onGeneratingChanged = onGeneratingChanged;
         _notifications = notifications;
 
         InitializeComponent();
@@ -104,7 +87,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         PART_Close.Click += (_, _) => CloseRequested?.Invoke(this, EventArgs.Empty);
         PART_OpenSettings.Click += (_, _) => OpenSettingsRequested?.Invoke(this, EventArgs.Empty);
         PART_Generate.Click += OnGenerate;
-        PART_Stop.Click += (_, _) => _cts?.Cancel();
+        PART_Stop.Click += (_, _) => _tasks.Cancel(_conversationId);
         PART_SingleMode.Click += (_, _) => SetMode(WorkbenchMode.Single);
         PART_ConversationMode.Click += (_, _) => SetMode(WorkbenchMode.Conversation);
         PART_UploadSource.Click += OnUploadSourceClick;
@@ -129,10 +112,9 @@ public partial class ImageGenerationWorkbenchView : UserControl
             UpdateSourceUi();
         };
         _gallery.CollectionChanged += (_, _) => UpdateEmptyState();
-        _settings.PropertyChanged += OnSettingsChanged;
         DetachedFromVisualTree += (_, _) =>
         {
-            _settings.PropertyChanged -= OnSettingsChanged;
+            SetPresented(false);
             DisposeBaseThumbnail();
         };
 
@@ -146,7 +128,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
     /// conversation id, not the result: the host routes it through the sidebar
     /// so the list highlights the same task the workbench switches to.</summary>
     public event EventHandler<string>? OpenTaskRequested;
-    public bool IsGenerating => _cts is not null;
+    public bool IsGenerating => _tasks.IsGenerating(_conversationId);
     public string? ConversationId => _conversationId;
 
     private bool SupportsEdit => _settings.SelectedWorkbenchImageGenerationModel?.SupportsEdit == true;
@@ -181,7 +163,6 @@ public partial class ImageGenerationWorkbenchView : UserControl
             _loading = false;
         }
 
-        LoadStoredImages();
         ShowCurrent();
         UpdateOptionChips();
         UpdateStatus();
@@ -189,12 +170,9 @@ public partial class ImageGenerationWorkbenchView : UserControl
         UpdateEmptyState();
     }
 
-    private async void OnGenerate(object? sender, RoutedEventArgs e)
+    private void OnGenerate(object? sender, RoutedEventArgs e)
     {
-        // Cancelling lives on PART_Stop now. This used to double as the cancel
-        // path, which meant Enter mid-run aborted the image it had just started.
-        if (_cts is not null) return;
-
+        if (IsGenerating || !_settings.IsWorkbenchImageGenerationConfigured) return;
         var prompt = PART_Prompt.Text?.Trim() ?? string.Empty;
         if (prompt.Length == 0)
         {
@@ -203,166 +181,98 @@ public partial class ImageGenerationWorkbenchView : UserControl
             return;
         }
 
-        EnsureConversation(prompt);
         var selected = _settings.SelectedWorkbenchImageGenerationModel;
-        var providerId = selected?.ProviderId ?? _settings.WorkbenchImageGenerationProviderId;
-        var modelId = selected?.ModelId ?? _settings.WorkbenchImageGenerationModelId;
-        var modelLabel = selected?.Label ?? modelId;
-        var editSource = ResolveEditSource();
-        var isEdit = editSource is not null;
-        var count = EffectiveCount;
-        var taskTitle = CurrentTaskTitle();
-        if (IsDefaultTaskTitle(taskTitle)) taskTitle = BuildTaskTitle(prompt);
-
-        var pending = ImageWorkbenchRun.Pending(prompt, taskTitle, isEdit, modelLabel, modelId, providerId);
-        _hiddenNotificationShown = false;
-        _runs.Add(pending);
-
-        // Emptied the moment the run is queued, exactly like the chat composer:
-        // the prompt is on screen in its own bubble now, so leaving a copy in
-        // the box only means typing over it. Put back if the run failed and
-        // nothing new has been typed since — the words are not worth losing.
-        PART_Prompt.Clear();
-        ShowCurrent();
-        ScrollResultsToEnd();
-
-        var cts = new CancellationTokenSource();
-        _cts = cts;
-        SetGenerating(true);
+        var options = _settings.BuildWorkbenchImageGenerationOptions() with
+        {
+            Size = SelectedSize(),
+            Style = string.IsNullOrWhiteSpace(PART_Style.Text) ? null : PART_Style.Text.Trim(),
+            AsTool = false
+        };
+        var source = ResolveEditSource();
         try
         {
-            // HasEditSource can be true while the resolve came up empty — the
-            // stored original was deleted between the last refresh and now.
-            StatusText = !isEdit && HasEditSource ? "底图已失效，本次直接生成" : string.Empty;
-            var options = _settings.BuildWorkbenchImageGenerationOptions() with
-            {
-                Size = SelectedSize(),
-                Style = string.IsNullOrWhiteSpace(PART_Style.Text) ? null : PART_Style.Text.Trim(),
-                AsTool = false
-            };
-            var images = isEdit
-                ? await _imageGeneration.EditAsync(
-                    options, prompt, editSource!.Value.Bytes, editSource.Value.MimeType, count, cts.Token)
-                : await _imageGeneration.GenerateAsync(options, prompt, count, cts.Token);
-
-            if (images.Count == 0)
-            {
-                Complete(pending, pending with { IsPending = false, ErrorMessage = "未返回图片，换个描述再试" });
-                RestorePrompt(prompt);
-
-                // Still a terminal state: without it the 「正在后台生成」 banner
-                // for this key would stay up for good.
-                Announce(NotifyKind.Warning, taskTitle, "未返回图片", "换个描述再试", completed: true);
-                return;
-            }
-
-            var results = new List<ImageWorkbenchResult>(images.Count);
-            var index = 0;
-            foreach (var image in images)
-            {
-                var fileName = $"generated-{DateTime.Now:yyyyMMdd-HHmmss}-{++index}{ExtensionForMime(image.MimeType)}";
-                var localName = _attachmentStore.Save(image.Bytes, image.MimeType, fileName);
-                var stored = ReadStoredImageInfo(localName);
-                var result = new ImageWorkbenchResult(
-                    fileName, image.MimeType, ByteSourceFor(localName, image.Bytes), localName,
-                    image.RevisedPrompt, stored?.Path, stored?.Size ?? default, prompt, DateTimeOffset.Now,
-                    modelLabel, _conversationId);
-                results.Add(result);
-                _gallery.Insert(0, result);
-            }
-
-            // The chain head moves to what was just produced; the base image
-            // stays loaded for 生成模式, which always goes back to it.
-            _baseIsChainHead = false;
-            var done = pending with { IsPending = false, Images = results };
-            Complete(pending, done);
-            Persist(done);
-
-            Announce(NotifyKind.Success, taskTitle, "生成完成",
-                results.Count > 1 ? $"共 {results.Count} 张" : null, completed: true);
-            ScrollResultsToEnd();
-        }
-        catch (OperationCanceledException)
-        {
-            var cancelled = pending with { IsPending = false, ErrorMessage = "已取消" };
-            Complete(pending, cancelled);
-            Persist(cancelled);
-            RestorePrompt(prompt);
-            Announce(NotifyKind.Warning, taskTitle, "已取消", null, completed: true);
+            _conversationId ??= _tasks.CreateTask(prompt, options.Model);
+            StatusText = source is null && HasEditSource ? "底图已失效，本次直接生成" : string.Empty;
+            _ = _tasks.Start(_conversationId, prompt, options, EffectiveCount, source,
+                selected?.Label ?? options.Model, selected?.ProviderId ?? _settings.WorkbenchImageGenerationProviderId);
         }
         catch (Exception ex)
         {
-            var failed = pending with { IsPending = false, ErrorMessage = ex.Message };
-            Complete(pending, failed);
-            Persist(failed);
-            RestorePrompt(prompt);
-            Announce(NotifyKind.Error, taskTitle, "生成失败", ex.Message, completed: false);
-        }
-        finally
-        {
-            if (ReferenceEquals(_cts, cts)) _cts = null;
-            cts.Dispose();
-            SetGenerating(false);
+            _notifications.Error("无法开始图像任务", ex.Message);
         }
     }
 
-    /// <summary>
-    /// Swaps the pending run for its outcome in place, so the row keeps its
-    /// position even if the user opened another task and came back.
-    /// </summary>
-    private void Complete(ImageWorkbenchRun pending, ImageWorkbenchRun outcome)
+    internal void SetPresented(bool presented)
     {
-        var index = _runs.IndexOf(pending);
-        if (index >= 0) _runs[index] = outcome;
-        else _runs.Add(outcome);
-    }
-
-    /// <summary>Only when the box is still empty: a prompt typed while the run
-    /// was in flight outranks the one that failed.</summary>
-    private void RestorePrompt(string prompt)
-    {
-        if (!string.IsNullOrWhiteSpace(PART_Prompt.Text)) return;
-        PART_Prompt.Text = prompt;
-        PART_Prompt.CaretIndex = prompt.Length;
-    }
-
-    /// <summary>
-    /// One key per task, so a run's progress banner is replaced by its outcome
-    /// rather than stacked under it. <paramref name="completed"/> is what lets
-    /// the router raise a system toast while the app is in the background.
-    /// </summary>
-    private void Announce(NotifyKind kind, string taskTitle, string headline, string? body, bool completed)
-    {
-        if (string.IsNullOrWhiteSpace(_conversationId)) return;
-        _notifications?.Notify(new AppNotification
+        if (_presented == presented) return;
+        _presented = presented;
+        if (presented)
         {
-            Key = "image-" + _conversationId,
-            Kind = kind,
-            Title = string.IsNullOrWhiteSpace(taskTitle) ? headline : $"「{taskTitle}」{headline}",
-            Body = body,
-            ConversationId = _conversationId,
-            IsAnswerCompleted = completed
-        });
+            _tasks.RunChanged += OnRunChanged;
+            _settings.PropertyChanged += OnSettingsChanged;
+            var pending = _runs.LastOrDefault(run => run.IsPending);
+            LoadStoredImages();
+            if (pending is not null && _runs.LastOrDefault() is { IsPending: false } finished)
+                ApplyFinishedRun(finished);
+            UpdateStatus();
+            RefreshGenerating();
+        }
+        else
+        {
+            _tasks.RunChanged -= OnRunChanged;
+            _settings.PropertyChanged -= OnSettingsChanged;
+            _tasks.NotifyHidden(_conversationId);
+        }
     }
 
-    private void EnsureConversation(string prompt)
+    private void OnRunChanged(string id, ImageWorkbenchRun run)
     {
-        if (!string.IsNullOrWhiteSpace(_conversationId)) return;
-        _conversationId = _createConversation(BuildTaskTitle(prompt), _settings.WorkbenchImageGenerationModelId);
+        if (id == _conversationId)
+        {
+            if (run.IsPending)
+            {
+                _runs.Add(run);
+                PART_Prompt.Clear();
+                ShowCurrent();
+            }
+            else
+            {
+                var pending = _runs.FirstOrDefault(item => item.IsPending);
+                if (pending is null) _runs.Add(run);
+                else _runs[_runs.IndexOf(pending)] = run;
+                ApplyFinishedRun(run);
+            }
+            RefreshGenerating();
+            ScrollResultsToEnd();
+        }
+
+        if (!run.HasImages) return;
+        foreach (var image in run.Images) _gallery.Insert(0, image);
+        if (_gallery.Count <= GalleryLimit) return;
+        PART_GalleryLimitNote.IsVisible = true;
+        while (_gallery.Count > GalleryLimit) _gallery.RemoveAt(_gallery.Count - 1);
     }
 
-    private void SetGenerating(bool generating)
+    private void ApplyFinishedRun(ImageWorkbenchRun run)
     {
-        if (!string.IsNullOrWhiteSpace(_conversationId))
-            _onGeneratingChanged(_conversationId, generating);
-        PART_Generate.IsVisible = !generating;
-        PART_Stop.IsVisible = generating;
+        if (run.HasImages) _baseIsChainHead = false;
+        else if (run.IsError && string.IsNullOrWhiteSpace(PART_Prompt.Text))
+        {
+            PART_Prompt.Text = run.Prompt;
+            PART_Prompt.CaretIndex = run.Prompt.Length;
+        }
+    }
+
+    private void RefreshGenerating()
+    {
+        PART_Generate.IsVisible = !IsGenerating;
+        PART_Stop.IsVisible = IsGenerating;
         UpdateGenerateButton();
         UpdateEmptyState();
     }
 
     private void UpdateGenerateButton() =>
-        PART_Generate.IsEnabled = _settings.IsWorkbenchImageGenerationConfigured
+        PART_Generate.IsEnabled = !IsGenerating && _settings.IsWorkbenchImageGenerationConfigured
             && !string.IsNullOrWhiteSpace(PART_Prompt.Text);
 
     private void OnPromptKeyDown(object? sender, KeyEventArgs e)
@@ -552,9 +462,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         try
         {
             await using var stream = await files[0].OpenReadAsync();
-            using var buffer = new MemoryStream();
-            await stream.CopyToAsync(buffer);
-            return ApplyBaseImage(buffer.ToArray(), files[0].Name);
+            return ApplyBaseImage(await BoundedRead.ReadAsync(stream, ImageSourceLoader.MaxEncodedBytes, default), files[0].Name);
         }
         catch (Exception ex)
         {
@@ -639,7 +547,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         e.Handled = accepted;
     }
 
-    private void OnSourceDrop(object? sender, DragEventArgs e)
+    private async void OnSourceDrop(object? sender, DragEventArgs e)
     {
         if (!SupportsEdit) return;
         if (e.DataTransfer.TryGetFiles() is not { Length: > 0 } files) return;
@@ -658,7 +566,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
 
         try
         {
-            ApplyBaseImage(File.ReadAllBytes(path), Path.GetFileName(path));
+            ApplyBaseImage(await ImageSourceLoader.ReadFileAsync(path), Path.GetFileName(path));
         }
         catch (Exception ex)
         {
@@ -685,7 +593,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
                 && await data.TryGetFilesAsync() is { Length: > 0 } files
                 && files[0].TryGetLocalPath() is { Length: > 0 } path)
             {
-                ApplyBaseImage(File.ReadAllBytes(path), Path.GetFileName(path));
+                ApplyBaseImage(await ImageSourceLoader.ReadFileAsync(path), Path.GetFileName(path));
                 return;
             }
 
@@ -799,8 +707,9 @@ public partial class ImageGenerationWorkbenchView : UserControl
 
     private void NewTask()
     {
-        if (_cts is not null) return;
+        if (IsGenerating) return;
         _conversationId = null;
+        _resultsClearedAt = null;
         _runs.Clear();
         PART_Prompt.Clear();
         ClearBaseImage();
@@ -813,7 +722,8 @@ public partial class ImageGenerationWorkbenchView : UserControl
 
     private void ClearResults()
     {
-        if (_cts is not null) return;
+        if (IsGenerating) return;
+        _resultsClearedAt = DateTimeOffset.Now;
         _runs.Clear();
         StatusText = "已收起，作品仍在画廊";
     }
@@ -845,7 +755,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         // same thing in both places.
         PART_CurrentCount.Text = _runs.Sum(run => run.Images.Count).ToString();
         PART_GalleryCount.Text = _gallery.Count.ToString();
-        PART_ClearResults.IsVisible = _runs.Count > 0 && _cts is null;
+        PART_ClearResults.IsVisible = _runs.Count > 0 && !IsGenerating;
     }
 
     private void ScrollResultsToEnd() =>
@@ -855,153 +765,17 @@ public partial class ImageGenerationWorkbenchView : UserControl
     {
         _runs.Clear();
         _gallery.Clear();
+        if (_conversationId is { } id)
+            foreach (var run in _tasks.ReadTaskRuns(id))
+                if (_resultsClearedAt is null || run.CreatedAt > _resultsClearedAt)
+                    _runs.Add(run);
 
-        if (!string.IsNullOrWhiteSpace(_conversationId))
-        {
-            var title = CurrentTaskTitle();
-            foreach (var run in _messageRepo.List(_conversationId)
-                         .Select(row => ParseStored(row.Meta, row.Content, row.CreatedAt, title, _conversationId, true))
-                         .OfType<ImageWorkbenchRun>()
-                         .OrderBy(run => run.CreatedAt))
-            {
-                _runs.Add(run);
-            }
-        }
+        var images = _tasks.ReadGallery(GalleryLimit + 1);
+        foreach (var image in images.Take(GalleryLimit))
+            _gallery.Add(image);
 
-        // The query is already newest-first, so taking the head keeps the cap
-        // on the recent end. Only image headers are read while building rows.
-        var stored = _messageRepo
-            .ListImageWorkbenchMessages(ConversationListViewModel.ImageWorkbenchProviderId)
-            .Select(row => ParseStored(
-                row.Meta, row.Content, row.CreatedAt, row.ConversationTitle, row.ConversationId, false))
-            .OfType<ImageWorkbenchRun>()
-            .SelectMany(run => run.Images)
-            .Take(GalleryLimit + 1)
-            .ToList();
-
-        foreach (var result in stored.Take(GalleryLimit).OrderByDescending(result => result.CreatedAt))
-            _gallery.Add(result);
-
-        PART_GalleryLimitNote.IsVisible = stored.Count > GalleryLimit;
+        PART_GalleryLimitNote.IsVisible = images.Count > GalleryLimit;
         PART_GalleryLimitNote.Text = $"只显示最近 {GalleryLimit} 张";
-    }
-
-    /// <summary>
-    /// One stored row back into one run. The attachments were always an array,
-    /// so a batch round-trips through the same shape a single picture does —
-    /// what changed is that <see cref="Persist"/> now writes one row per run
-    /// instead of one per picture, and four pictures come back as one prompt.
-    /// </summary>
-    private ImageWorkbenchRun? ParseStored(
-        string? meta, string content, long createdAt, string taskTitle,
-        string? conversationId, bool includeErrors)
-    {
-        if (string.IsNullOrWhiteSpace(meta)) return null;
-
-        JsonDocument document;
-        try { document = JsonDocument.Parse(meta); }
-        catch (JsonException) { return null; }
-
-        using (document)
-        {
-            var root = document.RootElement;
-            if (!root.TryGetProperty("image_workbench", out var marker) || marker.ValueKind != JsonValueKind.True)
-                return null;
-
-            var prompt = ReadString(root, "prompt") ?? content;
-            var modelLabel = ReadString(root, "model_label") ?? ReadString(root, "model") ?? ReadString(root, "model_id");
-            var modelId = ReadString(root, "model_id");
-            var providerId = ReadString(root, "provider_id");
-            var isEdit = ReadBool(root, "image_edit");
-            var isError = string.Equals(ReadString(root, "status"), "error", StringComparison.OrdinalIgnoreCase);
-            var created = DateTimeOffset.FromUnixTimeMilliseconds(createdAt).ToLocalTime();
-
-            if (isError)
-            {
-                return includeErrors
-                    ? new ImageWorkbenchRun(prompt, taskTitle, created, isEdit, modelLabel, modelId, providerId,
-                        [], ErrorMessage: ReadString(root, "error_message") ?? content)
-                    : null;
-            }
-
-            if (!root.TryGetProperty("attachments", out var attachments)
-                || attachments.ValueKind != JsonValueKind.Array) return null;
-
-            // Rows written before the batch existed carry one revised prompt for
-            // the whole run; newer ones carry one per picture.
-            var sharedRevised = ReadString(root, "revised_prompt");
-            var images = new List<ImageWorkbenchResult>();
-            foreach (var attachment in attachments.EnumerateArray())
-            {
-                if (attachment.ValueKind != JsonValueKind.Object) continue;
-                var localName = ReadString(attachment, "localName");
-
-                if (ReadStoredImageInfo(localName) is not { } stored) continue;
-                var mime = ReadString(attachment, "mime") ?? "image/png";
-                var fileName = ReadString(attachment, "filename")
-                    ?? localName
-                    ?? $"generated-{createdAt}{ExtensionForMime(mime)}";
-                images.Add(new ImageWorkbenchResult(
-                    fileName, mime, ByteSourceFor(localName, null), localName,
-                    ReadString(attachment, "revised_prompt") ?? sharedRevised,
-                    stored.Path, stored.Size, prompt, created, modelLabel, conversationId));
-            }
-
-            return images.Count == 0
-                ? null
-                : new ImageWorkbenchRun(prompt, taskTitle, created, isEdit, modelLabel, modelId, providerId, images);
-        }
-    }
-
-    private void Persist(ImageWorkbenchRun run)
-    {
-        if (string.IsNullOrWhiteSpace(_conversationId)) return;
-        if (!run.IsError && run.Images.Count == 0) return;
-
-        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var meta = new JsonObject
-        {
-            ["image_workbench"] = true,
-            ["prompt"] = run.Prompt,
-            ["image_edit"] = run.IsEditMode,
-            ["model_label"] = run.ModelLabel,
-            ["model"] = run.ModelLabel,
-            ["model_id"] = run.ModelId,
-            ["provider_id"] = run.ProviderId,
-            ["status"] = run.IsError ? "error" : "completed"
-        };
-
-        string content;
-        if (run.IsError)
-        {
-            meta["error_message"] = run.ErrorDisplay;
-            content = (run.IsEditMode ? "图像编辑失败：" : "图像生成失败：") + run.ErrorDisplay;
-        }
-        else
-        {
-            // One row for the whole run. Four rows would reload as four runs and
-            // print the prompt four times.
-            meta["revised_prompt"] = run.Images[0].RevisedPrompt;
-            meta["attachments"] = new JsonArray(run.Images.Select(image => (JsonNode?)new JsonObject
-            {
-                ["filename"] = image.FileName,
-                ["label"] = "图片",
-                ["localName"] = image.LocalName,
-                ["mime"] = image.MimeType,
-                ["revised_prompt"] = image.RevisedPrompt
-            }).ToArray());
-            content = run.Images[0].RevisedPrompt is { Length: > 0 } revised ? revised : "图像生成完成";
-        }
-
-        _messageRepo.Insert(new MessageRow(
-            Guid.NewGuid().ToString("N"), _conversationId, "assistant", content, meta.ToJsonString(), now));
-        if (_conversationRepo.Get(_conversationId) is not { } row) return;
-        _conversationRepo.Upsert(row with
-        {
-            Title = IsDefaultTaskTitle(row.Title) ? BuildTaskTitle(run.Prompt) : row.Title,
-            ModelId = run.ModelId ?? _settings.WorkbenchImageGenerationModelId,
-            UpdatedAt = now
-        });
     }
 
     private async void OnSaveResult(object? sender, RoutedEventArgs e)
@@ -1021,7 +795,7 @@ public partial class ImageGenerationWorkbenchView : UserControl
         {
             Title = "保存图片",
             SuggestedFileName = result.FileName,
-            DefaultExtension = ExtensionForMime(result.MimeType).TrimStart('.')
+            DefaultExtension = ImageWorkbenchTasks.ExtensionForMime(result.MimeType).TrimStart('.')
         });
         if (file is null) return;
 
@@ -1077,81 +851,14 @@ public partial class ImageGenerationWorkbenchView : UserControl
         _ = ImagePreviewWindow.ShowAsync(owner, bytes, result.FileName);
     }
 
-    private string CurrentTaskTitle() => string.IsNullOrWhiteSpace(_conversationId)
-        ? "图像工作台"
-        : _conversationRepo.Get(_conversationId)?.Title ?? "图像工作台";
-
-    public void NotifyHiddenWhileGenerating()
-    {
-        if (_cts is null || _hiddenNotificationShown) return;
-
-        var pendingTitle = CurrentTaskTitle();
-        _notifications?.Notify(new AppNotification
-        {
-            Key = "image-" + _conversationId,
-            Kind = NotifyKind.Progress,
-            Title = "图像正在后台生成",
-            Body = string.IsNullOrWhiteSpace(pendingTitle) ? "完成后提醒" : $"「{pendingTitle}」· 完成后提醒",
-            ConversationId = _conversationId
-        });
-        _hiddenNotificationShown = true;
-    }
-
-    private static string BuildTaskTitle(string prompt)
-    {
-        var compact = string.Join(" ", prompt.Split(Array.Empty<char>(), StringSplitOptions.RemoveEmptyEntries));
-        if (compact.Length == 0) return "图像工作台";
-        return compact.Length <= 18 ? compact : compact[..18] + "...";
-    }
-
-    private static bool IsDefaultTaskTitle(string? title) => string.IsNullOrWhiteSpace(title)
-        || string.Equals(title, "图像工作台", StringComparison.Ordinal)
-        || string.Equals(title, "新对话", StringComparison.Ordinal);
-
-    private static string? ReadString(JsonElement element, string propertyName) =>
-        element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : null;
-
-    private static bool ReadBool(JsonElement element, string propertyName) =>
-        element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.True;
-
-    private static string ExtensionForMime(string? mimeType) => mimeType?.Trim().ToLowerInvariant() switch
-    {
-        "image/jpeg" or "image/jpg" => ".jpg",
-        "image/webp" => ".webp",
-        _ => ".png"
-    };
-
-    // ---- thumbnails and byte sources ---------------------------------------
-
-    /// <summary>
-    /// Cards render at most ~600×460, so a full 1024²-or-larger decode is pure
-    /// waste: 4 MB of surface per image against roughly 1.6 MB at this width.
-    /// </summary>
+    // Cards and the gallery decode only what their viewport needs.
     private const int ThumbnailWidth = 640;
-
-    private (string Path, PixelSize Size)? ReadStoredImageInfo(string? localName)
-    {
-        if (!_attachmentStore.TryGetPath(localName, out var path)) return null;
-        try
-        {
-            using var stream = File.OpenRead(path);
-            using var codec = SKCodec.Create(stream);
-            return codec is null ? null : (path, new PixelSize(codec.Info.Width, codec.Info.Height));
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return null;
-        }
-    }
 
     private static Bitmap? DecodeThumbnail(byte[] bytes)
     {
         try
         {
-            using var stream = new MemoryStream(bytes);
-            return Bitmap.DecodeToWidth(stream, ThumbnailWidth);
+            return ImageSourceLoader.Decode(bytes, ThumbnailWidth);
         }
         catch
         {
@@ -1163,15 +870,6 @@ public partial class ImageGenerationWorkbenchView : UserControl
     /// Prefers the store, so nothing is retained but the file name. Only when a
     /// save failed does the closure keep the bytes alive.
     /// </summary>
-    private Func<byte[]> ByteSourceFor(string? localName, byte[]? retainedFallback)
-    {
-        if (localName is { Length: > 0 } name)
-            return () => _attachmentStore.Load(name) ?? [];
-
-        var retained = retainedFallback ?? [];
-        return () => retained;
-    }
-
     private static string FormatSize(long bytes) => bytes >= 1024 * 1024
         ? $"{bytes / 1024d / 1024d:0.#} MB"
         : $"{bytes / 1024d:0.#} KB";
@@ -1256,6 +954,7 @@ public sealed record ImageWorkbenchResult(
     /// call this — never a binding, or scrolling the gallery would page every
     /// image back into memory.</summary>
     public byte[] LoadBytes() => BytesSource?.Invoke() ?? [];
+    public Func<byte[]>? FallbackBytes => ImagePath is null ? BytesSource : null;
 
     public bool HasImage => ImageSize.Width > 0 && ImageSize.Height > 0;
     public bool HasRevisedPrompt => !string.IsNullOrWhiteSpace(RevisedPrompt);

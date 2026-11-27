@@ -1,6 +1,5 @@
-﻿using System.Net.Http;
+using System.Net.Http;
 using MolaGPT.Core.Auth;
-using MolaGPT.Core.Chat;
 using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Tools;
 using MolaGPT.Core.Models;
@@ -66,12 +65,9 @@ public sealed class PiByokProviderFactory
     private const string DefaultChatPath = "v1/chat/completions";
     private const string DefaultResponsesPath = "v1/responses";
 
-    /// <summary>Native root for the legacy Google preset, which saved the compatibility root.</summary>
-    private const string GeminiNativeBaseUrl = "https://generativelanguage.googleapis.com/v1beta";
-
     private readonly PiWorkSidecarLocator _locator;
     private readonly IChatToolHost _toolHost;
-    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly HttpClient _http;
     private readonly PiRuntime _runtime;
     private readonly Action<string>? _log;
     private readonly ChatGptAccount? _chatGpt;
@@ -79,14 +75,10 @@ public sealed class PiByokProviderFactory
     /// <summary>The account ChatGPT rows draw on; the settings page signs it in.</summary>
     public ChatGptAccount? ChatGpt => _chatGpt;
 
-    /// <summary>Live Pi providers by provider id, so re-registering one (a settings
-    /// save) tears down the sidecars belonging to the copy it replaces.</summary>
-    private readonly Dictionary<string, PiWorkProvider> _active = new(StringComparer.Ordinal);
-
     public PiByokProviderFactory(
         PiWorkSidecarLocator locator,
         IChatToolHost toolHost,
-        IHttpClientFactory httpClientFactory,
+        HttpClient http,
         PiRuntime runtime,
         Action<string>? log = null,
         ChatGptAccount? chatGpt = null)
@@ -94,7 +86,7 @@ public sealed class PiByokProviderFactory
         _chatGpt = chatGpt;
         _locator = locator;
         _toolHost = toolHost;
-        _httpClientFactory = httpClientFactory;
+        _http = http;
         _runtime = runtime;
         _log = log;
     }
@@ -123,7 +115,7 @@ public sealed class PiByokProviderFactory
 
     /// <summary>Returns the provider for this row, or null when it cannot be
     /// carried — in which case the row stays out of the picker.</summary>
-    public IChatProvider? TryWrap(
+    public PiWorkProvider? TryWrap(
         string type,
         string id,
         string displayName,
@@ -131,9 +123,11 @@ public sealed class PiByokProviderFactory
         string? apiPath,
         string? apiKey,
         IReadOnlyList<ProviderModel> models,
+        out ProviderApplyOutcome outcome,
         IReadOnlyList<KeyValuePair<string, string>>? headers = null,
         bool builtinSearch = false)
     {
+        outcome = ProviderApplyOutcome.Unsupported;
         if (!Eligible.TryGetValue(type, out var shape)) return null;
         var chatGpt = type.Equals("chatgpt", StringComparison.Ordinal);
         if (chatGpt)
@@ -146,11 +140,9 @@ public sealed class PiByokProviderFactory
             apiPath = null;
             apiKey = "-";
         }
-        else if (type.Equals("gemini", StringComparison.Ordinal)
-                 && string.Equals(baseUrl?.TrimEnd('/'), GeminiNativeBaseUrl + "/openai", StringComparison.OrdinalIgnoreCase)
-                 && (string.IsNullOrWhiteSpace(apiPath) || apiPath.Trim() == DefaultChatPath))
+        else if (GeminiModelPolicy.IsLegacyNativePreset(type, baseUrl, apiPath))
         {
-            baseUrl = GeminiNativeBaseUrl;
+            baseUrl = GeminiModelPolicy.NativeBaseUrl;
             apiPath = shape.DefaultPath;
         }
         // No default for a blank base URL: the settings page refuses to save a row
@@ -160,14 +152,12 @@ public sealed class PiByokProviderFactory
         if (string.IsNullOrWhiteSpace(baseUrl) || string.IsNullOrWhiteSpace(apiKey)) return null;
         if (models.Count == 0) return null;
 
-        PiSidecarAssets? assets;
-        try { assets = _locator.TryResolve(); }
-        catch (Exception ex)
+        var assets = _locator.TryResolve();
+        if (assets is null)
         {
-            _log?.Invoke("[pi-byok] 定位 Agent 运行时失败：" + ex.Message);
+            outcome = ProviderApplyOutcome.RuntimeUnavailable;
             return null;
         }
-        if (assets is null) return null;
 
         string endpoint;
         try
@@ -238,29 +228,38 @@ public sealed class PiByokProviderFactory
                 ResponseReceived: account is null ? null : account.ObserveResponse),
             BuiltinSearch: !chatGpt && builtinSearch);
 
-        var http = _httpClientFactory.CreateClient(HttpClientNames.Byok);
-        var provider = new PiWorkProvider(
+        outcome = ProviderApplyOutcome.Registered;
+        return new PiWorkProvider(
             config,
             _toolHost,
-            http,
-            http,
+            _http,
+            _http,
             _runtime,
             _log);
 
-        Retire(id);
-        _active[id] = provider;
-        return provider;
     }
+}
 
-    /// <summary>Dispose the Pi provider previously registered under this id, if any.
-    /// Fire-and-forget: teardown must never block a registration.</summary>
-    public void Retire(string id)
-    {
-        if (!_active.Remove(id, out var previous)) return;
-        _ = Task.Run(async () =>
-        {
-            try { await previous.DisposeAsync(); }
-            catch (Exception ex) { _log?.Invoke("[pi-byok] 释放 sidecar 失败：" + ex.Message); }
-        });
-    }
+/// <summary>
+/// Why a saved row did or did not end up in the registry.
+///
+/// The registry is what the model picker reads, so "saved" and "usable" are two
+/// different states and the user can only see the first one. Every path that
+/// registers a row reports which of these happened, so nothing can report
+/// success while leaving the picker empty.
+/// </summary>
+public enum ProviderApplyOutcome
+{
+    /// <summary>In the registry, and therefore in the picker.</summary>
+    Registered,
+
+    /// <summary>Disabled, or an image row — deliberately not a chat provider.</summary>
+    NotApplicable,
+
+    /// <summary>An otherwise eligible row cannot run without a compatible Agent runtime.</summary>
+    RuntimeUnavailable,
+
+    /// <summary>The row itself cannot be carried — unknown wire shape, missing
+    /// credentials, or no models. Specific to this row.</summary>
+    Unsupported
 }

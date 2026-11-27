@@ -12,6 +12,7 @@ using MolaGPT.Core.Chat.Agents.Pi;
 using MolaGPT.Core.Chat.Providers;
 using MolaGPT.Core.Models;
 using MolaGPT.Core.Net;
+using MolaGPT.Core.Runtime;
 using MolaGPT.ViewModels;
 using MolaGPT.Desktop.Services;
 using static MolaGPT.App.Selection.SelectionNative;
@@ -31,6 +32,7 @@ internal sealed class SelectionAssistantService : IDisposable
     private readonly ProviderRegistry _providers;
     private readonly IHttpClientFactory _http;
     private readonly Window _mainWindow;
+    private readonly IActivityTracker _activity;
     private GlobalSelectionHook? _hook;
     private AutoResetEvent? _signal;
     private Capture? _pending;
@@ -45,12 +47,15 @@ internal sealed class SelectionAssistantService : IDisposable
     private SelectionResultWindow? _result;
     private SelectionResultWindow? _gameHiddenResult;
     private SelectionText? _selection;
+    private IDisposable? _toolbarLease;
+    private IDisposable? _resultLease;
     private bool _disposed;
 
     public SelectionAssistantService(SettingsViewModel settings, ProviderRegistry providers,
-        IHttpClientFactory http, Window mainWindow)
+        IHttpClientFactory http, Window mainWindow, IActivityTracker? activity = null)
     {
         _settings = settings; _providers = providers; _http = http; _mainWindow = mainWindow;
+        _activity = activity ?? NullActivityTracker.Instance;
         settings.PropertyChanged += SettingsChanged;
         ApplySettings();
     }
@@ -133,6 +138,7 @@ internal sealed class SelectionAssistantService : IDisposable
                 {
                     _gameHiddenResult = result;
                     result.Hide();
+                    ReleaseResultLease();
                 }
             }
             else if (_gameHiddenResult is { } result)
@@ -141,6 +147,7 @@ internal sealed class SelectionAssistantService : IDisposable
                 if (_result != result) return;
                 var activated = result.ShowActivated;
                 result.ShowActivated = false;
+                AcquireResultLease();
                 result.Show();
                 result.ShowActivated = activated;
             }
@@ -176,6 +183,7 @@ internal sealed class SelectionAssistantService : IDisposable
                 if (!Current()) continue;
                 var options = _options;
                 if (!request.Explicit && options.Fullscreen && IsFullscreen(request.Window)) continue;
+                using var captureLease = _activity.Acquire("selection-capture");
                 try
                 {
                     GetWindowThreadProcessId(request.Window, out var pid);
@@ -263,6 +271,7 @@ internal sealed class SelectionAssistantService : IDisposable
             _toolbar.ActionRequested += ExecuteAction;
         }
         Place(_toolbar, selection.Anchor, _options.PopupCorner, selection.Bounds);
+        _toolbarLease ??= _activity.Acquire("selection-toolbar");
         _toolbar.Show();
         _toolbarVisible = true;
         _hook?.SetToolbarVisible(true);
@@ -313,6 +322,7 @@ internal sealed class SelectionAssistantService : IDisposable
         var models = BuildModelChoices(out var selectedModel);
         _result = new SelectionResultWindow(selection.Text, action, language, models, selectedModel, async (messages, reqOptions, onDelta, ct) =>
         {
+            using var streamLease = _activity.Acquire("selection-stream");
             var providerId = reqOptions.ProviderId ?? _settings.SelectedSelectionModel?.ProviderId;
             var modelId = reqOptions.ModelId ?? _settings.SelectedSelectionModel?.ModelId;
             var found = providerId is not null && modelId is not null ? _providers.FindModel(providerId, modelId) : null;
@@ -326,14 +336,12 @@ internal sealed class SelectionAssistantService : IDisposable
             var model = found.Value.Model;
             return await new OneShotCompletionClient(http).CompleteStreamAsync(
                 target,
-                model.Id,
+                model,
                 messages,
                 onDelta: onDelta,
                 maxTokens: 4096,
                 useThinking: reqOptions.UseThinking,
-                thinkingKind: model.ThinkingConfig?.Kind ?? ThinkingParamKindInference.InferFromModelId(model.Id),
                 reasoningEffort: reqOptions.ReasoningEffort,
-                thinkingConfig: model.ThinkingConfig,
                 ct: ct);
         });
         var resultWindow = _result;
@@ -346,8 +354,16 @@ internal sealed class SelectionAssistantService : IDisposable
             if (match is not null) _settings.SelectedSelectionModel = match;
         };
         resultWindow.SettingsRequested += OpenSelectionSettings;
-        resultWindow.Closed += (_, _) => { if (_result == resultWindow) _resultPinned = false; };
+        resultWindow.Closed += (_, _) =>
+        {
+            if (_result == resultWindow)
+            {
+                _resultPinned = false;
+                ReleaseResultLease();
+            }
+        };
         Place(_result, selection.Anchor);
+        AcquireResultLease();
         _result.Show();
     }
 
@@ -357,9 +373,15 @@ internal sealed class SelectionAssistantService : IDisposable
         _result?.Close();
         _result = new SelectionResultWindow("", "问 AI", "简体中文", [], null,
             (_, _, _, _) => Task.FromException<string>(new InvalidOperationException(message)));
-        _result.SettingsRequested += OpenSelectionSettings;
+        var resultWindow = _result;
+        resultWindow.SettingsRequested += OpenSelectionSettings;
+        resultWindow.Closed += (_, _) =>
+        {
+            if (_result == resultWindow) ReleaseResultLease();
+        };
         _result.ShowMessage(message);
         Place(_result, point);
+        AcquireResultLease();
         _result.Show();
     }
 
@@ -429,6 +451,7 @@ internal sealed class SelectionAssistantService : IDisposable
         HideToolbar();
         _selection = null;
         _result?.Close(); _result = null;
+        ReleaseResultLease();
         _gameHiddenResult = null;
         _gameForeground = false;
         _resultPinned = false;
@@ -447,5 +470,10 @@ internal sealed class SelectionAssistantService : IDisposable
         _toolbar?.Hide();
         _toolbarVisible = false;
         _hook?.SetToolbarVisible(false);
+        Interlocked.Exchange(ref _toolbarLease, null)?.Dispose();
     }
+
+    private void AcquireResultLease() => _resultLease ??= _activity.Acquire("selection-result");
+
+    private void ReleaseResultLease() => Interlocked.Exchange(ref _resultLease, null)?.Dispose();
 }

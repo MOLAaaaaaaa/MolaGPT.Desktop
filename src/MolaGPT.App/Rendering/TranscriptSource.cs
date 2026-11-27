@@ -588,14 +588,6 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
             var block = message.DisplayBlocks[i];
             if (block.Tool is { } tool)
             {
-                if (tool.Name is "tool" or "tool_status" && tool.Status is "completed" or "success"
-                    && tool.Label is "处理中..." or "处理中…" && i > 0)
-                {
-                    var previous = message.DisplayBlocks[i - 1];
-                    if (previous.Tool is { Name: "mcp", Status: "completed" or "success" }
-                        || previous.IsText && MolaGptMarkupSplitter.Split(previous.Text ?? string.Empty).LastOrDefault()
-                            is { Kind: MarkupUnitKind.DsAnalysis, Tag: "mcp", IsClosed: true }) continue;
-                }
                 if (thinkingTools?.TryGetValue(tool.Id, out var thinkingMarkup) == true) markupTools[tool.Id] = thinkingMarkup.Markup;
                 AddPendingTools([tool]);
                 continue;
@@ -634,7 +626,7 @@ public sealed class TranscriptSource : ObservableCollection<TranscriptRow>, IDis
                             unit = result;
                             markup = markup with { Unit = result };
                         }
-                        var id = unit.ToolCallId is { } identity ? $"web:{identity}" : $"web:{i}:{markup.SourceStart}";
+                        var id = unit.ToolCallId is { } identity ? identity : $"web:{i}:{markup.SourceStart}";
                         var presentationPending = !messageDone && unit.PresentationPending && i == message.DisplayBlocks.Count - 1;
                         var webTool = WebToolPresentation.Update(message, markup, segment.WebTools, id, messageDone, presentationPending);
                         markupTools[id] = markup;

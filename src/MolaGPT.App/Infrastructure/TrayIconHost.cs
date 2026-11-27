@@ -23,6 +23,7 @@ namespace MolaGPT.App.Infrastructure;
 internal sealed class TrayIconHost : IDisposable
 {
     private readonly SettingsViewModel _settings;
+    private readonly Action? _onWake;
     private readonly TrayIcon _icon = new();
     private readonly NativeMenu _menu = new();
     private Window? _window;
@@ -33,9 +34,10 @@ internal sealed class TrayIconHost : IDisposable
     public event EventHandler? SettingsRequested;
     public event EventHandler? AgentStatusRequested;
 
-    public TrayIconHost(SettingsViewModel settings)
+    public TrayIconHost(SettingsViewModel settings, Action? onWake = null)
     {
         _settings = settings;
+        _onWake = onWake;
         _icon.ToolTipText = "MolaGPT";
         _icon.Icon = LoadIcon();
         _icon.Clicked += (_, _) => ShowWindow();
@@ -119,6 +121,7 @@ internal sealed class TrayIconHost : IDisposable
 
     private void ShowWindow()
     {
+        _onWake?.Invoke();
         if (_window is null) return;
         if (!_window.IsVisible) _window.Show();
         if (_window.WindowState == WindowState.Minimized) _window.WindowState = WindowState.Normal;

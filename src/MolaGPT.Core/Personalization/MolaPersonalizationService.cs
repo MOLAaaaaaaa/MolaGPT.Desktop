@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 using MolaGPT.Core.Auth;
+using MolaGPT.Core.Chat;
 using MolaGPT.Core.Net;
 
 namespace MolaGPT.Core.Personalization;
@@ -314,9 +315,9 @@ public sealed class MolaPersonalizationService
             };
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
             using var resp = await _http.SendAsync(req, token).ConfigureAwait(false);
-            if (resp.StatusCode == HttpStatusCode.Unauthorized)
+            if (resp.StatusCode == HttpStatusCode.Unauthorized
+                && (await ChatApiErrorHelper.ReadAccountHttpErrorAsync(resp, token).ConfigureAwait(false))?.InvalidatesAccountSession == true)
             {
-                _auth.LogoutIfCurrent(jwt);
                 return new JsonObject { ["success"] = false, ["expired"] = true };
             }
             var root = await resp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: token).ConfigureAwait(false);

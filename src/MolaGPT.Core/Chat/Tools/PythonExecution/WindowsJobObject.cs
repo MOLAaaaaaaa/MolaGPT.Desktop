@@ -91,7 +91,11 @@ public sealed class WindowsJobObject : IDisposable
     {
         try
         {
-            if (_handle == nint.Zero || process.HasExited) return false;
+            if (_handle == nint.Zero || process.HasExited)
+            {
+                log?.Invoke("未应用作业对象限制：作业已关闭或进程已退出。");
+                return false;
+            }
             if (AssignProcessToJobObject(_handle, process.Handle)) return true;
             throw new Win32Exception();
         }

@@ -144,6 +144,10 @@ public static partial class MessageDocumentParser
             }
 
             var tail = ParseCore(normalized[cutOffset..], ct, seen);
+            var updatedCalls = tail.OfType<MarkupUnitBlock>().Where(block => block.Unit.ToolCallId is not null)
+                .Select(block => block.Unit.ToolCallId!).ToHashSet(StringComparer.Ordinal);
+            if (reused.OfType<MarkupUnitBlock>().Any(block => block.Unit.ToolCallId is { } id && updatedCalls.Contains(id)))
+                return Parse(body, ct);
             foreach (var block in tail)
                 reused.Add(block with { SourceStart = block.SourceStart + cutOffset });
 
@@ -166,7 +170,7 @@ public static partial class MessageDocumentParser
         // MolaGPT emits straight into delta.content. They have to come out
         // before Markdig sees the text, exactly as the FlowDocument renderer
         // does it, or the markdown parser mangles them.
-        var units = MolaGptMarkupSplitter.Split(body);
+        var units = MolaGptMarkupSplitter.SplitNormalized(body);
         var blocks = new List<RenderBlock>();
         var seen = seenSeed ?? new Dictionary<string, int>(StringComparer.Ordinal);
         var offset = 0;

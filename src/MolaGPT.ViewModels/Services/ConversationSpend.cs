@@ -56,9 +56,12 @@ public static class ConversationSpendCalculator
             var model = ReadModel(meta) ?? "未知模型";
             foreach (var (cost, attemptModel) in ReadCosts(meta, model))
             {
-                _total += cost;
+                var total = _total + cost;
                 var current = _totals.GetValueOrDefault(attemptModel);
-                _totals[attemptModel] = (current.Cost + cost, current.Turns + 1);
+                var modelTotal = current.Cost + cost;
+                if (!double.IsFinite(total) || !double.IsFinite(modelTotal)) continue;
+                _total = total;
+                _totals[attemptModel] = (modelTotal, current.Turns + 1);
             }
         }
 
@@ -95,7 +98,7 @@ public static class ConversationSpendCalculator
     private static double? ReadCost(JsonElement holder) =>
         holder.TryGetProperty("response_stats", out var stats) && stats.ValueKind == JsonValueKind.Object
         && stats.TryGetProperty("costUsd", out var cost) && cost.ValueKind == JsonValueKind.Number
-        && cost.TryGetDouble(out var value)
+        && cost.TryGetDouble(out var value) && double.IsFinite(value) && value >= 0
             ? value
             : null;
 

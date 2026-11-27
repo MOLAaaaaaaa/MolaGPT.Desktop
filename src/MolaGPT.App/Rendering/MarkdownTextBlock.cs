@@ -4,7 +4,6 @@ using Avalonia.Controls.Documents;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
-using System.Text.RegularExpressions;
 using Markdig;
 using Markdig.Syntax;
 using Markdig.Syntax.Inlines;
@@ -92,6 +91,10 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
         CodeBackgroundProperty.Changed.AddClassHandler<MarkdownTextBlock>((x, _) => x.Rebuild());
         FontSizeProperty.Changed.AddClassHandler<MarkdownTextBlock>((x, _) => x.Rebuild());
         FontWeightProperty.Changed.AddClassHandler<MarkdownTextBlock>((x, _) => x.Rebuild());
+        ForegroundProperty.Changed.AddClassHandler<MarkdownTextBlock>((x, _) =>
+        {
+            if (x._containsInlineMath) x.Rebuild();
+        });
 
         // The rebuild when the flag goes *false* is the one that matters. A
         // trailing fade that is never taken off leaves the last words of a
@@ -571,9 +574,9 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
                 case LinkInline link:
                 {
                     var start = _cursor;
-                    AppendText(
-                        target, LinkText(link), style, weight, strike,
-                        AccentBrush, Avalonia.Media.TextDecorations.Underline);
+                    var span = new Span { Foreground = AccentBrush, TextDecorations = Avalonia.Media.TextDecorations.Underline };
+                    Append(span.Inlines, link, style, weight, strike);
+                    target.Add(span);
                     Track(link.Url, start);
                     break;
                 }
@@ -620,43 +623,6 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
 
         if (AppendProtectedMath(target, text, style, weight, strike, foreground, decorations))
             return;
-
-        // Math is extracted before anything else touches the text: full-width
-        // punctuation inside a formula would corrupt it, and the script splitter
-        // would cut it into pieces.
-        if (InlineMath.Find(text) is { Count: > 0 } formulas)
-        {
-            var last = 0;
-            foreach (Match match in formulas)
-            {
-                if (match.Index > last)
-                    AppendPlain(target, text[last..match.Index], style, weight, strike, foreground, decorations);
-
-                var formula = InlineMath.Formula(match);
-                if (formula.Length == 0)
-                    AppendPlain(target, match.Value, style, weight, strike, foreground, decorations);
-                else
-                {
-                    _containsInlineMath = true;
-                    Add(target, new InlineUIContainer(new MathView
-                    {
-                        Latex = formula,
-                        FormulaSize = FontSize,
-                        Foreground = foreground ?? Foreground,
-                        Margin = new Thickness(1, 0, 1, 0)
-                    })
-                    {
-                        BaselineAlignment = BaselineAlignment.Center
-                    }, 1);
-                }
-
-                last = match.Index + match.Length;
-            }
-
-            if (last < text.Length)
-                AppendPlain(target, text[last..], style, weight, strike, foreground, decorations);
-            return;
-        }
 
         AppendPlain(target, text, style, weight, strike, foreground, decorations);
     }
@@ -899,12 +865,14 @@ public sealed class MarkdownTextBlock : Avalonia.Controls.SelectableTextBlock
     {
         if (link.FirstChild is null) return link.Url ?? string.Empty;
 
-        var text = string.Empty;
-        foreach (var child in link)
+        var text = new System.Text.StringBuilder();
+        foreach (var child in link.Descendants())
         {
-            if (child is LiteralInline literal) text += literal.Content.ToString();
+            if (child is LiteralInline literal) text.Append(literal.Content);
+            else if (child is CodeInline code) text.Append(code.Content);
+            else if (child is HtmlEntityInline entity) text.Append(entity.Transcoded);
         }
-        return text.Length > 0 ? text : link.Url ?? string.Empty;
+        return text.Length > 0 ? text.ToString() : link.Url ?? string.Empty;
     }
 
     private FontFamily MonoFamily() => Resolve("Font.Mono") ?? FontFamily.Default;

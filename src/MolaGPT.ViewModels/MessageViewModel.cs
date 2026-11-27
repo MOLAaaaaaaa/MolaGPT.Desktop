@@ -63,9 +63,6 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     [GeneratedRegex("<!--[\\s\\S]*?-->", RegexOptions.CultureInvariant)]
     private static partial Regex HtmlCommentRegex();
 
-    [GeneratedRegex("✝[^✝]*✝")]
-    private static partial Regex DaggerWrappedTokenRegex();
-
     [GeneratedRegex("<ref\\b(?<attrs>[^>]*)>(?<inner>[\\s\\S]*?)</ref>|<ref\\b(?<attrs2>[^>]*)/?>", RegexOptions.IgnoreCase)]
     private static partial Regex RefTagRegex();
 
@@ -367,7 +364,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     public bool IsTaskNotification => _taskNotice is not null;
     private TaskNotice? _taskNotice;
 
-    public string VisibleContent => ProcessCitationRefs(StripSystemHints(Content));
+    public string VisibleContent => ProcessCitationRefs(ChatMessageText.StripSystemHints(Content));
     public IReadOnlyList<string> BranchSiblingIds { get; private set; } = [];
     public int BranchIndex { get; private set; }
     public bool HasBranches => BranchSiblingIds.Count > 1;
@@ -864,9 +861,15 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(HasThinking));
 
         if (_activeThinkingSegment is not { } segment) return;
+        var checkToolEnd = ToolCalls.Count > 0 && text.Contains('>');
+        var previousToolEnd = checkToolEnd
+            ? segment.Source.LastIndexOf("</blockquote>", StringComparison.OrdinalIgnoreCase) : -1;
         segment.Append(text);
         if (!_activeThinkingHasToolMarker && text.Contains('>'))
             _activeThinkingHasToolMarker = segment.Source.Contains("data-tool-call", StringComparison.OrdinalIgnoreCase);
+        if (checkToolEnd && _activeThinkingHasToolMarker
+            && segment.Source.LastIndexOf("</blockquote>", StringComparison.OrdinalIgnoreCase) > previousToolEnd)
+            ApplyServerToolMarkers(segment.Source);
         if (_activeThinkingHasToolMarker && (ToolCalls.Count > 0 || ThinkingSegments.Count > 1))
             OnPropertyChanged(nameof(ThinkingSegments));
 
@@ -1006,7 +1009,8 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
                     tool.ContentOffset,
                     tool.TimelineIndex,
                     tool.BackgroundTaskId,
-                    tool.TaskState))
+                    tool.TaskState,
+                    Origin: tool.Origin))
                 .ToArray();
 
         return new MessageAttempt(
@@ -1149,6 +1153,11 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         }
 
         existing.Apply(delta);
+        if (existing.Origin == ToolCallOrigin.Arguments)
+        {
+            foreach (var segment in ThinkingSegments) ApplyServerToolMarkers(segment.Source);
+            ApplyServerToolMarkers(Content);
+        }
         RebuildDisplayBlocks();
     }
 
@@ -1234,14 +1243,32 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
 
     partial void OnThinkingChanged(string? value) => OnPropertyChanged(nameof(HasThinking));
     partial void OnRoleChanged(string value) => OnActionStateChanged();
-    partial void OnContentChanged(string value)
+    partial void OnContentChanged(string? oldValue, string newValue)
     {
-        _taskNotice = Role == ChatMessage.RoleUser ? TaskNotice.TryParse(value) : null;
+        _taskNotice = Role == ChatMessage.RoleUser ? TaskNotice.TryParse(newValue) : null;
         OnPropertyChanged(nameof(TaskNotification));
         OnPropertyChanged(nameof(IsTaskNotification));
         OnPropertyChanged(nameof(VisibleContent));
+        if (ToolCalls.Count > 0 && newValue.LastIndexOf("</blockquote>", StringComparison.OrdinalIgnoreCase)
+            > (oldValue?.LastIndexOf("</blockquote>", StringComparison.OrdinalIgnoreCase) ?? -1))
+            ApplyServerToolMarkers(newValue);
         RebuildDisplayBlocks();
         OnActionStateChanged();
+    }
+
+    private void ApplyServerToolMarkers(string content)
+    {
+        if (!ToolCalls.Any(tool => tool.Origin == ToolCallOrigin.Arguments)
+            || !content.Contains("data-tool-call", StringComparison.OrdinalIgnoreCase)) return;
+        foreach (var marker in MolaGptMarkupSplitter.Split(content).Where(unit => unit.ToolCallId is not null
+            && unit.StatusText is not null && unit.ToolVariant != MolaGptMarkupSplitter.Variant.None))
+        {
+            var tool = ToolCalls.FirstOrDefault(item => item.Id == marker.ToolCallId && item.Origin == ToolCallOrigin.Arguments);
+            if (tool is null) continue;
+            tool.Status = MolaGptMarkupSplitter.ToolPhase(marker, isFinal: false);
+            if (marker.StatusText is { Length: > 0 } label) tool.Label = label;
+            if (marker.ErrorText is { } error) tool.Detail = error;
+        }
     }
     partial void OnIsStreamingChanged(bool value) => OnActionStateChanged();
     partial void OnIsPendingChanged(bool value) => OnActionStateChanged();
@@ -1445,7 +1472,7 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
     }
 
     private ThinkingSegmentViewModel CreateThinkingSegment()
-        => CreateThinkingSegmentAt(Content.Length);
+        => CreateThinkingSegmentAt(Content.Length + _pacer.PendingAnswerLength);
 
     private ThinkingSegmentViewModel CreateThinkingSegmentAt(int contentOffset)
     {
@@ -1500,12 +1527,6 @@ public sealed partial class MessageViewModel : ObservableObject, IDisposable
         ThinkingSegmentViewModel thinking => thinking.TimelineIndex,
         _ => 0
     };
-
-    public static string StripSystemHints(string? content)
-    {
-        if (string.IsNullOrEmpty(content)) return string.Empty;
-        return DaggerWrappedTokenRegex().Replace(content, string.Empty).Trim();
-    }
 
     private string ProcessCitationRefs(string source)
     {
@@ -1871,6 +1892,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
     [ObservableProperty] private string _name;
     public int ContentOffset { get; set; }
     public int TimelineIndex { get; set; }
+    public ToolCallOrigin Origin { get; private set; }
 
     [ObservableProperty] private string _status = "preparing";
     [ObservableProperty] private string _label;
@@ -2300,6 +2322,7 @@ public sealed partial class ToolCallViewModel : ObservableObject
 
     public void Apply(ToolCallDelta delta)
     {
+        Origin = delta.Origin;
         // The reviewer's approval of a non-Python call arrives as an activity. It is
         // kept as a note on the card rather than as the running activity.
         if (delta.Activity is { } activity
